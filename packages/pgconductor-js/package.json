@@ -1,0 +1,14 @@
+{
+	"name": "pgconductor-js",
+	"module": "src/index.ts",
+	"type": "module",
+	"devDependencies": {
+		"@types/bun": "latest"
+	},
+	"peerDependencies": {
+		"typescript": "^5"
+	},
+	"dependencies": {
+		"postgres": "3.4.7"
+	}
+}

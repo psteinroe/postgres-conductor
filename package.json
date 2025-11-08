@@ -1,0 +1,6 @@
+{
+	"name": "pgconductor",
+	"module": "index.ts",
+	"type": "module",
+    "workspaces": ["packages/*"],
+}
