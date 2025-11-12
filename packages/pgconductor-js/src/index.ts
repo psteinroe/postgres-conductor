@@ -1,7 +1,6 @@
-export { PgConductor } from "./Conductor";
-export { Orchestrator } from "./Orchestrator";
-export { Worker } from "./Worker";
-export { Context } from "./Context";
-export { Workflow } from "./Task";
-export { SchemaManager } from "./SchemaManager";
-export { MigrationStore } from "./MigrationStore";
+export { PgConductor } from "./conductor";
+export { Orchestrator } from "./orchestrator";
+export { Worker } from "./worker";
+export { Workflow } from "./task";
+export { SchemaManager } from "./schema-manager";
+export { MigrationStore } from "./migration-store";

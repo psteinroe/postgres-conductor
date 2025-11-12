@@ -1,6 +1,6 @@
-import type { TaskContext } from "./TaskContext";
+import type { TaskContext } from "./task-context";
 
-export type HandlerFunction = (
+export type ExecuteFunction = (
 	payload: any,
 	context: TaskContext,
 ) => Promise<any>;

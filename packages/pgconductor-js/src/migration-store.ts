@@ -5,6 +5,7 @@ export interface Migration {
 	version: number;
 	name: string;
 	sql: string;
+	breaking: boolean;
 }
 
 // Manages the retrieval of migration files and versions.
@@ -25,7 +26,10 @@ export class MigrationStore {
 			const version = parseInt(parts[0]!, 10);
 			const name = parts.slice(1).join("_").replace(".sql", "");
 
-			migrations.set(version, { version, name, sql });
+			// Check if migration is breaking by looking for --!breaking comment
+			const breaking = sql.includes("--!breaking");
+
+			migrations.set(version, { version, name, sql, breaking });
 		}
 
 		return migrations;
@@ -46,7 +50,11 @@ export class MigrationStore {
 	}
 
 	getMigrationsToApply(currentVersion: number): Migration[] {
-		return this.getAllMigrations().filter((m) => m.version > currentVersion);
+		// If currentVersion is -1 (not installed), return all migrations
+		// Otherwise, return migrations newer than currentVersion
+		return this.getAllMigrations().filter(
+			(m) => currentVersion === -1 || m.version > currentVersion,
+		);
 	}
 
 	hasMigration(version: number): boolean {

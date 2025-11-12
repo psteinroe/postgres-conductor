@@ -1,9 +1,11 @@
-export function assertOk(value: unknown | undefined | null, error?: string) {
-	if (value) {
-		return;
+export function assertOk<T = unknown>(
+	value: T,
+	error?: string,
+): NonNullable<T> {
+	if (!value) {
+		throw new Error(error || "Value is not defined");
 	}
-
-	throw new Error(error || "Value is not defined");
+	return value as NonNullable<T>;
 }
 
 function assertEqual<T>(actual: T, expected: T, message?: string): void {
