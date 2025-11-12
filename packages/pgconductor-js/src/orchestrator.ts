@@ -1,18 +1,21 @@
-import postgres, { type Sql } from "postgres";
-import type { Task } from "./task";
 import { Worker } from "./worker";
 import { DatabaseClient } from "./database-client";
 import { MigrationStore } from "./migration-store";
 import { SchemaManager } from "./schema-manager";
 import { Deferred } from "./lib/deferred";
+import type { Conductor } from "./conductor";
+import type { Task } from "./task";
+
+type AnyTask = Task<string, any, any, any>;
+import { VERSION } from "./version";
 
 export type OrchestratorOptions = {
-	connectionString: string;
-	tasks: Task[];
-	version: string;
-	heartbeatIntervalMs?: number;
-	staleOrchestratorMaxAge?: string; // interval string, e.g. "30 seconds"
+	conductor: Conductor<any, any>;
+	tasks: AnyTask[];
 };
+
+const HEARTBEAT_INTERVAL_MS = 30000; // 30 seconds
+const STALE_ORCHESTRATOR_MAX_AGE_MS = HEARTBEAT_INTERVAL_MS * 10;
 
 /**
  * Orchestrator manages the worker pool and handles:
@@ -22,33 +25,26 @@ export type OrchestratorOptions = {
  * - Stale orchestrator recovery
  */
 export class Orchestrator {
-	private readonly sql: Sql;
 	private readonly db: DatabaseClient;
 	private readonly workers: Worker[] = [];
 	private readonly orchestratorId: string;
 	private readonly migrationStore: MigrationStore;
 	private readonly schemaManager: SchemaManager;
-	private readonly heartbeatIntervalMs: number;
-	private readonly staleOrchestratorMaxAge: string;
+	private readonly tasks: AnyTask[];
 
 	private heartbeatTimer: Timer | null = null;
 	private _deferred: Deferred<void> | null = null;
 	private _abortController: AbortController | null = null;
 
-	constructor(private options: OrchestratorOptions) {
+	constructor(options: OrchestratorOptions) {
 		this.orchestratorId = crypto.randomUUID();
-		this.sql = postgres(options.connectionString);
-		this.db = new DatabaseClient(this.orchestratorId, this.sql);
+		this.db = options.conductor.db;
 		this.migrationStore = new MigrationStore();
 		this.schemaManager = new SchemaManager(this.db);
-		this.heartbeatIntervalMs = options.heartbeatIntervalMs ?? 30000; // 30s default
-		this.staleOrchestratorMaxAge =
-			options.staleOrchestratorMaxAge ?? "1 minute";
+		this.tasks = options.tasks;
 
-		// Create workers for each task
-		// TODO: concurrency and pollIntervalMs will be defined on task level
-		for (const task of options.tasks) {
-			const worker = new Worker(task, {}, this.db);
+		for (const task of this.tasks) {
+			const worker = new Worker(this.orchestratorId, task, this.db);
 			this.workers.push(worker);
 		}
 	}
@@ -71,8 +67,10 @@ export class Orchestrator {
 
 		(async () => {
 			try {
-				const ourVersion = this.migrationStore.getLatestVersion();
-				const installedVersion = await this.schemaManager.getInstalledVersion();
+				const ourVersion = this.migrationStore.getLatestMigrationNumber();
+				const installedVersion = await this.db.getInstalledMigrationNumber(
+					this.signal,
+				);
 
 				// Step 1: Check if we're too old (should never happen, but safety check)
 				if (installedVersion > ourVersion) {
@@ -90,7 +88,9 @@ export class Orchestrator {
 				// - Signal others to shut down (if schema exists)
 				// - Wait for them to exit
 				// - Apply migrations
-				const { shouldShutdown } = await this.schemaManager.ensureLatest();
+				const { shouldShutdown } = await this.schemaManager.ensureLatest(
+					this.signal,
+				);
 
 				if (shouldShutdown) {
 					console.log(
@@ -102,8 +102,8 @@ export class Orchestrator {
 
 				const hbShutdown = await this.db.orchestratorHeartbeat(
 					this.orchestratorId,
-					this.options.version,
-					this.migrationStore.getLatestVersion(),
+					this.migrationStore.getLatestMigrationNumber(),
+					this.signal,
 				);
 
 				if (hbShutdown) {
@@ -181,14 +181,17 @@ export class Orchestrator {
 
 				// Every 4th heartbeat, recover stale orchestrators
 				if (heartbeatCount === 4) {
-					await this.db.recoverStaleOrchestrators(this.staleOrchestratorMaxAge);
+					await this.db.recoverStaleOrchestrators(
+						`${STALE_ORCHESTRATOR_MAX_AGE_MS} milliseconds`,
+						this.signal,
+					);
 				}
 
 				// Send heartbeat and check for shutdown signal
 				const shouldShutdown = await this.db.orchestratorHeartbeat(
 					this.orchestratorId,
-					this.options.version,
-					this.migrationStore.getLatestVersion(),
+					this.migrationStore.getLatestMigrationNumber(),
+					this.signal,
 				);
 
 				if (shouldShutdown && !this.signal.aborted) {
@@ -202,13 +205,13 @@ export class Orchestrator {
 			} finally {
 				// Schedule next heartbeat if not shutting down
 				if (!this.abortController.signal.aborted) {
-					this.heartbeatTimer = setTimeout(beat, this.heartbeatIntervalMs);
+					this.heartbeatTimer = setTimeout(beat, HEARTBEAT_INTERVAL_MS);
 				}
 			}
 		};
 
 		// Start first heartbeat
-		this.heartbeatTimer = setTimeout(beat, this.heartbeatIntervalMs);
+		this.heartbeatTimer = setTimeout(beat, HEARTBEAT_INTERVAL_MS);
 	}
 
 	/**
@@ -251,12 +254,13 @@ export class Orchestrator {
 			this.heartbeatTimer = null;
 		}
 
+		const cleanupSignal = new AbortController().signal;
+
 		// Remove ourselves from orchestrators table and release locked executions
-		await this.db.orchestratorShutdown(this.orchestratorId);
+		await this.db.orchestratorShutdown(this.orchestratorId, cleanupSignal);
 
-		// Close database connection
-		await this.sql.end();
-
+		// Close database client (no-op if user supplied their own instance)
+		await this.db.close();
 		this._deferred = null;
 		this._abortController = null;
 	}
@@ -264,8 +268,8 @@ export class Orchestrator {
 	get info() {
 		return {
 			id: this.orchestratorId,
-			version: this.options.version,
-			migrationNumber: this.migrationStore.getLatestVersion(),
+			version: VERSION,
+			migrationNumber: this.migrationStore.getLatestMigrationNumber(),
 			workerCount: this.workers.length,
 			isRunning: this._deferred !== null,
 			shutdownSignal: this._abortController?.signal.aborted ?? false,

@@ -1,4 +1,4 @@
-import { MigrationStore, type Migration } from "./migration-store";
+import { MigrationStore } from "./migration-store";
 import { waitFor } from "./lib/wait-for";
 import type { DatabaseClient } from "./database-client";
 
@@ -30,12 +30,12 @@ export class SchemaManager {
 	 * 2. Seeding the migration catalog via pgconductor.enqueue_migrations()
 	 * 3. Looping on pgconductor.apply_next_migration() until it reports "done"
 	 */
-	async ensureLatest(): Promise<{
+	async ensureLatest(signal: AbortSignal): Promise<{
 		migrated: boolean;
 		shouldShutdown: boolean;
 	}> {
-		let installedVersion = await this.db.getInstalledVersion();
-		const ourLatest = this.migrationStore.getLatestVersion();
+		let installedVersion = await this.db.getInstalledMigrationNumber(signal);
+		const ourLatest = this.migrationStore.getLatestMigrationNumber();
 
 		if (installedVersion > ourLatest) {
 			console.error(
@@ -58,11 +58,14 @@ export class SchemaManager {
 			}
 
 			if (nextMigration.breaking) {
-				await this.db.sweepOrchestrators(nextMigration.version);
-				await this.waitForOlderOrchestratorsToExit(nextMigration.version);
+				await this.db.sweepOrchestrators(nextMigration.version, signal);
+				await this.waitForOlderOrchestratorsToExit(
+					nextMigration.version,
+					signal,
+				);
 			}
 
-			const status = await this.db.applyMigration(nextMigration);
+			const status = await this.db.applyMigration(nextMigration, signal);
 
 			if (status === "applied") {
 				migrated = true;
@@ -70,19 +73,25 @@ export class SchemaManager {
 				continue;
 			}
 
-			await waitFor(POLL_INTERVAL_MS, { jitter: POLL_JITTER_MS });
+			await waitFor(POLL_INTERVAL_MS, {
+				jitter: POLL_JITTER_MS,
+				signal,
+			});
 		}
 	}
 
 	private async waitForOlderOrchestratorsToExit(
 		targetVersion: number,
+		signal: AbortSignal,
 		maxWaitMs: number = 4 * 60 * 60 * 1000,
 	): Promise<void> {
 		const start = Date.now();
 
 		while (Date.now() - start < maxWaitMs) {
-			const remaining =
-				await this.db.countActiveOrchestratorsBelow(targetVersion);
+			const remaining = await this.db.countActiveOrchestratorsBelow(
+				targetVersion,
+				signal,
+			);
 
 			if (remaining === 0) {
 				return;
@@ -91,7 +100,10 @@ export class SchemaManager {
 			console.log(
 				`Waiting for ${remaining} older orchestrator(s) to exit before migrating... (${Math.floor((Date.now() - start) / 1000)}s)`,
 			);
-			await waitFor(POLL_INTERVAL_MS, { jitter: POLL_JITTER_MS });
+			await waitFor(POLL_INTERVAL_MS, {
+				jitter: POLL_JITTER_MS,
+				signal,
+			});
 		}
 
 		console.warn(

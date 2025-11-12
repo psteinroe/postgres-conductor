@@ -10,10 +10,7 @@ import { Deferred } from "./lib/deferred";
 import { AsyncQueue } from "./lib/async-queue";
 import { TaskContext } from "./task-context";
 
-export type WorkerOptions = {
-	concurrency?: number;
-	pollIntervalMs?: number;
-};
+type AnyTask = Task<string, any, any, any>;
 
 /**
  * Worker implemented as async pipeline: fetch → execute → flush.
@@ -30,12 +27,13 @@ export class Worker {
 	private _abortController: AbortController | null = null;
 
 	constructor(
-		private readonly task: Task,
-		options: WorkerOptions,
+		private readonly orchestratorId: string,
+		private readonly task: AnyTask,
 		private readonly db: DatabaseClient,
 	) {
-		this.concurrency = options.concurrency || 1;
-		this.pollIntervalMs = options.pollIntervalMs || 1000;
+		// todo: get from Task
+		this.concurrency = 1;
+		this.pollIntervalMs = 1000;
 
 		// TODO: Tune these parameters
 		this.fetchBatchSize = this.concurrency * 2;
@@ -106,8 +104,10 @@ export class Worker {
 		while (!this.signal?.aborted) {
 			try {
 				const executions = await this.db.getExecutions(
+					this.orchestratorId,
 					this.task.key,
 					this.fetchBatchSize,
+					this.signal,
 				);
 
 				if (executions.length === 0) {
@@ -186,8 +186,8 @@ export class Worker {
 				flushTimer = null;
 			}
 
-			try {
-				await this.db.returnExecutions(batch);
+				try {
+					await this.db.returnExecutions(batch, this.signal);
 			} catch (err) {
 				console.error("Flush failed:", err);
 				// Re-add to buffer for retry

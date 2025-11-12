@@ -1,5 +1,4 @@
 import { getMigrations } from "./generated/sql";
-import { VERSION } from "./version";
 
 export interface Migration {
 	version: number;
@@ -35,8 +34,8 @@ export class MigrationStore {
 		return migrations;
 	}
 
-	getLatestVersion(): number {
-		return VERSION;
+	getLatestMigrationNumber(): number {
+		return Math.max(...this.migrations.keys());
 	}
 
 	getMigration(version: number): Migration | undefined {

@@ -1,0 +1,28 @@
+services:
+  db:
+    image: postgres:12-alpine
+    restart: always
+    tmpfs: /var/lib/postgresql/data
+    ports:
+      - "${PORT_DB-5432}:5432"
+    environment:
+      POSTGRES_DB: graphile_worker_test
+      POSTGRES_PASSWORD: workerdev
+
+  app:
+    build:
+      dockerfile: Dockerfile.dev
+      context: .
+    depends_on:
+      - db
+    volumes:
+      - ./__tests__:/app/__tests__
+      - ./sql:/app/sql
+      - ./src:/app/src
+      - ./perfTest:/app/perfTest
+      - ./website:/app/website
+    environment:
+      PGUSER: "postgres"
+      PGPASSWORD: "workerdev"
+      PGHOST: "db"
+      PGPORT: "5432"
