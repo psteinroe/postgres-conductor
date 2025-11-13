@@ -2,7 +2,7 @@ import postgres, { type Sql } from "postgres";
 import assert from "./lib/assert";
 import { waitFor } from "./lib/wait-for";
 import type { Migration } from "./migration-store";
-import { VERSION } from "./version";
+import { PACKAGE_VERSION, MIGRATION_NUMBER } from "./versions";
 
 type JsonValue = string | number | boolean | null | Payload | JsonValue[];
 export type Payload = { [key: string]: JsonValue };
@@ -149,6 +149,7 @@ export class DatabaseClient {
 
 	async orchestratorHeartbeat(
 		orchestratorId: string,
+		version: string,
 		migrationNumber: number,
 		signal: AbortSignal,
 	): Promise<boolean> {
@@ -157,7 +158,7 @@ export class DatabaseClient {
 				const result = await sql<[{ shutdown_signal: boolean }]>`
 				SELECT pgconductor.orchestrators_heartbeat(
 					v_orchestrator_id := ${orchestratorId}::uuid,
-					v_version := ${VERSION}::text,
+					v_version := ${version}::text,
 					v_migration_number := ${migrationNumber}::integer
 				) as shutdown_signal
 			`;

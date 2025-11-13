@@ -36,7 +36,11 @@ export class Conductor<
 	Tasks extends readonly TaskDefinition<string, any, any>[],
 	ExtraContext extends object = {},
 > {
-	public readonly db: DatabaseClient;
+	/**
+	 * @internal
+	 * Internal database client
+	 */
+	readonly db: DatabaseClient;
 
 	constructor(public readonly options: ConductorOptions<Tasks, ExtraContext>) {
 		if ("sql" in options && options.sql) {
@@ -55,18 +59,15 @@ export class Conductor<
 	createTask<
 		TName extends TaskName<Tasks>,
 		TDef extends FindTaskByName<Tasks, TName>,
+		TPayload extends object = InferPayload<TDef>,
+		TReturns extends object | void = InferReturns<TDef>,
 	>(
 		name: TName,
 		fn: (
-			payload: InferPayload<TDef>,
+			payload: TPayload,
 			ctx: TaskContext & ExtraContext,
-		) => Promise<InferReturns<TDef>>,
-	): Task<
-		TName,
-		InferPayload<TDef>,
-		InferReturns<TDef>,
-		TaskContext & ExtraContext
-	> {
+		) => Promise<TReturns>,
+	): Task<TName, TPayload, TReturns, TaskContext & ExtraContext> {
 		return new Task(name, fn);
 	}
 

@@ -55,9 +55,8 @@ describe("Basic Task Execution", () => {
 
 		const stoppedPromise = orchestrator.stopped;
 
-		const executionId = await conductor.db.invoke({
-			task_key: "hello-task",
-			payload: { name: "World" },
+		const executionId = await conductor.invokeTask("hello-task", {
+			name: "World",
 		});
 
 		expect(executionId).toBeDefined();

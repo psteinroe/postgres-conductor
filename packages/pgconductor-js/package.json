@@ -1,11 +1,13 @@
 {
 	"name": "pgconductor-js",
+	"version": "0.1.0",
 	"module": "src/index.ts",
 	"type": "module",
 	"scripts": {
 		"test": "bun test",
 		"test:unit": "bun test tests/unit",
-		"test:integration": "bun test tests/integration"
+		"test:integration": "bun test tests/integration",
+		"typecheck": "tsc --noEmit"
 	},
 	"devDependencies": {
 		"@testcontainers/postgresql": "^11.8.1",
