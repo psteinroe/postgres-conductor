@@ -2,8 +2,15 @@
 	"name": "pgconductor-js",
 	"module": "src/index.ts",
 	"type": "module",
+	"scripts": {
+		"test": "bun test",
+		"test:unit": "bun test tests/unit",
+		"test:integration": "bun test tests/integration"
+	},
 	"devDependencies": {
-		"@types/bun": "latest"
+		"@testcontainers/postgresql": "^11.8.1",
+		"@types/bun": "latest",
+		"zod": "^4.1.12"
 	},
 	"peerDependencies": {
 		"typescript": "^5"
@@ -11,6 +18,5 @@
 	"dependencies": {
 		"@standard-schema/spec": "1.0.0",
 		"postgres": "3.4.7",
-		"zod": "^4.1.12"
 	}
 }

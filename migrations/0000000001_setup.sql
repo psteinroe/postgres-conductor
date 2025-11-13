@@ -9,7 +9,6 @@
 -- check what extensions are available on install and store it on a settings table, e.g. pg_jsonschema, pg_partman, ...
 -- we need to fetch workflow config on fetch executions and add executions anyways...
 
---!breaking
 
 -- assert required extensions are installed
 
@@ -56,6 +55,93 @@ CREATE TABLE pgconductor.orchestrators (
     version text,
     migration_number integer,
     shutdown_signal boolean default false not null
+);
+
+CREATE TABLE pgconductor.executions (
+    id uuid,
+    task_key text not null,
+    key text,
+    created_at timestamptz default pgconductor.current_time() not null,
+    failed_at timestamptz,
+    completed_at timestamptz,
+    payload jsonb default '{}'::jsonb not null,
+    run_at timestamptz default pgconductor.current_time() not null,
+    locked_at timestamptz,
+    locked_by uuid,
+    attempts integer default 0 not null,
+    last_error text,
+    priority integer default 0 not null,
+    primary key (id, task_key)
+) PARTITION BY LIST (task_key);
+
+CREATE TABLE pgconductor.executions_default PARTITION OF pgconductor.executions DEFAULT with (fillfactor=70);
+
+CREATE TABLE pgconductor.failed_executions (
+    LIKE pgconductor.executions INCLUDING DEFAULTS INCLUDING GENERATED INCLUDING CONSTRAINTS EXCLUDING INDEXES,
+    PRIMARY KEY (failed_at, id)
+) PARTITION BY RANGE (failed_at);
+
+CREATE TABLE pgconductor.completed_executions (
+    LIKE pgconductor.executions INCLUDING DEFAULTS INCLUDING GENERATED INCLUDING CONSTRAINTS EXCLUDING INDEXES,
+    PRIMARY KEY (completed_at, id)
+) PARTITION BY RANGE (completed_at);
+
+-- TODO: register task rpc for upsert that is called on worker startup
+
+-- TODO: add settings here
+CREATE TABLE pgconductor.tasks (
+    key text primary key,
+    -- we could validate execution payloads on insert if pg jsonchema extension is available
+    input_schema jsonb default '{}'::jsonb not null,
+
+    -- retry settings
+    max_attempts integer default 3 not null,
+    retry_exponential_backoff boolean default true not null,
+    retry_delay_seconds integer default 60 not null,
+    max_retry_delay_seconds integer,
+
+    partition boolean default false not null,
+
+    -- task can be executed only within certain time windows
+    -- e.g. business hours, weekends, nights, ...
+    -- we will stop the execution of executions outside of these time windows at step boundaries
+    -- TODO: we should adjust run_at based on these windows when inserting / rescheduling executions
+    window_start timetz,
+    window_end timetz,
+    CONSTRAINT "windows" CHECK (
+        (window_start IS NULL AND window_end IS NULL) OR
+        (
+            window_start IS NOT NULL AND
+            window_end IS NOT NULL AND
+            window_start != window_end
+        )
+    )
+);
+
+CREATE TABLE pgconductor.steps (
+    id bigint primary key generated always as identity,
+    key text not null,
+    execution_id bigint not null,
+    result jsonb default '{}'::jsonb not null,
+    created_at timestamptz default pgconductor.current_time() not null
+);
+
+-- TODO: use this table to manage concurrency, throttling and rate limiting
+-- manage them when task is being updated/created
+CREATE TABLE pgconductor.slots (
+    key text primary key,
+    task_key text not null,
+    locked_at timestamptz,
+    locked_by uuid
+);
+
+CREATE TABLE pgconductor.schedule (
+    name text REFERENCES pgconductor.tasks ON DELETE CASCADE,
+    key text not null,
+    cron text not null,
+    timezone text,
+    data jsonb,
+    PRIMARY KEY (name, key)
 );
 
 CREATE OR REPLACE FUNCTION pgconductor.orchestrators_heartbeat(
@@ -158,40 +244,6 @@ WHERE e.locked_by = deleted.id
 $function$
 ;
 
--- TODO: register task rpc for upsert that is called on worker startup
-
--- TODO: add settings here
-CREATE TABLE pgconductor.tasks (
-    key text primary key,
-    -- we could validate execution payloads on insert if pg jsonchema extension is available
-    input_schema jsonb default '{}'::jsonb not null,
-
-    -- retry settings
-    max_attempts integer default 3 not null,
-    retry_exponential_backoff boolean default true not null,
-    retry_delay_seconds integer default 60 not null,
-    max_retry_delay_seconds integer,
-
-    visibility_timeout interval default interval '5 minutes',
-
-    partition boolean default false not null,
-
-    -- task can be executed only within certain time windows
-    -- e.g. business hours, weekends, nights, ...
-    -- we will stop the execution of executions outside of these time windows at step boundaries
-    -- TODO: we should adjust run_at based on these windows when inserting / rescheduling executions
-    window_start timetz,
-    window_end timetz,
-    CONSTRAINT "windows" CHECK (
-        (window_start IS NULL AND window_end IS NULL) OR
-        (
-            window_start IS NOT NULL AND
-            window_end IS NOT NULL AND
-            window_start != window_end
-        )
-    )
-);
-
 -- Trigger function to manage executions partitions based on tasks.partition setting
 CREATE OR REPLACE FUNCTION pgconductor.manage_execution_partition()
  RETURNS trigger
@@ -208,7 +260,7 @@ begin
   IF TG_OP = 'INSERT' THEN
     IF NEW.partition = true THEN
       EXECUTE format(
-        'CREATE TABLE %I PARTITION OF pgconductor.executions FOR VALUES IN (%L)',
+        'CREATE TABLE %I PARTITION OF pgconductor.executions FOR VALUES IN (%L) with (fillfactor=70)',
         v_partition_name,
         NEW.key
       );
@@ -223,7 +275,7 @@ begin
     -- Changed from false to true: create partition and move rows
     IF NEW.partition = true THEN
       EXECUTE format(
-        'CREATE TABLE %I PARTITION OF pgconductor.executions FOR VALUES IN (%L)',
+        'CREATE TABLE %I PARTITION OF pgconductor.executions FOR VALUES IN (%L) with (fillfactor=70)',
         v_partition_name,
         NEW.key
       );
@@ -276,83 +328,35 @@ CREATE TRIGGER manage_execution_partition_trigger
   FOR EACH ROW
   EXECUTE FUNCTION pgconductor.manage_execution_partition();
 
-CREATE TABLE pgconductor.executions (
-    id uuid primary key,
-    task_key text not null,
-    key text,
-    created_at timestamptz default pgconductor.current_time() not null,
-    failed_at timestamptz,
-    completed_at timestamptz,
-    payload jsonb default '{}'::jsonb not null,
-    run_at timestamptz default pgconductor.current_time() not null,
-    locked_at timestamptz,
-    locked_by uuid,
-    attempts integer default 0 not null,
-    last_error text,
-    priority integer default 0 not null
-) PARTITION BY LIST (task_key) with (fillfactor=70);
+-- SELECT partman.create_parent(
+--     p_parent_table => 'pgconductor.failed_executions',
+--     p_control => 'failed_at',
+--     p_type => 'native',
+--     p_interval => '1 day',
+--     p_premake => 7,
+--     p_start_partition => current_date::timestamptz,
+--     p_inherit_fk => true
+-- );
 
-CREATE TABLE pgconductor.executions_default PARTITION OF pgconductor.executions DEFAULT;
-
-CREATE TABLE pgconductor.failed_executions (LIKE executions INCLUDING ALL) PARTITION BY RANGE (failed_at);
-
-SELECT partman.create_parent(
-    p_parent_table => 'pgconductor.failed_executions',
-    p_control => 'failed_at',
-    p_type => 'native',
-    p_interval => '1 day',
-    p_premake => 7,
-    p_start_partition => current_date::timestamptz,
-    p_inherit_fk => true
-);
-
-CREATE TABLE pgconductor.completed_executions (LIKE executions INCLUDING ALL) PARTITION BY RANGE (completed_at);
-
-SELECT partman.create_parent(
-    p_parent_table => 'pgconductor.completed_executions',
-    p_control => 'completed_at',
-    p_type => 'native',
-    p_interval => '1 day',
-    p_premake => 7,
-    p_start_partition => current_date::timestamptz,
-    p_inherit_fk => true
-);
-
-UPDATE partman.part_config
-SET
-    retention = '7 days',
-    retention_keep_table = false,
-    retention_keep_index = false
-WHERE parent_table IN (
-    'pgconductor.failed_executions',
-    'pgconductor.completed_executions'
-);
-
-CREATE TABLE pgconductor.steps (
-    id bigint primary key generated always as identity,
-    key text not null,
-    execution_id bigint not null,
-    result jsonb default '{}'::jsonb not null,
-    created_at timestamptz default pgconductor.current_time() not null
-);
-
--- TODO: use this table to manage concurrency, throttling and rate limiting
--- manage them when task is being updated/created
-CREATE TABLE pgconductor.slots (
-    key text primary key,
-    task_key text not null,
-    locked_at timestamptz,
-    locked_by uuid
-);
-
-CREATE TABLE pgconductor.schedule (
-    name text REFERENCES pgconductor.tasks ON DELETE CASCADE,
-    key text not null,
-    cron text not null,
-    timezone text,
-    data jsonb,
-    PRIMARY KEY (name, key)
-);
+-- SELECT partman.create_parent(
+--     p_parent_table => 'pgconductor.completed_executions',
+--     p_control => 'completed_at',
+--     p_type => 'native',
+--     p_interval => '1 day',
+--     p_premake => 7,
+--     p_start_partition => current_date::timestamptz,
+--     p_inherit_fk => true
+-- );
+--
+-- UPDATE partman.part_config
+-- SET
+--     retention = '7 days',
+--     retention_keep_table = false,
+--     retention_keep_index = false
+-- WHERE parent_table IN (
+--     'pgconductor.failed_executions',
+--     'pgconductor.completed_executions'
+-- );
 
 -- utility function to generate a uuidv7 even for older postgres versions.
 create function pgconductor.portable_uuidv7 ()
@@ -394,7 +398,6 @@ AS $function$
 with task as (
   select window_start,
          window_end,
-         visibility_timeout,
          max_attempts
   from pgconductor.tasks
   where key = v_task_key
@@ -418,10 +421,7 @@ e as (
   join task t on true
   where exists (select 1 from allowed)
     and e.attempts < t.max_attempts
-    and (
-      e.locked_at is null
-      or e.locked_at + (t.visibility_timeout * interval '1 second') <= pgconductor.current_time()
-    )
+    and e.locked_at is null
     and e.run_at <= pgconductor.current_time()
     and e.task_key = v_task_key
   order by e.priority asc, e.run_at asc
@@ -577,24 +577,6 @@ create type pgconductor.execution_spec as (
 );
 
 CREATE OR REPLACE FUNCTION pgconductor.invoke(
-    task_key text,
-    payload jsonb default null,
-    run_at timestamptz default null,
-    key text default null,
-    priority integer default null
-)
- RETURNS uuid
- LANGUAGE sql
- VOLATILE
- SET search_path TO ''
-AS $function$
-select id from pgconductor.invoke(array[
-    (task_key, payload, run_at, key, priority)::pgconductor.execution_spec
-])
-$function$
-;
-
-CREATE OR REPLACE FUNCTION pgconductor.invoke(
     specs pgconductor.execution_spec[]
 )
  RETURNS TABLE(id uuid)
@@ -612,9 +594,10 @@ begin
     locked_at = null,
     last_error = 'superseded by reinvoke'
   from unnest(specs) spec
-  join pgconductor.tasks w on w.key = e.task_key
+  join pgconductor.tasks w on w.key = spec.task_key
   where spec.key is not null
   and e.key = spec.key
+  and e.task_key = spec.task_key
   and e.locked_at is not null;
 
   return query insert into pgconductor.executions as e (
@@ -628,12 +611,30 @@ begin
     select
       pgconductor.portable_uuidv7(),
       spec.task_key,
-      coalesce(spec.payload, '{}'::json),
+      coalesce(spec.payload, '{}'::jsonb),
       coalesce(spec.run_at, pgconductor.current_time()),
       spec.key,
       coalesce(spec.priority, 0)
     from unnest(specs) spec
   returning e.id;
 end;
+$function$
+;
+
+CREATE OR REPLACE FUNCTION pgconductor.invoke(
+    task_key text,
+    payload jsonb default null,
+    run_at timestamptz default null,
+    key text default null,
+    priority integer default null
+)
+ RETURNS uuid
+ LANGUAGE sql
+ VOLATILE
+ SET search_path TO ''
+AS $function$
+select id from pgconductor.invoke(array[
+    (task_key, payload, run_at, key, priority)::pgconductor.execution_spec
+])
 $function$
 ;

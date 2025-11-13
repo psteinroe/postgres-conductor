@@ -47,7 +47,7 @@ export type InferPayload<T> = T extends TaskDefinition<string, infer P, any>
 
 export type InferReturns<T> = T extends TaskDefinition<string, any, infer R>
 	? R extends undefined
-		? {}
+		? void
 		: R extends StandardSchemaV1<any, infer O>
 			? EnsureObject<O>
 			: never

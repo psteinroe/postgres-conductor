@@ -74,7 +74,7 @@ type DatabaseClientOptions =
 
 type QueryOptions = {
 	label?: string;
-	signal: AbortSignal;
+	signal?: AbortSignal;
 };
 
 type ErrorWithOptionalCode = Error & { code?: string };
@@ -104,11 +104,11 @@ export class DatabaseClient {
 
 	private async query<T>(
 		fn: (sql: Sql) => Promise<T>,
-		options: QueryOptions,
+		options?: QueryOptions,
 	): Promise<T> {
 		let attempt = 0;
 		while (true) {
-			if (options.signal.aborted) {
+			if (options?.signal?.aborted) {
 				throw new Error("Operation aborted");
 			}
 			try {
@@ -124,13 +124,13 @@ export class DatabaseClient {
 					MAX_RETRY_DELAY_MS,
 					MIN_RETRY_DELAY_MS * Math.pow(BACKOFF_MULTIPLIER, attempt - 1),
 				);
-				const label = options.label ? ` (${options.label})` : "";
+				const label = options?.label ? ` (${options.label})` : "";
 				console.warn(
 					`Database transient error${label}: ${err.message}. Retrying in ${delay}ms (attempt ${attempt}).`,
 				);
 				await waitFor(delay, {
 					jitter: delay / 2,
-					signal: options.signal,
+					signal: options?.signal,
 				});
 			}
 		}
@@ -245,15 +245,20 @@ export class DatabaseClient {
 						return "busy" as const;
 					}
 
-					const alreadyApplied = await tx<{ exists: boolean }[]>`
+					const applied =
+						migration.version > 0
+							? (
+									await tx<{ exists: boolean }[]>`
 					SELECT EXISTS (
 						SELECT 1
 						FROM pgconductor.schema_migrations
 						WHERE version = ${migration.version}
 					) as exists
-				`;
+				`
+								).shift()?.exists
+							: false;
 
-					if (alreadyApplied[0]?.exists) {
+					if (applied) {
 						return "applied" as const;
 					}
 
@@ -357,7 +362,7 @@ export class DatabaseClient {
 		);
 	}
 
-	async invoke(spec: ExecutionSpec, signal: AbortSignal): Promise<string> {
+	async invoke(spec: ExecutionSpec, signal?: AbortSignal): Promise<string> {
 		return this.query(
 			async (sql) => {
 				const result = await sql<[{ id: string }]>`

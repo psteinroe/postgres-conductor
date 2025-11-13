@@ -1,0 +1,29 @@
+{
+  "$schema": "https://pg-language-server.com/0.17.1/schema.json",
+  "extends": [],
+  "vcs": {
+    "enabled": false,
+    "clientKind": "git",
+    "useIgnoreFile": false
+  },
+  "files": {
+    "ignore": []
+  },
+  "linter": {
+    "enabled": true,
+    "rules": {
+      "recommended": true
+    }
+  },
+  "typecheck": {},
+  "plpgsqlCheck": {},
+  "db": {
+    "host": "127.0.0.1",
+    "port": 5432,
+    "username": "postgres",
+    "password": "postgres",
+    "database": "postgres",
+    "connTimeoutSecs": 10,
+    "disableConnection": false
+  }
+}

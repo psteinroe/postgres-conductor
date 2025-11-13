@@ -33,7 +33,8 @@ export class Orchestrator {
 	private readonly tasks: AnyTask[];
 
 	private heartbeatTimer: Timer | null = null;
-	private _deferred: Deferred<void> | null = null;
+	private _stopDeferred: Deferred<void> | null = null;
+	private _startDeferred: Deferred<void> | null = null;
 	private _abortController: AbortController | null = null;
 
 	constructor(options: OrchestratorOptions) {
@@ -44,9 +45,24 @@ export class Orchestrator {
 		this.tasks = options.tasks;
 
 		for (const task of this.tasks) {
-			const worker = new Worker(this.orchestratorId, task, this.db);
+			const worker = new Worker(
+				this.orchestratorId,
+				task,
+				this.db,
+				options.conductor.options.context,
+			);
 			this.workers.push(worker);
 		}
+	}
+
+	/**
+	 * Promise that resolves when the orchestrator stops (either via stop() or error)
+	 */
+	get stopped(): Promise<void> {
+		if (!this._stopDeferred) {
+			return Promise.resolve();
+		}
+		return this._stopDeferred.promise;
 	}
 
 	/**
@@ -56,13 +72,16 @@ export class Orchestrator {
 	 * 3. Run migrations if needed (migrate() handles locking/signaling/waiting)
 	 * 4. Start heartbeat loop
 	 * 5. Start all workers
+	 *
+	 * Returns when the orchestrator has started (not when it stops)
 	 */
 	async start(): Promise<void> {
-		if (this._deferred) {
-			return this._deferred.promise;
+		if (this._stopDeferred) {
+			throw new Error("Orchestrator is already running");
 		}
 
-		this._deferred = new Deferred<void>();
+		this._stopDeferred = new Deferred<void>();
+		this._startDeferred = new Deferred<void>();
 		this._abortController = new AbortController();
 
 		(async () => {
@@ -77,7 +96,8 @@ export class Orchestrator {
 					console.log(
 						`Orchestrator version ${ourVersion} is older than installed version ${installedVersion}, shutting down`,
 					);
-					this.deferred.resolve();
+					this.stopDeferred.resolve();
+					this.startDeferred.resolve();
 					return;
 				}
 
@@ -96,7 +116,8 @@ export class Orchestrator {
 					console.log(
 						`Orchestrator ${this.orchestratorId} could not acquire migration lock, shutting down`,
 					);
-					this.deferred.resolve();
+					this.stopDeferred.resolve();
+					this.startDeferred.resolve();
 					return;
 				}
 
@@ -110,7 +131,8 @@ export class Orchestrator {
 					console.log(
 						`Orchestrator ${this.orchestratorId} detected newer schema after migrations, shutting down`,
 					);
-					this.deferred.resolve();
+					this.stopDeferred.resolve();
+					this.startDeferred.resolve();
 					return;
 				}
 
@@ -119,6 +141,9 @@ export class Orchestrator {
 
 				// Start all workers
 				const workerPromises = this.workers.map((worker) => worker.start());
+
+				// Signal that we've started successfully
+				this.startDeferred.resolve();
 
 				// Wait for shutdown signal or all workers to complete
 				await Promise.race([
@@ -129,16 +154,18 @@ export class Orchestrator {
 				// Stop gracefully
 				await this.stopWorkers();
 
-				this.deferred.resolve();
+				this.stopDeferred.resolve();
 			} catch (err) {
 				console.error("Orchestrator error:", err);
-				this.deferred.reject(err);
+				this.stopDeferred.reject(err);
+				this.startDeferred.reject(err);
 			} finally {
 				await this.cleanup();
 			}
 		})();
 
-		return this._deferred.promise;
+		// Wait for start to complete
+		return this._startDeferred.promise;
 	}
 
 	/**
@@ -146,10 +173,12 @@ export class Orchestrator {
 	 * 1. Stop heartbeat
 	 * 2. Stop all workers
 	 * 3. Clean up resources
+	 *
+	 * Waits until the orchestrator is fully stopped
 	 */
 	async stop(): Promise<void> {
 		// Capture deferred before aborting (avoid race)
-		const currentDeferred = this._deferred;
+		const currentDeferred = this._stopDeferred;
 
 		if (!currentDeferred) {
 			return; // Not running
@@ -170,7 +199,7 @@ export class Orchestrator {
 	 * Start the heartbeat loop that:
 	 * - Updates last_heartbeat_at every heartbeatIntervalMs
 	 * - Checks for version mismatch shutdowns from database
-	 * - Recovers stale orchestrators periodically (every 4th heartbeat)
+	 * - Recovers stale orchestrators periodically (every 8th heartbeat)
 	 */
 	private startHeartbeatLoop(): void {
 		let heartbeatCount = 0;
@@ -179,8 +208,8 @@ export class Orchestrator {
 			try {
 				heartbeatCount = (heartbeatCount % 4) + 1;
 
-				// Every 4th heartbeat, recover stale orchestrators
-				if (heartbeatCount === 4) {
+				// Every 8th heartbeat, recover stale orchestrators
+				if (heartbeatCount === 8) {
 					await this.db.recoverStaleOrchestrators(
 						`${STALE_ORCHESTRATOR_MAX_AGE_MS} milliseconds`,
 						this.signal,
@@ -261,7 +290,8 @@ export class Orchestrator {
 
 		// Close database client (no-op if user supplied their own instance)
 		await this.db.close();
-		this._deferred = null;
+		this._stopDeferred = null;
+		this._startDeferred = null;
 		this._abortController = null;
 	}
 
@@ -271,16 +301,23 @@ export class Orchestrator {
 			version: VERSION,
 			migrationNumber: this.migrationStore.getLatestMigrationNumber(),
 			workerCount: this.workers.length,
-			isRunning: this._deferred !== null,
+			isRunning: this._stopDeferred !== null,
 			shutdownSignal: this._abortController?.signal.aborted ?? false,
 		};
 	}
 
-	private get deferred(): Deferred<void> {
-		if (!this._deferred) {
+	private get stopDeferred(): Deferred<void> {
+		if (!this._stopDeferred) {
 			throw new Error("Orchestrator is not running");
 		}
-		return this._deferred;
+		return this._stopDeferred;
+	}
+
+	private get startDeferred(): Deferred<void> {
+		if (!this._startDeferred) {
+			throw new Error("Orchestrator is not running");
+		}
+		return this._startDeferred;
 	}
 
 	private get abortController(): AbortController {

@@ -1,7 +1,7 @@
 // Represents a task definition that can be invoked or triggered by events
 export type ExecuteFunction<
 	Payload extends object,
-	Returns extends object,
+	Returns extends object | void,
 	Context extends object,
 > = (payload: Payload, context: Context) => Promise<Returns>;
 
@@ -9,7 +9,7 @@ export type ExecuteFunction<
 export class Task<
 	Key extends string,
 	Payload extends object,
-	Returns extends object,
+	Returns extends object | void,
 	Context extends object,
 > {
 	constructor(
@@ -17,3 +17,5 @@ export class Task<
 		public readonly execute: ExecuteFunction<Payload, Returns, Context>,
 	) {}
 }
+
+export type AnyTask = Task<string, any, any, any>;

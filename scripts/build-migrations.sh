@@ -23,22 +23,19 @@ for file in "$SQL_DIR"/[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]_*.sql;
     version="${filename:0:10}"
     latest_version="$version"
 
-    # Read SQL content - don't escape ${} since we want template literal interpolation
-    sql_content=$(cat "$file" | awk '
+    # Read SQL content - use String.raw to avoid escape sequence interpretation
+    # Process with awk to handle backticks and schema placeholders
+    echo "  \"$filename\": String.raw\`" >> "$OUTPUT_FILE"
+    cat "$file" | awk '
         {
-            # Escape backticks only
+            # Escape backticks for template literal
             gsub(/`/, "\\`")
-            # Replace {{schema_name}} with ${schemaName} for template literal
+            # Replace {{schema_name}} with ${schemaName} for template literal interpolation
             gsub(/\{\{schema_name\}\}/, "${schemaName}")
             print
         }
-    ' | tr '\n' '\r')
-
-    # Convert \r back to \n for the final output
-    sql_content=$(echo -n "$sql_content" | tr '\r' '\n')
-
-    # Write the entry using template literal (not String.raw)
-    echo "  \"$filename\": \`$sql_content\`," >> "$OUTPUT_FILE"
+    ' >> "$OUTPUT_FILE"
+    echo "\`," >> "$OUTPUT_FILE"
 done
 
 echo "});" >> "$OUTPUT_FILE"

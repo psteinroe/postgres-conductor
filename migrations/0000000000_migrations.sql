@@ -1,9 +1,5 @@
 DO $$
 BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_partman') THEN
-    RAISE EXCEPTION 'Extension pg_partman is not installed. Run: CREATE EXTENSION pg_partman;';
-  END IF;
-
   IF NOT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'uuid-ossp') THEN
     RAISE EXCEPTION 'Extension uuid-ossp is not installed. Run: CREATE EXTENSION "uuid-ossp";';
   END IF;

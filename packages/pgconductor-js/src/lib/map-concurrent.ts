@@ -1,10 +1,5 @@
 /**
  * Concurrently maps over an async iterable with a concurrency limit.
- *
- * @param source - The async iterable source
- * @param limit - Maximum number of concurrent operations
- * @param mapper - Function to apply to each item
- * @returns AsyncGenerator that yields results as they complete
  */
 export async function* mapConcurrent<T, R>(
 	source: AsyncIterable<T>,
@@ -13,7 +8,11 @@ export async function* mapConcurrent<T, R>(
 ): AsyncGenerator<R> {
 	const it = source[Symbol.asyncIterator]();
 	let sourceDone = false;
-	const active = new Set<Promise<R>>();
+	let nextId = 0;
+
+	// Track promises with unique IDs
+	type Task = { id: number; promise: Promise<R> };
+	const active = new Map<number, Task>();
 
 	const nextItem = async (): Promise<T | null> => {
 		if (sourceDone) return null;
@@ -29,19 +28,35 @@ export async function* mapConcurrent<T, R>(
 		while (!sourceDone && active.size < limit) {
 			const item = await nextItem();
 			if (item === null) break;
-			const p = mapper(item).finally(() => {
-				active.delete(p);
-			});
-			active.add(p);
+
+			const id = nextId++;
+			const task: Task = {
+				id,
+				promise: mapper(item),
+			};
+
+			active.set(id, task);
 		}
 	};
 
 	await fillSlots();
 
-	while (active.size > 0 || !sourceDone) {
-		if (active.size === 0) break;
-		const result = await Promise.race(active);
+	while (active.size > 0) {
+		// Wrap each promise to include its ID
+		const wrappedPromises = Array.from(active.values()).map(async (task) => ({
+			id: task.id,
+			result: await task.promise,
+		}));
+
+		// Race to get first completed task
+		const { id, result } = await Promise.race(wrappedPromises);
+
+		// Remove the completed task
+		active.delete(id);
+
 		yield result;
+
+		// Refill slots
 		await fillSlots();
 	}
 

@@ -3,14 +3,12 @@ import type {
 	Execution,
 	ExecutionResult,
 } from "./database-client";
-import type { Task } from "./task";
+import type { AnyTask, Task } from "./task";
 import { waitFor } from "./lib/wait-for";
 import { mapConcurrent } from "./lib/map-concurrent";
 import { Deferred } from "./lib/deferred";
 import { AsyncQueue } from "./lib/async-queue";
 import { TaskContext } from "./task-context";
-
-type AnyTask = Task<string, any, any, any>;
 
 /**
  * Worker implemented as async pipeline: fetch → execute → flush.
@@ -30,6 +28,7 @@ export class Worker {
 		private readonly orchestratorId: string,
 		private readonly task: AnyTask,
 		private readonly db: DatabaseClient,
+		private readonly extraContext: object = {},
 	) {
 		// todo: get from Task
 		this.concurrency = 1;
@@ -139,7 +138,7 @@ export class Worker {
 				try {
 					const output = await this.task.execute(
 						exec.payload,
-						new TaskContext({ signal: this.signal }),
+						TaskContext.create(this.signal, this.extraContext),
 					);
 
 					return {
@@ -186,8 +185,8 @@ export class Worker {
 				flushTimer = null;
 			}
 
-				try {
-					await this.db.returnExecutions(batch, this.signal);
+			try {
+				await this.db.returnExecutions(batch, this.signal);
 			} catch (err) {
 				console.error("Flush failed:", err);
 				// Re-add to buffer for retry
