@@ -1,3 +1,5 @@
+import type { TaskConfig } from "./task-definition";
+
 // Represents a task definition that can be invoked or triggered by events
 export type ExecuteFunction<
 	Payload extends object,
@@ -15,6 +17,7 @@ export class Task<
 	constructor(
 		public readonly key: Key,
 		public readonly execute: ExecuteFunction<Payload, Returns, Context>,
+		public readonly config: TaskConfig = {},
 	) {}
 }
 

@@ -12,8 +12,14 @@ export class AsyncQueue<T> implements AsyncIterable<T> {
 			await new Promise((r) => setTimeout(r, 5));
 		}
 		if (this.closed) return;
-		this.queue.push(item);
-		this.resolvers.shift()?.({ value: item, done: false });
+		// If a consumer is waiting, deliver immediately
+		const resolver = this.resolvers.shift();
+		if (resolver) {
+			resolver({ value: item, done: false });
+		} else {
+			// No consumer waiting, add to queue for later
+			this.queue.push(item);
+		}
 	}
 
 	async next(): Promise<IteratorResult<T>> {

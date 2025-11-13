@@ -6,6 +6,7 @@ import {
 	type FindTaskByName,
 	type InferPayload,
 	type InferReturns,
+	type TaskConfig,
 	type TaskDefinition,
 	type TaskName,
 } from "./task-definition";
@@ -67,8 +68,9 @@ export class Conductor<
 			payload: TPayload,
 			ctx: TaskContext & ExtraContext,
 		) => Promise<TReturns>,
+		config?: TaskConfig,
 	): Task<TName, TPayload, TReturns, TaskContext & ExtraContext> {
-		return new Task(name, fn);
+		return new Task(name, fn, config);
 	}
 
 	async invoke<

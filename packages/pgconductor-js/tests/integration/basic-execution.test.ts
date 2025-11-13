@@ -55,18 +55,14 @@ describe("Basic Task Execution", () => {
 
 		const stoppedPromise = orchestrator.stopped;
 
-		const executionId = await conductor.invokeTask("hello-task", {
+		await conductor.invoke("hello-task", {
 			name: "World",
 		});
 
-		expect(executionId).toBeDefined();
-
-		// Wait for task execution
 		await new Promise((r) => setTimeout(r, 2000));
 
 		await orchestrator.stop();
 
-		// this is just for testing - it should resolve at the same time as orchestrator.stop()
 		await stoppedPromise;
 
 		expect(executionCount).toBe(1);

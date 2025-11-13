@@ -189,4 +189,71 @@ describe("AsyncQueue", () => {
 		expect(r2.done).toBe(true);
 		expect(r3.done).toBe(true);
 	});
+
+	test("does not duplicate items when resolver is waiting", async () => {
+		const queue = new AsyncQueue<number>(10);
+
+		// Start a consumer that's waiting for an item
+		const firstNextPromise = queue.next();
+
+		// Push an item - should deliver directly to the waiting resolver, not queue it
+		await queue.push(42);
+
+		// First next() should receive the item
+		const firstResult = await firstNextPromise;
+		expect(firstResult.value).toBe(42);
+		expect(firstResult.done).toBe(false);
+
+		// Second next() should wait (not get the same item again)
+		let secondNextResolved = false;
+		const secondNextPromise = queue.next().then((result) => {
+			secondNextResolved = true;
+			return result;
+		});
+
+		// Give it time to resolve if it's going to
+		await new Promise((r) => setTimeout(r, 20));
+		expect(secondNextResolved).toBe(false);
+
+		// Push a different item to unblock the second next()
+		await queue.push(99);
+
+		const secondResult = await secondNextPromise;
+		expect(secondResult.value).toBe(99);
+		expect(secondResult.done).toBe(false);
+
+		queue.close();
+	});
+
+	test("delivers each item exactly once with multiple waiting consumers", async () => {
+		const queue = new AsyncQueue<number>(10);
+
+		// Create multiple waiting consumers
+		const consumer1 = queue.next();
+		const consumer2 = queue.next();
+		const consumer3 = queue.next();
+
+		// Push items - each should go to a different consumer
+		await queue.push(1);
+		await queue.push(2);
+		await queue.push(3);
+
+		const [r1, r2, r3] = await Promise.all([consumer1, consumer2, consumer3]);
+
+		// Each consumer should receive exactly one unique item
+		const receivedValues = [r1.value, r2.value, r3.value].sort();
+		expect(receivedValues).toEqual([1, 2, 3]);
+
+		// Queue should now be empty
+		let nextResolved = false;
+		const nextPromise = queue.next().then(() => {
+			nextResolved = true;
+		});
+
+		await new Promise((r) => setTimeout(r, 20));
+		expect(nextResolved).toBe(false);
+
+		queue.close();
+		await nextPromise;
+	});
 });

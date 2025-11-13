@@ -11,6 +11,7 @@
 
 
 -- assert required extensions are installed
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
 -- Returns either the actual current timestamp or a fake one if
 -- the session sets `pgconductor.fake_now`. This lets tests control time.
@@ -28,6 +29,37 @@ begin
   end if;
 
   return clock_timestamp();
+end;
+$$;
+
+-- utility function to generate a uuidv7 even for older postgres versions.
+create function pgconductor.portable_uuidv7 ()
+  returns uuid
+  language plpgsql
+  volatile
+as $$
+declare
+  v_server_num integer := current_setting('server_version_num')::int;
+  ts_ms bigint;
+  b bytea;
+  rnd bytea;
+  i int;
+begin
+  if v_server_num >= 180000 then
+    return uuidv7 ();
+  end if;
+  ts_ms := floor(extract(epoch from pgconductor.current_time()) * 1000)::bigint;
+  rnd := uuid_send(public.uuid_generate_v4 ());
+  b := repeat(E'\\000', 16)::bytea;
+  for i in 0..5 loop
+    b := set_byte(b, i, ((ts_ms >> ((5 - i) * 8)) & 255)::int);
+  end loop;
+  for i in 6..15 loop
+    b := set_byte(b, i, get_byte(rnd, i));
+  end loop;
+  b := set_byte(b, 6, ((get_byte(b, 6) & 15) | (7 << 4)));
+  b := set_byte(b, 8, ((get_byte(b, 8) & 63) | 128));
+  return encode(b, 'hex')::uuid;
 end;
 $$;
 
@@ -50,7 +82,7 @@ CREATE TABLE pgconductor.settings (
 
 -- add breaking marker in migrations
 CREATE TABLE pgconductor.orchestrators (
-    id uuid primary key,
+    id uuid default pgconductor.portable_uuidv7() primary key,
     last_heartbeat_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     version text,
     migration_number integer,
@@ -58,7 +90,7 @@ CREATE TABLE pgconductor.orchestrators (
 );
 
 CREATE TABLE pgconductor.executions (
-    id uuid,
+    id uuid default pgconductor.portable_uuidv7(),
     task_key text not null,
     key text,
     created_at timestamptz default pgconductor.current_time() not null,
@@ -86,19 +118,21 @@ CREATE TABLE pgconductor.completed_executions (
     PRIMARY KEY (completed_at, id)
 ) PARTITION BY RANGE (completed_at);
 
--- TODO: register task rpc for upsert that is called on worker startup
+-- todo: this will be managed by pg_partman or a cron job in the future
+CREATE TABLE pgconductor.failed_executions_default PARTITION OF pgconductor.failed_executions
+    FOR VALUES FROM (MINVALUE) TO (MAXVALUE);
 
--- TODO: add settings here
+-- todo: this will be managed by pg_partman or a cron job in the future
+CREATE TABLE pgconductor.completed_executions_default PARTITION OF pgconductor.completed_executions
+    FOR VALUES FROM (MINVALUE) TO (MAXVALUE);
+
 CREATE TABLE pgconductor.tasks (
     key text primary key,
     -- we could validate execution payloads on insert if pg jsonchema extension is available
     input_schema jsonb default '{}'::jsonb not null,
 
-    -- retry settings
+    -- retry settings - uses fixed Inngest-style backoff schedule
     max_attempts integer default 3 not null,
-    retry_exponential_backoff boolean default true not null,
-    retry_delay_seconds integer default 60 not null,
-    max_retry_delay_seconds integer,
 
     partition boolean default false not null,
 
@@ -119,30 +153,31 @@ CREATE TABLE pgconductor.tasks (
 );
 
 CREATE TABLE pgconductor.steps (
-    id bigint primary key generated always as identity,
+    id uuid default pgconductor.portable_uuidv7() primary key,
     key text not null,
-    execution_id bigint not null,
+    execution_id uuid,
     result jsonb default '{}'::jsonb not null,
-    created_at timestamptz default pgconductor.current_time() not null
+    created_at timestamptz default pgconductor.current_time() not null,
+    unique (key, execution_id)
 );
 
 -- TODO: use this table to manage concurrency, throttling and rate limiting
 -- manage them when task is being updated/created
-CREATE TABLE pgconductor.slots (
-    key text primary key,
-    task_key text not null,
-    locked_at timestamptz,
-    locked_by uuid
-);
-
-CREATE TABLE pgconductor.schedule (
-    name text REFERENCES pgconductor.tasks ON DELETE CASCADE,
-    key text not null,
-    cron text not null,
-    timezone text,
-    data jsonb,
-    PRIMARY KEY (name, key)
-);
+-- CREATE TABLE pgconductor.slots (
+--     key text primary key,
+--     task_key text not null,
+--     locked_at timestamptz,
+--     locked_by uuid
+-- );
+--
+-- CREATE TABLE pgconductor.schedule (
+--     name text REFERENCES pgconductor.tasks ON DELETE CASCADE,
+--     key text not null,
+--     cron text not null,
+--     timezone text,
+--     data jsonb,
+--     PRIMARY KEY (name, key)
+-- );
 
 CREATE OR REPLACE FUNCTION pgconductor.orchestrators_heartbeat(
   v_orchestrator_id uuid,
@@ -358,41 +393,10 @@ CREATE TRIGGER manage_execution_partition_trigger
 --     'pgconductor.completed_executions'
 -- );
 
--- utility function to generate a uuidv7 even for older postgres versions.
-create function pgconductor.portable_uuidv7 ()
-  returns uuid
-  language plpgsql
-  volatile
-as $$
-declare
-  v_server_num integer := current_setting('server_version_num')::int;
-  ts_ms bigint;
-  b bytea;
-  rnd bytea;
-  i int;
-begin
-  if v_server_num >= 180000 then
-    return uuidv7 ();
-  end if;
-  ts_ms := floor(extract(epoch from pgconductor.current_time()) * 1000)::bigint;
-  rnd := uuid_send(uuid_generate_v4 ());
-  b := repeat(E'\\000', 16)::bytea;
-  for i in 0..5 loop
-    b := set_byte(b, i, ((ts_ms >> ((5 - i) * 8)) & 255)::int);
-  end loop;
-  for i in 6..15 loop
-    b := set_byte(b, i, get_byte(rnd, i));
-  end loop;
-  b := set_byte(b, 6, ((get_byte(b, 6) & 15) | (7 << 4)));
-  b := set_byte(b, 8, ((get_byte(b, 8) & 63) | 128));
-  return encode(b, 'hex')::uuid;
-end;
-$$;
-
 CREATE OR REPLACE FUNCTION pgconductor.get_executions(v_task_key text, v_orchestrator_id uuid, v_batch_size integer default 100)
  RETURNS TABLE(id uuid, payload jsonb)
  LANGUAGE sql
- STABLE
+ VOLATILE
  SET search_path TO ''
 AS $function$
 with task as (
@@ -448,13 +452,22 @@ create type pgconductor.execution_result as (
     error text
 );
 
+-- Fixed Inngest-style backoff schedule (in seconds)
+-- 15s, 30s, 1m, 2m, 5m, 10m, 20m, 40m, 1h, 2h
+CREATE OR REPLACE FUNCTION pgconductor.backoff_schedule()
+ RETURNS integer[]
+ LANGUAGE sql
+ IMMUTABLE
+AS $function$
+  SELECT ARRAY[15, 30, 60, 120, 300, 600, 1200, 2400, 3600, 7200]::integer[];
+$function$;
+
 CREATE OR REPLACE FUNCTION pgconductor.return_executions(v_results pgconductor.execution_result[])
-RETURNS void
-LANGUAGE plpgsql
+RETURNS integer
+LANGUAGE sql
 VOLATILE
 SET search_path TO ''
 AS $function$
-BEGIN
   WITH results AS (
     SELECT *
     FROM unnest(v_results) AS r
@@ -490,9 +503,6 @@ BEGIN
   task AS (
     SELECT
       e.id AS execution_id,
-      w.retry_exponential_backoff,
-      w.retry_delay_seconds,
-      w.max_retry_delay_seconds,
       w.max_attempts
     FROM pgconductor.executions e
     JOIN pgconductor.tasks w ON w.key = e.task_key
@@ -513,17 +523,10 @@ BEGIN
         (SELECT r.error FROM results r WHERE r.execution_id = e.id),
         'unknown error'
       ),
-      run_at = CASE
-        WHEN w.retry_exponential_backoff THEN
-          GREATEST(pgconductor.current_time(), e.run_at)
-          + LEAST(
-              EXP(LEAST(e.attempts, 10)) * INTERVAL '1 second',
-              COALESCE(w.max_retry_delay_seconds * INTERVAL '1 second', INTERVAL '1 hour')
-            )
-        ELSE
-          GREATEST(pgconductor.current_time(), e.run_at)
-          + (w.retry_delay_seconds * INTERVAL '1 second')
-      END,
+      run_at = GREATEST(pgconductor.current_time(), e.run_at)
+        + (
+          (pgconductor.backoff_schedule())[LEAST(e.attempts + 1, array_length(pgconductor.backoff_schedule(), 1))] * INTERVAL '1 second'
+        ),
       locked_by = NULL,
       locked_at = NULL
     FROM task w
@@ -565,7 +568,6 @@ BEGIN
     RETURNING e.id
   )
   SELECT 1;
-END;
 $function$;
 
 create type pgconductor.execution_spec as (
@@ -575,6 +577,40 @@ create type pgconductor.execution_spec as (
     key text,
     priority integer
 );
+
+CREATE OR REPLACE FUNCTION pgconductor.upsert_task(
+    v_key text,
+    v_max_attempts integer default null,
+    v_partition boolean default null,
+    v_window_start timetz default null,
+    v_window_end timetz default null
+)
+ RETURNS void
+ LANGUAGE sql
+ VOLATILE
+ SET search_path TO ''
+AS $function$
+  INSERT INTO pgconductor.tasks (
+    key,
+    max_attempts,
+    partition,
+    window_start,
+    window_end
+  )
+  VALUES (
+    v_key,
+    COALESCE(v_max_attempts, 3),
+    COALESCE(v_partition, false),
+    v_window_start,
+    v_window_end
+  )
+  ON CONFLICT (key)
+  DO UPDATE SET
+    max_attempts = COALESCE(EXCLUDED.max_attempts, pgconductor.tasks.max_attempts),
+    partition = COALESCE(EXCLUDED.partition, pgconductor.tasks.partition),
+    window_start = EXCLUDED.window_start,
+    window_end = EXCLUDED.window_end;
+$function$;
 
 CREATE OR REPLACE FUNCTION pgconductor.invoke(
     specs pgconductor.execution_spec[]

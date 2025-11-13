@@ -14,6 +14,13 @@ export interface ExecutionSpec {
 	priority?: number | null;
 }
 
+export interface TaskSpec {
+	key: string;
+	maxAttempts?: number | null;
+	partition?: boolean | null;
+	window?: [string, string] | null;
+}
+
 export interface Execution {
 	id: string;
 	payload: Payload;
@@ -339,7 +346,7 @@ export class DatabaseClient {
 
 	async returnExecutions(
 		results: ExecutionResult[],
-		signal: AbortSignal,
+		signal?: AbortSignal,
 	): Promise<void> {
 		return this.query(
 			async (sql) => {
@@ -350,15 +357,35 @@ export class DatabaseClient {
 					error: r.error ?? null,
 				}));
 
-				await sql`
+				await sql<[{ return_executions: number }]>`
 				SELECT pgconductor.return_executions(
 					v_results := array(
-						SELECT json_populate_recordset(null::pgconductor.execution_result, ${sql.json(mappedResults)})
+						SELECT jsonb_populate_recordset(null::pgconductor.execution_result, ${sql.json(mappedResults)}::jsonb)::pgconductor.execution_result
 					)
 				)
 			`;
 			},
 			{ label: "returnExecutions", signal },
+		);
+	}
+
+	async upsertTask(spec: TaskSpec, signal?: AbortSignal): Promise<void> {
+		return this.query(
+			async (sql) => {
+				const windowStart = spec.window?.[0] ?? null;
+				const windowEnd = spec.window?.[1] ?? null;
+
+				await sql`
+					SELECT pgconductor.upsert_task(
+						v_key := ${spec.key}::text,
+						v_max_attempts := ${spec.maxAttempts ?? null}::integer,
+						v_partition := ${spec.partition ?? null}::boolean,
+						v_window_start := ${windowStart}::timetz,
+						v_window_end := ${windowEnd}::timetz
+					)
+				`;
+			},
+			{ label: "upsertTask", signal },
 		);
 	}
 

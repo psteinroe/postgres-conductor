@@ -45,10 +45,21 @@ export class Worker {
 	 * Returns a promise that resolves when the worker stops.
 	 */
 	async start(): Promise<void> {
-		if (this.deferred) return this.deferred.promise;
+		if (this._deferred) return this._deferred.promise;
 
 		this._abortController = new AbortController();
 		this._deferred = new Deferred<void>();
+
+		// Upsert task configuration before starting worker
+		await this.db.upsertTask(
+			{
+				key: this.task.key,
+				maxAttempts: this.task.config.maxAttempts,
+				partition: this.task.config.partition,
+				window: this.task.config.window,
+			},
+			this.signal,
+		);
 
 		const queue = new AsyncQueue<Execution>(this.fetchBatchSize * 2);
 
@@ -80,21 +91,17 @@ export class Worker {
 	 * Returns a promise that resolves when the worker has fully stopped.
 	 */
 	async stop(): Promise<void> {
-		// Capture deferred before aborting (avoid race)
 		const currentDeferred = this._deferred;
 
 		if (!currentDeferred) {
-			return; // Not running
+			return;
 		}
 
-		// Signal shutdown
 		this.abortController.abort();
 
-		// Wait for pipeline to complete
 		try {
 			await currentDeferred.promise;
 		} catch {
-			// Ignore pipeline errors; already logged in start()
 		}
 	}
 
@@ -177,7 +184,7 @@ export class Worker {
 		let buffer: ExecutionResult[] = [];
 		let flushTimer: Timer | null = null;
 
-		const flushNow = async () => {
+		const flushNow = async (isCleanup = false) => {
 			if (buffer.length === 0) return;
 
 			const batch = buffer;
@@ -189,11 +196,12 @@ export class Worker {
 			}
 
 			try {
-				await this.db.returnExecutions(batch, this.signal);
+				await this.db.returnExecutions(batch, isCleanup ? undefined : this.signal);
 			} catch (err) {
 				console.error("Flush failed:", err);
-				// Re-add to buffer for retry
-				buffer.push(...batch);
+				if (!isCleanup) {
+					buffer.push(...batch);
+				}
 			}
 		};
 
@@ -217,9 +225,8 @@ export class Worker {
 				}
 			}
 		} finally {
-			// Final flush on pipeline end
 			if (flushTimer) clearTimeout(flushTimer);
-			await flushNow();
+			await flushNow(true);
 		}
 	}
 
