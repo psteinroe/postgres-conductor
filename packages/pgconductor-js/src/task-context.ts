@@ -2,6 +2,7 @@ import type { DatabaseClient } from "./database-client";
 
 export type TaskContextOptions = {
 	signal: AbortSignal;
+    abortController: AbortController;
 	db: DatabaseClient;
 };
 
@@ -9,11 +10,6 @@ const hangup = <T>() => new Promise<T>(() => {});
 
 // second argument for tasks
 export class TaskContext {
-	// ctx.step()
-	// ctx.checkpoint()
-	// ...dependencies
-	private _aborted: boolean = false;
-
 	// should receive AbortSignal for cancellation
 	constructor(private readonly opts: TaskContextOptions) {}
 
@@ -25,16 +21,7 @@ export class TaskContext {
 		return Object.assign(base, extra);
 	}
 
-	get aborted(): boolean {
-		return this._aborted;
-	}
-
 	async step<T>(name: string, fn: () => Promise<T> | T): Promise<T> {
-		if (this.opts.signal.aborted) {
-			this._aborted = true;
-			return hangup();
-		}
-
 		// check if step is already completed
 
 		// execute if not
@@ -45,10 +32,7 @@ export class TaskContext {
 	}
 
 	async checkpoint(): Promise<void> {
-		if (this.opts.signal.aborted) {
-			this._aborted = true;
-			return hangup();
-		}
+		// just marks progress, doesn't hangup
 	}
 
 	// use ms package

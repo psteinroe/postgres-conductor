@@ -3,12 +3,14 @@ import type {
 	Execution,
 	ExecutionResult,
 } from "./database-client";
-import type { AnyTask, Task } from "./task";
+import type { AnyTask } from "./task";
 import { waitFor } from "./lib/wait-for";
 import { mapConcurrent } from "./lib/map-concurrent";
 import { Deferred } from "./lib/deferred";
 import { AsyncQueue } from "./lib/async-queue";
 import { TaskContext } from "./task-context";
+
+const HANGUP = Symbol("hangup");
 
 /**
  * Worker implemented as async pipeline: fetch → execute → flush.
@@ -101,8 +103,7 @@ export class Worker {
 
 		try {
 			await currentDeferred.promise;
-		} catch {
-		}
+		} catch {}
 	}
 
 	// --- Stage 1: Fetch executions from database ---
@@ -142,14 +143,36 @@ export class Worker {
 			source,
 			this.concurrency,
 			async (exec) => {
+				const taskAbortController = new AbortController();
+
+				const hangupPromise = new Promise<typeof HANGUP>((resolve) => {
+					taskAbortController.signal.addEventListener("abort", () => {
+						resolve(HANGUP);
+					});
+				});
+
 				try {
-					const output = await this.task.execute(
-						exec.payload,
-						TaskContext.create(
-							{ signal: this.signal, db: this.db },
-							this.extraContext,
+					const output = await Promise.race([
+						this.task.execute(
+							exec.payload,
+							TaskContext.create(
+								{
+									signal: this.signal,
+									db: this.db,
+									abortController: taskAbortController,
+								},
+								this.extraContext,
+							),
 						),
-					);
+						hangupPromise,
+					]);
+
+					if (output === HANGUP) {
+						return {
+							execution_id: exec.id,
+							status: "released",
+						} as const;
+					}
 
 					return {
 						execution_id: exec.id,
@@ -157,13 +180,6 @@ export class Worker {
 						result: output,
 					} as const;
 				} catch (err) {
-					if (this.signal.aborted || (err as Error).name === "AbortError") {
-						return {
-							execution_id: exec.id,
-							status: "released",
-						} as const;
-					}
-
 					return {
 						execution_id: exec.id,
 						status: "failed",
@@ -196,7 +212,10 @@ export class Worker {
 			}
 
 			try {
-				await this.db.returnExecutions(batch, isCleanup ? undefined : this.signal);
+				await this.db.returnExecutions(
+					batch,
+					isCleanup ? undefined : this.signal,
+				);
 			} catch (err) {
 				console.error("Flush failed:", err);
 				if (!isCleanup) {
