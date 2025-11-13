@@ -39,7 +39,7 @@ export class Worker {
 		// TODO: Tune these parameters
 		this.fetchBatchSize = this.concurrency * 2;
 		this.flushBatchSize = this.concurrency * 4;
-		this.flushIntervalMs = this.pollIntervalMs * 2;
+		this.flushIntervalMs = this.task.config.flushInterval ?? 2000;
 	}
 
 	/**
@@ -160,6 +160,7 @@ export class Worker {
 									signal: this.signal,
 									db: this.db,
 									abortController: taskAbortController,
+									executionId: exec.id,
 								},
 								this.extraContext,
 							),

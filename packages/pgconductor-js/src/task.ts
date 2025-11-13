@@ -1,4 +1,9 @@
-import type { TaskConfig } from "./task-definition";
+export type TaskConfig = {
+	maxAttempts?: number;
+	partition?: boolean;
+	window?: [string, string];
+	flushInterval?: number;
+};
 
 // Represents a task definition that can be invoked or triggered by events
 export type ExecuteFunction<

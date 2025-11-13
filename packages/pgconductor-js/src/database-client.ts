@@ -431,4 +431,45 @@ export class DatabaseClient {
 			{ label: "invokeBatch", signal },
 		);
 	}
+
+	async loadStep(
+		executionId: string,
+		key: string,
+		signal?: AbortSignal,
+	): Promise<Payload | null> {
+		return this.query(
+			async (sql) => {
+				const rows = await sql<[{ load_step: Payload | null }]>`
+					SELECT pgconductor.load_step(
+						v_execution_id := ${executionId}::uuid,
+						v_key := ${key}::text
+					) as load_step
+				`;
+				return rows[0]?.load_step ?? null;
+			},
+			{ label: "loadStep", signal },
+		);
+	}
+
+	async saveStep(
+		executionId: string,
+		key: string,
+		result: Payload | null,
+		runAt?: Date,
+		signal?: AbortSignal,
+	): Promise<void> {
+		return this.query(
+			async (sql) => {
+				await sql`
+					SELECT pgconductor.save_step(
+						v_execution_id := ${executionId}::uuid,
+						v_key := ${key}::text,
+						v_result := ${result ? sql.json(result) : null}::jsonb,
+						v_run_at := ${runAt ? runAt.toISOString() : null}::timestamptz
+					)
+				`;
+			},
+			{ label: "saveStep", signal },
+		);
+	}
 }

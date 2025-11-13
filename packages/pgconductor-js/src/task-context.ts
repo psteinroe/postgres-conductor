@@ -1,12 +1,11 @@
-import type { DatabaseClient } from "./database-client";
+import type { DatabaseClient, Payload, JsonValue } from "./database-client";
 
 export type TaskContextOptions = {
 	signal: AbortSignal;
-    abortController: AbortController;
+	abortController: AbortController;
 	db: DatabaseClient;
+	executionId: string;
 };
-
-const hangup = <T>() => new Promise<T>(() => {});
 
 // second argument for tasks
 export class TaskContext {
@@ -21,27 +20,80 @@ export class TaskContext {
 		return Object.assign(base, extra);
 	}
 
-	async step<T>(name: string, fn: () => Promise<T> | T): Promise<T> {
-		// check if step is already completed
+	async step<T extends JsonValue | void>(
+		name: string,
+		fn: () => Promise<T> | T,
+	): Promise<T> {
+		// Check if step already completed
+		const cached = await this.opts.db.loadStep(
+			this.opts.executionId,
+			name,
+			this.opts.signal,
+		);
 
-		// execute if not
+		if (cached) {
+			return cached.result;
+		}
 
-		// store result
+		// Execute and save
+		const result = await fn();
 
-		return fn();
+		await this.opts.db.saveStep(
+			this.opts.executionId,
+			name,
+			{ result },
+			undefined,
+			this.opts.signal,
+		);
+
+		return result;
 	}
 
 	async checkpoint(): Promise<void> {
-		// just marks progress, doesn't hangup
+		if (this.opts.signal.aborted) {
+			return this.abortAndHangup();
+		}
 	}
 
-	// use ms package
-	async sleep(id: string | number, ms: number): Promise<void> {}
+	private abortAndHangup(): Promise<never> {
+		this.opts.abortController.abort();
+		return new Promise(() => {});
+	}
 
-	async sleepUntil(id: string, datetime: Date | string): Promise<void> {}
+	async sleep(id: string, ms: number): Promise<void> {
+		return this.sleepUntil(id, new Date(Date.now() + ms));
+	}
 
-	async invoke<T>(name: string, task: string): Promise<T> {
-		return {} as T;
+	async sleepUntil(id: string, datetime: Date | string): Promise<void> {
+		// Check if we already slept
+		const cached = await this.opts.db.loadStep(
+			this.opts.executionId,
+			id,
+			this.opts.signal,
+		);
+
+		if (cached) {
+			return; // Already slept, continue
+		}
+
+		// Save sleep step with run_at
+		const runAt = typeof datetime === "string" ? new Date(datetime) : datetime;
+		await this.opts.db.saveStep(
+			this.opts.executionId,
+			id,
+			null,
+			runAt,
+			this.opts.signal,
+		);
+
+		return this.abortAndHangup();
+	}
+
+	async invoke<T extends JsonValue | void>(
+		name: string,
+		task: string,
+	): Promise<T> {
+		throw new Error("Not implemented");
 	}
 
 	// async waitForEvent(name: string): Promise<void> {}

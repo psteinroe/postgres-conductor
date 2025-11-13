@@ -62,8 +62,4 @@ export type FindTaskByName<
 	TName extends string,
 > = Extract<TTasks[number], { name: TName }>;
 
-export type TaskConfig = {
-	maxAttempts?: number;
-	partition?: boolean;
-	window?: [string, string];
-};
+export type { TaskConfig } from "./task";

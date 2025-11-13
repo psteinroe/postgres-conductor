@@ -138,9 +138,11 @@ CREATE TABLE pgconductor.completed_executions (
     PRIMARY KEY (completed_at, id)
 ) PARTITION BY RANGE (completed_at);
 
+-- todo: this will be managed by pg_partman or a cron job in the future
 CREATE TABLE pgconductor.failed_executions_default PARTITION OF pgconductor.failed_executions
     FOR VALUES FROM (MINVALUE) TO (MAXVALUE);
 
+-- todo: this will be managed by pg_partman or a cron job in the future
 CREATE TABLE pgconductor.completed_executions_default PARTITION OF pgconductor.completed_executions
     FOR VALUES FROM (MINVALUE) TO (MAXVALUE);
 
@@ -174,10 +176,47 @@ CREATE TABLE pgconductor.steps (
     id uuid default pgconductor.portable_uuidv7() primary key,
     key text not null,
     execution_id uuid,
-    result jsonb default '{}'::jsonb not null,
+    result jsonb,
     created_at timestamptz default pgconductor.current_time() not null,
     unique (key, execution_id)
 );
+
+-- Load a step result by execution_id and key
+CREATE OR REPLACE FUNCTION pgconductor.load_step(
+    v_execution_id uuid,
+    v_key text
+) RETURNS jsonb
+LANGUAGE sql
+STABLE
+SET search_path TO ''
+AS $$
+    SELECT jsonb_build_object('result', result) FROM pgconductor.steps
+    WHERE execution_id = v_execution_id AND key = v_key;
+$$;
+
+-- Save a step result and optionally update execution run_at
+CREATE OR REPLACE FUNCTION pgconductor.save_step(
+    v_execution_id uuid,
+    v_key text,
+    v_result jsonb,
+    v_run_at timestamptz default null
+) RETURNS void
+LANGUAGE sql
+VOLATILE
+SET search_path TO ''
+AS $$
+    WITH inserted AS (
+        INSERT INTO pgconductor.steps (execution_id, key, result)
+        VALUES (v_execution_id, v_key, v_result)
+        ON CONFLICT (execution_id, key) DO NOTHING
+        RETURNING id
+    )
+    UPDATE pgconductor.executions
+    SET run_at = v_run_at
+    WHERE id = v_execution_id
+      AND v_run_at IS NOT NULL
+      AND EXISTS (SELECT 1 FROM inserted);
+$$;
 
 -- TODO: use this table to manage concurrency, throttling and rate limiting
 -- manage them when task is being updated/created
