@@ -138,7 +138,10 @@ export class Worker {
 				try {
 					const output = await this.task.execute(
 						exec.payload,
-						TaskContext.create(this.signal, this.extraContext),
+						TaskContext.create(
+							{ signal: this.signal, db: this.db },
+							this.extraContext,
+						),
 					);
 
 					return {

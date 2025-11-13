@@ -1,27 +1,52 @@
+import type { DatabaseClient } from "./database-client";
+
+export type TaskContextOptions = {
+	signal: AbortSignal;
+	db: DatabaseClient;
+};
+
 // second argument for tasks
 export class TaskContext {
 	// ctx.step()
 	// ctx.checkpoint()
 	// ...dependencies
+	private _aborted: boolean = false;
 
 	// should receive AbortSignal for cancellation
-	constructor({ signal }: { signal: AbortSignal }) {}
+	constructor(private readonly opts: TaskContextOptions) {}
 
 	static create<Extra extends object>(
-		signal: AbortSignal,
+		opts: TaskContextOptions,
 		extra?: Extra,
 	): TaskContext & Extra {
-		const base = new TaskContext({ signal });
+		const base = new TaskContext(opts);
 		return Object.assign(base, extra);
 	}
 
+	get aborted(): boolean {
+		return this._aborted;
+	}
+
 	async step<T>(name: string, fn: () => Promise<T> | T): Promise<T> {
-		// implement step tracking logic here
+		if (this.opts.signal.aborted) {
+			this._aborted = true;
+			return new Promise(() => {});
+		}
+
+		// check if step is already completed
+
+		// execute if not
+
+		// store result
+
 		return fn();
 	}
 
 	async checkpoint(): Promise<void> {
-		// shutdown if aborted
+		if (this.opts.signal.aborted) {
+			this._aborted = true;
+			return new Promise(() => {});
+		}
 	}
 
 	// use ms package
