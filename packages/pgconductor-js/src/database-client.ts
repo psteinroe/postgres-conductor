@@ -2,7 +2,6 @@ import postgres, { type Sql } from "postgres";
 import assert from "./lib/assert";
 import { waitFor } from "./lib/wait-for";
 import type { Migration } from "./migration-store";
-import { PACKAGE_VERSION, MIGRATION_NUMBER } from "./versions";
 
 type JsonValue = string | number | boolean | null | Payload | JsonValue[];
 export type Payload = { [key: string]: JsonValue };
@@ -363,10 +362,10 @@ export class DatabaseClient {
 		);
 	}
 
-	async invoke(spec: ExecutionSpec, signal?: AbortSignal): Promise<string> {
+	async invoke(spec: ExecutionSpec, signal?: AbortSignal): Promise<void> {
 		return this.query(
 			async (sql) => {
-				const result = await sql<[{ id: string }]>`
+				await sql<[{ id: string }]>`
 				SELECT pgconductor.invoke(
 					task_key := ${spec.task_key}::text,
 					payload := ${spec.payload ? sql.json(spec.payload) : null}::jsonb,
@@ -375,8 +374,6 @@ export class DatabaseClient {
 					priority := ${spec.priority ?? null}::integer
 				) as id
 			`;
-
-				return result[0].id;
 			},
 			{ label: "invoke", signal },
 		);
@@ -384,8 +381,8 @@ export class DatabaseClient {
 
 	async invokeBatch(
 		specs: ExecutionSpec[],
-		signal: AbortSignal,
-	): Promise<string[]> {
+		signal?: AbortSignal,
+	): Promise<void> {
 		const specsArray = specs.map((spec) => ({
 			task_key: spec.task_key,
 			payload: spec.payload ?? null,
@@ -396,15 +393,13 @@ export class DatabaseClient {
 
 		return this.query(
 			async (sql) => {
-				const result = await sql<{ id: string }[]>`
+				await sql<{ id: string }[]>`
 				SELECT id FROM pgconductor.invoke(
 					specs := array(
 						SELECT json_populate_recordset(null::pgconductor.execution_spec, ${sql.json(specsArray)})
 					)
 				)
 			`;
-
-				return result.map((r) => r.id);
 			},
 			{ label: "invokeBatch", signal },
 		);

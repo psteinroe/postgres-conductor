@@ -5,6 +5,8 @@ export type TaskContextOptions = {
 	db: DatabaseClient;
 };
 
+const hangup = <T>() => new Promise<T>(() => {});
+
 // second argument for tasks
 export class TaskContext {
 	// ctx.step()
@@ -30,7 +32,7 @@ export class TaskContext {
 	async step<T>(name: string, fn: () => Promise<T> | T): Promise<T> {
 		if (this.opts.signal.aborted) {
 			this._aborted = true;
-			return new Promise(() => {});
+			return hangup();
 		}
 
 		// check if step is already completed
@@ -45,7 +47,7 @@ export class TaskContext {
 	async checkpoint(): Promise<void> {
 		if (this.opts.signal.aborted) {
 			this._aborted = true;
-			return new Promise(() => {});
+			return hangup();
 		}
 	}
 
@@ -58,7 +60,7 @@ export class TaskContext {
 		return {} as T;
 	}
 
-	async waitForEvent(name: string): Promise<void> {}
-
-	async emitEvent(name: string): Promise<void> {}
+	// async waitForEvent(name: string): Promise<void> {}
+	//
+	// async emitEvent(name: string): Promise<void> {}
 }

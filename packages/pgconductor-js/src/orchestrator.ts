@@ -5,7 +5,7 @@ import { SchemaManager } from "./schema-manager";
 import { Deferred } from "./lib/deferred";
 import type { Conductor } from "./conductor";
 import type { Task } from "./task";
-import { PACKAGE_VERSION, MIGRATION_NUMBER } from "./versions";
+import { PACKAGE_VERSION } from "./versions";
 
 type AnyTask = Task<string, any, any, any>;
 
@@ -123,7 +123,7 @@ export class Orchestrator {
 
 				const hbShutdown = await this.db.orchestratorHeartbeat(
 					this.orchestratorId,
-				PACKAGE_VERSION,
+					PACKAGE_VERSION,
 					this.migrationStore.getLatestMigrationNumber(),
 					this.signal,
 				);
@@ -220,7 +220,7 @@ export class Orchestrator {
 				// Send heartbeat and check for shutdown signal
 				const shouldShutdown = await this.db.orchestratorHeartbeat(
 					this.orchestratorId,
-				PACKAGE_VERSION,
+					PACKAGE_VERSION,
 					this.migrationStore.getLatestMigrationNumber(),
 					this.signal,
 				);

@@ -1,5 +1,5 @@
 import type { Sql } from "postgres";
-import { DatabaseClient } from "./database-client";
+import { DatabaseClient, type ExecutionSpec } from "./database-client";
 import { Task } from "./task";
 import type { TaskContext } from "./task-context";
 import {
@@ -71,15 +71,58 @@ export class Conductor<
 		return new Task(name, fn);
 	}
 
-	async invokeTask<
+	async invoke<
 		TName extends TaskName<Tasks>,
 		TDef extends FindTaskByName<Tasks, TName>,
-	>(name: TName, payload: InferPayload<TDef>): Promise<void> {
-		// implement task invocation logic here
-		// should be overloaded with batch version
-		// no return value - we just invoke and dont wait for result
-		// this.db.invoke();
+	>(
+		task_key: TName,
+		payload: InferPayload<TDef>,
+		opts?: Omit<ExecutionSpec, "task_key" | "payload">,
+	): Promise<void>;
+	async invoke<
+		TName extends TaskName<Tasks>,
+		TDef extends FindTaskByName<Tasks, TName>,
+	>(
+		task_key: TName,
+		items: Array<
+			{ payload: InferPayload<TDef> } & Omit<
+				ExecutionSpec,
+				"task_key" | "payload"
+			>
+		>,
+	): Promise<void>;
+	async invoke<
+		TName extends TaskName<Tasks>,
+		TDef extends FindTaskByName<Tasks, TName>,
+	>(
+		task_key: TName,
+		payloadOrItems:
+			| InferPayload<TDef>
+			| Array<
+					{ payload: InferPayload<TDef> } & Omit<
+						ExecutionSpec,
+						"task_key" | "payload"
+					>
+			  >,
+		opts?: Omit<ExecutionSpec, "task_key" | "payload">,
+	): Promise<void | string[]> {
+		if (Array.isArray(payloadOrItems)) {
+			const specs = payloadOrItems.map((item) => ({
+				task_key,
+				payload: item.payload,
+				run_at: item.run_at,
+				key: item.key,
+				priority: item.priority,
+			}));
+			return this.db.invokeBatch(specs);
+		}
+
+		return this.db.invoke({
+			task_key,
+			payload: payloadOrItems,
+			...opts,
+		});
 	}
 
-	// emitEvent(name: string): Promise<void> {}
+	// emit(name: string): Promise<void> {}
 }
