@@ -3,7 +3,7 @@ import assert from "./lib/assert";
 import { waitFor } from "./lib/wait-for";
 import type { Migration } from "./migration-store";
 
-type JsonValue = string | number | boolean | null | Payload | JsonValue[];
+export type JsonValue = string | number | boolean | null | Payload | JsonValue[];
 export type Payload = { [key: string]: JsonValue };
 
 export interface ExecutionSpec {
@@ -12,6 +12,9 @@ export interface ExecutionSpec {
 	run_at?: Date | null;
 	key?: string | null;
 	priority?: number | null;
+	parent_execution_id?: string | null;
+	parent_step_key?: string | null;
+	parent_timeout_at?: Date | null;
 }
 
 export interface TaskSpec {
@@ -24,6 +27,7 @@ export interface TaskSpec {
 export interface Execution {
 	id: string;
 	payload: Payload;
+	waiting_on_execution_id: string | null;
 }
 
 export interface ExecutionResult {
@@ -398,7 +402,10 @@ export class DatabaseClient {
 					payload := ${spec.payload ? sql.json(spec.payload) : null}::jsonb,
 					run_at := ${spec.run_at ? spec.run_at.toISOString() : null}::timestamptz,
 					key := ${spec.key ?? null}::text,
-					priority := ${spec.priority ?? null}::integer
+					priority := ${spec.priority ?? null}::integer,
+					parent_execution_id := ${spec.parent_execution_id ?? null}::uuid,
+					parent_step_key := ${spec.parent_step_key ?? null}::text,
+					parent_timeout_at := ${spec.parent_timeout_at ? spec.parent_timeout_at.toISOString() : null}::timestamptz
 				) as id
 			`;
 			},
@@ -470,6 +477,22 @@ export class DatabaseClient {
 				`;
 			},
 			{ label: "saveStep", signal },
+		);
+	}
+
+	async clearWaitingState(
+		executionId: string,
+		signal?: AbortSignal,
+	): Promise<void> {
+		return this.query(
+			async (sql) => {
+				await sql`
+					SELECT pgconductor.clear_waiting_state(
+						v_execution_id := ${executionId}::uuid
+					)
+				`;
+			},
+			{ label: "clearWaitingState", signal },
 		);
 	}
 }

@@ -103,6 +103,8 @@ CREATE TABLE pgconductor.executions (
     attempts integer default 0 not null,
     last_error text,
     priority integer default 0 not null,
+    waiting_on_execution_id uuid,
+    waiting_step_key text,
     primary key (id, task_key)
 ) PARTITION BY LIST (task_key);
 
@@ -431,7 +433,7 @@ CREATE TRIGGER manage_execution_partition_trigger
 -- );
 
 CREATE OR REPLACE FUNCTION pgconductor.get_executions(v_task_key text, v_orchestrator_id uuid, v_batch_size integer default 100)
- RETURNS TABLE(id uuid, payload jsonb)
+ RETURNS TABLE(id uuid, payload jsonb, waiting_on_execution_id uuid)
  LANGUAGE sql
  VOLATILE
  SET search_path TO ''
@@ -444,7 +446,7 @@ with task as (
   where key = v_task_key
 ),
 
--- Only proceed if we’re inside the active window (or no window defined)
+-- Only proceed if we're inside the active window (or no window defined)
 allowed as (
   select 1
   from task t
@@ -477,7 +479,7 @@ set
   locked_at = pgconductor.current_time()
 from e
 where executions.id = e.id
-returning executions.id, executions.payload;
+returning executions.id, executions.payload, executions.waiting_on_execution_id;
 $function$
 ;
 
@@ -490,13 +492,15 @@ create type pgconductor.execution_result as (
 );
 
 -- Fixed Inngest-style backoff schedule (in seconds)
+-- Returns backoff delay for given attempt number (1-indexed)
 -- 15s, 30s, 1m, 2m, 5m, 10m, 20m, 40m, 1h, 2h
-CREATE OR REPLACE FUNCTION pgconductor.backoff_schedule()
- RETURNS integer[]
+-- Attempts beyond the schedule use the last value (2h)
+CREATE OR REPLACE FUNCTION pgconductor.backoff_seconds(attempt integer)
+ RETURNS integer
  LANGUAGE sql
  IMMUTABLE
 AS $function$
-  SELECT ARRAY[15, 30, 60, 120, 300, 600, 1200, 2400, 3600, 7200]::integer[];
+  SELECT (ARRAY[15, 30, 60, 120, 300, 600, 1200, 2400, 3600, 7200])[LEAST(attempt, 10)];
 $function$;
 
 CREATE OR REPLACE FUNCTION pgconductor.return_executions(v_results pgconductor.execution_result[])
@@ -509,6 +513,7 @@ AS $function$
     SELECT *
     FROM unnest(v_results) AS r
   ),
+  -- move all completed executions to completed_executions
   completed AS (
     DELETE FROM pgconductor.executions e
     USING results r
@@ -537,33 +542,83 @@ AS $function$
     FROM completed
     RETURNING id
   ),
+  -- complete executions that were waiting on completed children
+  parent_steps_completed AS (
+    INSERT INTO pgconductor.steps (execution_id, key, result)
+    SELECT
+      parent_e.id,
+      parent_e.waiting_step_key,
+      r.result
+    FROM results r
+    JOIN pgconductor.executions parent_e ON parent_e.waiting_on_execution_id = r.execution_id
+    WHERE r.status = 'completed'
+    ON CONFLICT (execution_id, key) DO NOTHING
+    RETURNING execution_id
+  ),
+  woken_parents_completed AS (
+    UPDATE pgconductor.executions
+    SET
+      run_at = pgconductor.current_time(),
+      waiting_on_execution_id = NULL,
+      waiting_step_key = NULL
+    FROM parent_steps_completed
+    WHERE id = parent_steps_completed.execution_id
+    RETURNING id
+  ),
   task AS (
     SELECT
       e.id AS execution_id,
       w.max_attempts
-    FROM pgconductor.executions e
+    FROM results r
+    JOIN pgconductor.executions e ON e.id = r.execution_id
     JOIN pgconductor.tasks w ON w.key = e.task_key
-    JOIN results r ON r.execution_id = e.id
     WHERE r.status = 'failed'
+  ),
+  permanently_failed_children AS (
+    SELECT
+      r.execution_id,
+      r.error as child_error
+    FROM results r
+    JOIN pgconductor.executions e ON e.id = r.execution_id
+    JOIN pgconductor.tasks w ON w.key = e.task_key
+    WHERE r.status = 'failed' AND e.attempts >= w.max_attempts
   ),
   deleted_failed AS (
     DELETE FROM pgconductor.executions e
-    USING task w
-    WHERE e.id = w.execution_id
-      AND e.attempts >= w.max_attempts
-    RETURNING e.*
+    WHERE (
+      -- Direct failures: execution permanently failed
+      e.id IN (SELECT execution_id FROM permanently_failed_children)
+      OR
+      -- CASCADE: parent waiting on permanently failed child
+      e.waiting_on_execution_id IN (SELECT execution_id FROM permanently_failed_children)
+    )
+    RETURNING
+      e.id,
+      e.task_key,
+      e.key,
+      e.created_at,
+      e.payload,
+      e.run_at,
+      e.locked_at,
+      e.locked_by,
+      e.attempts,
+      e.priority,
+      COALESCE(
+        (SELECT error FROM results WHERE execution_id = e.id AND status = 'failed'),
+        (SELECT 'Child execution failed: ' || COALESCE(child_error, 'unknown error')
+         FROM permanently_failed_children
+         WHERE execution_id = e.waiting_on_execution_id)
+      ) as last_error
   ),
   retried AS (
     UPDATE pgconductor.executions e
     SET
       last_error = COALESCE(
-        (SELECT r.error FROM results r WHERE r.execution_id = e.id),
+        (SELECT error FROM results WHERE execution_id = e.id AND status = 'failed'),
         'unknown error'
       ),
       run_at = GREATEST(pgconductor.current_time(), e.run_at)
-        + (
-          (pgconductor.backoff_schedule())[LEAST(e.attempts + 1, array_length(pgconductor.backoff_schedule(), 1))] * INTERVAL '1 second'
-        ),
+        + (pgconductor.backoff_seconds(e.attempts) * INTERVAL '1 second'),
       locked_by = NULL,
       locked_at = NULL
     FROM task w
@@ -582,7 +637,7 @@ AS $function$
       key,
       created_at,
       pgconductor.current_time(),
-      completed_at,
+      NULL,
       payload,
       run_at,
       locked_at,
@@ -699,15 +754,61 @@ CREATE OR REPLACE FUNCTION pgconductor.invoke(
     payload jsonb default null,
     run_at timestamptz default null,
     key text default null,
-    priority integer default null
+    priority integer default null,
+    parent_execution_id uuid default null,
+    parent_step_key text default null,
+    parent_timeout_at timestamptz default null
 )
  RETURNS uuid
  LANGUAGE sql
  VOLATILE
  SET search_path TO ''
 AS $function$
-select id from pgconductor.invoke(array[
-    (task_key, payload, run_at, key, priority)::pgconductor.execution_spec
-])
+WITH inserted_child AS (
+  INSERT INTO pgconductor.executions (
+    id,
+    task_key,
+    payload,
+    run_at,
+    key,
+    priority
+  )
+  VALUES (
+    pgconductor.portable_uuidv7(),
+    task_key,
+    COALESCE(payload, '{}'::jsonb),
+    COALESCE(run_at, pgconductor.current_time()),
+    key,
+    COALESCE(priority, 0)
+  )
+  RETURNING id
+),
+updated_parent AS (
+  UPDATE pgconductor.executions
+  SET
+    waiting_on_execution_id = (SELECT id FROM inserted_child),
+    waiting_step_key = parent_step_key,
+    run_at = COALESCE(parent_timeout_at, 'infinity'::timestamptz)
+  WHERE id = parent_execution_id
+    AND parent_execution_id IS NOT NULL
+  RETURNING 1
+)
+SELECT id FROM inserted_child;
+$function$
+;
+
+CREATE OR REPLACE FUNCTION pgconductor.clear_waiting_state(
+  v_execution_id uuid
+)
+RETURNS void
+LANGUAGE sql
+VOLATILE
+SET search_path TO ''
+AS $function$
+  UPDATE pgconductor.executions
+  SET
+    waiting_on_execution_id = NULL,
+    waiting_step_key = NULL
+  WHERE id = v_execution_id;
 $function$
 ;

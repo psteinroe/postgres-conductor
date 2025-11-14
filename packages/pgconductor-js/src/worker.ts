@@ -160,7 +160,7 @@ export class Worker {
 									signal: this.signal,
 									db: this.db,
 									abortController: taskAbortController,
-									executionId: exec.id,
+									execution: exec,
 								},
 								this.extraContext,
 							),
