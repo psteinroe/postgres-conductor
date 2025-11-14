@@ -14,7 +14,7 @@ export interface ExecutionSpec {
 	priority?: number | null;
 	parent_execution_id?: string | null;
 	parent_step_key?: string | null;
-	parent_timeout_at?: Date | null;
+	parent_timeout_ms?: number | null;
 }
 
 export interface TaskSpec {
@@ -167,9 +167,9 @@ export class DatabaseClient {
 			async (sql) => {
 				const result = await sql<[{ shutdown_signal: boolean }]>`
 				SELECT pgconductor.orchestrators_heartbeat(
-					v_orchestrator_id := ${orchestratorId}::uuid,
-					v_version := ${version}::text,
-					v_migration_number := ${migrationNumber}::integer
+					orchestrator_id := ${orchestratorId}::uuid,
+					version := ${version}::text,
+					migration_number := ${migrationNumber}::integer
 				) as shutdown_signal
 			`;
 
@@ -191,7 +191,7 @@ export class DatabaseClient {
 			async (sql) => {
 				await sql`
 				SELECT pgconductor.recover_stale_orchestrators(
-					v_max_age := ${maxAge}::interval
+					max_age := ${maxAge}::interval
 				)
 			`;
 			},
@@ -207,7 +207,7 @@ export class DatabaseClient {
 			async (sql) => {
 				await sql`
 				SELECT pgconductor.sweep_orchestrators(
-					v_migration_number := ${migrationNumber}::integer
+					migration_number := ${migrationNumber}::integer
 				)
 			`;
 			},
@@ -320,7 +320,7 @@ export class DatabaseClient {
 			async (sql) => {
 				await sql`
 				SELECT pgconductor.orchestrator_shutdown(
-					v_orchestrator_id := ${orchestratorId}::uuid
+					orchestrator_id := ${orchestratorId}::uuid
 				)
 			`;
 			},
@@ -338,9 +338,9 @@ export class DatabaseClient {
 			async (sql) => {
 				return await sql<Execution[]>`
 				SELECT * FROM pgconductor.get_executions(
-					v_task_key := ${taskKey}::text,
-					v_orchestrator_id := ${orchestratorId}::uuid,
-					v_batch_size := ${batchSize}::integer
+					task_key := ${taskKey}::text,
+					orchestrator_id := ${orchestratorId}::uuid,
+					batch_size := ${batchSize}::integer
 				)
 			`;
 			},
@@ -363,7 +363,7 @@ export class DatabaseClient {
 
 				await sql<[{ return_executions: number }]>`
 				SELECT pgconductor.return_executions(
-					v_results := array(
+					results := array(
 						SELECT jsonb_populate_recordset(null::pgconductor.execution_result, ${sql.json(mappedResults)}::jsonb)::pgconductor.execution_result
 					)
 				)
@@ -381,11 +381,11 @@ export class DatabaseClient {
 
 				await sql`
 					SELECT pgconductor.upsert_task(
-						v_key := ${spec.key}::text,
-						v_max_attempts := ${spec.maxAttempts ?? null}::integer,
-						v_partition := ${spec.partition ?? null}::boolean,
-						v_window_start := ${windowStart}::timetz,
-						v_window_end := ${windowEnd}::timetz
+						key := ${spec.key}::text,
+						max_attempts := ${spec.maxAttempts ?? null}::integer,
+						partition := ${spec.partition ?? null}::boolean,
+						window_start := ${windowStart}::timetz,
+						window_end := ${windowEnd}::timetz
 					)
 				`;
 			},
@@ -405,7 +405,7 @@ export class DatabaseClient {
 					priority := ${spec.priority ?? null}::integer,
 					parent_execution_id := ${spec.parent_execution_id ?? null}::uuid,
 					parent_step_key := ${spec.parent_step_key ?? null}::text,
-					parent_timeout_at := ${spec.parent_timeout_at ? spec.parent_timeout_at.toISOString() : null}::timestamptz
+					parent_timeout_ms := ${spec.parent_timeout_ms ?? null}::integer
 				) as id
 			`;
 			},
@@ -448,8 +448,8 @@ export class DatabaseClient {
 			async (sql) => {
 				const rows = await sql<[{ load_step: Payload | null }]>`
 					SELECT pgconductor.load_step(
-						v_execution_id := ${executionId}::uuid,
-						v_key := ${key}::text
+						execution_id := ${executionId}::uuid,
+						key := ${key}::text
 					) as load_step
 				`;
 				return rows[0]?.load_step ?? null;
@@ -462,17 +462,17 @@ export class DatabaseClient {
 		executionId: string,
 		key: string,
 		result: Payload | null,
-		runAt?: Date,
+		runAtMs?: number,
 		signal?: AbortSignal,
 	): Promise<void> {
 		return this.query(
 			async (sql) => {
 				await sql`
 					SELECT pgconductor.save_step(
-						v_execution_id := ${executionId}::uuid,
-						v_key := ${key}::text,
-						v_result := ${result ? sql.json(result) : null}::jsonb,
-						v_run_at := ${runAt ? runAt.toISOString() : null}::timestamptz
+						execution_id := ${executionId}::uuid,
+						key := ${key}::text,
+						result := ${result ? sql.json(result) : null}::jsonb,
+						run_in_ms := ${runAtMs ?? null}::integer
 					)
 				`;
 			},
@@ -488,7 +488,7 @@ export class DatabaseClient {
 			async (sql) => {
 				await sql`
 					SELECT pgconductor.clear_waiting_state(
-						v_execution_id := ${executionId}::uuid
+						execution_id := ${executionId}::uuid
 					)
 				`;
 			},

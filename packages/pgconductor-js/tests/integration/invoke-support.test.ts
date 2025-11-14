@@ -45,7 +45,7 @@ describe("Invoke Support", () => {
 				const result = childFn(payload.input);
 				return { output: result };
 			},
-			{ flushInterval: 100 },
+			{ flushInterval: 100, pollInterval: 100 },
 		);
 
 		const parentTask = conductor.createTask(
@@ -58,7 +58,7 @@ describe("Invoke Support", () => {
 				);
 				return { result: childResult.output };
 			},
-			{ flushInterval: 100 },
+			{ flushInterval: 100, pollInterval: 100 },
 		);
 
 		const orchestrator = new Orchestrator({
@@ -72,7 +72,7 @@ describe("Invoke Support", () => {
 
 		await conductor.invoke("parent-task", { value: 5 });
 
-		await new Promise((r) => setTimeout(r, 3000));
+		await new Promise((r) => setTimeout(r, 1500));
 
 		await orchestrator.stop();
 		await stoppedPromise;
@@ -112,7 +112,7 @@ describe("Invoke Support", () => {
 				await ctx.sleep("long-sleep", 5000);
 				return { completed: true };
 			},
-			{ flushInterval: 100 },
+			{ flushInterval: 100, pollInterval: 100 },
 		);
 
 		const timeoutParentTask = conductor.createTask(
@@ -131,7 +131,7 @@ describe("Invoke Support", () => {
 					throw err;
 				}
 			},
-			{ flushInterval: 100 },
+			{ flushInterval: 100, pollInterval: 100 },
 		);
 
 		const orchestrator = new Orchestrator({
@@ -143,19 +143,41 @@ describe("Invoke Support", () => {
 
 		const stoppedPromise = orchestrator.stopped;
 
+		// Set fake time
+		const startTime = new Date("2024-01-01T00:00:00Z");
+		await db.sql`
+			INSERT INTO pgconductor.test_config (key, value)
+			VALUES ('fake_now', ${startTime.toISOString()})
+			ON CONFLICT (key) DO UPDATE SET value = ${startTime.toISOString()}
+		`;
+
 		await conductor.invoke("timeout-parent", {});
 
-		// Wait for timeout to occur
-		await new Promise((r) => setTimeout(r, 3000));
+		// Wait for parent to invoke child and child to sleep
+		await new Promise((r) => setTimeout(r, 500));
+
+		// Advance time past timeout (1 second) but before sleep completes (5 seconds)
+		const afterTimeout = new Date(startTime.getTime() + 1500);
+		await db.sql`
+			UPDATE pgconductor.test_config
+			SET value = ${afterTimeout.toISOString()}
+			WHERE key = 'fake_now'
+		`;
+
+		// Wait for timeout to be detected and parent to resume
+		await new Promise((r) => setTimeout(r, 500));
 
 		await orchestrator.stop();
 		await stoppedPromise;
+
+		// Clean up
+		await db.sql`DELETE FROM pgconductor.test_config WHERE key = 'fake_now'`;
 
 		// Parent should have caught timeout error
 		expect(parentError).toHaveBeenCalledTimes(1);
 		const errorMsg = parentError.mock.results[0]?.value;
 		expect(errorMsg).toContain("timed out after 1000ms");
-	}, 30000);
+	}, 5000);
 
 	test("invoke() caches child result on retry", async () => {
 		const db = await pool.child();
@@ -332,7 +354,7 @@ describe("Invoke Support", () => {
 				childFn();
 				return { result: "never-reached" };
 			},
-			{ flushInterval: 100, maxAttempts: 2 },
+			{ flushInterval: 100, pollInterval: 100, maxAttempts: 2 },
 		);
 
 		const cascadeParentTask = conductor.createTask(
@@ -341,7 +363,7 @@ describe("Invoke Support", () => {
 				await ctx.invoke("invoke-failing", "failing-child", {});
 				return { success: true };
 			},
-			{ flushInterval: 100 },
+			{ flushInterval: 100, pollInterval: 100 },
 		);
 
 		const orchestrator = new Orchestrator({
@@ -353,13 +375,37 @@ describe("Invoke Support", () => {
 
 		const stoppedPromise = orchestrator.stopped;
 
+		// Set initial fake time
+		const startTime = new Date("2024-01-01T00:00:00Z");
+		await db.sql`
+			INSERT INTO pgconductor.test_config (key, value)
+			VALUES ('fake_now', ${startTime.toISOString()})
+			ON CONFLICT (key) DO UPDATE SET value = ${startTime.toISOString()}
+		`;
+
 		await conductor.invoke("cascade-parent", {});
 
-		// Wait for child to fail twice (15s backoff + execution + 30s second backoff + execution + cascade)
-		await new Promise((r) => setTimeout(r, 50000));
+		// Wait for first execution cycle: parent runs → invokes child → child fails
+		await new Promise((r) => setTimeout(r, 500));
+		expect(childFn).toHaveBeenCalledTimes(1);
+
+		// Advance fake time past first backoff (15 seconds)
+		const afterFirstBackoff = new Date(startTime.getTime() + 15000);
+		await db.sql`
+			UPDATE pgconductor.test_config
+			SET value = ${afterFirstBackoff.toISOString()}
+			WHERE key = 'fake_now'
+		`;
+
+		// Wait for second execution cycle: child retries and fails permanently
+		// Cascade should happen immediately in the same flush
+		await new Promise((r) => setTimeout(r, 500));
 
 		await orchestrator.stop();
 		await stoppedPromise;
+
+		// Clean up
+		await db.sql`DELETE FROM pgconductor.test_config WHERE key = 'fake_now'`;
 
 		// Child should have been called maxAttempts times
 		expect(childFn).toHaveBeenCalledTimes(2);
@@ -375,5 +421,5 @@ describe("Invoke Support", () => {
 
 		expect(failedParents.length).toBe(1);
 		expect(failedParents[0]?.last_error).toContain("Child execution failed");
-	}, 90000);
+	}, 5000);
 });

@@ -3,6 +3,7 @@ export type TaskConfig = {
 	partition?: boolean;
 	window?: [string, string];
 	flushInterval?: number;
+	pollInterval?: number;
 };
 
 // Represents a task definition that can be invoked or triggered by events

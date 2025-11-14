@@ -13,8 +13,14 @@
 -- assert required extensions are installed
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
--- Returns either the actual current timestamp or a fake one if
--- the session sets `pgconductor.fake_now`. This lets tests control time.
+-- Test configuration table for controlling behavior in tests
+CREATE TABLE IF NOT EXISTS pgconductor.test_config (
+  key text PRIMARY KEY,
+  value text
+);
+
+-- Returns either the actual current timestamp or a fake one for tests.
+-- Checks test_config table first, then session variable, then real time.
 create function pgconductor.current_time ()
   returns timestamptz
   language plpgsql
@@ -23,6 +29,18 @@ as $$
 declare
   v_fake text;
 begin
+  -- Check test_config table first (works across all connections)
+  BEGIN
+    SELECT value INTO v_fake FROM pgconductor.test_config WHERE key = 'fake_now';
+    IF v_fake IS NOT NULL AND length(trim(v_fake)) > 0 THEN
+      RETURN v_fake::timestamptz;
+    END IF;
+  EXCEPTION
+    WHEN undefined_table THEN
+      NULL; -- Table doesn't exist yet during initial migration
+  END;
+
+  -- Fall back to session variable (for backwards compatibility)
   v_fake := current_setting('pgconductor.fake_now', true);
   if v_fake is not null and length(trim(v_fake)) > 0 then
     return v_fake::timestamptz;
@@ -165,23 +183,23 @@ CREATE TABLE pgconductor.steps (
 
 -- Load a step result by execution_id and key
 CREATE OR REPLACE FUNCTION pgconductor.load_step(
-    v_execution_id uuid,
-    v_key text
+    execution_id uuid,
+    key text
 ) RETURNS jsonb
 LANGUAGE sql
 STABLE
 SET search_path TO ''
 AS $$
     SELECT jsonb_build_object('result', result) FROM pgconductor.steps
-    WHERE execution_id = v_execution_id AND key = v_key;
+    WHERE execution_id = load_step.execution_id AND key = load_step.key;
 $$;
 
 -- Save a step result and optionally update execution run_at
 CREATE OR REPLACE FUNCTION pgconductor.save_step(
-    v_execution_id uuid,
-    v_key text,
-    v_result jsonb,
-    v_run_at timestamptz default null
+    execution_id uuid,
+    key text,
+    result jsonb,
+    run_in_ms integer default null
 ) RETURNS void
 LANGUAGE sql
 VOLATILE
@@ -189,14 +207,14 @@ SET search_path TO ''
 AS $$
     WITH inserted AS (
         INSERT INTO pgconductor.steps (execution_id, key, result)
-        VALUES (v_execution_id, v_key, v_result)
+        VALUES (save_step.execution_id, save_step.key, save_step.result)
         ON CONFLICT (execution_id, key) DO NOTHING
         RETURNING id
     )
     UPDATE pgconductor.executions
-    SET run_at = v_run_at
-    WHERE id = v_execution_id
-      AND v_run_at IS NOT NULL
+    SET run_at = pgconductor.current_time() + (run_in_ms || ' milliseconds')::interval
+    WHERE id = save_step.execution_id
+      AND run_in_ms IS NOT NULL
       AND EXISTS (SELECT 1 FROM inserted);
 $$;
 
@@ -219,9 +237,9 @@ $$;
 -- );
 
 CREATE OR REPLACE FUNCTION pgconductor.orchestrators_heartbeat(
-  v_orchestrator_id uuid,
-  v_version text,
-  v_migration_number integer
+  orchestrator_id uuid,
+  version text,
+  migration_number integer
 )
 RETURNS boolean
 LANGUAGE sql
@@ -239,9 +257,9 @@ WITH latest AS (
     last_heartbeat_at
   )
   VALUES (
-    v_orchestrator_id,
-    v_version,
-    v_migration_number,
+    orchestrators_heartbeat.orchestrator_id,
+    orchestrators_heartbeat.version,
+    orchestrators_heartbeat.migration_number,
     pgconductor.current_time()
   )
   ON CONFLICT (id)
@@ -254,20 +272,20 @@ WITH latest AS (
 ), marked AS (
   UPDATE pgconductor.orchestrators
   SET shutdown_signal = true
-  WHERE id = v_orchestrator_id
-    AND (SELECT db_version FROM latest) > v_migration_number
+  WHERE id = orchestrators_heartbeat.orchestrator_id
+    AND (SELECT db_version FROM latest) > orchestrators_heartbeat.migration_number
   RETURNING shutdown_signal
 )
 SELECT COALESCE(
   (SELECT shutdown_signal FROM marked),
   CASE
-    WHEN (SELECT db_version FROM latest) > v_migration_number THEN true
+    WHEN (SELECT db_version FROM latest) > orchestrators_heartbeat.migration_number THEN true
     ELSE (SELECT shutdown_signal FROM upsert)
   END
 );
 $function$;
 
-CREATE OR REPLACE FUNCTION pgconductor.sweep_orchestrators(v_migration_number int)
+CREATE OR REPLACE FUNCTION pgconductor.sweep_orchestrators(migration_number int)
  RETURNS void
  LANGUAGE sql
  VOLATILE
@@ -275,10 +293,10 @@ CREATE OR REPLACE FUNCTION pgconductor.sweep_orchestrators(v_migration_number in
 AS $function$
 UPDATE pgconductor.orchestrators
 SET shutdown_signal = true
-WHERE migration_number < v_migration_number;
+WHERE migration_number < sweep_orchestrators.migration_number;
 $function$;
 
-CREATE OR REPLACE FUNCTION pgconductor.recover_stale_orchestrators(v_max_age interval)
+CREATE OR REPLACE FUNCTION pgconductor.recover_stale_orchestrators(max_age interval)
  RETURNS void
  LANGUAGE sql
  VOLATILE
@@ -286,7 +304,7 @@ CREATE OR REPLACE FUNCTION pgconductor.recover_stale_orchestrators(v_max_age int
 AS $function$
 WITH expired AS (
     DELETE FROM pgconductor.orchestrators o
-    WHERE o.last_heartbeat_at < pgconductor.current_time() - v_max_age
+    WHERE o.last_heartbeat_at < pgconductor.current_time() - recover_stale_orchestrators.max_age
     RETURNING o.id
 )
 UPDATE pgconductor.executions e
@@ -298,7 +316,7 @@ WHERE e.locked_by = expired.id
 $function$
 ;
 
-CREATE OR REPLACE FUNCTION pgconductor.orchestrator_shutdown(v_orchestrator_id uuid)
+CREATE OR REPLACE FUNCTION pgconductor.orchestrator_shutdown(orchestrator_id uuid)
  RETURNS void
  LANGUAGE sql
  VOLATILE
@@ -306,7 +324,7 @@ CREATE OR REPLACE FUNCTION pgconductor.orchestrator_shutdown(v_orchestrator_id u
 AS $function$
 WITH deleted AS (
     DELETE FROM pgconductor.orchestrators
-    WHERE id = v_orchestrator_id
+    WHERE id = orchestrator_shutdown.orchestrator_id
     RETURNING id
 )
 UPDATE pgconductor.executions e
@@ -432,7 +450,7 @@ CREATE TRIGGER manage_execution_partition_trigger
 --     'pgconductor.completed_executions'
 -- );
 
-CREATE OR REPLACE FUNCTION pgconductor.get_executions(v_task_key text, v_orchestrator_id uuid, v_batch_size integer default 100)
+CREATE OR REPLACE FUNCTION pgconductor.get_executions(task_key text, orchestrator_id uuid, batch_size integer default 100)
  RETURNS TABLE(id uuid, payload jsonb, waiting_on_execution_id uuid)
  LANGUAGE sql
  VOLATILE
@@ -443,7 +461,7 @@ with task as (
          window_end,
          max_attempts
   from pgconductor.tasks
-  where key = v_task_key
+  where key = get_executions.task_key
 ),
 
 -- Only proceed if we're inside the active window (or no window defined)
@@ -466,16 +484,16 @@ e as (
     and e.attempts < t.max_attempts
     and e.locked_at is null
     and e.run_at <= pgconductor.current_time()
-    and e.task_key = v_task_key
+    and e.task_key = get_executions.task_key
   order by e.priority asc, e.run_at asc
-  limit v_batch_size
+  limit get_executions.batch_size
   for update skip locked
 )
 
 update pgconductor.executions
 set
   attempts = executions.attempts + 1,
-  locked_by = v_orchestrator_id,
+  locked_by = get_executions.orchestrator_id,
   locked_at = pgconductor.current_time()
 from e
 where executions.id = e.id
@@ -503,7 +521,7 @@ AS $function$
   SELECT (ARRAY[15, 30, 60, 120, 300, 600, 1200, 2400, 3600, 7200])[LEAST(attempt, 10)];
 $function$;
 
-CREATE OR REPLACE FUNCTION pgconductor.return_executions(v_results pgconductor.execution_result[])
+CREATE OR REPLACE FUNCTION pgconductor.return_executions(results pgconductor.execution_result[])
 RETURNS integer
 LANGUAGE sql
 VOLATILE
@@ -511,7 +529,7 @@ SET search_path TO ''
 AS $function$
   WITH results AS (
     SELECT *
-    FROM unnest(v_results) AS r
+    FROM unnest(return_executions.results) AS r
   ),
   -- move all completed executions to completed_executions
   completed AS (
@@ -671,11 +689,11 @@ create type pgconductor.execution_spec as (
 );
 
 CREATE OR REPLACE FUNCTION pgconductor.upsert_task(
-    v_key text,
-    v_max_attempts integer default null,
-    v_partition boolean default null,
-    v_window_start timetz default null,
-    v_window_end timetz default null
+    key text,
+    max_attempts integer default null,
+    partition boolean default null,
+    window_start timetz default null,
+    window_end timetz default null
 )
  RETURNS void
  LANGUAGE sql
@@ -690,11 +708,11 @@ AS $function$
     window_end
   )
   VALUES (
-    v_key,
-    COALESCE(v_max_attempts, 3),
-    COALESCE(v_partition, false),
-    v_window_start,
-    v_window_end
+    upsert_task.key,
+    COALESCE(upsert_task.max_attempts, 3),
+    COALESCE(upsert_task.partition, false),
+    upsert_task.window_start,
+    upsert_task.window_end
   )
   ON CONFLICT (key)
   DO UPDATE SET
@@ -757,7 +775,7 @@ CREATE OR REPLACE FUNCTION pgconductor.invoke(
     priority integer default null,
     parent_execution_id uuid default null,
     parent_step_key text default null,
-    parent_timeout_at timestamptz default null
+    parent_timeout_ms integer default null
 )
  RETURNS uuid
  LANGUAGE sql
@@ -775,11 +793,11 @@ WITH inserted_child AS (
   )
   VALUES (
     pgconductor.portable_uuidv7(),
-    task_key,
-    COALESCE(payload, '{}'::jsonb),
-    COALESCE(run_at, pgconductor.current_time()),
-    key,
-    COALESCE(priority, 0)
+    invoke.task_key,
+    COALESCE(invoke.payload, '{}'::jsonb),
+    COALESCE(invoke.run_at, pgconductor.current_time()),
+    invoke.key,
+    COALESCE(invoke.priority, 0)
   )
   RETURNING id
 ),
@@ -787,10 +805,15 @@ updated_parent AS (
   UPDATE pgconductor.executions
   SET
     waiting_on_execution_id = (SELECT id FROM inserted_child),
-    waiting_step_key = parent_step_key,
-    run_at = COALESCE(parent_timeout_at, 'infinity'::timestamptz)
-  WHERE id = parent_execution_id
-    AND parent_execution_id IS NOT NULL
+    waiting_step_key = invoke.parent_step_key,
+    run_at = CASE
+      WHEN invoke.parent_timeout_ms IS NOT NULL THEN
+        pgconductor.current_time() + (invoke.parent_timeout_ms || ' milliseconds')::interval
+      ELSE
+        'infinity'::timestamptz
+    END
+  WHERE id = invoke.parent_execution_id
+    AND invoke.parent_execution_id IS NOT NULL
   RETURNING 1
 )
 SELECT id FROM inserted_child;
@@ -798,7 +821,7 @@ $function$
 ;
 
 CREATE OR REPLACE FUNCTION pgconductor.clear_waiting_state(
-  v_execution_id uuid
+  execution_id uuid
 )
 RETURNS void
 LANGUAGE sql
@@ -809,6 +832,6 @@ AS $function$
   SET
     waiting_on_execution_id = NULL,
     waiting_step_key = NULL
-  WHERE id = v_execution_id;
+  WHERE id = clear_waiting_state.execution_id;
 $function$
 ;

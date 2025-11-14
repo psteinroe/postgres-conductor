@@ -34,7 +34,7 @@ export class Worker {
 	) {
 		// todo: get from Task
 		this.concurrency = 1;
-		this.pollIntervalMs = 1000;
+		this.pollIntervalMs = this.task.config.pollInterval ?? 1000;
 
 		// TODO: Tune these parameters
 		this.fetchBatchSize = this.concurrency * 2;

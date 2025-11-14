@@ -14,7 +14,6 @@ export type TaskContextOptions = {
 
 // second argument for tasks
 export class TaskContext {
-	// should receive AbortSignal for cancellation
 	constructor(private readonly opts: TaskContextOptions) {}
 
 	static create<Extra extends object>(
@@ -60,16 +59,16 @@ export class TaskContext {
 		}
 	}
 
+	/**
+	 * Abort the current execution and hang up indefinitely
+	 * @return Promise that never resolves
+	 **/
 	private abortAndHangup(): Promise<never> {
 		this.opts.abortController.abort();
 		return new Promise(() => {});
 	}
 
 	async sleep(id: string, ms: number): Promise<void> {
-		return this.sleepUntil(id, new Date(Date.now() + ms));
-	}
-
-	async sleepUntil(id: string, datetime: Date | string): Promise<void> {
 		// Check if we already slept
 		const cached = await this.opts.db.loadStep(
 			this.opts.execution.id,
@@ -81,13 +80,12 @@ export class TaskContext {
 			return; // Already slept, continue
 		}
 
-		// Save sleep step with run_at
-		const runAt = typeof datetime === "string" ? new Date(datetime) : datetime;
+		// Save sleep step with ms - time calculation happens in SQL
 		await this.opts.db.saveStep(
 			this.opts.execution.id,
 			id,
 			null,
-			runAt,
+			ms,
 			this.opts.signal,
 		);
 
@@ -116,10 +114,9 @@ export class TaskContext {
 		}
 
 		// Check if we're already waiting (distinguishes first invoke from timeout)
-		// This value comes from the execution row fetched by get_executions
 		if (this.opts.execution.waiting_on_execution_id !== null) {
-			// Scenario 3: We resumed but no step exists → timeout occurred
-			// Clear waiting state before throwing
+			// we resumed but no step exists → timeout occurred
+			// clear waiting state before throwing
 			await this.opts.db.clearWaitingState(
 				this.opts.execution.id,
 				this.opts.signal,
@@ -132,18 +129,14 @@ export class TaskContext {
 			);
 		}
 
-		// Scenario 1: First time invoking - create child and set waiting state
-		const timeoutAt = timeout ? new Date(Date.now() + timeout) : null;
-
 		await this.opts.db.invoke({
 			task_key: taskKey,
 			payload,
 			parent_execution_id: this.opts.execution.id,
 			parent_step_key: id,
-			parent_timeout_at: timeoutAt,
+			parent_timeout_ms: timeout ?? null,
 		});
 
-		// Hangup - will resume when child completes or timeout reached
 		return this.abortAndHangup();
 	}
 
