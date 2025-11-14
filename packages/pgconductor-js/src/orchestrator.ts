@@ -4,10 +4,8 @@ import { MigrationStore } from "./migration-store";
 import { SchemaManager } from "./schema-manager";
 import { Deferred } from "./lib/deferred";
 import type { Conductor } from "./conductor";
-import type { Task } from "./task";
+import type { AnyTask } from "./task";
 import { PACKAGE_VERSION } from "./versions";
-
-type AnyTask = Task<string, any, any, any>;
 
 export type OrchestratorOptions = {
 	conductor: Conductor<any, any>;

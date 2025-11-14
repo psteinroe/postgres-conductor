@@ -40,16 +40,15 @@ describe("Invoke Support", () => {
 		});
 
 		const childTask = conductor.createTask(
-			"child-task",
+			{ name: "child-task", flushInterval: 100, pollInterval: 100 },
 			async (payload, _ctx) => {
 				const result = childFn(payload.input);
 				return { output: result };
 			},
-			{ flushInterval: 100, pollInterval: 100 },
 		);
 
 		const parentTask = conductor.createTask(
-			"parent-task",
+			{ name: "parent-task", flushInterval: 100, pollInterval: 100 },
 			async (payload, ctx) => {
 				const childResult = await ctx.invoke<{ output: number }>(
 					"invoke-child",
@@ -58,7 +57,6 @@ describe("Invoke Support", () => {
 				);
 				return { result: childResult.output };
 			},
-			{ flushInterval: 100, pollInterval: 100 },
 		);
 
 		const orchestrator = new Orchestrator({
@@ -106,17 +104,16 @@ describe("Invoke Support", () => {
 		});
 
 		const slowChildTask = conductor.createTask(
-			"slow-child",
+			{ name: "slow-child", flushInterval: 100, pollInterval: 100 },
 			async (_payload, ctx) => {
 				// Sleep for 5 seconds
 				await ctx.sleep("long-sleep", 5000);
 				return { completed: true };
 			},
-			{ flushInterval: 100, pollInterval: 100 },
 		);
 
 		const timeoutParentTask = conductor.createTask(
-			"timeout-parent",
+			{ name: "timeout-parent", flushInterval: 100, pollInterval: 100 },
 			async (_payload, ctx) => {
 				try {
 					await ctx.invoke(
@@ -131,7 +128,6 @@ describe("Invoke Support", () => {
 					throw err;
 				}
 			},
-			{ flushInterval: 100, pollInterval: 100 },
 		);
 
 		const orchestrator = new Orchestrator({
@@ -203,17 +199,16 @@ describe("Invoke Support", () => {
 		});
 
 		const onceChildTask = conductor.createTask(
-			"once-child",
+			{ name: "once-child", flushInterval: 100 },
 			async (payload, _ctx) => {
 				const result = childFn(payload.input);
 				return { output: result };
 			},
-			{ flushInterval: 100 },
 		);
 
 		let parentAttempts = 0;
 		const retryParentTask = conductor.createTask(
-			"retry-parent",
+			{ name: "retry-parent", flushInterval: 100, maxAttempts: 3 },
 			async (payload, ctx) => {
 				parentAttempts++;
 				const childResult = await ctx.invoke<{ output: number }>(
@@ -229,7 +224,6 @@ describe("Invoke Support", () => {
 
 				return { result: childResult.output };
 			},
-			{ flushInterval: 100, maxAttempts: 3 },
 		);
 
 		const orchestrator = new Orchestrator({
@@ -278,18 +272,17 @@ describe("Invoke Support", () => {
 		});
 
 		const eventualChildTask = conductor.createTask(
-			"eventual-child",
+			{ name: "eventual-child", flushInterval: 100 },
 			async (_payload, ctx) => {
 				// Sleep for 2 seconds
 				await ctx.sleep("moderate-sleep", 2000);
 				const result = childFn();
 				return { result };
 			},
-			{ flushInterval: 100 },
 		);
 
 		const patientParentTask = conductor.createTask(
-			"patient-parent",
+			{ name: "patient-parent", flushInterval: 100 },
 			async (_payload, ctx) => {
 				// No timeout - will wait forever
 				const childResult = await ctx.invoke<{ result: string }>(
@@ -299,7 +292,6 @@ describe("Invoke Support", () => {
 				);
 				return { childResult: childResult.result };
 			},
-			{ flushInterval: 100 },
 		);
 
 		const orchestrator = new Orchestrator({
@@ -349,21 +341,19 @@ describe("Invoke Support", () => {
 		});
 
 		const failingChildTask = conductor.createTask(
-			"failing-child",
+			{ name: "failing-child", flushInterval: 100, pollInterval: 100, maxAttempts: 2 },
 			async (_payload, _ctx) => {
 				childFn();
 				return { result: "never-reached" };
 			},
-			{ flushInterval: 100, pollInterval: 100, maxAttempts: 2 },
 		);
 
 		const cascadeParentTask = conductor.createTask(
-			"cascade-parent",
+			{ name: "cascade-parent", flushInterval: 100, pollInterval: 100 },
 			async (_payload, ctx) => {
 				await ctx.invoke("invoke-failing", "failing-child", {});
 				return { success: true };
 			},
-			{ flushInterval: 100, pollInterval: 100 },
 		);
 
 		const orchestrator = new Orchestrator({

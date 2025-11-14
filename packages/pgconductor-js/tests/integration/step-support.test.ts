@@ -35,7 +35,7 @@ describe("Step Support", () => {
 		});
 
 		const stepTask = conductor.createTask(
-			"step-task",
+			{ name: "step-task", flushInterval: 100 },
 			async (payload, ctx) => {
 				const result = await ctx.step("expensive-step", () => {
 					return expensiveFn(payload.value);
@@ -43,7 +43,6 @@ describe("Step Support", () => {
 
 				return { result };
 			},
-			{ flushInterval: 100 },
 		);
 
 		const orchestrator = new Orchestrator({
@@ -86,14 +85,13 @@ describe("Step Support", () => {
 		});
 
 		const sleepTask = conductor.createTask(
-			"sleep-task",
+			{ name: "sleep-task", flushInterval: 100 },
 			async (payload, ctx) => {
 				executionSteps("before-sleep");
 				await ctx.sleep("wait", payload.delay);
 				executionSteps("after-sleep");
 				return { completed: true };
 			},
-			{ flushInterval: 100 },
 		);
 
 		const orchestrator = new Orchestrator({
@@ -143,7 +141,7 @@ describe("Step Support", () => {
 		});
 
 		const checkpointTask = conductor.createTask(
-			"checkpoint-task",
+			{ name: "checkpoint-task", flushInterval: 100 },
 			async (payload, ctx) => {
 				for (let i = 0; i < payload.items; i++) {
 					processedItems(i);
@@ -153,7 +151,6 @@ describe("Step Support", () => {
 				}
 				return { processed: payload.items };
 			},
-			{ flushInterval: 100 },
 		);
 
 		const orchestrator = new Orchestrator({
@@ -198,14 +195,13 @@ describe("Step Support", () => {
 		});
 
 		const multiStepTask = conductor.createTask(
-			"multi-step-task",
+			{ name: "multi-step-task", flushInterval: 100 },
 			async (payload, ctx) => {
 				const a = await ctx.step("step1", () => step1Fn(payload.x));
 				const b = await ctx.step("step2", () => step2Fn(a));
 				const c = await ctx.step("step3", () => step3Fn(b));
 				return { result: c };
 			},
-			{ flushInterval: 100 },
 		);
 
 		const orchestrator = new Orchestrator({

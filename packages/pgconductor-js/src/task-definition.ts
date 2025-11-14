@@ -6,33 +6,38 @@ export type TaskDefinition<
 	Name extends string,
 	Payload extends ObjectSchema | undefined = undefined,
 	Returns extends ObjectSchema | undefined = undefined,
+	Queue extends string = "default",
 > = {
 	name: Name;
+	queue: Queue;
 	payload: Payload;
 	returns: Returns;
 };
 
 export function defineTask<Name extends string>(def: {
 	name: Name;
-}): TaskDefinition<Name>;
+	queue?: string;
+}): TaskDefinition<Name, undefined, undefined, typeof def.queue extends string ? typeof def.queue : "default">;
 export function defineTask<
 	Name extends string,
 	Payload extends ObjectSchema,
 >(def: {
 	name: Name;
+	queue?: string;
 	payload: Payload;
-}): TaskDefinition<Name, Payload>;
+}): TaskDefinition<Name, Payload, undefined, typeof def.queue extends string ? typeof def.queue : "default">;
 export function defineTask<
 	Name extends string,
 	Payload extends ObjectSchema,
 	Returns extends ObjectSchema,
 >(def: {
 	name: Name;
+	queue?: string;
 	payload?: Payload;
 	returns?: Returns;
-}): TaskDefinition<Name, Payload, Returns>;
+}): TaskDefinition<Name, Payload, Returns, typeof def.queue extends string ? typeof def.queue : "default">;
 export function defineTask(def: any) {
-	return def;
+	return { ...def, queue: def.queue ?? "default" };
 }
 
 type EnsureObject<T> = T extends object ? T : {};

@@ -6,6 +6,14 @@ export type TaskConfig = {
 	pollInterval?: number;
 };
 
+export type TaskConfiguration<
+	TName extends string = string,
+	TQueue extends string = "default",
+> = {
+	name: TName;
+	queue?: TQueue;
+} & TaskConfig;
+
 // Represents a task definition that can be invoked or triggered by events
 export type ExecuteFunction<
 	Payload extends object,
@@ -15,16 +23,25 @@ export type ExecuteFunction<
 
 // Represents a task definition that can be invoked or triggered by events
 export class Task<
-	Key extends string,
-	Payload extends object,
-	Returns extends object | void,
-	Context extends object,
+	Queue extends string = "default",
+	Key extends string = string,
+	Payload extends object = object,
+	Returns extends object | void = void,
+	Context extends object = object,
 > {
+	public readonly key: Key;
+	public readonly queue: Queue;
+	public readonly config: TaskConfig;
+
 	constructor(
-		public readonly key: Key,
+		definition: TaskConfiguration<Key, Queue>,
 		public readonly execute: ExecuteFunction<Payload, Returns, Context>,
-		public readonly config: TaskConfig = {},
-	) {}
+	) {
+		this.key = definition.name;
+		this.queue = (definition.queue ?? "default") as Queue;
+		const { name, queue, ...config } = definition;
+		this.config = config;
+	}
 }
 
-export type AnyTask = Task<string, any, any, any>;
+export type AnyTask = Task<string, string, any, any, any>;

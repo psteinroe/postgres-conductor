@@ -23,6 +23,7 @@ export class MockDatabaseClient implements IDatabaseClient {
 	invokeBatch = mock(async () => {});
 	loadStep = mock(async () => null);
 	saveStep = mock(async () => {});
+	clearWaitingState = mock(async () => {});
 
 	constructor(overrides: Partial<IDatabaseClient> = {}) {
 		Object.assign(this, overrides);

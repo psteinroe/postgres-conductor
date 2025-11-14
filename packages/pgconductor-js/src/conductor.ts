@@ -1,12 +1,11 @@
 import type { Sql } from "postgres";
 import { DatabaseClient, type ExecutionSpec } from "./database-client";
-import { Task } from "./task";
+import { Task, type TaskConfiguration } from "./task";
 import type { TaskContext } from "./task-context";
 import {
 	type FindTaskByName,
 	type InferPayload,
 	type InferReturns,
-	type TaskConfig,
 	type TaskDefinition,
 	type TaskName,
 } from "./task-definition";
@@ -62,15 +61,15 @@ export class Conductor<
 		TDef extends FindTaskByName<Tasks, TName>,
 		TPayload extends object = InferPayload<TDef>,
 		TReturns extends object | void = InferReturns<TDef>,
+		TQueue extends string = TDef extends { queue: infer Q extends string } ? Q : "default",
 	>(
-		name: TName,
+		definition: TaskConfiguration<TName, TQueue>,
 		fn: (
 			payload: TPayload,
 			ctx: TaskContext & ExtraContext,
 		) => Promise<TReturns>,
-		config?: TaskConfig,
-	): Task<TName, TPayload, TReturns, TaskContext & ExtraContext> {
-		return new Task(name, fn, config);
+	): Task<TQueue, TName, TPayload, TReturns, TaskContext & ExtraContext> {
+		return new Task(definition, fn);
 	}
 
 	async invoke<

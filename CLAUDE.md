@@ -42,9 +42,10 @@ just build-migrations              # Rebuild TypeScript types from migrations
 
 ### Running Tests
 
-Tests use Bun test runner:
+Tests use Bun test runner. **Always run typecheck with tests:**
 
 ```bash
+bun test && bun run typecheck      # Run tests and type checking (ALWAYS)
 bun test                           # All tests (unit + integration)
 bun test tests/unit/               # Unit tests only
 bun test tests/integration/        # Integration tests only
@@ -177,13 +178,18 @@ SQL functions in `migrations/0000000001_setup.sql`:
 Tasks accept a configuration object with these options:
 
 ```typescript
-conductor.createTask("my-task", handler, {
-  maxAttempts: 3,        // Max retry attempts before permanent failure (default: from DB)
-  flushInterval: 2000,   // How often to flush results to DB in ms (default: 2000)
-  pollInterval: 1000,    // How often to poll for new executions in ms (default: 1000)
-  partition: false,      // Enable partitioning (default: false)
-  window: ["09:00", "17:00"],  // Time window for execution [start, end]
-});
+conductor.createTask(
+  {
+    name: "my-task",
+    queue: "default",      // Queue name (default: "default")
+    maxAttempts: 3,        // Max retry attempts before permanent failure (default: from DB)
+    flushInterval: 2000,   // How often to flush results to DB in ms (default: 2000)
+    pollInterval: 1000,    // How often to poll for new executions in ms (default: 1000)
+    partition: false,      // Enable partitioning (default: false)
+    window: ["09:00", "17:00"],  // Time window for execution [start, end]
+  },
+  handler,
+);
 ```
 
 **Note**: Lower `pollInterval` values (e.g., 100ms) are useful in tests for faster execution cycles.
@@ -283,6 +289,25 @@ This is particularly useful for testing:
 
 ---
 
+## Planned Changes
+
+### Queue System (In Progress)
+
+See **QUEUE-IMPLEMENTATION-PLAN.md** for detailed implementation plan.
+
+**Goal**: Transition from one-worker-per-task to queue-based worker model with explicit partitioning and batch processing.
+
+**Key Changes**:
+- Tasks will have a `queue` field (defaults to "default")
+- Workers operate on queues (handling multiple tasks)
+- Explicit `createWorker(queueName, settings, tasks)` API
+- Auto-provisioned default queue with zero config
+- Task-level batching support
+
+**Status**: Phase 1 complete (type system updates) ✅
+
+---
+
 ## Development Environment
 
 ### Bun Runtime
@@ -307,3 +332,21 @@ bun test tests/integration/        # Run integration tests
 
 - **Console logs**: Always remove debug `console.log()` statements before committing
 - **Tests**: Ensure all tests pass and clean up resources (database connections, fake_now, etc.)
+- **Type checking**: Always run both tests AND typecheck together:
+  ```bash
+  bun test && bun run typecheck
+  ```
+
+### Code Style Guidelines
+
+**TypeScript**:
+- **Array types**: Always use `T[]` syntax, never `Array<T>`
+  ```typescript
+  // ✅ Correct
+  const tasks: Task[] = [];
+  function process(items: string[]): number[] { }
+
+  // ❌ Wrong
+  const tasks: Array<Task> = [];
+  function process(items: Array<string>): Array<number> { }
+  ```

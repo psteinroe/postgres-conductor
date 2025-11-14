@@ -39,7 +39,7 @@ describe("Basic Task Execution", () => {
 		let executionCount = 0;
 
 		const helloTask = conductor.createTask(
-			"hello-task",
+			{ name: "hello-task" },
 			async (payload, ctx) => {
 				executionCount++;
 				ctx.contextFn(payload.name);

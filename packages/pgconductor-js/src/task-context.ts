@@ -36,7 +36,7 @@ export class TaskContext {
 		);
 
 		if (cached) {
-			return cached.result;
+			return cached.result as T;
 		}
 
 		// Execute and save
@@ -45,7 +45,7 @@ export class TaskContext {
 		await this.opts.db.saveStep(
 			this.opts.execution.id,
 			name,
-			{ result },
+			{ result: result as JsonValue },
 			undefined,
 			this.opts.signal,
 		);
@@ -108,7 +108,7 @@ export class TaskContext {
 		if (cached) {
 			// Child completed successfully
 			if ("result" in cached) {
-				return cached.result;
+				return cached.result as T;
 			}
 			// Note: errors are handled via cascade - parent would already be failed
 		}
