@@ -1,4 +1,4 @@
-import { Worker } from "./worker";
+import { Worker, type WorkerConfig } from "./worker";
 import { DatabaseClient } from "./database-client";
 import { MigrationStore } from "./migration-store";
 import { SchemaManager } from "./schema-manager";
@@ -9,7 +9,9 @@ import { PACKAGE_VERSION } from "./versions";
 
 export type OrchestratorOptions = {
 	conductor: Conductor<any, any>;
-	tasks: AnyTask[];
+	tasks?: AnyTask[];
+	defaultWorker?: Partial<WorkerConfig>;
+	workers?: Worker[];
 };
 
 const HEARTBEAT_INTERVAL_MS = 30000; // 30 seconds
@@ -28,7 +30,6 @@ export class Orchestrator {
 	private readonly orchestratorId: string;
 	private readonly migrationStore: MigrationStore;
 	private readonly schemaManager: SchemaManager;
-	private readonly tasks: AnyTask[];
 
 	private heartbeatTimer: Timer | null = null;
 	private _stopDeferred: Deferred<void> | null = null;
@@ -40,16 +41,24 @@ export class Orchestrator {
 		this.db = options.conductor.db;
 		this.migrationStore = new MigrationStore();
 		this.schemaManager = new SchemaManager(this.db);
-		this.tasks = options.tasks;
 
-		for (const task of this.tasks) {
+		if (options.tasks?.length) {
 			const worker = new Worker(
-				this.orchestratorId,
-				task,
+				"default",
+				new Map(options.tasks.map((task) => [task.name, task])),
 				this.db,
+				options.defaultWorker,
 				options.conductor.options.context,
 			);
 			this.workers.push(worker);
+		}
+
+		for (const w of options.workers || []) {
+			if (this.workers.find((existing) => existing.queueName === w.queueName)) {
+				throw new Error(`Duplicate worker name: ${w.queueName}`);
+			}
+
+			this.workers.push(w);
 		}
 	}
 
@@ -139,7 +148,9 @@ export class Orchestrator {
 				this.startHeartbeatLoop();
 
 				// Start all workers
-				const workerPromises = this.workers.map((worker) => worker.start());
+				const workerPromises = this.workers.map((worker) =>
+					worker.start(this.orchestratorId),
+				);
 
 				// Signal that we've started successfully
 				this.startDeferred.resolve();
@@ -263,11 +274,7 @@ export class Orchestrator {
 	 * Stop all workers gracefully
 	 */
 	private async stopWorkers(): Promise<void> {
-		console.log(`Stopping ${this.workers.length} workers...`);
-
 		await Promise.all(this.workers.map((worker) => worker.stop()));
-
-		console.log("All workers stopped");
 	}
 
 	/**
@@ -302,7 +309,7 @@ export class Orchestrator {
 			migrationNumber: this.migrationStore.getLatestMigrationNumber(),
 			workerCount: this.workers.length,
 			isRunning: this._stopDeferred !== null,
-			shutdownSignal: this._abortController?.signal.aborted ?? false,
+			shutdownSignal: this._abortController?.signal.aborted || false,
 		};
 	}
 

@@ -253,31 +253,33 @@ console.log(JSON.stringify(rows, null, 2));
 
 ### Controlling Time in Tests
 
-The `pgconductor.current_time()` function checks a test configuration table before returning the real time. This allows tests to control time without waiting:
+The `pgconductor.current_time()` function checks `current_setting('pgconductor.fake_now')` before returning the real time. This allows tests to control time without waiting:
 
 ```typescript
-// Set fake time (after orchestrator.start() so table exists)
+// Test databases use max: 1 connection pool (see TestDatabase.create())
+// This ensures all queries share the same connection and see the same fake time
+
+// Set fake time before starting orchestrator
 const fakeTime = new Date("2024-01-01T12:00:00Z");
-await db.sql`
-  INSERT INTO pgconductor.test_config (key, value)
-  VALUES ('fake_now', ${fakeTime.toISOString()})
-  ON CONFLICT (key) DO UPDATE SET value = ${fakeTime.toISOString()}
-`;
+await db.client.setFakeTime(fakeTime);
 
 // Now all operations use fake time
 await db.sql`SELECT pgconductor.current_time()`; // Returns 2024-01-01 12:00:00
 
-// Advance time by 1 hour
+// Advance time by 1 hour (works immediately with session-level SET)
 const laterTime = new Date(fakeTime.getTime() + 3600000);
-await db.sql`
-  UPDATE pgconductor.test_config
-  SET value = ${laterTime.toISOString()}
-  WHERE key = 'fake_now'
-`;
+await db.client.setFakeTime(laterTime);
 
 // Reset to real time
-await db.sql`DELETE FROM pgconductor.test_config WHERE key = 'fake_now'`;
+await db.client.clearFakeTime();
 ```
+
+**How it works:**
+- Each test creates an isolated database via `pool.child()`
+- The database connection uses `max: 1` pool size
+- All queries (test, conductor, worker) share the same connection
+- `setFakeTime()` uses session-level `SET pgconductor.fake_now`
+- Since everyone shares the connection, everyone sees the same time
 
 This is particularly useful for testing:
 - Sleep/delayed executions

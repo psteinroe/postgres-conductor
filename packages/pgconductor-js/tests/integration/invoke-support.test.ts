@@ -40,7 +40,7 @@ describe("Invoke Support", () => {
 		});
 
 		const childTask = conductor.createTask(
-			{ name: "child-task", flushInterval: 100, pollInterval: 100 },
+			{ name: "child-task" },
 			async (payload, _ctx) => {
 				const result = childFn(payload.input);
 				return { output: result };
@@ -48,7 +48,7 @@ describe("Invoke Support", () => {
 		);
 
 		const parentTask = conductor.createTask(
-			{ name: "parent-task", flushInterval: 100, pollInterval: 100 },
+			{ name: "parent-task" },
 			async (payload, ctx) => {
 				const childResult = await ctx.invoke<{ output: number }>(
 					"invoke-child",
@@ -66,16 +66,12 @@ describe("Invoke Support", () => {
 
 		await orchestrator.start();
 
-		const stoppedPromise = orchestrator.stopped;
-
 		await conductor.invoke("parent-task", { value: 5 });
 
 		await new Promise((r) => setTimeout(r, 1500));
 
 		await orchestrator.stop();
-		await stoppedPromise;
 
-		// Child function should have been called
 		expect(childFn).toHaveBeenCalledTimes(1);
 		expect(childFn).toHaveBeenCalledWith(5);
 	}, 30000);
@@ -104,24 +100,18 @@ describe("Invoke Support", () => {
 		});
 
 		const slowChildTask = conductor.createTask(
-			{ name: "slow-child", flushInterval: 100, pollInterval: 100 },
+			{ name: "slow-child" },
 			async (_payload, ctx) => {
-				// Sleep for 5 seconds
 				await ctx.sleep("long-sleep", 5000);
 				return { completed: true };
 			},
 		);
 
 		const timeoutParentTask = conductor.createTask(
-			{ name: "timeout-parent", flushInterval: 100, pollInterval: 100 },
+			{ name: "timeout-parent" },
 			async (_payload, ctx) => {
 				try {
-					await ctx.invoke(
-						"invoke-slow",
-						"slow-child",
-						{},
-						1000, // 1 second timeout
-					);
+					await ctx.invoke("invoke-slow", "slow-child", {}, 1000);
 					return { success: true };
 				} catch (err) {
 					parentError(err as Error);
@@ -130,46 +120,34 @@ describe("Invoke Support", () => {
 			},
 		);
 
+		const startTime = new Date("2024-01-01T00:00:00Z");
+		await db.client.setFakeTime(startTime);
+
 		const orchestrator = new Orchestrator({
 			conductor,
 			tasks: [timeoutParentTask, slowChildTask],
+			defaultWorker: {
+				pollIntervalMs: 100,
+				flushIntervalMs: 100,
+			},
 		});
 
 		await orchestrator.start();
 
-		const stoppedPromise = orchestrator.stopped;
-
-		// Set fake time
-		const startTime = new Date("2024-01-01T00:00:00Z");
-		await db.sql`
-			INSERT INTO pgconductor.test_config (key, value)
-			VALUES ('fake_now', ${startTime.toISOString()})
-			ON CONFLICT (key) DO UPDATE SET value = ${startTime.toISOString()}
-		`;
-
 		await conductor.invoke("timeout-parent", {});
 
-		// Wait for parent to invoke child and child to sleep
 		await new Promise((r) => setTimeout(r, 500));
 
 		// Advance time past timeout (1 second) but before sleep completes (5 seconds)
 		const afterTimeout = new Date(startTime.getTime() + 1500);
-		await db.sql`
-			UPDATE pgconductor.test_config
-			SET value = ${afterTimeout.toISOString()}
-			WHERE key = 'fake_now'
-		`;
+		await db.client.setFakeTime(afterTimeout);
 
-		// Wait for timeout to be detected and parent to resume
 		await new Promise((r) => setTimeout(r, 500));
 
 		await orchestrator.stop();
-		await stoppedPromise;
 
-		// Clean up
-		await db.sql`DELETE FROM pgconductor.test_config WHERE key = 'fake_now'`;
+		await db.client.clearFakeTime();
 
-		// Parent should have caught timeout error
 		expect(parentError).toHaveBeenCalledTimes(1);
 		const errorMsg = parentError.mock.results[0]?.value;
 		expect(errorMsg).toContain("timed out after 1000ms");
@@ -199,7 +177,7 @@ describe("Invoke Support", () => {
 		});
 
 		const onceChildTask = conductor.createTask(
-			{ name: "once-child", flushInterval: 100 },
+			{ name: "once-child" },
 			async (payload, _ctx) => {
 				const result = childFn(payload.input);
 				return { output: result };
@@ -208,7 +186,7 @@ describe("Invoke Support", () => {
 
 		let parentAttempts = 0;
 		const retryParentTask = conductor.createTask(
-			{ name: "retry-parent", flushInterval: 100, maxAttempts: 3 },
+			{ name: "retry-parent", maxAttempts: 3 },
 			async (payload, ctx) => {
 				parentAttempts++;
 				const childResult = await ctx.invoke<{ output: number }>(
@@ -233,17 +211,12 @@ describe("Invoke Support", () => {
 
 		await orchestrator.start();
 
-		const stoppedPromise = orchestrator.stopped;
-
 		await conductor.invoke("retry-parent", { value: 7 });
 
-		// Wait for retry to complete
 		await new Promise((r) => setTimeout(r, 5000));
 
 		await orchestrator.stop();
-		await stoppedPromise;
 
-		// Child should only be called once (cached on parent retry)
 		expect(childFn).toHaveBeenCalledTimes(1);
 		expect(childFn).toHaveBeenCalledWith(7);
 	}, 30000);
@@ -272,9 +245,8 @@ describe("Invoke Support", () => {
 		});
 
 		const eventualChildTask = conductor.createTask(
-			{ name: "eventual-child", flushInterval: 100 },
+			{ name: "eventual-child" },
 			async (_payload, ctx) => {
-				// Sleep for 2 seconds
 				await ctx.sleep("moderate-sleep", 2000);
 				const result = childFn();
 				return { result };
@@ -282,9 +254,8 @@ describe("Invoke Support", () => {
 		);
 
 		const patientParentTask = conductor.createTask(
-			{ name: "patient-parent", flushInterval: 100 },
+			{ name: "patient-parent" },
 			async (_payload, ctx) => {
-				// No timeout - will wait forever
 				const childResult = await ctx.invoke<{ result: string }>(
 					"invoke-eventual",
 					"eventual-child",
@@ -301,17 +272,12 @@ describe("Invoke Support", () => {
 
 		await orchestrator.start();
 
-		const stoppedPromise = orchestrator.stopped;
-
 		await conductor.invoke("patient-parent", {});
 
-		// Wait for child to complete (2s sleep + parent resume + buffer)
 		await new Promise((r) => setTimeout(r, 6000));
 
 		await orchestrator.stop();
-		await stoppedPromise;
 
-		// Child should have completed successfully
 		expect(childFn).toHaveBeenCalledTimes(1);
 	}, 40000);
 
@@ -341,7 +307,7 @@ describe("Invoke Support", () => {
 		});
 
 		const failingChildTask = conductor.createTask(
-			{ name: "failing-child", flushInterval: 100, pollInterval: 100, maxAttempts: 2 },
+			{ name: "failing-child", maxAttempts: 2 },
 			async (_payload, _ctx) => {
 				childFn();
 				return { result: "never-reached" };
@@ -349,29 +315,26 @@ describe("Invoke Support", () => {
 		);
 
 		const cascadeParentTask = conductor.createTask(
-			{ name: "cascade-parent", flushInterval: 100, pollInterval: 100 },
+			{ name: "cascade-parent" },
 			async (_payload, ctx) => {
 				await ctx.invoke("invoke-failing", "failing-child", {});
 				return { success: true };
 			},
 		);
 
+		const startTime = new Date("2024-01-01T00:00:00Z");
+		await db.client.setFakeTime(startTime);
+
 		const orchestrator = new Orchestrator({
 			conductor,
 			tasks: [cascadeParentTask, failingChildTask],
+			defaultWorker: {
+				pollIntervalMs: 100,
+				flushIntervalMs: 100,
+			},
 		});
 
 		await orchestrator.start();
-
-		const stoppedPromise = orchestrator.stopped;
-
-		// Set initial fake time
-		const startTime = new Date("2024-01-01T00:00:00Z");
-		await db.sql`
-			INSERT INTO pgconductor.test_config (key, value)
-			VALUES ('fake_now', ${startTime.toISOString()})
-			ON CONFLICT (key) DO UPDATE SET value = ${startTime.toISOString()}
-		`;
 
 		await conductor.invoke("cascade-parent", {});
 
@@ -381,26 +344,17 @@ describe("Invoke Support", () => {
 
 		// Advance fake time past first backoff (15 seconds)
 		const afterFirstBackoff = new Date(startTime.getTime() + 15000);
-		await db.sql`
-			UPDATE pgconductor.test_config
-			SET value = ${afterFirstBackoff.toISOString()}
-			WHERE key = 'fake_now'
-		`;
+		await db.client.setFakeTime(afterFirstBackoff);
 
 		// Wait for second execution cycle: child retries and fails permanently
-		// Cascade should happen immediately in the same flush
 		await new Promise((r) => setTimeout(r, 500));
 
 		await orchestrator.stop();
-		await stoppedPromise;
 
-		// Clean up
-		await db.sql`DELETE FROM pgconductor.test_config WHERE key = 'fake_now'`;
+		await db.client.clearFakeTime();
 
-		// Child should have been called maxAttempts times
 		expect(childFn).toHaveBeenCalledTimes(2);
 
-		// Verify parent was moved to failed_executions with cascade error
 		const failedParents = await db.sql<
 			Array<{ last_error: string; task_key: string }>
 		>`

@@ -17,7 +17,12 @@ export type TaskDefinition<
 export function defineTask<Name extends string>(def: {
 	name: Name;
 	queue?: string;
-}): TaskDefinition<Name, undefined, undefined, typeof def.queue extends string ? typeof def.queue : "default">;
+}): TaskDefinition<
+	Name,
+	undefined,
+	undefined,
+	typeof def.queue extends string ? typeof def.queue : "default"
+>;
 export function defineTask<
 	Name extends string,
 	Payload extends ObjectSchema,
@@ -25,7 +30,12 @@ export function defineTask<
 	name: Name;
 	queue?: string;
 	payload: Payload;
-}): TaskDefinition<Name, Payload, undefined, typeof def.queue extends string ? typeof def.queue : "default">;
+}): TaskDefinition<
+	Name,
+	Payload,
+	undefined,
+	typeof def.queue extends string ? typeof def.queue : "default"
+>;
 export function defineTask<
 	Name extends string,
 	Payload extends ObjectSchema,
@@ -35,9 +45,14 @@ export function defineTask<
 	queue?: string;
 	payload?: Payload;
 	returns?: Returns;
-}): TaskDefinition<Name, Payload, Returns, typeof def.queue extends string ? typeof def.queue : "default">;
+}): TaskDefinition<
+	Name,
+	Payload,
+	Returns,
+	typeof def.queue extends string ? typeof def.queue : "default"
+>;
 export function defineTask(def: any) {
-	return { ...def, queue: def.queue ?? "default" };
+	return { ...def, queue: def.queue || "default" };
 }
 
 type EnsureObject<T> = T extends object ? T : {};
@@ -66,5 +81,3 @@ export type FindTaskByName<
 	TTasks extends readonly TaskDefinition<string, any, any>[],
 	TName extends string,
 > = Extract<TTasks[number], { name: TName }>;
-
-export type { TaskConfig } from "./task";

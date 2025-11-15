@@ -4,14 +4,17 @@ import {
 	type StartedTestContainer,
 	Wait,
 } from "testcontainers";
+import { DatabaseClient } from "../../src/database-client";
 
 export class TestDatabase {
 	public readonly sql: Sql;
+	public readonly client: DatabaseClient;
 	public readonly name: string;
 	private readonly masterUrl: string;
 
 	private constructor(sql: Sql, name: string, masterUrl: string) {
 		this.sql = sql;
+		this.client = new DatabaseClient({ sql });
 		this.name = name;
 		this.masterUrl = masterUrl;
 	}
@@ -28,7 +31,8 @@ export class TestDatabase {
 		}
 
 		const testDbUrl = masterUrl.replace(/\/[^/]+$/, `/${name}`);
-		const sql = postgres(testDbUrl);
+		// Use max: 1 to ensure only one connection, making fake time work reliably
+		const sql = postgres(testDbUrl, { max: 1 });
 
 		await sql`CREATE EXTENSION IF NOT EXISTS "uuid-ossp"`;
 

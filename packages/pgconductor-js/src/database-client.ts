@@ -19,13 +19,14 @@ export interface ExecutionSpec {
 
 export interface TaskSpec {
 	key: string;
+	queue?: string | null;
 	maxAttempts?: number | null;
-	partition?: boolean | null;
 	window?: [string, string] | null;
 }
 
 export interface Execution {
 	id: string;
+	task_key: string;
 	payload: Payload;
 	waiting_on_execution_id: string | null;
 }
@@ -330,7 +331,7 @@ export class DatabaseClient {
 
 	async getExecutions(
 		orchestratorId: string,
-		taskKey: string,
+		queueName: string,
 		batchSize: number,
 		signal: AbortSignal,
 	): Promise<Execution[]> {
@@ -338,7 +339,7 @@ export class DatabaseClient {
 			async (sql) => {
 				return await sql<Execution[]>`
 				SELECT * FROM pgconductor.get_executions(
-					task_key := ${taskKey}::text,
+					queue_name := ${queueName}::text,
 					orchestrator_id := ${orchestratorId}::uuid,
 					batch_size := ${batchSize}::integer
 				)
@@ -373,23 +374,31 @@ export class DatabaseClient {
 		);
 	}
 
-	async upsertTask(spec: TaskSpec, signal?: AbortSignal): Promise<void> {
+	async registerWorker(
+		queueName: string,
+		taskSpecs: TaskSpec[],
+		signal?: AbortSignal,
+	): Promise<void> {
 		return this.query(
 			async (sql) => {
-				const windowStart = spec.window?.[0] ?? null;
-				const windowEnd = spec.window?.[1] ?? null;
+				const taskSpecRows = taskSpecs.map((spec) => ({
+					key: spec.key,
+					queue: spec.queue || null,
+					max_attempts: spec.maxAttempts || null,
+					window_start: spec.window?.[0] || null,
+					window_end: spec.window?.[1] || null,
+				}));
 
 				await sql`
-					SELECT pgconductor.upsert_task(
-						key := ${spec.key}::text,
-						max_attempts := ${spec.maxAttempts ?? null}::integer,
-						partition := ${spec.partition ?? null}::boolean,
-						window_start := ${windowStart}::timetz,
-						window_end := ${windowEnd}::timetz
+					SELECT pgconductor.register_worker(
+						p_queue_name := ${queueName}::text,
+						p_task_specs := array(
+							SELECT json_populate_recordset(null::pgconductor.task_spec, ${sql.json(taskSpecRows)}::json)::pgconductor.task_spec
+						)
 					)
 				`;
 			},
-			{ label: "upsertTask", signal },
+			{ label: "registerWorker", signal },
 		);
 	}
 
@@ -493,6 +502,40 @@ export class DatabaseClient {
 				`;
 			},
 			{ label: "clearWaitingState", signal },
+		);
+	}
+
+	/**
+	 * Set fake time for testing purposes.
+	 * All calls to pgconductor.current_time() will return this value.
+	 *
+	 * Uses session-level SET, which works perfectly when the connection pool has max: 1
+	 * (all queries share the same connection, so all see the same fake time).
+	 *
+	 * IMPORTANT: Test database connection pool must have max: 1 for this to work reliably.
+	 */
+	async setFakeTime(date: Date, signal?: AbortSignal): Promise<void> {
+		return this.query(
+			async (sql) => {
+				// Session-level setting - affects all queries on this connection
+				await sql.unsafe(
+					`SET pgconductor.fake_now = '${date.toISOString()}'`,
+				);
+			},
+			{ label: "setFakeTime", signal },
+		);
+	}
+
+	/**
+	 * Clear fake time, returning to real clock_timestamp().
+	 */
+	async clearFakeTime(signal?: AbortSignal): Promise<void> {
+		return this.query(
+			async (sql) => {
+				// Reset session-level setting
+				await sql.unsafe(`SET pgconductor.fake_now = ''`);
+			},
+			{ label: "clearFakeTime", signal },
 		);
 	}
 }

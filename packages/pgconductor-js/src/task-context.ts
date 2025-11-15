@@ -98,7 +98,6 @@ export class TaskContext {
 		payload: Payload = {},
 		timeout?: number,
 	): Promise<T> {
-		// Step is the source of truth - check if child already completed
 		const cached = await this.opts.db.loadStep(
 			this.opts.execution.id,
 			id,
@@ -106,11 +105,7 @@ export class TaskContext {
 		);
 
 		if (cached) {
-			// Child completed successfully
-			if ("result" in cached) {
-				return cached.result as T;
-			}
-			// Note: errors are handled via cascade - parent would already be failed
+			return cached.result as T;
 		}
 
 		// Check if we're already waiting (distinguishes first invoke from timeout)

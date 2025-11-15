@@ -18,12 +18,14 @@ export class MockDatabaseClient implements IDatabaseClient {
 	orchestratorShutdown = mock(async () => {});
 	getExecutions = mock(async () => []);
 	returnExecutions = mock(async () => {});
-	upsertTask = mock(async () => {});
+	registerWorker = mock(async () => {});
 	invoke = mock(async () => {});
 	invokeBatch = mock(async () => {});
 	loadStep = mock(async () => null);
 	saveStep = mock(async () => {});
 	clearWaitingState = mock(async () => {});
+	setFakeTime = mock(async () => {});
+	clearFakeTime = mock(async () => {});
 
 	constructor(overrides: Partial<IDatabaseClient> = {}) {
 		Object.assign(this, overrides);

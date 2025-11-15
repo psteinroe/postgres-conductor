@@ -1,20 +1,16 @@
-export type TaskConfig = {
-	maxAttempts?: number;
-	partition?: boolean;
-	window?: [string, string];
-	flushInterval?: number;
-	pollInterval?: number;
-};
-
 export type TaskConfiguration<
 	TName extends string = string,
 	TQueue extends string = "default",
 > = {
+	// identifier
 	name: TName;
 	queue?: TQueue;
-} & TaskConfig;
 
-// Represents a task definition that can be invoked or triggered by events
+	// configuration
+	maxAttempts?: number;
+	window?: [string, string];
+};
+
 export type ExecuteFunction<
 	Payload extends object,
 	Returns extends object | void,
@@ -29,18 +25,21 @@ export class Task<
 	Returns extends object | void = void,
 	Context extends object = object,
 > {
-	public readonly key: Key;
+	public readonly name: Key;
 	public readonly queue: Queue;
-	public readonly config: TaskConfig;
+	public readonly maxAttempts?: number;
+	public readonly window?: [string, string];
 
 	constructor(
 		definition: TaskConfiguration<Key, Queue>,
 		public readonly execute: ExecuteFunction<Payload, Returns, Context>,
 	) {
-		this.key = definition.name;
-		this.queue = (definition.queue ?? "default") as Queue;
 		const { name, queue, ...config } = definition;
-		this.config = config;
+		this.name = name;
+		this.queue = (queue || "default") as Queue;
+
+		this.maxAttempts = config.maxAttempts;
+		this.window = config.window;
 	}
 }
 

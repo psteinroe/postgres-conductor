@@ -35,7 +35,7 @@ describe("Step Support", () => {
 		});
 
 		const stepTask = conductor.createTask(
-			{ name: "step-task", flushInterval: 100 },
+			{ name: "step-task" },
 			async (payload, ctx) => {
 				const result = await ctx.step("expensive-step", () => {
 					return expensiveFn(payload.value);
@@ -52,14 +52,11 @@ describe("Step Support", () => {
 
 		await orchestrator.start();
 
-		const stoppedPromise = orchestrator.stopped;
-
 		await conductor.invoke("step-task", { value: 5 });
 
 		await new Promise((r) => setTimeout(r, 2000));
 
 		await orchestrator.stop();
-		await stoppedPromise;
 
 		// Expensive function should only be called once
 		expect(expensiveFn).toHaveBeenCalledTimes(1);
@@ -85,7 +82,7 @@ describe("Step Support", () => {
 		});
 
 		const sleepTask = conductor.createTask(
-			{ name: "sleep-task", flushInterval: 100 },
+			{ name: "sleep-task" },
 			async (payload, ctx) => {
 				executionSteps("before-sleep");
 				await ctx.sleep("wait", payload.delay);
@@ -100,8 +97,6 @@ describe("Step Support", () => {
 		});
 
 		await orchestrator.start();
-
-		const stoppedPromise = orchestrator.stopped;
 
 		await conductor.invoke("sleep-task", { delay: 2000 });
 
@@ -119,7 +114,6 @@ describe("Step Support", () => {
 		expect(executionSteps).toHaveBeenCalledWith("after-sleep");
 
 		await orchestrator.stop();
-		await stoppedPromise;
 	}, 30000);
 
 	test("checkpoint() works without crashing", async () => {
@@ -141,7 +135,7 @@ describe("Step Support", () => {
 		});
 
 		const checkpointTask = conductor.createTask(
-			{ name: "checkpoint-task", flushInterval: 100 },
+			{ name: "checkpoint-task" },
 			async (payload, ctx) => {
 				for (let i = 0; i < payload.items; i++) {
 					processedItems(i);
@@ -160,15 +154,12 @@ describe("Step Support", () => {
 
 		await orchestrator.start();
 
-		const stoppedPromise = orchestrator.stopped;
-
 		await conductor.invoke("checkpoint-task", { items: 5 });
 
 		// Wait for task to complete
 		await new Promise((r) => setTimeout(r, 2000));
 
 		await orchestrator.stop();
-		await stoppedPromise;
 
 		// Should have processed all items
 		expect(processedItems).toHaveBeenCalledTimes(5);
@@ -195,7 +186,7 @@ describe("Step Support", () => {
 		});
 
 		const multiStepTask = conductor.createTask(
-			{ name: "multi-step-task", flushInterval: 100 },
+			{ name: "multi-step-task" },
 			async (payload, ctx) => {
 				const a = await ctx.step("step1", () => step1Fn(payload.x));
 				const b = await ctx.step("step2", () => step2Fn(a));
@@ -211,14 +202,11 @@ describe("Step Support", () => {
 
 		await orchestrator.start();
 
-		const stoppedPromise = orchestrator.stopped;
-
 		await conductor.invoke("multi-step-task", { x: 5 });
 
 		await new Promise((r) => setTimeout(r, 2000));
 
 		await orchestrator.stop();
-		await stoppedPromise;
 
 		// All steps should execute once
 		expect(step1Fn).toHaveBeenCalledTimes(1);

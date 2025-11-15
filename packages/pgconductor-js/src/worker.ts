@@ -9,59 +9,81 @@ import { mapConcurrent } from "./lib/map-concurrent";
 import { Deferred } from "./lib/deferred";
 import { AsyncQueue } from "./lib/async-queue";
 import { TaskContext } from "./task-context";
+import assert from "./lib/assert";
 
 const HANGUP = Symbol("hangup");
+
+export type WorkerConfig = {
+	concurrency: number;
+	localBuffer: number;
+	fetchBatchSize: number;
+	pollIntervalMs: number;
+	flushIntervalMs: number;
+};
+
+export const DEFAULT_WORKER_CONFIG: WorkerConfig = {
+	concurrency: 1,
+	localBuffer: 2,
+	fetchBatchSize: 2,
+	pollIntervalMs: 1000,
+	flushIntervalMs: 2000,
+};
 
 /**
  * Worker implemented as async pipeline: fetch → execute → flush.
  * Uses async iterators for clean composition and natural backpressure.
+ *
+ * Queue-aware: Processes multiple tasks from a single queue.
  */
 export class Worker {
+	private orchestratorId: string | null = null;
+
 	private readonly fetchBatchSize: number;
 	private readonly concurrency: number;
 	private readonly flushBatchSize: number;
 	private readonly flushIntervalMs: number;
-	private pollIntervalMs: number;
+	private readonly pollIntervalMs: number;
 
 	private _deferred: Deferred<void> | null = null;
 	private _abortController: AbortController | null = null;
 
 	constructor(
-		private readonly orchestratorId: string,
-		private readonly task: AnyTask,
+		public readonly queueName: string,
+		private readonly tasks: Map<string, AnyTask>,
 		private readonly db: DatabaseClient,
+		config: Partial<WorkerConfig> = {},
 		private readonly extraContext: object = {},
 	) {
-		// todo: get from Task
-		this.concurrency = 1;
-		this.pollIntervalMs = this.task.config.pollInterval ?? 1000;
+		const fullConfig = { ...DEFAULT_WORKER_CONFIG, ...config };
 
-		// TODO: Tune these parameters
-		this.fetchBatchSize = this.concurrency * 2;
-		this.flushBatchSize = this.concurrency * 4;
-		this.flushIntervalMs = this.task.config.flushInterval ?? 2000;
+		this.concurrency = fullConfig.concurrency;
+		this.pollIntervalMs = fullConfig.pollIntervalMs;
+		this.flushIntervalMs = fullConfig.flushIntervalMs;
+		this.fetchBatchSize = fullConfig.fetchBatchSize;
+		this.flushBatchSize = fullConfig.localBuffer;
 	}
 
 	/**
 	 * Start the worker pipeline.
 	 * Returns a promise that resolves when the worker stops.
 	 */
-	async start(): Promise<void> {
+	async start(orchestratorId: string): Promise<void> {
+		this.orchestratorId = orchestratorId;
+
 		if (this._deferred) return this._deferred.promise;
 
 		this._abortController = new AbortController();
 		this._deferred = new Deferred<void>();
 
-		// Upsert task configuration before starting worker
-		await this.db.upsertTask(
-			{
-				key: this.task.key,
-				maxAttempts: this.task.config.maxAttempts,
-				partition: this.task.config.partition,
-				window: this.task.config.window,
-			},
-			this.signal,
-		);
+		// Register worker: create queue partition and upsert all tasks in a single call
+		const taskSpecs = Array.from(this.tasks.values()).map((task) => ({
+			key: task.name,
+			queue: this.queueName,
+			maxAttempts: task.maxAttempts,
+			window: task.window,
+		}));
+
+		await this.db.registerWorker(this.queueName, taskSpecs, this.signal);
 
 		const queue = new AsyncQueue<Execution>(this.fetchBatchSize * 2);
 
@@ -108,11 +130,16 @@ export class Worker {
 
 	// --- Stage 1: Fetch executions from database ---
 	private async fetchExecutions(queue: AsyncQueue<Execution>) {
+		assert.ok(
+			this.orchestratorId,
+			"orchestratorId must be set when starting the pipeline",
+		);
+
 		while (!this.signal?.aborted) {
 			try {
 				const executions = await this.db.getExecutions(
-					this.orchestratorId,
-					this.task.key,
+					this.orchestratorId!,
+					this.queueName,
 					this.fetchBatchSize,
 					this.signal,
 				);
@@ -143,6 +170,16 @@ export class Worker {
 			source,
 			this.concurrency,
 			async (exec) => {
+				// Dispatch to correct task based on task_key
+				const task = this.tasks.get(exec.task_key);
+				if (!task) {
+					return {
+						execution_id: exec.id,
+						status: "failed",
+						error: `Task not found: ${exec.task_key}`,
+					} as const;
+				}
+
 				const taskAbortController = new AbortController();
 
 				const hangupPromise = new Promise<typeof HANGUP>((resolve) => {
@@ -153,7 +190,7 @@ export class Worker {
 
 				try {
 					const output = await Promise.race([
-						this.task.execute(
+						task.execute(
 							exec.payload,
 							TaskContext.create(
 								{

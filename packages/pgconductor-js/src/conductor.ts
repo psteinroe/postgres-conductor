@@ -1,6 +1,6 @@
 import type { Sql } from "postgres";
 import { DatabaseClient, type ExecutionSpec } from "./database-client";
-import { Task, type TaskConfiguration } from "./task";
+import { Task, type TaskConfiguration, type AnyTask } from "./task";
 import type { TaskContext } from "./task-context";
 import {
 	type FindTaskByName,
@@ -9,9 +9,7 @@ import {
 	type TaskDefinition,
 	type TaskName,
 } from "./task-definition";
-
-// should get db client!
-// maybe migration store just on SchemaManager (Orchestrator only needs latest version?)
+import { Worker, type WorkerConfig } from "./worker";
 
 type ConnectionOptions =
 	| { connectionString: string; sql?: never }
@@ -61,7 +59,9 @@ export class Conductor<
 		TDef extends FindTaskByName<Tasks, TName>,
 		TPayload extends object = InferPayload<TDef>,
 		TReturns extends object | void = InferReturns<TDef>,
-		TQueue extends string = TDef extends { queue: infer Q extends string } ? Q : "default",
+		TQueue extends string = TDef extends { queue: infer Q extends string }
+			? Q
+			: "default",
 	>(
 		definition: TaskConfiguration<TName, TQueue>,
 		fn: (
@@ -70,6 +70,20 @@ export class Conductor<
 		) => Promise<TReturns>,
 	): Task<TQueue, TName, TPayload, TReturns, TaskContext & ExtraContext> {
 		return new Task(definition, fn);
+	}
+
+	createWorker(
+		queueName: string,
+		tasks: AnyTask[],
+		config?: Partial<WorkerConfig>,
+	): Worker {
+		return new Worker(
+			queueName,
+			new Map(tasks.map((task) => [task.name, task])),
+			this.db,
+			config,
+			this.options.context,
+		);
 	}
 
 	async invoke<

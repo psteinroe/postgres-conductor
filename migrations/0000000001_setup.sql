@@ -13,14 +13,8 @@
 -- assert required extensions are installed
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
--- Test configuration table for controlling behavior in tests
-CREATE TABLE IF NOT EXISTS pgconductor.test_config (
-  key text PRIMARY KEY,
-  value text
-);
-
 -- Returns either the actual current timestamp or a fake one for tests.
--- Checks test_config table first, then session variable, then real time.
+-- Uses session variable (current_setting) for test time control.
 create function pgconductor.current_time ()
   returns timestamptz
   language plpgsql
@@ -29,18 +23,6 @@ as $$
 declare
   v_fake text;
 begin
-  -- Check test_config table first (works across all connections)
-  BEGIN
-    SELECT value INTO v_fake FROM pgconductor.test_config WHERE key = 'fake_now';
-    IF v_fake IS NOT NULL AND length(trim(v_fake)) > 0 THEN
-      RETURN v_fake::timestamptz;
-    END IF;
-  EXCEPTION
-    WHEN undefined_table THEN
-      NULL; -- Table doesn't exist yet during initial migration
-  END;
-
-  -- Fall back to session variable (for backwards compatibility)
   v_fake := current_setting('pgconductor.fake_now', true);
   if v_fake is not null and length(trim(v_fake)) > 0 then
     return v_fake::timestamptz;
@@ -107,9 +89,16 @@ CREATE TABLE pgconductor.orchestrators (
     shutdown_signal boolean default false not null
 );
 
+-- Queues table for partition management
+-- Workers upsert their queue on startup, creating partitions automatically
+CREATE TABLE pgconductor.queues (
+    name text primary key
+);
+
 CREATE TABLE pgconductor.executions (
     id uuid default pgconductor.portable_uuidv7(),
     task_key text not null,
+    queue text not null default 'default',
     key text,
     created_at timestamptz default pgconductor.current_time() not null,
     failed_at timestamptz,
@@ -123,10 +112,8 @@ CREATE TABLE pgconductor.executions (
     priority integer default 0 not null,
     waiting_on_execution_id uuid,
     waiting_step_key text,
-    primary key (id, task_key)
-) PARTITION BY LIST (task_key);
-
-CREATE TABLE pgconductor.executions_default PARTITION OF pgconductor.executions DEFAULT with (fillfactor=70);
+    primary key (id, queue)
+) PARTITION BY LIST (queue);
 
 CREATE TABLE pgconductor.failed_executions (
     LIKE pgconductor.executions INCLUDING DEFAULTS INCLUDING GENERATED INCLUDING CONSTRAINTS EXCLUDING INDEXES,
@@ -148,13 +135,12 @@ CREATE TABLE pgconductor.completed_executions_default PARTITION OF pgconductor.c
 
 CREATE TABLE pgconductor.tasks (
     key text primary key,
-    -- we could validate execution payloads on insert if pg jsonchema extension is available
-    input_schema jsonb default '{}'::jsonb not null,
+
+    -- queue that this task belongs to (used for queue-based worker assignment)
+    queue text default 'default' not null,
 
     -- retry settings - uses fixed Inngest-style backoff schedule
     max_attempts integer default 3 not null,
-
-    partition boolean default false not null,
 
     -- task can be executed only within certain time windows
     -- e.g. business hours, weekends, nights, ...
@@ -171,6 +157,9 @@ CREATE TABLE pgconductor.tasks (
         )
     )
 );
+
+-- Index for fast queue lookups
+CREATE INDEX idx_tasks_queue ON pgconductor.tasks(queue);
 
 CREATE TABLE pgconductor.steps (
     id uuid default pgconductor.portable_uuidv7() primary key,
@@ -336,89 +325,37 @@ WHERE e.locked_by = deleted.id
 $function$
 ;
 
--- Trigger function to manage executions partitions based on tasks.partition setting
-CREATE OR REPLACE FUNCTION pgconductor.manage_execution_partition()
+-- Trigger function to manage executions partitions per queue
+-- Automatically creates partition when queue is inserted
+CREATE OR REPLACE FUNCTION pgconductor.manage_queue_partition()
  RETURNS trigger
  LANGUAGE plpgsql
  VOLATILE
  SET search_path TO ''
 AS $function$
-declare
+DECLARE
   v_partition_name text;
-begin
-  v_partition_name := 'pgconductor.executions_' || replace(NEW.key, '-', '_');
+BEGIN
+  v_partition_name := 'executions_' || replace(NEW.name, '-', '_');
 
-  -- INSERT: Create partition if partition = true
-  IF TG_OP = 'INSERT' THEN
-    IF NEW.partition = true THEN
-      EXECUTE format(
-        'CREATE TABLE %I PARTITION OF pgconductor.executions FOR VALUES IN (%L) with (fillfactor=70)',
-        v_partition_name,
-        NEW.key
-      );
-    END IF;
-
-    RETURN NEW;
-  END IF;
-
-  -- UPDATE: Handle partition setting changes
-  IF TG_OP = 'UPDATE' AND OLD.partition != NEW.partition THEN
-
-    -- Changed from false to true: create partition and move rows
-    IF NEW.partition = true THEN
-      EXECUTE format(
-        'CREATE TABLE %I PARTITION OF pgconductor.executions FOR VALUES IN (%L) with (fillfactor=70)',
-        v_partition_name,
-        NEW.key
-      );
-
-      EXECUTE format(
-        'WITH moved AS (
-           DELETE FROM pgconductor.executions_default
-           WHERE task_key = %L
-           RETURNING *
-         )
-         INSERT INTO %I SELECT * FROM moved',
-        NEW.key,
-        v_partition_name
-      );
-
-    -- Changed from true to false: move rows back to default and drop partition
-    ELSE
-      -- Detach partition first (makes it a regular table)
-      EXECUTE format(
-        'ALTER TABLE pgconductor.executions DETACH PARTITION %I',
-        v_partition_name
-      );
-
-      -- Move rows to default partition
-      EXECUTE format(
-        'INSERT INTO pgconductor.executions_default SELECT * FROM %I',
-        v_partition_name
-      );
-
-      -- Drop the detached table
-      EXECUTE format('DROP TABLE %I', v_partition_name);
-    END IF;
-  END IF;
-
-  -- DELETE: Drop dedicated partition if it exists
-  IF TG_OP = 'DELETE' THEN
-    IF OLD.partition = true THEN
-      EXECUTE format('DROP TABLE %I', v_partition_name);
-    END IF;
-    RETURN OLD;
-  END IF;
+  -- Create partition for this queue: executions_default, executions_reports, etc.
+  EXECUTE format(
+    'CREATE TABLE IF NOT EXISTS pgconductor.%I PARTITION OF pgconductor.executions FOR VALUES IN (%L) WITH (fillfactor=70)',
+    v_partition_name,
+    NEW.name
+  );
 
   RETURN NEW;
-end;
+END;
 $function$;
 
--- Attach trigger to tasks table
-CREATE TRIGGER manage_execution_partition_trigger
-  AFTER INSERT OR UPDATE OR DELETE ON pgconductor.tasks
+-- Attach trigger to queues table
+CREATE TRIGGER manage_queue_partition_trigger
+  AFTER INSERT ON pgconductor.queues
   FOR EACH ROW
-  EXECUTE FUNCTION pgconductor.manage_execution_partition();
+  EXECUTE FUNCTION pgconductor.manage_queue_partition();
+
+INSERT INTO pgconductor.queues (name) VALUES ('default');
 
 -- SELECT partman.create_parent(
 --     p_parent_table => 'pgconductor.failed_executions',
@@ -450,54 +387,63 @@ CREATE TRIGGER manage_execution_partition_trigger
 --     'pgconductor.completed_executions'
 -- );
 
-CREATE OR REPLACE FUNCTION pgconductor.get_executions(task_key text, orchestrator_id uuid, batch_size integer default 100)
- RETURNS TABLE(id uuid, payload jsonb, waiting_on_execution_id uuid)
+CREATE OR REPLACE FUNCTION pgconductor.get_executions(queue_name text, orchestrator_id uuid, batch_size integer default 100)
+ RETURNS TABLE(id uuid, task_key text, payload jsonb, waiting_on_execution_id uuid)
  LANGUAGE sql
  VOLATILE
  SET search_path TO ''
 AS $function$
-with task as (
-  select window_start,
-         window_end,
-         max_attempts
-  from pgconductor.tasks
-  where key = get_executions.task_key
+WITH queue_tasks AS (
+  SELECT
+    t.key,
+    t.window_start,
+    t.window_end,
+    t.max_attempts
+  FROM pgconductor.tasks t
+  WHERE t.queue = get_executions.queue_name
 ),
 
 -- Only proceed if we're inside the active window (or no window defined)
-allowed as (
-  select 1
-  from task t
-  where
-    (t.window_start is null and t.window_end is null)
-    or (
-      pgconductor.current_time()::timetz >= t.window_start
-      and pgconductor.current_time()::timetz < t.window_end
+allowed AS (
+  SELECT
+    qt.key,
+    qt.max_attempts
+  FROM queue_tasks qt
+  WHERE
+    (qt.window_start IS NULL AND qt.window_end IS NULL)
+    OR (
+      pgconductor.current_time()::timetz >= qt.window_start
+      AND pgconductor.current_time()::timetz < qt.window_end
     )
 ),
 
-e as (
-  select e.id
-  from pgconductor.executions e
-  join task t on true
-  where exists (select 1 from allowed)
-    and e.attempts < t.max_attempts
-    and e.locked_at is null
-    and e.run_at <= pgconductor.current_time()
-    and e.task_key = get_executions.task_key
-  order by e.priority asc, e.run_at asc
-  limit get_executions.batch_size
-  for update skip locked
+e AS (
+  SELECT
+    e.id,
+    e.task_key
+  FROM pgconductor.executions e
+  JOIN allowed a ON e.task_key = a.key
+  WHERE e.queue = get_executions.queue_name
+    AND e.attempts < a.max_attempts
+    AND e.locked_at IS NULL
+    AND e.run_at <= pgconductor.current_time()
+  ORDER BY e.priority ASC, e.run_at ASC
+  LIMIT get_executions.batch_size
+  FOR UPDATE SKIP LOCKED
 )
 
-update pgconductor.executions
-set
+UPDATE pgconductor.executions
+SET
   attempts = executions.attempts + 1,
   locked_by = get_executions.orchestrator_id,
   locked_at = pgconductor.current_time()
-from e
-where executions.id = e.id
-returning executions.id, executions.payload, executions.waiting_on_execution_id;
+FROM e
+WHERE executions.id = e.id
+RETURNING
+  executions.id,
+  executions.task_key,
+  executions.payload,
+  executions.waiting_on_execution_id;
 $function$
 ;
 
@@ -688,36 +634,46 @@ create type pgconductor.execution_spec as (
     priority integer
 );
 
-CREATE OR REPLACE FUNCTION pgconductor.upsert_task(
+create type pgconductor.task_spec as (
     key text,
-    max_attempts integer default null,
-    partition boolean default null,
-    window_start timetz default null,
-    window_end timetz default null
+    queue text,
+    max_attempts integer,
+    window_start timetz,
+    window_end timetz
+);
+
+CREATE OR REPLACE FUNCTION pgconductor.register_worker(
+    p_queue_name text,
+    p_task_specs pgconductor.task_spec[]
 )
  RETURNS void
  LANGUAGE sql
  VOLATILE
  SET search_path TO ''
 AS $function$
+  WITH queue_upsert AS (
+    INSERT INTO pgconductor.queues (name)
+    VALUES (p_queue_name)
+    ON CONFLICT (name) DO NOTHING
+  )
   INSERT INTO pgconductor.tasks (
     key,
+    queue,
     max_attempts,
-    partition,
     window_start,
     window_end
   )
-  VALUES (
-    upsert_task.key,
-    COALESCE(upsert_task.max_attempts, 3),
-    COALESCE(upsert_task.partition, false),
-    upsert_task.window_start,
-    upsert_task.window_end
-  )
+  SELECT
+    spec.key,
+    COALESCE(spec.queue, 'default'),
+    COALESCE(spec.max_attempts, 3),
+    spec.window_start,
+    spec.window_end
+  FROM unnest(p_task_specs) AS spec
   ON CONFLICT (key)
   DO UPDATE SET
+    queue = COALESCE(EXCLUDED.queue, pgconductor.tasks.queue),
     max_attempts = COALESCE(EXCLUDED.max_attempts, pgconductor.tasks.max_attempts),
-    partition = COALESCE(EXCLUDED.partition, pgconductor.tasks.partition),
     window_start = EXCLUDED.window_start,
     window_end = EXCLUDED.window_end;
 $function$;
@@ -749,6 +705,7 @@ begin
   return query insert into pgconductor.executions as e (
     id,
     task_key,
+    queue,
     payload,
     run_at,
     key,
@@ -757,11 +714,13 @@ begin
     select
       pgconductor.portable_uuidv7(),
       spec.task_key,
+      COALESCE(t.queue, 'default'),
       coalesce(spec.payload, '{}'::jsonb),
       coalesce(spec.run_at, pgconductor.current_time()),
       spec.key,
       coalesce(spec.priority, 0)
     from unnest(specs) spec
+    left join pgconductor.tasks t on t.key = spec.task_key
   returning e.id;
 end;
 $function$
@@ -786,19 +745,22 @@ WITH inserted_child AS (
   INSERT INTO pgconductor.executions (
     id,
     task_key,
+    queue,
     payload,
     run_at,
     key,
     priority
   )
-  VALUES (
+  SELECT
     pgconductor.portable_uuidv7(),
     invoke.task_key,
+    COALESCE(t.queue, 'default'),
     COALESCE(invoke.payload, '{}'::jsonb),
     COALESCE(invoke.run_at, pgconductor.current_time()),
     invoke.key,
     COALESCE(invoke.priority, 0)
-  )
+  FROM (SELECT 1) AS dummy
+  LEFT JOIN pgconductor.tasks t ON t.key = invoke.task_key
   RETURNING id
 ),
 updated_parent AS (
