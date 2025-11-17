@@ -38,8 +38,11 @@ describe("Worker API", () => {
 
 		const emailTask = conductor.createTask(
 			{ name: "send-email", queue: "notifications" },
-			async (payload) => {
-				emailResults.push(payload.to);
+			{ invocable: true },
+			async (event) => {
+				if (event.event === "pgconductor.invoke") {
+					emailResults.push(event.payload.to);
+				}
 			},
 		);
 
@@ -88,8 +91,11 @@ describe("Worker API", () => {
 
 		const testTask = conductor.createTask(
 			{ name: "test-task" },
-			async (payload) => {
-				results.push(payload.value);
+			{ invocable: true },
+			async (event) => {
+				if (event.event === "pgconductor.invoke") {
+					results.push(event.payload.value);
+				}
 			},
 		);
 

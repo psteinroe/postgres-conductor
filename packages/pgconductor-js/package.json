@@ -10,15 +10,17 @@
 		"typecheck": "tsc --noEmit"
 	},
 	"devDependencies": {
-		"@testcontainers/postgresql": "^11.8.1",
+		"@testcontainers/postgresql": "11.8.1",
 		"@types/bun": "latest",
-		"zod": "^4.1.12"
+		"expect-type": "1.2.2",
+		"zod": "4.1.12"
 	},
 	"peerDependencies": {
-		"typescript": "^5"
+		"typescript": "5.9.3"
 	},
 	"dependencies": {
 		"@standard-schema/spec": "1.0.0",
-		"postgres": "3.4.7",
+		"cron-parser": "5.4.0",
+		"postgres": "3.4.7"
 	}
 }

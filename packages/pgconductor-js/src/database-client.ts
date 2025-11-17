@@ -1,9 +1,15 @@
 import postgres, { type Sql } from "postgres";
-import assert from "./lib/assert";
+import * as assert from "./lib/assert";
 import { waitFor } from "./lib/wait-for";
 import type { Migration } from "./migration-store";
 
-export type JsonValue = string | number | boolean | null | Payload | JsonValue[];
+export type JsonValue =
+	| string
+	| number
+	| boolean
+	| null
+	| Payload
+	| JsonValue[];
 export type Payload = { [key: string]: JsonValue };
 
 export interface ExecutionSpec {
@@ -11,6 +17,7 @@ export interface ExecutionSpec {
 	payload?: Payload | null;
 	run_at?: Date | null;
 	dedupe_key?: string | null;
+	cron_expression?: string | null;
 	priority?: number | null;
 	parent_execution_id?: string | null;
 	parent_step_key?: string | null;
@@ -29,6 +36,8 @@ export interface Execution {
 	task_key: string;
 	payload: Payload;
 	waiting_on_execution_id: string | null;
+	dedupe_key?: string | null;
+	cron_expression?: string | null;
 }
 
 export interface ExecutionResult {
@@ -377,6 +386,7 @@ export class DatabaseClient {
 	async registerWorker(
 		queueName: string,
 		taskSpecs: TaskSpec[],
+		cronSchedules: ExecutionSpec[],
 		signal?: AbortSignal,
 	): Promise<void> {
 		return this.query(
@@ -389,11 +399,29 @@ export class DatabaseClient {
 					window_end: spec.window?.[1] || null,
 				}));
 
+				const cronScheduleRows = cronSchedules.map((spec) => {
+					assert.ok(
+						spec.cron_expression,
+						"cron_expression is required for cron schedules",
+					);
+
+					return {
+						task_key: spec.task_key,
+						payload: spec.payload || null,
+						run_at: spec.run_at,
+						dedupe_key: spec.dedupe_key,
+						cron_expression: spec.cron_expression,
+					};
+				});
+
 				await sql`
 					SELECT pgconductor.register_worker(
 						p_queue_name := ${queueName}::text,
 						p_task_specs := array(
 							SELECT json_populate_recordset(null::pgconductor.task_spec, ${sql.json(taskSpecRows)}::json)::pgconductor.task_spec
+						),
+						p_cron_schedules := array(
+							SELECT json_populate_recordset(null::pgconductor.execution_spec, ${sql.json(cronScheduleRows)}::json)::pgconductor.execution_spec
 						)
 					)
 				`;
@@ -411,6 +439,7 @@ export class DatabaseClient {
 					payload := ${spec.payload ? sql.json(spec.payload) : null}::jsonb,
 					run_at := ${spec.run_at ? spec.run_at.toISOString() : null}::timestamptz,
 					dedupe_key := ${spec.dedupe_key ?? null}::text,
+					cron_expression := ${spec.cron_expression ?? null}::text,
 					priority := ${spec.priority ?? null}::integer,
 					parent_execution_id := ${spec.parent_execution_id ?? null}::uuid,
 					parent_step_key := ${spec.parent_step_key ?? null}::text,
@@ -431,6 +460,7 @@ export class DatabaseClient {
 			payload: spec.payload ?? null,
 			run_at: spec.run_at,
 			dedupe_key: spec.dedupe_key,
+			cron_expression: spec.cron_expression ?? null,
 			priority: spec.priority,
 		}));
 
@@ -509,18 +539,12 @@ export class DatabaseClient {
 	 * Set fake time for testing purposes.
 	 * All calls to pgconductor.current_time() will return this value.
 	 *
-	 * Uses session-level SET, which works perfectly when the connection pool has max: 1
-	 * (all queries share the same connection, so all see the same fake time).
-	 *
 	 * IMPORTANT: Test database connection pool must have max: 1 for this to work reliably.
 	 */
 	async setFakeTime(date: Date, signal?: AbortSignal): Promise<void> {
 		return this.query(
 			async (sql) => {
-				// Session-level setting - affects all queries on this connection
-				await sql.unsafe(
-					`SET pgconductor.fake_now = '${date.toISOString()}'`,
-				);
+				await sql.unsafe(`SET pgconductor.fake_now = '${date.toISOString()}'`);
 			},
 			{ label: "setFakeTime", signal },
 		);
@@ -532,7 +556,6 @@ export class DatabaseClient {
 	async clearFakeTime(signal?: AbortSignal): Promise<void> {
 		return this.query(
 			async (sql) => {
-				// Reset session-level setting
 				await sql.unsafe(`SET pgconductor.fake_now = ''`);
 			},
 			{ label: "clearFakeTime", signal },

@@ -120,6 +120,7 @@ CREATE TABLE pgconductor.executions (
     task_key text not null,
     queue text not null default 'default',
     dedupe_key text,
+    cron_expression text,
     created_at timestamptz default pgconductor.current_time() not null,
     failed_at timestamptz,
     completed_at timestamptz,
@@ -154,6 +155,11 @@ CREATE TABLE pgconductor.failed_executions_default PARTITION OF pgconductor.fail
 CREATE TABLE pgconductor.completed_executions_default PARTITION OF pgconductor.completed_executions
     FOR VALUES FROM (MINVALUE) TO (MAXVALUE);
 
+-- Index for efficient cron schedule cleanup
+CREATE INDEX idx_executions_cron_cleanup
+ON pgconductor.executions (queue, task_key, cron_expression)
+WHERE cron_expression IS NOT NULL;
+
 CREATE TABLE pgconductor.tasks (
     key text primary key,
 
@@ -178,9 +184,6 @@ CREATE TABLE pgconductor.tasks (
         )
     )
 );
-
--- Index for fast queue lookups
-CREATE INDEX idx_tasks_queue ON pgconductor.tasks(queue);
 
 CREATE TABLE pgconductor.steps (
     id uuid default pgconductor.portable_uuidv7() primary key,
@@ -409,7 +412,7 @@ INSERT INTO pgconductor.queues (name) VALUES ('default');
 -- );
 
 CREATE OR REPLACE FUNCTION pgconductor.get_executions(queue_name text, orchestrator_id uuid, batch_size integer default 100)
- RETURNS TABLE(id uuid, task_key text, payload jsonb, waiting_on_execution_id uuid)
+ RETURNS TABLE(id uuid, task_key text, payload jsonb, waiting_on_execution_id uuid, dedupe_key text, cron_expression text)
  LANGUAGE sql
  VOLATILE
  SET search_path TO ''
@@ -464,7 +467,9 @@ RETURNING
   executions.id,
   executions.task_key,
   executions.payload,
-  executions.waiting_on_execution_id;
+  executions.waiting_on_execution_id,
+  executions.dedupe_key,
+  executions.cron_expression;
 $function$
 ;
 
@@ -652,6 +657,7 @@ create type pgconductor.execution_spec as (
     payload jsonb,
     run_at timestamptz,
     dedupe_key text,
+    cron_expression text,
     priority integer
 );
 
@@ -665,25 +671,22 @@ create type pgconductor.task_spec as (
 
 CREATE OR REPLACE FUNCTION pgconductor.register_worker(
     p_queue_name text,
-    p_task_specs pgconductor.task_spec[]
+    p_task_specs pgconductor.task_spec[],
+    p_cron_schedules pgconductor.execution_spec[]
 )
- RETURNS void
- LANGUAGE sql
- VOLATILE
- SET search_path TO ''
+RETURNS void
+LANGUAGE plpgsql
+VOLATILE
+SET search_path TO ''
 AS $function$
-  WITH queue_upsert AS (
-    INSERT INTO pgconductor.queues (name)
-    VALUES (p_queue_name)
-    ON CONFLICT (name) DO NOTHING
-  )
-  INSERT INTO pgconductor.tasks (
-    key,
-    queue,
-    max_attempts,
-    window_start,
-    window_end
-  )
+BEGIN
+  -- Step 1: Upsert queue (triggers partition creation)
+  INSERT INTO pgconductor.queues (name)
+  VALUES (p_queue_name)
+  ON CONFLICT (name) DO NOTHING;
+
+  -- Step 2: Register/update tasks
+  INSERT INTO pgconductor.tasks (key, queue, max_attempts, window_start, window_end)
   SELECT
     spec.key,
     COALESCE(spec.queue, 'default'),
@@ -697,6 +700,32 @@ AS $function$
     max_attempts = COALESCE(EXCLUDED.max_attempts, pgconductor.tasks.max_attempts),
     window_start = EXCLUDED.window_start,
     window_end = EXCLUDED.window_end;
+
+  -- Step 3: Insert scheduled cron executions (ON CONFLICT DO NOTHING)
+  INSERT INTO pgconductor.executions (task_key, queue, payload, run_at, dedupe_key, cron_expression)
+  SELECT
+    spec.task_key,
+    COALESCE(t.queue, 'default'),
+    COALESCE(spec.payload, '{}'::jsonb),
+    COALESCE(spec.run_at, pgconductor.current_time()),
+    spec.dedupe_key,
+    spec.cron_expression
+  FROM unnest(p_cron_schedules) AS spec
+  LEFT JOIN pgconductor.tasks t ON t.key = spec.task_key
+  WHERE spec.dedupe_key IS NOT NULL
+  ON CONFLICT (task_key, dedupe_key, queue) DO NOTHING;
+
+  -- Step 4: Clean up stale schedules for this queue
+  DELETE FROM pgconductor.executions
+  WHERE queue = p_queue_name
+    AND cron_expression IS NOT NULL
+    AND run_at > pgconductor.current_time()
+    AND (task_key, cron_expression) NOT IN (
+      SELECT spec.task_key, spec.cron_expression
+      FROM unnest(p_cron_schedules) AS spec
+      WHERE spec.cron_expression IS NOT NULL
+    );
+END;
 $function$;
 
 CREATE OR REPLACE FUNCTION pgconductor.invoke(
@@ -730,6 +759,7 @@ begin
     payload,
     run_at,
     dedupe_key,
+    cron_expression,
     priority
   )
     select
@@ -739,6 +769,7 @@ begin
       coalesce(spec.payload, '{}'::jsonb),
       coalesce(spec.run_at, pgconductor.current_time()),
       spec.dedupe_key,
+      spec.cron_expression,
       coalesce(spec.priority, 0)
     from unnest(specs) spec
     left join pgconductor.tasks t on t.key = spec.task_key
@@ -752,6 +783,7 @@ CREATE OR REPLACE FUNCTION pgconductor.invoke(
     payload jsonb default null,
     run_at timestamptz default null,
     dedupe_key text default null,
+    cron_expression text default null,
     priority integer default null,
     parent_execution_id uuid default null,
     parent_step_key text default null,
@@ -769,6 +801,7 @@ WITH inserted_child AS (
     queue,
     payload,
     run_at,
+    cron_expression,
     dedupe_key,
     priority
   )
@@ -778,6 +811,7 @@ WITH inserted_child AS (
     COALESCE(t.queue, 'default'),
     COALESCE(invoke.payload, '{}'::jsonb),
     COALESCE(invoke.run_at, pgconductor.current_time()),
+    invoke.cron_expression,
     invoke.dedupe_key,
     COALESCE(invoke.priority, 0)
   FROM (SELECT 1) AS dummy

@@ -22,11 +22,13 @@ describe("Invoke Support", () => {
 		const parentDefinition = defineTask({
 			name: "parent-task",
 			payload: z.object({ value: z.number() }),
+			returns: z.object({ result: z.number() }),
 		});
 
 		const childDefinition = defineTask({
 			name: "child-task",
 			payload: z.object({ input: z.number() }),
+			returns: z.object({ output: z.number() }),
 		});
 
 		const tasks = [parentDefinition, childDefinition] as const;
@@ -41,21 +43,29 @@ describe("Invoke Support", () => {
 
 		const childTask = conductor.createTask(
 			{ name: "child-task" },
-			async (payload, _ctx) => {
-				const result = childFn(payload.input);
-				return { output: result };
+			{ invocable: true },
+			async (event, _ctx) => {
+				if (event.event === "pgconductor.invoke") {
+					const result = childFn(event.payload.input);
+					return { output: result };
+				}
+				throw new Error("Unexpected event type");
 			},
 		);
 
 		const parentTask = conductor.createTask(
 			{ name: "parent-task" },
-			async (payload, ctx) => {
-				const childResult = await ctx.invoke<{ output: number }>(
-					"invoke-child",
-					"child-task",
-					{ input: payload.value },
-				);
-				return { result: childResult.output };
+			{ invocable: true },
+			async (event, ctx) => {
+				if (event.event === "pgconductor.invoke") {
+					const childResult = await ctx.invoke<{ output: number }>(
+						"invoke-child",
+						"child-task",
+						{ input: event.payload.value },
+					);
+					return { result: childResult.output };
+				}
+				throw new Error("Unexpected event type");
 			},
 		);
 
@@ -82,11 +92,13 @@ describe("Invoke Support", () => {
 		const parentDefinition = defineTask({
 			name: "timeout-parent",
 			payload: z.object({}),
+			returns: z.object({ success: z.boolean() }),
 		});
 
 		const childDefinition = defineTask({
 			name: "slow-child",
 			payload: z.object({}),
+			returns: z.object({ completed: z.boolean() }),
 		});
 
 		const tasks = [parentDefinition, childDefinition] as const;
@@ -101,7 +113,8 @@ describe("Invoke Support", () => {
 
 		const slowChildTask = conductor.createTask(
 			{ name: "slow-child" },
-			async (_payload, ctx) => {
+			{ invocable: true },
+			async (_event, ctx) => {
 				await ctx.sleep("long-sleep", 5000);
 				return { completed: true };
 			},
@@ -109,7 +122,8 @@ describe("Invoke Support", () => {
 
 		const timeoutParentTask = conductor.createTask(
 			{ name: "timeout-parent" },
-			async (_payload, ctx) => {
+			{ invocable: true },
+			async (_event, ctx) => {
 				try {
 					await ctx.invoke("invoke-slow", "slow-child", {}, 1000);
 					return { success: true };
@@ -159,11 +173,13 @@ describe("Invoke Support", () => {
 		const parentDefinition = defineTask({
 			name: "retry-parent",
 			payload: z.object({ value: z.number() }),
+			returns: z.object({ result: z.number() }),
 		});
 
 		const childDefinition = defineTask({
 			name: "once-child",
 			payload: z.object({ input: z.number() }),
+			returns: z.object({ output: z.number() }),
 		});
 
 		const tasks = [parentDefinition, childDefinition] as const;
@@ -178,29 +194,37 @@ describe("Invoke Support", () => {
 
 		const onceChildTask = conductor.createTask(
 			{ name: "once-child" },
-			async (payload, _ctx) => {
-				const result = childFn(payload.input);
-				return { output: result };
+			{ invocable: true },
+			async (event, _ctx) => {
+				if (event.event === "pgconductor.invoke") {
+					const result = childFn(event.payload.input);
+					return { output: result };
+				}
+				throw new Error("Unexpected event type");
 			},
 		);
 
 		let parentAttempts = 0;
 		const retryParentTask = conductor.createTask(
 			{ name: "retry-parent", maxAttempts: 3 },
-			async (payload, ctx) => {
-				parentAttempts++;
-				const childResult = await ctx.invoke<{ output: number }>(
-					"invoke-once",
-					"once-child",
-					{ input: payload.value },
-				);
+			{ invocable: true },
+			async (event, ctx) => {
+				if (event.event === "pgconductor.invoke") {
+					parentAttempts++;
+					const childResult = await ctx.invoke<{ output: number }>(
+						"invoke-once",
+						"once-child",
+						{ input: event.payload.value },
+					);
 
-				// Fail on first attempt, succeed on retry
-				if (parentAttempts === 1) {
-					throw new Error("First attempt fails");
+					// Fail on first attempt, succeed on retry
+					if (parentAttempts === 1) {
+						throw new Error("First attempt fails");
+					}
+
+					return { result: childResult.output };
 				}
-
-				return { result: childResult.output };
+				throw new Error("Unexpected event type");
 			},
 		);
 
@@ -227,11 +251,13 @@ describe("Invoke Support", () => {
 		const parentDefinition = defineTask({
 			name: "patient-parent",
 			payload: z.object({}),
+			returns: z.object({ childResult: z.string() }),
 		});
 
 		const childDefinition = defineTask({
 			name: "eventual-child",
 			payload: z.object({}),
+			returns: z.object({ result: z.string() }),
 		});
 
 		const tasks = [parentDefinition, childDefinition] as const;
@@ -246,7 +272,8 @@ describe("Invoke Support", () => {
 
 		const eventualChildTask = conductor.createTask(
 			{ name: "eventual-child" },
-			async (_payload, ctx) => {
+			{ invocable: true },
+			async (_event, ctx) => {
 				await ctx.sleep("moderate-sleep", 2000);
 				const result = childFn();
 				return { result };
@@ -255,7 +282,8 @@ describe("Invoke Support", () => {
 
 		const patientParentTask = conductor.createTask(
 			{ name: "patient-parent" },
-			async (_payload, ctx) => {
+			{ invocable: true },
+			async (_event, ctx) => {
 				const childResult = await ctx.invoke<{ result: string }>(
 					"invoke-eventual",
 					"eventual-child",
@@ -287,11 +315,13 @@ describe("Invoke Support", () => {
 		const parentDefinition = defineTask({
 			name: "cascade-parent",
 			payload: z.object({}),
+			returns: z.object({ success: z.boolean() }),
 		});
 
 		const childDefinition = defineTask({
 			name: "failing-child",
 			payload: z.object({}),
+			returns: z.object({ result: z.string() }),
 		});
 
 		const tasks = [parentDefinition, childDefinition] as const;
@@ -308,7 +338,8 @@ describe("Invoke Support", () => {
 
 		const failingChildTask = conductor.createTask(
 			{ name: "failing-child", maxAttempts: 2 },
-			async (_payload, _ctx) => {
+			{ invocable: true },
+			async (_event, _ctx) => {
 				childFn();
 				return { result: "never-reached" };
 			},
@@ -316,7 +347,8 @@ describe("Invoke Support", () => {
 
 		const cascadeParentTask = conductor.createTask(
 			{ name: "cascade-parent" },
-			async (_payload, ctx) => {
+			{ invocable: true },
+			async (_event, ctx) => {
 				await ctx.invoke("invoke-failing", "failing-child", {});
 				return { success: true };
 			},

@@ -40,9 +40,13 @@ describe("Basic Task Execution", () => {
 
 		const helloTask = conductor.createTask(
 			{ name: "hello-task" },
-			async (payload, ctx) => {
+			{ invocable: true },
+			async (event, ctx) => {
 				executionCount++;
-				ctx.contextFn(payload.name);
+				// This test only uses manual invocation
+				if (event.event === "pgconductor.invoke") {
+					ctx.contextFn(event.payload.name);
+				}
 			},
 		);
 

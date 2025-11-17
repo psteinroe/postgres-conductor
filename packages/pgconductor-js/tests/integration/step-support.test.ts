@@ -22,6 +22,7 @@ describe("Step Support", () => {
 		const taskDefinitions = defineTask({
 			name: "step-task",
 			payload: z.object({ value: z.number() }),
+			returns: z.object({ result: z.number() }),
 		});
 
 		const tasks = [taskDefinitions] as const;
@@ -36,12 +37,16 @@ describe("Step Support", () => {
 
 		const stepTask = conductor.createTask(
 			{ name: "step-task" },
-			async (payload, ctx) => {
-				const result = await ctx.step("expensive-step", () => {
-					return expensiveFn(payload.value);
-				});
+			{ invocable: true },
+			async (event, ctx) => {
+				if (event.event === "pgconductor.invoke") {
+					const result = await ctx.step("expensive-step", () => {
+						return expensiveFn(event.payload.value);
+					});
 
-				return { result };
+					return { result };
+				}
+				throw new Error("Unexpected event type");
 			},
 		);
 
@@ -69,6 +74,7 @@ describe("Step Support", () => {
 		const taskDefinitions = defineTask({
 			name: "sleep-task",
 			payload: z.object({ delay: z.number() }),
+			returns: z.object({ completed: z.boolean() }),
 		});
 
 		const tasks = [taskDefinitions] as const;
@@ -83,11 +89,15 @@ describe("Step Support", () => {
 
 		const sleepTask = conductor.createTask(
 			{ name: "sleep-task" },
-			async (payload, ctx) => {
-				executionSteps("before-sleep");
-				await ctx.sleep("wait", payload.delay);
-				executionSteps("after-sleep");
-				return { completed: true };
+			{ invocable: true },
+			async (event, ctx) => {
+				if (event.event === "pgconductor.invoke") {
+					executionSteps("before-sleep");
+					await ctx.sleep("wait", event.payload.delay);
+					executionSteps("after-sleep");
+					return { completed: true };
+				}
+				throw new Error("Unexpected event type");
 			},
 		);
 
@@ -122,6 +132,7 @@ describe("Step Support", () => {
 		const taskDefinitions = defineTask({
 			name: "checkpoint-task",
 			payload: z.object({ items: z.number() }),
+			returns: z.object({ processed: z.number() }),
 		});
 
 		const tasks = [taskDefinitions] as const;
@@ -136,14 +147,18 @@ describe("Step Support", () => {
 
 		const checkpointTask = conductor.createTask(
 			{ name: "checkpoint-task" },
-			async (payload, ctx) => {
-				for (let i = 0; i < payload.items; i++) {
-					processedItems(i);
-					await ctx.checkpoint();
-					// Simulate some work
-					await new Promise((r) => setTimeout(r, 50));
+			{ invocable: true },
+			async (event, ctx) => {
+				if (event.event === "pgconductor.invoke") {
+					for (let i = 0; i < event.payload.items; i++) {
+						processedItems(i);
+						await ctx.checkpoint();
+						// Simulate some work
+						await new Promise((r) => setTimeout(r, 50));
+					}
+					return { processed: event.payload.items };
 				}
-				return { processed: payload.items };
+				throw new Error("Unexpected event type");
 			},
 		);
 
@@ -171,6 +186,7 @@ describe("Step Support", () => {
 		const taskDefinitions = defineTask({
 			name: "multi-step-task",
 			payload: z.object({ x: z.number() }),
+			returns: z.object({ result: z.number() }),
 		});
 
 		const tasks = [taskDefinitions] as const;
@@ -187,11 +203,15 @@ describe("Step Support", () => {
 
 		const multiStepTask = conductor.createTask(
 			{ name: "multi-step-task" },
-			async (payload, ctx) => {
-				const a = await ctx.step("step1", () => step1Fn(payload.x));
-				const b = await ctx.step("step2", () => step2Fn(a));
-				const c = await ctx.step("step3", () => step3Fn(b));
-				return { result: c };
+			{ invocable: true },
+			async (event, ctx) => {
+				if (event.event === "pgconductor.invoke") {
+					const a = await ctx.step("step1", () => step1Fn(event.payload.x));
+					const b = await ctx.step("step2", () => step2Fn(a));
+					const c = await ctx.step("step3", () => step3Fn(b));
+					return { result: c };
+				}
+				throw new Error("Unexpected event type");
 			},
 		);
 

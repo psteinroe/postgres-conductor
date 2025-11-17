@@ -1,13 +1,21 @@
 import type { Sql } from "postgres";
 import { DatabaseClient, type ExecutionSpec } from "./database-client";
-import { Task, type TaskConfiguration, type AnyTask } from "./task";
+import {
+	Task,
+	type TaskConfiguration,
+	type AnyTask,
+	type TaskEventFromTriggers,
+} from "./task";
 import type { TaskContext } from "./task-context";
 import {
 	type FindTaskByName,
 	type InferPayload,
 	type InferReturns,
+	type NonEmptyArray,
 	type TaskDefinition,
 	type TaskName,
+	type Trigger,
+	type ValidateTriggers,
 } from "./task-definition";
 import { Worker, type WorkerConfig } from "./worker";
 
@@ -55,21 +63,34 @@ export class Conductor<
 	}
 
 	createTask<
-		TName extends TaskName<Tasks>,
-		TDef extends FindTaskByName<Tasks, TName>,
-		TPayload extends object = InferPayload<TDef>,
-		TReturns extends object | void = InferReturns<TDef>,
-		TQueue extends string = TDef extends { queue: infer Q extends string }
-			? Q
-			: "default",
+		TName extends string,
+		TQueue extends string = "default",
+		TTriggers extends NonEmptyArray<Trigger> | Trigger = Trigger,
+		TPayload extends object = TName extends TaskName<Tasks>
+			? InferPayload<FindTaskByName<Tasks, TName>>
+			: {},
 	>(
 		definition: TaskConfiguration<TName, TQueue>,
+		triggers: ValidateTriggers<Tasks, TName, TTriggers>,
 		fn: (
-			payload: TPayload,
+			event: TaskEventFromTriggers<TTriggers, TPayload>,
 			ctx: TaskContext & ExtraContext,
-		) => Promise<TReturns>,
-	): Task<TQueue, TName, TPayload, TReturns, TaskContext & ExtraContext> {
-		return new Task(definition, fn);
+		) => Promise<
+			TName extends TaskName<Tasks>
+				? InferReturns<FindTaskByName<Tasks, TName>>
+				: void
+		>,
+	): Task<
+		TQueue,
+		TName,
+		TPayload,
+		TName extends TaskName<Tasks>
+			? InferReturns<FindTaskByName<Tasks, TName>>
+			: void,
+		TaskContext & ExtraContext,
+		TaskEventFromTriggers<TTriggers, TPayload>
+	> {
+		return new Task(definition, triggers as TTriggers, fn);
 	}
 
 	createWorker(

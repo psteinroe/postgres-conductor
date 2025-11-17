@@ -2,14 +2,16 @@ import type {
 	DatabaseClient,
 	Execution,
 	ExecutionResult,
+	ExecutionSpec,
 } from "./database-client";
 import type { AnyTask } from "./task";
 import { waitFor } from "./lib/wait-for";
 import { mapConcurrent } from "./lib/map-concurrent";
 import { Deferred } from "./lib/deferred";
 import { AsyncQueue } from "./lib/async-queue";
+import CronExpressionParser from "cron-parser";
 import { TaskContext } from "./task-context";
-import assert from "./lib/assert";
+import * as assert from "./lib/assert";
 
 const HANGUP = Symbol("hangup");
 
@@ -75,15 +77,7 @@ export class Worker {
 		this._abortController = new AbortController();
 		this._deferred = new Deferred<void>();
 
-		// Register worker: create queue partition and upsert all tasks in a single call
-		const taskSpecs = Array.from(this.tasks.values()).map((task) => ({
-			key: task.name,
-			queue: this.queueName,
-			maxAttempts: task.maxAttempts,
-			window: task.window,
-		}));
-
-		await this.db.registerWorker(this.queueName, taskSpecs, this.signal);
+		await this.register();
 
 		const queue = new AsyncQueue<Execution>(this.fetchBatchSize * 2);
 
@@ -102,7 +96,6 @@ export class Worker {
 				this.deferred.reject(err);
 			} finally {
 				queue.close();
-				this._deferred = null;
 				this._abortController = null;
 			}
 		})();
@@ -128,6 +121,43 @@ export class Worker {
 		} catch {}
 	}
 
+	private async register(): Promise<void> {
+		const taskSpecs = Array.from(this.tasks.values()).map((task) => ({
+			key: task.name,
+			queue: this.queueName,
+			maxAttempts: task.maxAttempts,
+			window: task.window,
+		}));
+
+		const cronSchedules: ExecutionSpec[] = [];
+		for (const task of this.tasks.values()) {
+			const cronTriggers = task.triggers.filter(
+				(t): t is { cron: string } => "cron" in t,
+			);
+
+			for (const trigger of cronTriggers) {
+				const interval = CronExpressionParser.parse(trigger.cron);
+				const nextTimestamp = interval.next().toDate();
+				const timestampSeconds = Math.floor(nextTimestamp.getTime() / 1000);
+				const dedupeKey = `repeated::${trigger.cron}::${timestampSeconds}`;
+
+				cronSchedules.push({
+					task_key: task.name,
+					run_at: nextTimestamp,
+					dedupe_key: dedupeKey,
+					cron_expression: trigger.cron,
+				});
+			}
+		}
+
+		await this.db.registerWorker(
+			this.queueName,
+			taskSpecs,
+			cronSchedules,
+			this.signal,
+		);
+	}
+
 	// --- Stage 1: Fetch executions from database ---
 	private async fetchExecutions(queue: AsyncQueue<Execution>) {
 		assert.ok(
@@ -138,7 +168,7 @@ export class Worker {
 		while (!this.signal?.aborted) {
 			try {
 				const executions = await this.db.getExecutions(
-					this.orchestratorId!,
+					this.orchestratorId,
 					this.queueName,
 					this.fetchBatchSize,
 					this.signal,
@@ -189,9 +219,15 @@ export class Worker {
 				});
 
 				try {
+					await this.scheduleNextExecution(exec);
+
+					const taskEvent = exec.cron_expression
+						? ({ event: "pgconductor.cron" } as const)
+						: ({ event: "pgconductor.invoke", payload: exec.payload } as const);
+
 					const output = await Promise.race([
 						task.execute(
-							exec.payload,
+							taskEvent,
 							TaskContext.create(
 								{
 									signal: this.signal,
@@ -229,6 +265,27 @@ export class Worker {
 		)) {
 			yield result;
 		}
+	}
+
+	private async scheduleNextExecution(execution: Execution): Promise<void> {
+		if (!execution.cron_expression) {
+			return;
+		}
+
+		const interval = CronExpressionParser.parse(execution.cron_expression);
+		const nextTimestamp = interval.next().toDate();
+		const timestampSeconds = Math.floor(nextTimestamp.getTime() / 1000);
+		const nextDedupeKey = `repeated::${execution.cron_expression}::${timestampSeconds}`;
+
+		await this.db.invoke(
+			{
+				task_key: execution.task_key,
+				run_at: nextTimestamp,
+				dedupe_key: nextDedupeKey,
+				cron_expression: execution.cron_expression,
+			},
+			this.signal,
+		);
 	}
 
 	// --- Stage 3: Flush results to database ---
