@@ -10,7 +10,7 @@ export interface ExecutionSpec {
 	task_key: string;
 	payload?: Payload | null;
 	run_at?: Date | null;
-	key?: string | null;
+	dedupe_key?: string | null;
 	priority?: number | null;
 	parent_execution_id?: string | null;
 	parent_step_key?: string | null;
@@ -410,7 +410,7 @@ export class DatabaseClient {
 					task_key := ${spec.task_key}::text,
 					payload := ${spec.payload ? sql.json(spec.payload) : null}::jsonb,
 					run_at := ${spec.run_at ? spec.run_at.toISOString() : null}::timestamptz,
-					key := ${spec.key ?? null}::text,
+					dedupe_key := ${spec.dedupe_key ?? null}::text,
 					priority := ${spec.priority ?? null}::integer,
 					parent_execution_id := ${spec.parent_execution_id ?? null}::uuid,
 					parent_step_key := ${spec.parent_step_key ?? null}::text,
@@ -430,7 +430,7 @@ export class DatabaseClient {
 			task_key: spec.task_key,
 			payload: spec.payload ?? null,
 			run_at: spec.run_at,
-			key: spec.key,
+			dedupe_key: spec.dedupe_key,
 			priority: spec.priority,
 		}));
 

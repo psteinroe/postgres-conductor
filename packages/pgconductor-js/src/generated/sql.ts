@@ -119,7 +119,7 @@ CREATE TABLE pgconductor.executions (
     id uuid default pgconductor.portable_uuidv7(),
     task_key text not null,
     queue text not null default 'default',
-    key text,
+    dedupe_key text,
     created_at timestamptz default pgconductor.current_time() not null,
     failed_at timestamptz,
     completed_at timestamptz,
@@ -132,7 +132,8 @@ CREATE TABLE pgconductor.executions (
     priority integer default 0 not null,
     waiting_on_execution_id uuid,
     waiting_step_key text,
-    primary key (id, queue)
+    primary key (id, queue),
+    unique (task_key, dedupe_key, queue)
 ) PARTITION BY LIST (queue);
 
 CREATE TABLE pgconductor.failed_executions (
@@ -506,13 +507,13 @@ AS $function$
   ),
   inserted_completed AS (
     INSERT INTO pgconductor.completed_executions (
-      id, task_key, key, created_at, failed_at, completed_at,
+      id, task_key, dedupe_key, created_at, failed_at, completed_at,
       payload, run_at, locked_at, locked_by, attempts, last_error, priority
     )
     SELECT
       id,
       task_key,
-      key,
+      dedupe_key,
       created_at,
       failed_at,
       pgconductor.current_time(),
@@ -579,7 +580,7 @@ AS $function$
     RETURNING
       e.id,
       e.task_key,
-      e.key,
+      e.dedupe_key,
       e.created_at,
       e.payload,
       e.run_at,
@@ -612,13 +613,13 @@ AS $function$
   ),
   inserted_failed AS (
     INSERT INTO pgconductor.failed_executions (
-      id, task_key, key, created_at, failed_at, completed_at,
+      id, task_key, dedupe_key, created_at, failed_at, completed_at,
       payload, run_at, locked_at, locked_by, attempts, last_error, priority
     )
     SELECT
       id,
       task_key,
-      key,
+      dedupe_key,
       created_at,
       pgconductor.current_time(),
       NULL,
@@ -650,7 +651,7 @@ create type pgconductor.execution_spec as (
     task_key text,
     payload jsonb,
     run_at timestamptz,
-    key text,
+    dedupe_key text,
     priority integer
 );
 
@@ -710,15 +711,15 @@ begin
   -- Clear keys that are currently locked so a subsequent insert can succeed.
   update pgconductor.executions as e
   set
-    key = null,
+    dedupe_key = null,
     attempts = w.max_attempts,
     locked_by = null,
     locked_at = null,
     last_error = 'superseded by reinvoke'
   from unnest(specs) spec
   join pgconductor.tasks w on w.key = spec.task_key
-  where spec.key is not null
-  and e.key = spec.key
+  where spec.dedupe_key is not null
+  and e.dedupe_key = spec.dedupe_key
   and e.task_key = spec.task_key
   and e.locked_at is not null;
 
@@ -728,7 +729,7 @@ begin
     queue,
     payload,
     run_at,
-    key,
+    dedupe_key,
     priority
   )
     select
@@ -737,7 +738,7 @@ begin
       COALESCE(t.queue, 'default'),
       coalesce(spec.payload, '{}'::jsonb),
       coalesce(spec.run_at, pgconductor.current_time()),
-      spec.key,
+      spec.dedupe_key,
       coalesce(spec.priority, 0)
     from unnest(specs) spec
     left join pgconductor.tasks t on t.key = spec.task_key
@@ -750,7 +751,7 @@ CREATE OR REPLACE FUNCTION pgconductor.invoke(
     task_key text,
     payload jsonb default null,
     run_at timestamptz default null,
-    key text default null,
+    dedupe_key text default null,
     priority integer default null,
     parent_execution_id uuid default null,
     parent_step_key text default null,
@@ -768,7 +769,7 @@ WITH inserted_child AS (
     queue,
     payload,
     run_at,
-    key,
+    dedupe_key,
     priority
   )
   SELECT
@@ -777,7 +778,7 @@ WITH inserted_child AS (
     COALESCE(t.queue, 'default'),
     COALESCE(invoke.payload, '{}'::jsonb),
     COALESCE(invoke.run_at, pgconductor.current_time()),
-    invoke.key,
+    invoke.dedupe_key,
     COALESCE(invoke.priority, 0)
   FROM (SELECT 1) AS dummy
   LEFT JOIN pgconductor.tasks t ON t.key = invoke.task_key

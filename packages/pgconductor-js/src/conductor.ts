@@ -126,7 +126,7 @@ export class Conductor<
 				task_key,
 				payload: item.payload,
 				run_at: item.run_at,
-				key: item.key,
+				dedupe_key: item.dedupe_key,
 				priority: item.priority,
 			}));
 			return this.db.invokeBatch(specs);
