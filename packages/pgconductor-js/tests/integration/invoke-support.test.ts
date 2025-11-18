@@ -391,8 +391,8 @@ describe("Invoke Support", () => {
 			Array<{ last_error: string; task_key: string }>
 		>`
 			SELECT last_error, task_key
-			FROM pgconductor.failed_executions
-			WHERE task_key = 'cascade-parent'
+			FROM pgconductor.executions
+			WHERE task_key = 'cascade-parent' AND failed_at IS NOT NULL
 		`;
 
 		expect(failedParents.length).toBe(1);

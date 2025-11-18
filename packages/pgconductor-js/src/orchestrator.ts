@@ -45,7 +45,7 @@ export class Orchestrator {
 		if (options.tasks?.length) {
 			const worker = new Worker(
 				"default",
-				new Map(options.tasks.map((task) => [task.name, task])),
+				options.tasks,
 				this.db,
 				options.defaultWorker,
 				options.conductor.options.context,

@@ -17,12 +17,13 @@ export class MockDatabaseClient implements IDatabaseClient {
 	countActiveOrchestratorsBelow = mock(async () => 0);
 	orchestratorShutdown = mock(async () => {});
 	getExecutions = mock(async () => []);
-	returnExecutions = mock(async () => {});
+	returnExecutions = mock(async (results, taskMaxAttempts, taskRemoveOnComplete, taskRemoveOnFail, signal) => {});
+	removeExecutions = mock(async () => false);
 	registerWorker = mock(async () => {});
-	invoke = mock(async () => {});
-	invokeBatch = mock(async () => {});
+	invoke = mock(async () => "mock-id");
+	invokeBatch = mock(async () => ["mock-id"]);
 	loadStep = mock(async () => null);
-	saveStep = mock(async () => {});
+	saveStep = mock(async (executionId, queue, key, result, runAtMs, signal) => {});
 	clearWaitingState = mock(async () => {});
 	setFakeTime = mock(async () => {});
 	clearFakeTime = mock(async () => {});

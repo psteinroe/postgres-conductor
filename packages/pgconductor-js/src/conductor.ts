@@ -98,13 +98,7 @@ export class Conductor<
 		tasks: AnyTask[],
 		config?: Partial<WorkerConfig>,
 	): Worker {
-		return new Worker(
-			queueName,
-			new Map(tasks.map((task) => [task.name, task])),
-			this.db,
-			config,
-			this.options.context,
-		);
+		return new Worker(queueName, tasks, this.db, config, this.options.context);
 	}
 
 	async invoke<
@@ -114,7 +108,7 @@ export class Conductor<
 		task_key: TName,
 		payload: InferPayload<TDef>,
 		opts?: Omit<ExecutionSpec, "task_key" | "payload">,
-	): Promise<void>;
+	): Promise<string>;
 	async invoke<
 		TName extends TaskName<Tasks>,
 		TDef extends FindTaskByName<Tasks, TName>,
@@ -126,7 +120,7 @@ export class Conductor<
 				"task_key" | "payload"
 			>
 		>,
-	): Promise<void>;
+	): Promise<string[]>;
 	async invoke<
 		TName extends TaskName<Tasks>,
 		TDef extends FindTaskByName<Tasks, TName>,
@@ -141,7 +135,7 @@ export class Conductor<
 					>
 			  >,
 		opts?: Omit<ExecutionSpec, "task_key" | "payload">,
-	): Promise<void | string[]> {
+	): Promise<string | string[]> {
 		if (Array.isArray(payloadOrItems)) {
 			const specs = payloadOrItems.map((item) => ({
 				task_key,

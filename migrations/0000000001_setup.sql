@@ -137,13 +137,13 @@ CREATE TABLE pgconductor.tasks (
 CREATE TABLE pgconductor.steps (
     id uuid default pgconductor.portable_uuidv7() primary key,
     key text not null,
-    execution_id uuid,
+    execution_id uuid not null,
+    queue text not null,
     result jsonb,
     created_at timestamptz default pgconductor.current_time() not null,
-    unique (key, execution_id)
+    unique (key, execution_id),
+    CONSTRAINT fk_execution FOREIGN KEY (execution_id, queue) REFERENCES pgconductor.executions(id, queue) ON DELETE CASCADE
 );
-
-INSERT INTO pgconductor.queues (name) VALUES ('default');
 
 -- Trigger function to manage executions partitions per queue
 -- Automatically creates partition when queue is inserted
@@ -156,10 +156,6 @@ AS $function$
 DECLARE
   v_partition_name text;
 BEGIN
-  if old.name = 'default' or new.name = 'default' then
-    RAISE EXCEPTION 'Modifying or deleting the default queue is not allowed';
-  end if;
-
   IF TG_OP = 'INSERT' THEN
     v_partition_name := 'executions_' || replace(NEW.name, '-', '_');
 
@@ -173,6 +169,11 @@ BEGIN
     RETURN NEW;
 
   ELSIF TG_OP = 'UPDATE' THEN
+    -- Protect default queue from modification
+    IF OLD.name = 'default' OR NEW.name = 'default' THEN
+      RAISE EXCEPTION 'Modifying the default queue is not allowed';
+    END IF;
+
     -- Disallow renaming queues
     IF NEW.name != OLD.name THEN
       RAISE EXCEPTION 'Renaming queues is not allowed. Queue name cannot be changed from % to %', OLD.name, NEW.name;
@@ -181,6 +182,11 @@ BEGIN
     RETURN NEW;
 
   ELSIF TG_OP = 'DELETE' THEN
+    -- Protect default queue from deletion
+    IF OLD.name = 'default' THEN
+      RAISE EXCEPTION 'Deleting the default queue is not allowed';
+    END IF;
+
     v_partition_name := 'executions_' || replace(OLD.name, '-', '_');
 
     -- Drop the partition for this queue
@@ -199,6 +205,9 @@ CREATE TRIGGER manage_queue_partition_trigger
   AFTER INSERT OR UPDATE OR DELETE ON pgconductor.queues
   FOR EACH ROW
   EXECUTE FUNCTION pgconductor.manage_queue_partition();
+
+-- Create default queue (trigger will create executions_default partition)
+INSERT INTO pgconductor.queues (name) VALUES ('default');
 
 -- Drop a queue (will trigger partition deletion via trigger)
 CREATE OR REPLACE FUNCTION pgconductor.drop_queue(queue_name text)

@@ -44,6 +44,7 @@ export class TaskContext {
 
 		await this.opts.db.saveStep(
 			this.opts.execution.id,
+			this.opts.execution.queue,
 			name,
 			{ result: result as JsonValue },
 			undefined,
@@ -83,6 +84,7 @@ export class TaskContext {
 		// Save sleep step with ms - time calculation happens in SQL
 		await this.opts.db.saveStep(
 			this.opts.execution.id,
+			this.opts.execution.queue,
 			id,
 			null,
 			ms,

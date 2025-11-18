@@ -4,7 +4,7 @@ import type {
 	ExecutionResult,
 	ExecutionSpec,
 } from "./database-client";
-import type { AnyTask } from "./task";
+import type { AnyTask, Task } from "./task";
 import { waitFor } from "./lib/wait-for";
 import { mapConcurrent } from "./lib/map-concurrent";
 import { Deferred } from "./lib/deferred";
@@ -12,6 +12,7 @@ import { AsyncQueue } from "./lib/async-queue";
 import CronExpressionParser from "cron-parser";
 import { TaskContext } from "./task-context";
 import * as assert from "./lib/assert";
+import { createMaintenanceTask } from "./maintenance-task";
 
 const HANGUP = Symbol("hangup");
 
@@ -40,6 +41,8 @@ export const DEFAULT_WORKER_CONFIG: WorkerConfig = {
 export class Worker {
 	private orchestratorId: string | null = null;
 
+	private readonly tasks: Map<string, AnyTask>;
+
 	private readonly fetchBatchSize: number;
 	private readonly concurrency: number;
 	private readonly flushBatchSize: number;
@@ -51,11 +54,27 @@ export class Worker {
 
 	constructor(
 		public readonly queueName: string,
-		private readonly tasks: Map<string, AnyTask>,
+		tasks: AnyTask[],
 		private readonly db: DatabaseClient,
 		config: Partial<WorkerConfig> = {},
 		private readonly extraContext: object = {},
 	) {
+		const maintenanceTask = createMaintenanceTask(
+			this.queueName,
+			tasks.map((t) => ({
+				name: t.name,
+				removeOnComplete: t.removeOnComplete,
+				removeOnFail: t.removeOnFail,
+			})),
+		);
+		this.tasks = tasks.reduce(
+			(m, task) => {
+				m.set(task.name, task);
+				return m;
+			},
+			new Map<string, AnyTask>([[maintenanceTask.name, maintenanceTask]]),
+		);
+
 		const fullConfig = { ...DEFAULT_WORKER_CONFIG, ...config };
 
 		this.concurrency = fullConfig.concurrency;
@@ -209,7 +228,6 @@ export class Worker {
 					if (this.signal.aborted) break;
 				}
 			} catch (err) {
-				console.error("Fetch error:", err);
 				await waitFor(2000, { signal: this.signal });
 			}
 		}
@@ -251,6 +269,12 @@ export class Worker {
 						? ({ event: "pgconductor.cron" } as const)
 						: ({ event: "pgconductor.invoke", payload: exec.payload } as const);
 
+					// Pass db as extra context to maintenance task
+					const extraContext =
+						task.name === "pgconductor.maintenance"
+							? { ...this.extraContext, db: this.db }
+							: this.extraContext;
+
 					const output = await Promise.race([
 						task.execute(
 							taskEvent,
@@ -261,7 +285,7 @@ export class Worker {
 									abortController: taskAbortController,
 									execution: exec,
 								},
-								this.extraContext,
+								extraContext,
 							),
 						),
 						hangupPromise,
@@ -326,8 +350,12 @@ export class Worker {
 
 		// Pre-compute task metadata once
 		const taskMaxAttempts: Record<string, number> = {};
+		const taskRemoveOnComplete: Record<string, boolean> = {};
+		const taskRemoveOnFail: Record<string, boolean> = {};
 		for (const task of this.tasks.values()) {
 			taskMaxAttempts[task.name] = task.maxAttempts || 3;
+			taskRemoveOnComplete[task.name] = task.removeOnComplete === true;
+			taskRemoveOnFail[task.name] = task.removeOnFail === true;
 		}
 
 		const flushNow = async (isCleanup = false) => {
@@ -345,6 +373,8 @@ export class Worker {
 				await this.db.returnExecutions(
 					batch,
 					taskMaxAttempts,
+					taskRemoveOnComplete,
+					taskRemoveOnFail,
 					isCleanup ? undefined : this.signal,
 				);
 			} catch (err) {

@@ -16,7 +16,11 @@ export type TaskConfiguration<
 	// configuration
 	maxAttempts?: number;
 	window?: [string, string];
+	removeOnComplete?: RetentionSettings;
+	removeOnFail?: RetentionSettings;
 };
+
+export type RetentionSettings = boolean | { days: number };
 
 export type TaskEvent<P extends object = object> =
 	| { event: "pgconductor.cron" }
@@ -51,6 +55,9 @@ export class Task<
 	public readonly queue: Queue;
 	public readonly maxAttempts?: number;
 	public readonly window?: [string, string];
+	public readonly removeOnComplete: RetentionSettings;
+	public readonly removeOnFail: RetentionSettings;
+
 	public readonly triggers: NonEmptyArray<Trigger>;
 
 	constructor(
@@ -64,6 +71,9 @@ export class Task<
 
 		this.maxAttempts = config.maxAttempts;
 		this.window = config.window;
+		this.removeOnComplete = config.removeOnComplete ?? false;
+		this.removeOnFail = config.removeOnFail ?? false;
+
 		this.triggers = Array.isArray(triggers) ? triggers : [triggers];
 	}
 }

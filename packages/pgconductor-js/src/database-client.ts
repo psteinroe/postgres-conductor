@@ -2,6 +2,7 @@ import postgres, { type PendingQuery, type Sql } from "postgres";
 import * as assert from "./lib/assert";
 import { waitFor } from "./lib/wait-for";
 import type { Migration } from "./migration-store";
+import type { TaskConfiguration } from "./task";
 
 export type JsonValue =
 	| string
@@ -34,6 +35,7 @@ export interface TaskSpec {
 export interface Execution {
 	id: string;
 	task_key: string;
+	queue: string;
 	payload: Payload;
 	waiting_on_execution_id: string | null;
 	dedupe_key?: string | null;
@@ -414,6 +416,8 @@ export class DatabaseClient {
 							and e.attempts < (case ${maxAttemptsCases} end)::integer
 							and e.locked_at is null
 							and e.run_at <= pgconductor.current_time()
+							and e.completed_at is null
+							and e.failed_at is null
 						order by e.priority asc, e.run_at asc
 						limit ${batchSize}::integer
 						for update skip locked
@@ -429,6 +433,7 @@ export class DatabaseClient {
 					returning
 						executions.id,
 						executions.task_key,
+						executions.queue,
 						executions.payload,
 						executions.waiting_on_execution_id,
 						executions.dedupe_key,
@@ -442,12 +447,21 @@ export class DatabaseClient {
 	async returnExecutions(
 		results: ExecutionResult[],
 		taskMaxAttempts: Record<string, number>,
+		taskRemoveOnComplete: Record<string, boolean>,
+		taskRemoveOnFail: Record<string, boolean>,
 		signal?: AbortSignal,
 	): Promise<void> {
 		if (results.length === 0) return;
 
-		// Group by status for dynamic query building
+		// Group by status and retention policy
 		const completed = results.filter((r) => r.status === "completed");
+		const completedToDelete = completed.filter(
+			(r) => taskRemoveOnComplete[r.task_key] === true,
+		);
+		const completedToKeep = completed.filter(
+			(r) => taskRemoveOnComplete[r.task_key] !== true,
+		);
+
 		const failed = results.filter((r) => r.status === "failed");
 		const released = results.filter((r) => r.status === "released");
 
@@ -455,70 +469,118 @@ export class DatabaseClient {
 			async (sql) => {
 				const ctes: PendingQuery<any>[] = [];
 
-				// Build completed CTEs
-				if (completed.length > 0) {
-					const completedData = completed.map((r) => ({
+				// Handle completed executions that should be deleted immediately
+				if (completedToDelete.length > 0) {
+					const completedData = completedToDelete.map((r) => ({
 						execution_id: r.execution_id,
 						result: r.result || null,
 					}));
 
-					// Parse completed execution IDs and results from TypeScript
-					ctes.push(sql`completed_results as (
+					// Parse completed execution IDs from TypeScript
+					ctes.push(sql`completed_delete_results as (
 						select
 							(r->>'execution_id')::uuid as execution_id,
 							(r->'result')::jsonb as result
 						from jsonb_array_elements(${sql.json(completedData)}::jsonb) r
 					)`);
 
-					// Delete completed executions from active queue
-					ctes.push(sql`completed as (
-						delete from pgconductor.executions e
-						using completed_results r
-						where e.id = r.execution_id
-						returning e.*
-					)`);
-
-					// Archive completed executions for history/audit
-					ctes.push(sql`inserted_completed as (
-						insert into pgconductor.completed_executions (
-							id, task_key, dedupe_key, created_at, failed_at, completed_at,
-							payload, run_at, locked_at, locked_by, attempts, last_error, priority, queue
-						)
-						select
-							id, task_key, dedupe_key, created_at, failed_at,
-							pgconductor.current_time(),
-							payload, run_at, locked_at, locked_by, attempts, last_error, priority, queue
-						from completed
-						returning id
-					)`);
-
-					// If this was a child execution, save result as step in parent (ctx.invoke pattern)
-					ctes.push(sql`parent_steps_completed as (
-						insert into pgconductor.steps (execution_id, key, result)
+					// Save result as step in parent (ctx.invoke pattern) before deleting
+					ctes.push(sql`parent_steps_completed_delete as (
+						insert into pgconductor.steps (execution_id, queue, key, result)
 						select
 							parent_e.id,
+							parent_e.queue,
 							parent_e.waiting_step_key,
 							r.result
-						from completed_results r
+						from completed_delete_results r
 						join pgconductor.executions parent_e on parent_e.waiting_on_execution_id = r.execution_id
 						on conflict (execution_id, key) do nothing
 						returning execution_id
 					)`);
 
-					// Wake up parent executions now that child is complete
-					ctes.push(sql`updated_parents_completed as (
+					// Wake up parent executions
+					ctes.push(sql`updated_parents_completed_delete as (
 						update pgconductor.executions
 						set
 							run_at = pgconductor.current_time(),
 							waiting_on_execution_id = null,
 							waiting_step_key = null
-						from parent_steps_completed
-						where id = parent_steps_completed.execution_id
+						from parent_steps_completed_delete
+						where id = parent_steps_completed_delete.execution_id
+						returning id
+					)`);
+
+					// Delete completed executions
+					ctes.push(sql`deleted_completed as (
+						delete from pgconductor.executions
+						where id in (select execution_id from completed_delete_results)
 						returning id
 					)`);
 				}
 
-				// Build failed CTEs
+				// Handle completed executions that should be kept (update status)
+				if (completedToKeep.length > 0) {
+					const completedData = completedToKeep.map((r) => ({
+						execution_id: r.execution_id,
+						result: r.result || null,
+					}));
+
+					// Parse completed execution IDs from TypeScript
+					ctes.push(sql`completed_keep_results as (
+						select
+							(r->>'execution_id')::uuid as execution_id,
+							(r->'result')::jsonb as result
+						from jsonb_array_elements(${sql.json(completedData)}::jsonb) r
+					)`);
+
+					// Update executions to mark as completed (keep in table)
+					ctes.push(sql`updated_completed as (
+						update pgconductor.executions e
+						set
+							completed_at = pgconductor.current_time(),
+							locked_by = null,
+							locked_at = null
+						from completed_keep_results r
+						where e.id = r.execution_id
+						returning e.id
+					)`);
+
+					// Save result as step in parent (ctx.invoke pattern)
+					ctes.push(sql`parent_steps_completed_keep as (
+						insert into pgconductor.steps (execution_id, queue, key, result)
+						select
+							parent_e.id,
+							parent_e.queue,
+							parent_e.waiting_step_key,
+							r.result
+						from completed_keep_results r
+						join pgconductor.executions parent_e on parent_e.waiting_on_execution_id = r.execution_id
+						on conflict (execution_id, key) do nothing
+						returning execution_id
+					)`);
+
+					// Wake up parent executions
+					ctes.push(sql`updated_parents_completed_keep as (
+						update pgconductor.executions
+						set
+							run_at = pgconductor.current_time(),
+							waiting_on_execution_id = null,
+							waiting_step_key = null
+						from parent_steps_completed_keep
+						where id = parent_steps_completed_keep.execution_id
+						returning id
+					)`);
+				}
+
+				// Build removeOnFail cases for ALL tasks (not just failed ones)
+				// This is needed because parents may fail due to cascade from child failures
+				const allTaskKeys = Object.keys(taskRemoveOnFail);
+				const allRemoveOnFailCases = allTaskKeys.map((key) => {
+					const remove = taskRemoveOnFail[key] === true;
+					return sql`when e.task_key = ${key} then ${remove}`;
+				});
+
+				// Handle failed executions
 				if (failed.length > 0) {
 					const failedData = failed.map((r) => ({
 						execution_id: r.execution_id,
@@ -533,6 +595,12 @@ export class DatabaseClient {
 						return sql`when e.task_key = ${key} then ${attempts}`;
 					});
 
+					//Build dynamic CASE statement for removeOnFail
+					const removeOnFailCases = failedTaskKeys.map((key) => {
+						const remove = taskRemoveOnFail[key] === true;
+						return sql`when e.task_key = ${key} then ${remove}`;
+					});
+
 					// Parse failed execution IDs and errors from TypeScript
 					ctes.push(sql`failed_results as (
 						select
@@ -545,29 +613,65 @@ export class DatabaseClient {
 					ctes.push(sql`permanently_failed_children as (
 						select
 							r.execution_id,
-							r.error as child_error
+							r.error as child_error,
+							(case ${removeOnFailCases} end)::boolean as should_remove
 						from failed_results r
 						join pgconductor.executions e on e.id = r.execution_id
 						where e.attempts >= (case ${maxAttemptsCases} end)::integer
 					)`);
 
-					// Delete permanently failed executions + cascade to parents (child failure fails parent)
+					// Delete permanently failed children (where removeOnFail=true)
+					// Also delete parents waiting on them where parent's removeOnFail=true
 					ctes.push(sql`deleted_failed as (
 						delete from pgconductor.executions e
 						where (
-							e.id in (select execution_id from permanently_failed_children)
+							e.id in (select execution_id from permanently_failed_children where should_remove)
 							or
-							e.waiting_on_execution_id in (select execution_id from permanently_failed_children)
+							(
+								e.waiting_on_execution_id in (select execution_id from permanently_failed_children)
+								and (case ${allRemoveOnFailCases} else false end)::boolean = true
+							)
 						)
 						returning
-							e.id, e.task_key, e.dedupe_key, e.created_at, e.payload,
-							e.run_at, e.locked_at, e.locked_by, e.attempts, e.priority, e.queue,
+							e.id, e.task_key, e.last_error,
 							coalesce(
 								(select error from failed_results where execution_id = e.id),
 								(select 'Child execution failed: ' || coalesce(child_error, 'unknown error')
 									from permanently_failed_children
 									where execution_id = e.waiting_on_execution_id)
-							) as last_error
+							) as error
+					)`);
+
+					// Update permanently failed executions where removeOnFail=false (keep in table)
+					ctes.push(sql`updated_failed as (
+						update pgconductor.executions e
+						set
+							failed_at = pgconductor.current_time(),
+							last_error = coalesce(r.error, 'unknown error'),
+							locked_by = null,
+							locked_at = null
+						from permanently_failed_children p, failed_results r
+						where e.id = p.execution_id
+							and e.id = r.execution_id
+							and p.should_remove = false
+						returning e.id
+					)`);
+
+					// Mark parent executions as failed when child fails permanently
+					// Only for parents where removeOnFail=false (keep in table)
+					ctes.push(sql`updated_failed_parents as (
+						update pgconductor.executions e
+						set
+							failed_at = pgconductor.current_time(),
+							last_error = 'Child execution failed: ' || coalesce(p.child_error, 'unknown error'),
+							waiting_on_execution_id = null,
+							waiting_step_key = null,
+							locked_by = null,
+							locked_at = null
+						from permanently_failed_children p
+						where e.waiting_on_execution_id = p.execution_id
+							and (case ${allRemoveOnFailCases} else false end)::boolean = false
+						returning e.id
 					)`);
 
 					// Schedule retry for failed executions that still have attempts left
@@ -582,26 +686,11 @@ export class DatabaseClient {
 						from failed_results r
 						where e.id = r.execution_id
 							and e.attempts < (case ${maxAttemptsCases} end)::integer
-						returning e.*
-					)`);
-
-					// Archive permanently failed executions for history/audit
-					ctes.push(sql`inserted_failed as (
-						insert into pgconductor.failed_executions (
-							id, task_key, dedupe_key, created_at, failed_at, completed_at,
-							payload, run_at, locked_at, locked_by, attempts, last_error, priority, queue
-						)
-						select
-							id, task_key, dedupe_key, created_at,
-							pgconductor.current_time(),
-							null,
-							payload, run_at, locked_at, locked_by, attempts, last_error, priority, queue
-						from deleted_failed
-						returning id
+						returning e.id
 					)`);
 				}
 
-				// Build released CTEs
+				// Handle released executions
 				if (released.length > 0) {
 					const releasedIds = released.map((r) => r.execution_id);
 
@@ -617,10 +706,7 @@ export class DatabaseClient {
 					)`);
 				}
 
-				assert.ok(
-					ctes.length,
-					"At least one CTE should be present in returnExecutions",
-				);
+				if (ctes.length === 0) return;
 
 				const combined = ctes.reduce((acc, cte, i) =>
 					i === 0 ? cte : sql`${acc}, ${cte}`,
@@ -629,6 +715,79 @@ export class DatabaseClient {
 				await sql`with ${combined} select 1`;
 			},
 			{ label: "returnExecutions", signal },
+		);
+	}
+
+	async removeExecutions(
+		queueName: string,
+		tasks: Pick<
+			TaskConfiguration,
+			"name" | "removeOnComplete" | "removeOnFail"
+		>[],
+		batchSize: number,
+		signal?: AbortSignal,
+	): Promise<boolean> {
+		return this.query(
+			async (sql) => {
+				// Only process tasks with retention days (not immediate deletion)
+				const tasksWithRetention = tasks.filter(
+					(t) =>
+						(typeof t.removeOnComplete === "object" && t.removeOnComplete.days) ||
+						(typeof t.removeOnFail === "object" && t.removeOnFail.days),
+				);
+
+				if (tasksWithRetention.length === 0) {
+					return false;
+				}
+
+				// Build WHERE clauses for each task's retention policy
+				const conditions = tasksWithRetention.flatMap((task) => {
+					const clauses = [];
+					if (
+						typeof task.removeOnComplete === "object" &&
+						task.removeOnComplete.days
+					) {
+						clauses.push(
+							sql`(task_key = ${task.name} and completed_at is not null and completed_at < pgconductor.current_time() - ${task.removeOnComplete.days} * interval '1 day')`,
+						);
+					}
+					if (typeof task.removeOnFail === "object" && task.removeOnFail.days) {
+						clauses.push(
+							sql`(task_key = ${task.name} and failed_at is not null and failed_at < pgconductor.current_time() - ${task.removeOnFail.days} * interval '1 day')`,
+						);
+					}
+					return clauses;
+				});
+
+				if (conditions.length === 0) {
+					return false;
+				}
+
+				const combinedConditions = conditions.reduce(
+					(acc, cond, i) => (i === 0 ? cond : sql`${acc} or ${cond}`),
+				);
+
+				// Delete old completed/failed executions from main executions table
+				const result = await sql<{ deleted_count: number }[]>`
+					with batch as (
+						select id from pgconductor.executions
+						where queue = ${queueName}
+							and (${combinedConditions})
+						limit ${batchSize}
+					),
+					deleted as (
+						delete from pgconductor.executions
+						using batch
+						where executions.id = batch.id
+						returning 1
+					)
+					select count(*)::int as deleted_count from deleted
+				`;
+
+				const deletedCount = result[0]?.deleted_count ?? 0;
+				return deletedCount >= batchSize; // true if hit limit (hasMore)
+			},
+			{ label: "removeExecutions", signal },
 		);
 	}
 
@@ -679,10 +838,10 @@ export class DatabaseClient {
 		);
 	}
 
-	async invoke(spec: ExecutionSpec, signal?: AbortSignal): Promise<void> {
+	async invoke(spec: ExecutionSpec, signal?: AbortSignal): Promise<string> {
 		return this.query(
 			async (sql) => {
-				await sql<[{ id: string }]>`
+				const result = await sql<[{ id: string }]>`
 				select pgconductor.invoke(
 					task_key := ${spec.task_key}::text,
 					payload := ${spec.payload ? sql.json(spec.payload) : null}::jsonb,
@@ -695,6 +854,7 @@ export class DatabaseClient {
 					parent_timeout_ms := ${spec.parent_timeout_ms || null}::integer
 				) as id
 			`;
+				return result[0]!.id;
 			},
 			{ label: "invoke", signal },
 		);
@@ -703,7 +863,7 @@ export class DatabaseClient {
 	async invokeBatch(
 		specs: ExecutionSpec[],
 		signal?: AbortSignal,
-	): Promise<void> {
+	): Promise<string[]> {
 		const specsArray = specs.map((spec) => ({
 			task_key: spec.task_key,
 			payload: spec.payload || null,
@@ -715,13 +875,14 @@ export class DatabaseClient {
 
 		return this.query(
 			async (sql) => {
-				await sql<{ id: string }[]>`
+				const result = await sql<{ id: string }[]>`
 				select id from pgconductor.invoke(
 					specs := array(
 						select json_populate_recordset(null::pgconductor.execution_spec, ${sql.json(specsArray)})
 					)
 				)
 			`;
+				return result.map((r) => r.id);
 			},
 			{ label: "invokeBatch", signal },
 		);
@@ -750,6 +911,7 @@ export class DatabaseClient {
 
 	async saveStep(
 		executionId: string,
+		queue: string,
 		key: string,
 		result: Payload | null,
 		runAtMs?: number,
@@ -761,8 +923,8 @@ export class DatabaseClient {
 					// Sleep case: insert step and update run_at
 					await sql`
 						with inserted as (
-							insert into pgconductor.steps (execution_id, key, result)
-							values (${executionId}::uuid, ${key}::text, ${sql.json(result)}::jsonb)
+							insert into pgconductor.steps (execution_id, queue, key, result)
+							values (${executionId}::uuid, ${queue}::text, ${key}::text, ${sql.json(result)}::jsonb)
 							on conflict (execution_id, key) do nothing
 							returning id
 						)
@@ -774,8 +936,8 @@ export class DatabaseClient {
 				} else {
 					// Regular step: just insert
 					await sql`
-						insert into pgconductor.steps (execution_id, key, result)
-						values (${executionId}::uuid, ${key}::text, ${sql.json(result)}::jsonb)
+						insert into pgconductor.steps (execution_id, queue, key, result)
+						values (${executionId}::uuid, ${queue}::text, ${key}::text, ${sql.json(result)}::jsonb)
 						on conflict (execution_id, key) do nothing
 					`;
 				}
