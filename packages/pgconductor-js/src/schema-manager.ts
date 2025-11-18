@@ -20,7 +20,7 @@ export class SchemaManager {
 		options: { schemaName?: string } = {},
 	) {
 		this.migrationStore = new MigrationStore(
-			options.schemaName ?? "pgconductor",
+			options.schemaName || "pgconductor",
 		);
 	}
 

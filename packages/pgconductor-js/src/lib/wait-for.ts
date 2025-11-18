@@ -12,7 +12,7 @@ export function waitFor(
 			return;
 		}
 
-		const jitter = options?.jitter ?? 0;
+		const jitter = options?.jitter || 0;
 		const delay = jitter > 0 ? ms + Math.random() * jitter : ms;
 		const timeout = setTimeout(resolve, delay);
 

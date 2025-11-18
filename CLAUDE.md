@@ -352,3 +352,6 @@ bun test tests/integration/        # Run integration tests
   const tasks: Array<Task> = [];
   function process(items: Array<string>): Array<number> { }
   ```
+- always add AGENT=1 as an env var when running anything
+- always use lower-case in sql
+- prefer || ofer ?? in typescript. good: runAtMs || null. bad: runAtMs ?? null

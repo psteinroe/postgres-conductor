@@ -35,8 +35,8 @@ export class TaskContext {
 			this.opts.signal,
 		);
 
-		if (cached) {
-			return cached.result as T;
+		if (cached !== undefined) {
+			return cached as T;
 		}
 
 		// Execute and save
@@ -76,7 +76,7 @@ export class TaskContext {
 			this.opts.signal,
 		);
 
-		if (cached) {
+		if (cached !== undefined) {
 			return; // Already slept, continue
 		}
 
@@ -104,8 +104,8 @@ export class TaskContext {
 			this.opts.signal,
 		);
 
-		if (cached) {
-			return cached.result as T;
+		if (cached !== undefined) {
+			return cached as T;
 		}
 
 		// Check if we're already waiting (distinguishes first invoke from timeout)
@@ -129,7 +129,7 @@ export class TaskContext {
 			payload,
 			parent_execution_id: this.opts.execution.id,
 			parent_step_key: id,
-			parent_timeout_ms: timeout ?? null,
+			parent_timeout_ms: timeout || null,
 		});
 
 		return this.abortAndHangup();

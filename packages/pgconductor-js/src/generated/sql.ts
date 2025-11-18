@@ -24,13 +24,8 @@ CREATE TABLE pgconductor.schema_migrations (
 -- - rateLimit (limit, period, key),
 -- - debounce (period, key) -> via invoke
 -- throttling, concurrency and rateLimit: key and seconds - fetch and group by - USE SLOTS similar to https://planetscale.com/blog/the-slotted-counter-pattern
--- maybe: cel as a postgres extension -> no, rust binary with cdc
 -- batch processing via array payloads?
--- check what extensions are available on install and store it on a settings table, e.g. pg_jsonschema, pg_partman, ...
--- we need to fetch workflow config on fetch executions and add executions anyways...
 
-
--- assert required extensions are installed
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
 -- Returns either the actual current timestamp or a fake one for tests.
@@ -88,19 +83,6 @@ CREATE TABLE pgconductor.settings (
     value jsonb not null
 );
 
--- NOTES FOR LIVE MIGRATIONS:
--- todo: how to make sure we handle sudden worker crashes? we could leverage steps to also update locked_at periodically
--- or have a separate heartbeat mechanism per execution
--- and if a execution has been locked for too long, we can assume the worker crashed and make it available again
--- DANGER: this could lead to multiple orchestrators working on the same execution if the heartbeat interval is too long
--- separate heartbeat mechanism is safer than leveraging steps because steps might not be executed frequently enough and we do
--- not want this burden on the user
--- we could even just put the heartbeat on the orchestrators table and have a background process that checks for stale locks
--- this should be fine too and it means we do not have to join the orchestrators table when fetching executions
--- just refresh locked_at?
--- todo: stale worker cleanup function that removes orchestrators and unlocks their executions if last_heartbeat_at is too old
-
--- add breaking marker in migrations
 CREATE TABLE pgconductor.orchestrators (
     id uuid default pgconductor.portable_uuidv7() primary key,
     last_heartbeat_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -109,10 +91,10 @@ CREATE TABLE pgconductor.orchestrators (
     shutdown_signal boolean default false not null
 );
 
--- Queues table for partition management
--- Workers upsert their queue on startup, creating partitions automatically
 CREATE TABLE pgconductor.queues (
-    name text primary key
+    name text primary key,
+    completed_retention_days integer DEFAULT 7 NOT NULL,
+    failed_retention_days integer DEFAULT 30 NOT NULL
 );
 
 CREATE TABLE pgconductor.executions (
@@ -155,11 +137,6 @@ CREATE TABLE pgconductor.failed_executions_default PARTITION OF pgconductor.fail
 CREATE TABLE pgconductor.completed_executions_default PARTITION OF pgconductor.completed_executions
     FOR VALUES FROM (MINVALUE) TO (MAXVALUE);
 
--- Index for efficient cron schedule cleanup
-CREATE INDEX idx_executions_cron_cleanup
-ON pgconductor.executions (queue, task_key, cron_expression)
-WHERE cron_expression IS NOT NULL;
-
 CREATE TABLE pgconductor.tasks (
     key text primary key,
 
@@ -172,7 +149,6 @@ CREATE TABLE pgconductor.tasks (
     -- task can be executed only within certain time windows
     -- e.g. business hours, weekends, nights, ...
     -- we will stop the execution of executions outside of these time windows at step boundaries
-    -- TODO: we should adjust run_at based on these windows when inserting / rescheduling executions
     window_start timetz,
     window_end timetz,
     CONSTRAINT "windows" CHECK (
@@ -238,15 +214,6 @@ $$;
 --     task_key text not null,
 --     locked_at timestamptz,
 --     locked_by uuid
--- );
---
--- CREATE TABLE pgconductor.schedule (
---     name text REFERENCES pgconductor.tasks ON DELETE CASCADE,
---     key text not null,
---     cron text not null,
---     timezone text,
---     data jsonb,
---     PRIMARY KEY (name, key)
 -- );
 
 CREATE OR REPLACE FUNCTION pgconductor.orchestrators_heartbeat(
@@ -360,22 +327,43 @@ AS $function$
 DECLARE
   v_partition_name text;
 BEGIN
-  v_partition_name := 'executions_' || replace(NEW.name, '-', '_');
+  IF TG_OP = 'INSERT' THEN
+    v_partition_name := 'executions_' || replace(NEW.name, '-', '_');
 
-  -- Create partition for this queue: executions_default, executions_reports, etc.
-  EXECUTE format(
-    'CREATE TABLE IF NOT EXISTS pgconductor.%I PARTITION OF pgconductor.executions FOR VALUES IN (%L) WITH (fillfactor=70)',
-    v_partition_name,
-    NEW.name
-  );
+    -- Create partition for this queue: executions_default, executions_reports, etc.
+    EXECUTE format(
+      'CREATE TABLE IF NOT EXISTS pgconductor.%I PARTITION OF pgconductor.executions FOR VALUES IN (%L) WITH (fillfactor=70)',
+      v_partition_name,
+      NEW.name
+    );
 
-  RETURN NEW;
+    RETURN NEW;
+
+  ELSIF TG_OP = 'UPDATE' THEN
+    -- Disallow renaming queues
+    IF NEW.name != OLD.name THEN
+      RAISE EXCEPTION 'Renaming queues is not allowed. Queue name cannot be changed from % to %', OLD.name, NEW.name;
+    END IF;
+
+    RETURN NEW;
+
+  ELSIF TG_OP = 'DELETE' THEN
+    v_partition_name := 'executions_' || replace(OLD.name, '-', '_');
+
+    -- Drop the partition for this queue
+    EXECUTE format(
+      'DROP TABLE IF EXISTS pgconductor.%I',
+      v_partition_name
+    );
+
+    RETURN OLD;
+  END IF;
 END;
 $function$;
 
 -- Attach trigger to queues table
 CREATE TRIGGER manage_queue_partition_trigger
-  AFTER INSERT ON pgconductor.queues
+  AFTER INSERT OR UPDATE OR DELETE ON pgconductor.queues
   FOR EACH ROW
   EXECUTE FUNCTION pgconductor.manage_queue_partition();
 
