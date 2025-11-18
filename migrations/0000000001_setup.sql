@@ -210,14 +210,6 @@ AS $function$
   DELETE FROM pgconductor.queues WHERE name = drop_queue.queue_name;
 $function$;
 
--- Composite type for returning execution results
-create type pgconductor.execution_result as (
-    execution_id uuid,
-    status text, -- 'completed', 'failed', or 'released'
-    result jsonb,
-    error text
-);
-
 create type pgconductor.execution_spec as (
     task_key text,
     payload jsonb,

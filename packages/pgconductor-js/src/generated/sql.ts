@@ -78,11 +78,6 @@ begin
 end;
 $$;
 
-CREATE TABLE pgconductor.settings (
-    key text primary key,
-    value jsonb not null
-);
-
 CREATE TABLE pgconductor.orchestrators (
     id uuid default pgconductor.portable_uuidv7() primary key,
     last_heartbeat_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -92,9 +87,7 @@ CREATE TABLE pgconductor.orchestrators (
 );
 
 CREATE TABLE pgconductor.queues (
-    name text primary key,
-    completed_retention_days integer DEFAULT 7 NOT NULL,
-    failed_retention_days integer DEFAULT 30 NOT NULL
+    name text primary key
 );
 
 CREATE TABLE pgconductor.executions (
@@ -170,151 +163,7 @@ CREATE TABLE pgconductor.steps (
     unique (key, execution_id)
 );
 
--- Load a step result by execution_id and key
-CREATE OR REPLACE FUNCTION pgconductor.load_step(
-    execution_id uuid,
-    key text
-) RETURNS jsonb
-LANGUAGE sql
-STABLE
-SET search_path TO ''
-AS $$
-    SELECT jsonb_build_object('result', result) FROM pgconductor.steps
-    WHERE execution_id = load_step.execution_id AND key = load_step.key;
-$$;
-
--- Save a step result and optionally update execution run_at
-CREATE OR REPLACE FUNCTION pgconductor.save_step(
-    execution_id uuid,
-    key text,
-    result jsonb,
-    run_in_ms integer default null
-) RETURNS void
-LANGUAGE sql
-VOLATILE
-SET search_path TO ''
-AS $$
-    WITH inserted AS (
-        INSERT INTO pgconductor.steps (execution_id, key, result)
-        VALUES (save_step.execution_id, save_step.key, save_step.result)
-        ON CONFLICT (execution_id, key) DO NOTHING
-        RETURNING id
-    )
-    UPDATE pgconductor.executions
-    SET run_at = pgconductor.current_time() + (run_in_ms || ' milliseconds')::interval
-    WHERE id = save_step.execution_id
-      AND run_in_ms IS NOT NULL
-      AND EXISTS (SELECT 1 FROM inserted);
-$$;
-
--- TODO: use this table to manage concurrency, throttling and rate limiting
--- manage them when task is being updated/created
--- CREATE TABLE pgconductor.slots (
---     key text primary key,
---     task_key text not null,
---     locked_at timestamptz,
---     locked_by uuid
--- );
-
-CREATE OR REPLACE FUNCTION pgconductor.orchestrators_heartbeat(
-  orchestrator_id uuid,
-  version text,
-  migration_number integer
-)
-RETURNS boolean
-LANGUAGE sql
-VOLATILE
-SET search_path TO ''
-AS $function$
-WITH latest AS (
-  SELECT COALESCE(MAX(version), -1) AS db_version
-  FROM pgconductor.schema_migrations
-), upsert AS (
-  INSERT INTO pgconductor.orchestrators AS o (
-    id,
-    version,
-    migration_number,
-    last_heartbeat_at
-  )
-  VALUES (
-    orchestrators_heartbeat.orchestrator_id,
-    orchestrators_heartbeat.version,
-    orchestrators_heartbeat.migration_number,
-    pgconductor.current_time()
-  )
-  ON CONFLICT (id)
-  DO UPDATE
-  SET
-    last_heartbeat_at = pgconductor.current_time(),
-    version = EXCLUDED.version,
-    migration_number = EXCLUDED.migration_number
-  RETURNING shutdown_signal
-), marked AS (
-  UPDATE pgconductor.orchestrators
-  SET shutdown_signal = true
-  WHERE id = orchestrators_heartbeat.orchestrator_id
-    AND (SELECT db_version FROM latest) > orchestrators_heartbeat.migration_number
-  RETURNING shutdown_signal
-)
-SELECT COALESCE(
-  (SELECT shutdown_signal FROM marked),
-  CASE
-    WHEN (SELECT db_version FROM latest) > orchestrators_heartbeat.migration_number THEN true
-    ELSE (SELECT shutdown_signal FROM upsert)
-  END
-);
-$function$;
-
-CREATE OR REPLACE FUNCTION pgconductor.sweep_orchestrators(migration_number int)
- RETURNS void
- LANGUAGE sql
- VOLATILE
- SET search_path TO ''
-AS $function$
-UPDATE pgconductor.orchestrators
-SET shutdown_signal = true
-WHERE migration_number < sweep_orchestrators.migration_number;
-$function$;
-
-CREATE OR REPLACE FUNCTION pgconductor.recover_stale_orchestrators(max_age interval)
- RETURNS void
- LANGUAGE sql
- VOLATILE
- SET search_path TO ''
-AS $function$
-WITH expired AS (
-    DELETE FROM pgconductor.orchestrators o
-    WHERE o.last_heartbeat_at < pgconductor.current_time() - recover_stale_orchestrators.max_age
-    RETURNING o.id
-)
-UPDATE pgconductor.executions e
-SET
-  locked_by = NULL,
-  locked_at = NULL
-from expired
-WHERE e.locked_by = expired.id
-$function$
-;
-
-CREATE OR REPLACE FUNCTION pgconductor.orchestrator_shutdown(orchestrator_id uuid)
- RETURNS void
- LANGUAGE sql
- VOLATILE
- SET search_path TO ''
-AS $function$
-WITH deleted AS (
-    DELETE FROM pgconductor.orchestrators
-    WHERE id = orchestrator_shutdown.orchestrator_id
-    RETURNING id
-)
-UPDATE pgconductor.executions e
-SET
-  locked_by = NULL,
-  locked_at = NULL
-FROM deleted
-WHERE e.locked_by = deleted.id
-$function$
-;
+INSERT INTO pgconductor.queues (name) VALUES ('default');
 
 -- Trigger function to manage executions partitions per queue
 -- Automatically creates partition when queue is inserted
@@ -327,6 +176,10 @@ AS $function$
 DECLARE
   v_partition_name text;
 BEGIN
+  if old.name = 'default' or new.name = 'default' then
+    RAISE EXCEPTION 'Modifying or deleting the default queue is not allowed';
+  end if;
+
   IF TG_OP = 'INSERT' THEN
     v_partition_name := 'executions_' || replace(NEW.name, '-', '_');
 
@@ -367,277 +220,14 @@ CREATE TRIGGER manage_queue_partition_trigger
   FOR EACH ROW
   EXECUTE FUNCTION pgconductor.manage_queue_partition();
 
-INSERT INTO pgconductor.queues (name) VALUES ('default');
-
--- SELECT partman.create_parent(
---     p_parent_table => 'pgconductor.failed_executions',
---     p_control => 'failed_at',
---     p_type => 'native',
---     p_interval => '1 day',
---     p_premake => 7,
---     p_start_partition => current_date::timestamptz,
---     p_inherit_fk => true
--- );
-
--- SELECT partman.create_parent(
---     p_parent_table => 'pgconductor.completed_executions',
---     p_control => 'completed_at',
---     p_type => 'native',
---     p_interval => '1 day',
---     p_premake => 7,
---     p_start_partition => current_date::timestamptz,
---     p_inherit_fk => true
--- );
---
--- UPDATE partman.part_config
--- SET
---     retention = '7 days',
---     retention_keep_table = false,
---     retention_keep_index = false
--- WHERE parent_table IN (
---     'pgconductor.failed_executions',
---     'pgconductor.completed_executions'
--- );
-
-CREATE OR REPLACE FUNCTION pgconductor.get_executions(queue_name text, orchestrator_id uuid, batch_size integer default 100)
- RETURNS TABLE(id uuid, task_key text, payload jsonb, waiting_on_execution_id uuid, dedupe_key text, cron_expression text)
+-- Drop a queue (will trigger partition deletion via trigger)
+CREATE OR REPLACE FUNCTION pgconductor.drop_queue(queue_name text)
+ RETURNS void
  LANGUAGE sql
  VOLATILE
  SET search_path TO ''
 AS $function$
-WITH queue_tasks AS (
-  SELECT
-    t.key,
-    t.window_start,
-    t.window_end,
-    t.max_attempts
-  FROM pgconductor.tasks t
-  WHERE t.queue = get_executions.queue_name
-),
-
--- Only proceed if we're inside the active window (or no window defined)
-allowed AS (
-  SELECT
-    qt.key,
-    qt.max_attempts
-  FROM queue_tasks qt
-  WHERE
-    (qt.window_start IS NULL AND qt.window_end IS NULL)
-    OR (
-      pgconductor.current_time()::timetz >= qt.window_start
-      AND pgconductor.current_time()::timetz < qt.window_end
-    )
-),
-
-e AS (
-  SELECT
-    e.id,
-    e.task_key
-  FROM pgconductor.executions e
-  JOIN allowed a ON e.task_key = a.key
-  WHERE e.queue = get_executions.queue_name
-    AND e.attempts < a.max_attempts
-    AND e.locked_at IS NULL
-    AND e.run_at <= pgconductor.current_time()
-  ORDER BY e.priority ASC, e.run_at ASC
-  LIMIT get_executions.batch_size
-  FOR UPDATE SKIP LOCKED
-)
-
-UPDATE pgconductor.executions
-SET
-  attempts = executions.attempts + 1,
-  locked_by = get_executions.orchestrator_id,
-  locked_at = pgconductor.current_time()
-FROM e
-WHERE executions.id = e.id
-RETURNING
-  executions.id,
-  executions.task_key,
-  executions.payload,
-  executions.waiting_on_execution_id,
-  executions.dedupe_key,
-  executions.cron_expression;
-$function$
-;
-
--- Composite type for returning execution results
-create type pgconductor.execution_result as (
-    execution_id uuid,
-    status text, -- 'completed', 'failed', or 'released'
-    result jsonb,
-    error text
-);
-
--- Fixed Inngest-style backoff schedule (in seconds)
--- Returns backoff delay for given attempt number (1-indexed)
--- 15s, 30s, 1m, 2m, 5m, 10m, 20m, 40m, 1h, 2h
--- Attempts beyond the schedule use the last value (2h)
-CREATE OR REPLACE FUNCTION pgconductor.backoff_seconds(attempt integer)
- RETURNS integer
- LANGUAGE sql
- IMMUTABLE
-AS $function$
-  SELECT (ARRAY[15, 30, 60, 120, 300, 600, 1200, 2400, 3600, 7200])[LEAST(attempt, 10)];
-$function$;
-
-CREATE OR REPLACE FUNCTION pgconductor.return_executions(results pgconductor.execution_result[])
-RETURNS integer
-LANGUAGE sql
-VOLATILE
-SET search_path TO ''
-AS $function$
-  WITH results AS (
-    SELECT *
-    FROM unnest(return_executions.results) AS r
-  ),
-  -- move all completed executions to completed_executions
-  completed AS (
-    DELETE FROM pgconductor.executions e
-    USING results r
-    WHERE e.id = r.execution_id AND r.status = 'completed'
-    RETURNING e.*
-  ),
-  inserted_completed AS (
-    INSERT INTO pgconductor.completed_executions (
-      id, task_key, dedupe_key, created_at, failed_at, completed_at,
-      payload, run_at, locked_at, locked_by, attempts, last_error, priority
-    )
-    SELECT
-      id,
-      task_key,
-      dedupe_key,
-      created_at,
-      failed_at,
-      pgconductor.current_time(),
-      payload,
-      run_at,
-      locked_at,
-      locked_by,
-      attempts,
-      last_error,
-      priority
-    FROM completed
-    RETURNING id
-  ),
-  -- complete executions that were waiting on completed children
-  parent_steps_completed AS (
-    INSERT INTO pgconductor.steps (execution_id, key, result)
-    SELECT
-      parent_e.id,
-      parent_e.waiting_step_key,
-      r.result
-    FROM results r
-    JOIN pgconductor.executions parent_e ON parent_e.waiting_on_execution_id = r.execution_id
-    WHERE r.status = 'completed'
-    ON CONFLICT (execution_id, key) DO NOTHING
-    RETURNING execution_id
-  ),
-  woken_parents_completed AS (
-    UPDATE pgconductor.executions
-    SET
-      run_at = pgconductor.current_time(),
-      waiting_on_execution_id = NULL,
-      waiting_step_key = NULL
-    FROM parent_steps_completed
-    WHERE id = parent_steps_completed.execution_id
-    RETURNING id
-  ),
-  task AS (
-    SELECT
-      e.id AS execution_id,
-      w.max_attempts
-    FROM results r
-    JOIN pgconductor.executions e ON e.id = r.execution_id
-    JOIN pgconductor.tasks w ON w.key = e.task_key
-    WHERE r.status = 'failed'
-  ),
-  permanently_failed_children AS (
-    SELECT
-      r.execution_id,
-      r.error as child_error
-    FROM results r
-    JOIN pgconductor.executions e ON e.id = r.execution_id
-    JOIN pgconductor.tasks w ON w.key = e.task_key
-    WHERE r.status = 'failed' AND e.attempts >= w.max_attempts
-  ),
-  deleted_failed AS (
-    DELETE FROM pgconductor.executions e
-    WHERE (
-      -- Direct failures: execution permanently failed
-      e.id IN (SELECT execution_id FROM permanently_failed_children)
-      OR
-      -- CASCADE: parent waiting on permanently failed child
-      e.waiting_on_execution_id IN (SELECT execution_id FROM permanently_failed_children)
-    )
-    RETURNING
-      e.id,
-      e.task_key,
-      e.dedupe_key,
-      e.created_at,
-      e.payload,
-      e.run_at,
-      e.locked_at,
-      e.locked_by,
-      e.attempts,
-      e.priority,
-      COALESCE(
-        (SELECT error FROM results WHERE execution_id = e.id AND status = 'failed'),
-        (SELECT 'Child execution failed: ' || COALESCE(child_error, 'unknown error')
-         FROM permanently_failed_children
-         WHERE execution_id = e.waiting_on_execution_id)
-      ) as last_error
-  ),
-  retried AS (
-    UPDATE pgconductor.executions e
-    SET
-      last_error = COALESCE(
-        (SELECT error FROM results WHERE execution_id = e.id AND status = 'failed'),
-        'unknown error'
-      ),
-      run_at = GREATEST(pgconductor.current_time(), e.run_at)
-        + (pgconductor.backoff_seconds(e.attempts) * INTERVAL '1 second'),
-      locked_by = NULL,
-      locked_at = NULL
-    FROM task w
-    WHERE e.id = w.execution_id
-      AND e.attempts < w.max_attempts
-    RETURNING e.*
-  ),
-  inserted_failed AS (
-    INSERT INTO pgconductor.failed_executions (
-      id, task_key, dedupe_key, created_at, failed_at, completed_at,
-      payload, run_at, locked_at, locked_by, attempts, last_error, priority
-    )
-    SELECT
-      id,
-      task_key,
-      dedupe_key,
-      created_at,
-      pgconductor.current_time(),
-      NULL,
-      payload,
-      run_at,
-      locked_at,
-      locked_by,
-      attempts,
-      last_error,
-      priority
-    FROM deleted_failed
-    RETURNING id
-  ),
-  released AS (
-    UPDATE pgconductor.executions e
-    SET
-      attempts = GREATEST(e.attempts - 1, 0),
-      locked_by = NULL,
-      locked_at = NULL
-    FROM results r
-    WHERE e.id = r.execution_id
-      AND r.status = 'released'
-    RETURNING e.id
-  )
-  SELECT 1;
+  DELETE FROM pgconductor.queues WHERE name = drop_queue.queue_name;
 $function$;
 
 create type pgconductor.execution_spec as (
@@ -825,20 +415,5 @@ SELECT id FROM inserted_child;
 $function$
 ;
 
-CREATE OR REPLACE FUNCTION pgconductor.clear_waiting_state(
-  execution_id uuid
-)
-RETURNS void
-LANGUAGE sql
-VOLATILE
-SET search_path TO ''
-AS $function$
-  UPDATE pgconductor.executions
-  SET
-    waiting_on_execution_id = NULL,
-    waiting_step_key = NULL
-  WHERE id = clear_waiting_state.execution_id;
-$function$
-;
 `,
 });

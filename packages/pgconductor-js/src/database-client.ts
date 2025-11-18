@@ -1,4 +1,4 @@
-import postgres, { type Sql } from "postgres";
+import postgres, { type PendingQuery, type Sql } from "postgres";
 import * as assert from "./lib/assert";
 import { waitFor } from "./lib/wait-for";
 import type { Migration } from "./migration-store";
@@ -42,6 +42,7 @@ export interface Execution {
 
 export interface ExecutionResult {
 	execution_id: string;
+	task_key: string;
 	status: "completed" | "failed" | "released";
 	result?: Payload;
 	error?: string;
@@ -390,43 +391,27 @@ export class DatabaseClient {
 		orchestratorId: string,
 		queueName: string,
 		batchSize: number,
+		taskKeys: string[],
+		taskMaxAttempts: Record<string, number>,
 		signal: AbortSignal,
 	): Promise<Execution[]> {
 		return this.query(
 			async (sql) => {
+				const maxAttemptsCases = taskKeys.map((key) => {
+					const attempts = taskMaxAttempts[key];
+					assert.ok(attempts, `Missing max_attempts for task ${key}`);
+					return sql`when e.task_key = ${key} then ${attempts}`;
+				});
+
 				return await sql<Execution[]>`
-					with queue_tasks as (
-						select
-							t.key,
-							t.window_start,
-							t.window_end,
-							t.max_attempts
-						from pgconductor.tasks t
-						where t.queue = ${queueName}::text
-					),
-
-					-- Only proceed if we're inside the active window (or no window defined)
-					allowed as (
-						select
-							qt.key,
-							qt.max_attempts
-						from queue_tasks qt
-						where
-							(qt.window_start is null and qt.window_end is null)
-							or (
-								pgconductor.current_time()::timetz >= qt.window_start
-								and pgconductor.current_time()::timetz < qt.window_end
-							)
-					),
-
-					e as (
+					with e as (
 						select
 							e.id,
 							e.task_key
 						from pgconductor.executions e
-						join allowed a on e.task_key = a.key
 						where e.queue = ${queueName}::text
-							and e.attempts < a.max_attempts
+							and e.task_key = any(${taskKeys}::text[])
+							and e.attempts < (case ${maxAttemptsCases} end)::integer
 							and e.locked_at is null
 							and e.run_at <= pgconductor.current_time()
 						order by e.priority asc, e.run_at asc
@@ -456,65 +441,72 @@ export class DatabaseClient {
 
 	async returnExecutions(
 		results: ExecutionResult[],
+		taskMaxAttempts: Record<string, number>,
 		signal?: AbortSignal,
 	): Promise<void> {
+		if (results.length === 0) return;
+
+		// Group by status for dynamic query building
+		const completed = results.filter((r) => r.status === "completed");
+		const failed = results.filter((r) => r.status === "failed");
+		const released = results.filter((r) => r.status === "released");
+
 		return this.query(
 			async (sql) => {
-				const mappedResults = results.map((r) => ({
-					execution_id: r.execution_id,
-					status: r.status,
-					result: r.result || null,
-					error: r.error || null,
-				}));
+				const ctes: PendingQuery<any>[] = [];
 
-				await sql`
-					with results as (
-						select *
-						from jsonb_populate_recordset(null::pgconductor.execution_result, ${sql.json(mappedResults)}::jsonb)
-					),
-					-- move all completed executions to completed_executions
-					completed as (
+				// Build completed CTEs
+				if (completed.length > 0) {
+					const completedData = completed.map((r) => ({
+						execution_id: r.execution_id,
+						result: r.result || null,
+					}));
+
+					// Parse completed execution IDs and results from TypeScript
+					ctes.push(sql`completed_results as (
+						select
+							(r->>'execution_id')::uuid as execution_id,
+							(r->'result')::jsonb as result
+						from jsonb_array_elements(${sql.json(completedData)}::jsonb) r
+					)`);
+
+					// Delete completed executions from active queue
+					ctes.push(sql`completed as (
 						delete from pgconductor.executions e
-						using results r
-						where e.id = r.execution_id and r.status = 'completed'
+						using completed_results r
+						where e.id = r.execution_id
 						returning e.*
-					),
-					inserted_completed as (
+					)`);
+
+					// Archive completed executions for history/audit
+					ctes.push(sql`inserted_completed as (
 						insert into pgconductor.completed_executions (
 							id, task_key, dedupe_key, created_at, failed_at, completed_at,
-							payload, run_at, locked_at, locked_by, attempts, last_error, priority
+							payload, run_at, locked_at, locked_by, attempts, last_error, priority, queue
 						)
 						select
-							id,
-							task_key,
-							dedupe_key,
-							created_at,
-							failed_at,
+							id, task_key, dedupe_key, created_at, failed_at,
 							pgconductor.current_time(),
-							payload,
-							run_at,
-							locked_at,
-							locked_by,
-							attempts,
-							last_error,
-							priority
+							payload, run_at, locked_at, locked_by, attempts, last_error, priority, queue
 						from completed
 						returning id
-					),
-					-- complete executions that were waiting on completed children
-					parent_steps_completed as (
+					)`);
+
+					// If this was a child execution, save result as step in parent (ctx.invoke pattern)
+					ctes.push(sql`parent_steps_completed as (
 						insert into pgconductor.steps (execution_id, key, result)
 						select
 							parent_e.id,
 							parent_e.waiting_step_key,
 							r.result
-						from results r
+						from completed_results r
 						join pgconductor.executions parent_e on parent_e.waiting_on_execution_id = r.execution_id
-						where r.status = 'completed'
 						on conflict (execution_id, key) do nothing
 						returning execution_id
-					),
-					woken_parents_completed as (
+					)`);
+
+					// Wake up parent executions now that child is complete
+					ctes.push(sql`updated_parents_completed as (
 						update pgconductor.executions
 						set
 							run_at = pgconductor.current_time(),
@@ -523,103 +515,118 @@ export class DatabaseClient {
 						from parent_steps_completed
 						where id = parent_steps_completed.execution_id
 						returning id
-					),
-					task as (
+					)`);
+				}
+
+				// Build failed CTEs
+				if (failed.length > 0) {
+					const failedData = failed.map((r) => ({
+						execution_id: r.execution_id,
+						error: r.error || "unknown error",
+					}));
+
+					// Build dynamic CASE statement only for tasks that actually failed
+					const failedTaskKeys = [...new Set(failed.map((r) => r.task_key))];
+					const maxAttemptsCases = failedTaskKeys.map((key) => {
+						const attempts = taskMaxAttempts[key];
+						assert.ok(attempts, `Missing max_attempts for task ${key}`);
+						return sql`when e.task_key = ${key} then ${attempts}`;
+					});
+
+					// Parse failed execution IDs and errors from TypeScript
+					ctes.push(sql`failed_results as (
 						select
-							e.id as execution_id,
-							w.max_attempts
-						from results r
-						join pgconductor.executions e on e.id = r.execution_id
-						join pgconductor.tasks w on w.key = e.task_key
-						where r.status = 'failed'
-					),
-					permanently_failed_children as (
+							(r->>'execution_id')::uuid as execution_id,
+							r->>'error' as error
+						from jsonb_array_elements(${sql.json(failedData)}::jsonb) r
+					)`);
+
+					// Find executions that exhausted all retries (attempts >= max_attempts)
+					ctes.push(sql`permanently_failed_children as (
 						select
 							r.execution_id,
 							r.error as child_error
-						from results r
+						from failed_results r
 						join pgconductor.executions e on e.id = r.execution_id
-						join pgconductor.tasks w on w.key = e.task_key
-						where r.status = 'failed' and e.attempts >= w.max_attempts
-					),
-					deleted_failed as (
+						where e.attempts >= (case ${maxAttemptsCases} end)::integer
+					)`);
+
+					// Delete permanently failed executions + cascade to parents (child failure fails parent)
+					ctes.push(sql`deleted_failed as (
 						delete from pgconductor.executions e
 						where (
-							-- Direct failures: execution permanently failed
 							e.id in (select execution_id from permanently_failed_children)
 							or
-							-- CASCADE: parent waiting on permanently failed child
 							e.waiting_on_execution_id in (select execution_id from permanently_failed_children)
 						)
 						returning
-							e.id,
-							e.task_key,
-							e.dedupe_key,
-							e.created_at,
-							e.payload,
-							e.run_at,
-							e.locked_at,
-							e.locked_by,
-							e.attempts,
-							e.priority,
+							e.id, e.task_key, e.dedupe_key, e.created_at, e.payload,
+							e.run_at, e.locked_at, e.locked_by, e.attempts, e.priority, e.queue,
 							coalesce(
-								(select error from results where execution_id = e.id and status = 'failed'),
+								(select error from failed_results where execution_id = e.id),
 								(select 'Child execution failed: ' || coalesce(child_error, 'unknown error')
 									from permanently_failed_children
 									where execution_id = e.waiting_on_execution_id)
 							) as last_error
-					),
-					retried as (
+					)`);
+
+					// Schedule retry for failed executions that still have attempts left
+					ctes.push(sql`retried as (
 						update pgconductor.executions e
 						set
-							last_error = coalesce(
-								(select error from results where execution_id = e.id and status = 'failed'),
-								'unknown error'
-							),
+							last_error = coalesce(r.error, 'unknown error'),
 							run_at = greatest(pgconductor.current_time(), e.run_at)
 								+ ((array[15, 30, 60, 120, 300, 600, 1200, 2400, 3600, 7200])[least(e.attempts, 10)] * interval '1 second'),
 							locked_by = null,
 							locked_at = null
-						from task w
-						where e.id = w.execution_id
-							and e.attempts < w.max_attempts
+						from failed_results r
+						where e.id = r.execution_id
+							and e.attempts < (case ${maxAttemptsCases} end)::integer
 						returning e.*
-					),
-					inserted_failed as (
+					)`);
+
+					// Archive permanently failed executions for history/audit
+					ctes.push(sql`inserted_failed as (
 						insert into pgconductor.failed_executions (
 							id, task_key, dedupe_key, created_at, failed_at, completed_at,
-							payload, run_at, locked_at, locked_by, attempts, last_error, priority
+							payload, run_at, locked_at, locked_by, attempts, last_error, priority, queue
 						)
 						select
-							id,
-							task_key,
-							dedupe_key,
-							created_at,
+							id, task_key, dedupe_key, created_at,
 							pgconductor.current_time(),
 							null,
-							payload,
-							run_at,
-							locked_at,
-							locked_by,
-							attempts,
-							last_error,
-							priority
+							payload, run_at, locked_at, locked_by, attempts, last_error, priority, queue
 						from deleted_failed
 						returning id
-					),
-					released as (
-						update pgconductor.executions e
+					)`);
+				}
+
+				// Build released CTEs
+				if (released.length > 0) {
+					const releasedIds = released.map((r) => r.execution_id);
+
+					// Release execution back to queue (hangup case: sleep/invoke/checkpoint)
+					ctes.push(sql`updated_released as (
+						update pgconductor.executions
 						set
-							attempts = greatest(e.attempts - 1, 0),
+							attempts = greatest(attempts - 1, 0),
 							locked_by = null,
 							locked_at = null
-						from results r
-						where e.id = r.execution_id
-							and r.status = 'released'
-						returning e.id
-					)
-					select 1
-				`;
+						where id = any(${sql.array(releasedIds)}::uuid[])
+						returning id
+					)`);
+				}
+
+				assert.ok(
+					ctes.length,
+					"At least one CTE should be present in returnExecutions",
+				);
+
+				const combined = ctes.reduce((acc, cte, i) =>
+					i === 0 ? cte : sql`${acc}, ${cte}`,
+				);
+
+				await sql`with ${combined} select 1`;
 			},
 			{ label: "returnExecutions", signal },
 		);
@@ -750,19 +757,28 @@ export class DatabaseClient {
 	): Promise<void> {
 		return this.query(
 			async (sql) => {
-				await sql`
-					with inserted as (
+				if (runAtMs) {
+					// Sleep case: insert step and update run_at
+					await sql`
+						with inserted as (
+							insert into pgconductor.steps (execution_id, key, result)
+							values (${executionId}::uuid, ${key}::text, ${sql.json(result)}::jsonb)
+							on conflict (execution_id, key) do nothing
+							returning id
+						)
+						update pgconductor.executions
+						set run_at = pgconductor.current_time() + (${runAtMs}::integer || ' milliseconds')::interval
+						where id = ${executionId}::uuid
+							and exists (select 1 from inserted)
+					`;
+				} else {
+					// Regular step: just insert
+					await sql`
 						insert into pgconductor.steps (execution_id, key, result)
 						values (${executionId}::uuid, ${key}::text, ${sql.json(result)}::jsonb)
 						on conflict (execution_id, key) do nothing
-						returning id
-					)
-					update pgconductor.executions
-					set run_at = pgconductor.current_time() + (${runAtMs || null}::integer || ' milliseconds')::interval
-					where id = ${executionId}::uuid
-						and ${runAtMs || null}::integer is not null
-						and exists (select 1 from inserted)
-				`;
+					`;
+				}
 			},
 			{ label: "saveStep", signal },
 		);

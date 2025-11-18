@@ -165,12 +165,37 @@ export class Worker {
 			"orchestratorId must be set when starting the pipeline",
 		);
 
+		// Pre-compute task metadata once
+		const allTasks = Array.from(this.tasks.values());
+		const taskMaxAttempts: Record<string, number> = {};
+		for (const task of allTasks) {
+			taskMaxAttempts[task.name] = task.maxAttempts || 3;
+		}
+
 		while (!this.signal?.aborted) {
 			try {
+				// Filter tasks based on time windows (if any)
+				const now = new Date();
+				const allowedTaskKeys = allTasks
+					.filter((task) => {
+						if (!task.window) return true;
+						const [start, end] = task.window;
+						const currentTime = now.toTimeString().slice(0, 8);
+						return currentTime >= start && currentTime < end;
+					})
+					.map((t) => t.name);
+
+				if (allowedTaskKeys.length === 0) {
+					await waitFor(this.pollIntervalMs, { signal: this.signal });
+					continue;
+				}
+
 				const executions = await this.db.getExecutions(
 					this.orchestratorId,
 					this.queueName,
 					this.fetchBatchSize,
+					allowedTaskKeys,
+					taskMaxAttempts,
 					this.signal,
 				);
 
@@ -205,6 +230,7 @@ export class Worker {
 				if (!task) {
 					return {
 						execution_id: exec.id,
+						task_key: exec.task_key,
 						status: "failed",
 						error: `Task not found: ${exec.task_key}`,
 					} as const;
@@ -244,18 +270,21 @@ export class Worker {
 					if (output === HANGUP) {
 						return {
 							execution_id: exec.id,
+							task_key: exec.task_key,
 							status: "released",
 						} as const;
 					}
 
 					return {
 						execution_id: exec.id,
+						task_key: exec.task_key,
 						status: "completed",
 						result: output,
 					} as const;
 				} catch (err) {
 					return {
 						execution_id: exec.id,
+						task_key: exec.task_key,
 						status: "failed",
 						// todo: properly serialize errors
 						error: (err as Error).message,
@@ -295,6 +324,12 @@ export class Worker {
 		let buffer: ExecutionResult[] = [];
 		let flushTimer: Timer | null = null;
 
+		// Pre-compute task metadata once
+		const taskMaxAttempts: Record<string, number> = {};
+		for (const task of this.tasks.values()) {
+			taskMaxAttempts[task.name] = task.maxAttempts || 3;
+		}
+
 		const flushNow = async (isCleanup = false) => {
 			if (buffer.length === 0) return;
 
@@ -309,6 +344,7 @@ export class Worker {
 			try {
 				await this.db.returnExecutions(
 					batch,
+					taskMaxAttempts,
 					isCleanup ? undefined : this.signal,
 				);
 			} catch (err) {
