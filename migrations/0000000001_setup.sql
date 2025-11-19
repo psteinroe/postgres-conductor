@@ -92,24 +92,6 @@ CREATE TABLE pgconductor.executions (
     unique (task_key, dedupe_key, queue)
 ) PARTITION BY LIST (queue);
 
-CREATE TABLE pgconductor.failed_executions (
-    LIKE pgconductor.executions INCLUDING DEFAULTS INCLUDING GENERATED INCLUDING CONSTRAINTS EXCLUDING INDEXES,
-    PRIMARY KEY (failed_at, id)
-) PARTITION BY RANGE (failed_at);
-
-CREATE TABLE pgconductor.completed_executions (
-    LIKE pgconductor.executions INCLUDING DEFAULTS INCLUDING GENERATED INCLUDING CONSTRAINTS EXCLUDING INDEXES,
-    PRIMARY KEY (completed_at, id)
-) PARTITION BY RANGE (completed_at);
-
--- todo: this will be managed by pg_partman or a cron job in the future
-CREATE TABLE pgconductor.failed_executions_default PARTITION OF pgconductor.failed_executions
-    FOR VALUES FROM (MINVALUE) TO (MAXVALUE);
-
--- todo: this will be managed by pg_partman or a cron job in the future
-CREATE TABLE pgconductor.completed_executions_default PARTITION OF pgconductor.completed_executions
-    FOR VALUES FROM (MINVALUE) TO (MAXVALUE);
-
 CREATE TABLE pgconductor.tasks (
     key text primary key,
 

@@ -3,6 +3,7 @@ import * as assert from "./lib/assert";
 import { waitFor } from "./lib/wait-for";
 import type { Migration } from "./migration-store";
 import type { TaskConfiguration } from "./task";
+import { QueryBuilder } from "./query-builder";
 
 export type JsonValue =
 	| string
@@ -104,6 +105,7 @@ type ErrorWithOptionalCode = Error & { code?: string };
 
 export class DatabaseClient {
 	private readonly sql: Sql;
+	private readonly builder: QueryBuilder;
 	private readonly ownsSql: boolean;
 
 	constructor(options: DatabaseClientOptions) {
@@ -118,6 +120,8 @@ export class DatabaseClient {
 				"DatabaseClient requires either a connectionString or an existing postgres instance",
 			);
 		}
+
+		this.builder = new QueryBuilder(this.sql);
 	}
 
 	async close(): Promise<void> {
@@ -126,7 +130,9 @@ export class DatabaseClient {
 	}
 
 	private async query<T>(
-		fn: (sql: Sql) => Promise<T>,
+		queryOrCallback:
+			| PendingQuery<T extends readonly postgres.MaybeRow[] ? T : never>
+			| ((sql: Sql) => Promise<T>),
 		options?: QueryOptions,
 	): Promise<T> {
 		let attempt = 0;
@@ -135,7 +141,10 @@ export class DatabaseClient {
 				throw new Error("Operation aborted");
 			}
 			try {
-				return await fn(this.sql);
+				if (typeof queryOrCallback === "function") {
+					return await queryOrCallback(this.sql);
+				}
+				return await queryOrCallback;
 			} catch (error) {
 				const err = error as ErrorWithOptionalCode;
 				if (!this.isRetryableError(err)) {
@@ -176,78 +185,27 @@ export class DatabaseClient {
 		migrationNumber: number,
 		signal: AbortSignal,
 	): Promise<boolean> {
-		return this.query(
-			async (sql) => {
-				const result = await sql<[{ shutdown_signal: boolean }]>`
-					with latest as (
-						select coalesce(max(version), -1) as db_version
-						from pgconductor.schema_migrations
-					), upsert as (
-						insert into pgconductor.orchestrators as o (
-							id,
-							version,
-							migration_number,
-							last_heartbeat_at
-						)
-						values (
-							${orchestratorId}::uuid,
-							${version}::text,
-							${migrationNumber}::integer,
-							pgconductor.current_time()
-						)
-						on conflict (id)
-						do update
-						set
-							last_heartbeat_at = pgconductor.current_time(),
-							version = excluded.version,
-							migration_number = excluded.migration_number
-						returning shutdown_signal
-					), marked as (
-						update pgconductor.orchestrators
-						set shutdown_signal = true
-						where id = ${orchestratorId}::uuid
-							and (select db_version from latest) > ${migrationNumber}::integer
-						returning shutdown_signal
-					)
-					select coalesce(
-						(select shutdown_signal from marked),
-						case
-							when (select db_version from latest) > ${migrationNumber}::integer then true
-							else (select shutdown_signal from upsert)
-						end
-					) as shutdown_signal
-				`;
-
-				const row = result[0];
-
-				assert.ok(row, "No result returned from orchestrators_heartbeat");
-
-				return row.shutdown_signal;
-			},
+		const result = await this.query(
+			this.builder.buildOrchestratorHeartbeat(
+				orchestratorId,
+				version,
+				migrationNumber,
+			),
 			{ label: "orchestratorHeartbeat", signal },
 		);
+
+		const row = result[0];
+		assert.ok(row, "No result returned from orchestrators_heartbeat");
+
+		return row.shutdown_signal;
 	}
 
 	async recoverStaleOrchestrators(
 		maxAge: string,
 		signal: AbortSignal,
 	): Promise<void> {
-		return this.query(
-			async (sql) => {
-				await sql`
-					with expired as (
-						delete from pgconductor.orchestrators o
-						where o.last_heartbeat_at < pgconductor.current_time() - ${maxAge}::interval
-						returning o.id
-					)
-					update pgconductor.executions e
-					set
-						locked_by = null,
-						locked_at = null
-					from expired
-					where e.locked_by = expired.id
-				`;
-			},
+		await this.query(
+			this.builder.buildRecoverStaleOrchestrators(maxAge),
 			{ label: "recoverStaleOrchestrators", signal },
 		);
 	}
@@ -256,14 +214,8 @@ export class DatabaseClient {
 		migrationNumber: number,
 		signal: AbortSignal,
 	): Promise<void> {
-		return this.query(
-			async (sql) => {
-				await sql`
-					update pgconductor.orchestrators
-					set shutdown_signal = true
-					where migration_number < ${migrationNumber}::integer
-				`;
-			},
+		await this.query(
+			this.builder.buildSweepOrchestrators(migrationNumber),
 			{ label: "sweepOrchestrators", signal },
 		);
 	}
@@ -274,24 +226,19 @@ export class DatabaseClient {
 	 * Returns the highest migration version from schema_migrations table
 	 */
 	async getInstalledMigrationNumber(signal: AbortSignal): Promise<number> {
-		return this.query(
-			async (sql) => {
-				try {
-					const result = await sql<{ version: number | null }[]>`
-					select max(version) as version
-					from pgconductor.schema_migrations
-				`;
-					return result[0]?.version || -1;
-				} catch (err) {
-					const pgErr = err as { code?: string };
-					if (pgErr?.code === "42P01" || pgErr?.code === "3F000") {
-						return -1;
-					}
-					throw err;
-				}
-			},
-			{ label: "getInstalledVersion", signal },
-		);
+		try {
+			const result = await this.query(
+				this.builder.buildGetInstalledMigrationNumber(),
+				{ label: "getInstalledVersion", signal },
+			);
+			return result[0]?.version || -1;
+		} catch (err) {
+			const pgErr = err as { code?: string };
+			if (pgErr?.code === "42P01" || pgErr?.code === "3F000") {
+				return -1;
+			}
+			throw err;
+		}
 	}
 
 	async applyMigration(
@@ -302,8 +249,8 @@ export class DatabaseClient {
 			async (sql) => {
 				return sql.begin(async (tx) => {
 					const lockResult = await tx<{ locked: boolean }[]>`
-					select pg_try_advisory_xact_lock(hashtext('pgconductor:migrations')) as locked
-				`;
+						select pg_try_advisory_xact_lock(hashtext('pgconductor:migrations')) as locked
+					`;
 
 					if (!lockResult[0]?.locked) {
 						return "busy" as const;
@@ -313,12 +260,12 @@ export class DatabaseClient {
 						migration.version > 0
 							? (
 									await tx<{ exists: boolean }[]>`
-					select exists (
-						select 1
-						from pgconductor.schema_migrations
-						where version = ${migration.version}
-					) as exists
-				`
+						select exists (
+							select 1
+							from pgconductor.schema_migrations
+							where version = ${migration.version}
+						) as exists
+					`
 								).shift()?.exists
 							: false;
 
@@ -328,9 +275,9 @@ export class DatabaseClient {
 
 					await tx.unsafe(migration.sql);
 					await tx`
-					insert into pgconductor.schema_migrations (version, name, breaking)
-					values (${migration.version}, ${migration.name}, ${migration.breaking})
-				`;
+						insert into pgconductor.schema_migrations (version, name, breaking)
+						values (${migration.version}, ${migration.name}, ${migration.breaking})
+					`;
 
 					return "applied" as const;
 				});
@@ -343,48 +290,27 @@ export class DatabaseClient {
 		version: number,
 		signal: AbortSignal,
 	): Promise<number> {
-		return this.query(
-			async (sql) => {
-				try {
-					const result = await sql<{ count: number }[]>`
-					select count(*) as count
-					from pgconductor.orchestrators
-					where migration_number < ${version}::integer
-					  and shutdown_signal = false
-				`;
-					return Number(result[0]?.count || 0);
-				} catch (err) {
-					const pgErr = err as { code?: string };
-					if (pgErr?.code === "42P01") {
-						return 0;
-					}
-					throw err;
-				}
-			},
-			{ label: "countActiveOrchestratorsBelow", signal },
-		);
+		try {
+			const result = await this.query(
+				this.builder.buildCountActiveOrchestratorsBelow(version),
+				{ label: "countActiveOrchestratorsBelow", signal },
+			);
+			return Number(result[0]?.count || 0);
+		} catch (err) {
+			const pgErr = err as { code?: string };
+			if (pgErr?.code === "42P01") {
+				return 0;
+			}
+			throw err;
+		}
 	}
 
 	async orchestratorShutdown(
 		orchestratorId: string,
 		signal: AbortSignal,
 	): Promise<void> {
-		return this.query(
-			async (sql) => {
-				await sql`
-					with deleted as (
-						delete from pgconductor.orchestrators
-						where id = ${orchestratorId}::uuid
-						returning id
-					)
-					update pgconductor.executions e
-					set
-						locked_by = null,
-						locked_at = null
-					from deleted
-					where e.locked_by = deleted.id
-				`;
-			},
+		await this.query(
+			this.builder.buildOrchestratorShutdown(orchestratorId),
 			{ label: "orchestratorShutdown", signal },
 		);
 	}
@@ -398,48 +324,13 @@ export class DatabaseClient {
 		signal: AbortSignal,
 	): Promise<Execution[]> {
 		return this.query(
-			async (sql) => {
-				const maxAttemptsCases = taskKeys.map((key) => {
-					const attempts = taskMaxAttempts[key];
-					assert.ok(attempts, `Missing max_attempts for task ${key}`);
-					return sql`when e.task_key = ${key} then ${attempts}`;
-				});
-
-				return await sql<Execution[]>`
-					with e as (
-						select
-							e.id,
-							e.task_key
-						from pgconductor.executions e
-						where e.queue = ${queueName}::text
-							and e.task_key = any(${taskKeys}::text[])
-							and e.attempts < (case ${maxAttemptsCases} end)::integer
-							and e.locked_at is null
-							and e.run_at <= pgconductor.current_time()
-							and e.completed_at is null
-							and e.failed_at is null
-						order by e.priority asc, e.run_at asc
-						limit ${batchSize}::integer
-						for update skip locked
-					)
-
-					update pgconductor.executions
-					set
-						attempts = executions.attempts + 1,
-						locked_by = ${orchestratorId}::uuid,
-						locked_at = pgconductor.current_time()
-					from e
-					where executions.id = e.id
-					returning
-						executions.id,
-						executions.task_key,
-						executions.queue,
-						executions.payload,
-						executions.waiting_on_execution_id,
-						executions.dedupe_key,
-						executions.cron_expression
-				`;
-			},
+			this.builder.buildGetExecutions(
+				orchestratorId,
+				queueName,
+				batchSize,
+				taskKeys,
+				taskMaxAttempts,
+			),
 			{ label: "getExecutions", signal },
 		);
 	}
@@ -451,271 +342,16 @@ export class DatabaseClient {
 		taskRemoveOnFail: Record<string, boolean>,
 		signal?: AbortSignal,
 	): Promise<void> {
-		if (results.length === 0) return;
-
-		// Group by status and retention policy
-		const completed = results.filter((r) => r.status === "completed");
-		const completedToDelete = completed.filter(
-			(r) => taskRemoveOnComplete[r.task_key] === true,
-		);
-		const completedToKeep = completed.filter(
-			(r) => taskRemoveOnComplete[r.task_key] !== true,
+		const query = this.builder.buildReturnExecutions(
+			results,
+			taskMaxAttempts,
+			taskRemoveOnComplete,
+			taskRemoveOnFail,
 		);
 
-		const failed = results.filter((r) => r.status === "failed");
-		const released = results.filter((r) => r.status === "released");
+		if (!query) return;
 
-		return this.query(
-			async (sql) => {
-				const ctes: PendingQuery<any>[] = [];
-
-				// Handle completed executions that should be deleted immediately
-				if (completedToDelete.length > 0) {
-					const completedData = completedToDelete.map((r) => ({
-						execution_id: r.execution_id,
-						result: r.result || null,
-					}));
-
-					// Parse completed execution IDs from TypeScript
-					ctes.push(sql`completed_delete_results as (
-						select
-							(r->>'execution_id')::uuid as execution_id,
-							(r->'result')::jsonb as result
-						from jsonb_array_elements(${sql.json(completedData)}::jsonb) r
-					)`);
-
-					// Save result as step in parent (ctx.invoke pattern) before deleting
-					ctes.push(sql`parent_steps_completed_delete as (
-						insert into pgconductor.steps (execution_id, queue, key, result)
-						select
-							parent_e.id,
-							parent_e.queue,
-							parent_e.waiting_step_key,
-							r.result
-						from completed_delete_results r
-						join pgconductor.executions parent_e on parent_e.waiting_on_execution_id = r.execution_id
-						on conflict (execution_id, key) do nothing
-						returning execution_id
-					)`);
-
-					// Wake up parent executions
-					ctes.push(sql`updated_parents_completed_delete as (
-						update pgconductor.executions
-						set
-							run_at = pgconductor.current_time(),
-							waiting_on_execution_id = null,
-							waiting_step_key = null
-						from parent_steps_completed_delete
-						where id = parent_steps_completed_delete.execution_id
-						returning id
-					)`);
-
-					// Delete completed executions
-					ctes.push(sql`deleted_completed as (
-						delete from pgconductor.executions
-						where id in (select execution_id from completed_delete_results)
-						returning id
-					)`);
-				}
-
-				// Handle completed executions that should be kept (update status)
-				if (completedToKeep.length > 0) {
-					const completedData = completedToKeep.map((r) => ({
-						execution_id: r.execution_id,
-						result: r.result || null,
-					}));
-
-					// Parse completed execution IDs from TypeScript
-					ctes.push(sql`completed_keep_results as (
-						select
-							(r->>'execution_id')::uuid as execution_id,
-							(r->'result')::jsonb as result
-						from jsonb_array_elements(${sql.json(completedData)}::jsonb) r
-					)`);
-
-					// Update executions to mark as completed (keep in table)
-					ctes.push(sql`updated_completed as (
-						update pgconductor.executions e
-						set
-							completed_at = pgconductor.current_time(),
-							locked_by = null,
-							locked_at = null
-						from completed_keep_results r
-						where e.id = r.execution_id
-						returning e.id
-					)`);
-
-					// Save result as step in parent (ctx.invoke pattern)
-					ctes.push(sql`parent_steps_completed_keep as (
-						insert into pgconductor.steps (execution_id, queue, key, result)
-						select
-							parent_e.id,
-							parent_e.queue,
-							parent_e.waiting_step_key,
-							r.result
-						from completed_keep_results r
-						join pgconductor.executions parent_e on parent_e.waiting_on_execution_id = r.execution_id
-						on conflict (execution_id, key) do nothing
-						returning execution_id
-					)`);
-
-					// Wake up parent executions
-					ctes.push(sql`updated_parents_completed_keep as (
-						update pgconductor.executions
-						set
-							run_at = pgconductor.current_time(),
-							waiting_on_execution_id = null,
-							waiting_step_key = null
-						from parent_steps_completed_keep
-						where id = parent_steps_completed_keep.execution_id
-						returning id
-					)`);
-				}
-
-				// Build removeOnFail cases for ALL tasks (not just failed ones)
-				// This is needed because parents may fail due to cascade from child failures
-				const allTaskKeys = Object.keys(taskRemoveOnFail);
-				const allRemoveOnFailCases = allTaskKeys.map((key) => {
-					const remove = taskRemoveOnFail[key] === true;
-					return sql`when e.task_key = ${key} then ${remove}`;
-				});
-
-				// Handle failed executions
-				if (failed.length > 0) {
-					const failedData = failed.map((r) => ({
-						execution_id: r.execution_id,
-						error: r.error || "unknown error",
-					}));
-
-					// Build dynamic CASE statement only for tasks that actually failed
-					const failedTaskKeys = [...new Set(failed.map((r) => r.task_key))];
-					const maxAttemptsCases = failedTaskKeys.map((key) => {
-						const attempts = taskMaxAttempts[key];
-						assert.ok(attempts, `Missing max_attempts for task ${key}`);
-						return sql`when e.task_key = ${key} then ${attempts}`;
-					});
-
-					//Build dynamic CASE statement for removeOnFail
-					const removeOnFailCases = failedTaskKeys.map((key) => {
-						const remove = taskRemoveOnFail[key] === true;
-						return sql`when e.task_key = ${key} then ${remove}`;
-					});
-
-					// Parse failed execution IDs and errors from TypeScript
-					ctes.push(sql`failed_results as (
-						select
-							(r->>'execution_id')::uuid as execution_id,
-							r->>'error' as error
-						from jsonb_array_elements(${sql.json(failedData)}::jsonb) r
-					)`);
-
-					// Find executions that exhausted all retries (attempts >= max_attempts)
-					ctes.push(sql`permanently_failed_children as (
-						select
-							r.execution_id,
-							r.error as child_error,
-							(case ${removeOnFailCases} end)::boolean as should_remove
-						from failed_results r
-						join pgconductor.executions e on e.id = r.execution_id
-						where e.attempts >= (case ${maxAttemptsCases} end)::integer
-					)`);
-
-					// Delete permanently failed children (where removeOnFail=true)
-					// Also delete parents waiting on them where parent's removeOnFail=true
-					ctes.push(sql`deleted_failed as (
-						delete from pgconductor.executions e
-						where (
-							e.id in (select execution_id from permanently_failed_children where should_remove)
-							or
-							(
-								e.waiting_on_execution_id in (select execution_id from permanently_failed_children)
-								and (case ${allRemoveOnFailCases} else false end)::boolean = true
-							)
-						)
-						returning
-							e.id, e.task_key, e.last_error,
-							coalesce(
-								(select error from failed_results where execution_id = e.id),
-								(select 'Child execution failed: ' || coalesce(child_error, 'unknown error')
-									from permanently_failed_children
-									where execution_id = e.waiting_on_execution_id)
-							) as error
-					)`);
-
-					// Update permanently failed executions where removeOnFail=false (keep in table)
-					ctes.push(sql`updated_failed as (
-						update pgconductor.executions e
-						set
-							failed_at = pgconductor.current_time(),
-							last_error = coalesce(r.error, 'unknown error'),
-							locked_by = null,
-							locked_at = null
-						from permanently_failed_children p, failed_results r
-						where e.id = p.execution_id
-							and e.id = r.execution_id
-							and p.should_remove = false
-						returning e.id
-					)`);
-
-					// Mark parent executions as failed when child fails permanently
-					// Only for parents where removeOnFail=false (keep in table)
-					ctes.push(sql`updated_failed_parents as (
-						update pgconductor.executions e
-						set
-							failed_at = pgconductor.current_time(),
-							last_error = 'Child execution failed: ' || coalesce(p.child_error, 'unknown error'),
-							waiting_on_execution_id = null,
-							waiting_step_key = null,
-							locked_by = null,
-							locked_at = null
-						from permanently_failed_children p
-						where e.waiting_on_execution_id = p.execution_id
-							and (case ${allRemoveOnFailCases} else false end)::boolean = false
-						returning e.id
-					)`);
-
-					// Schedule retry for failed executions that still have attempts left
-					ctes.push(sql`retried as (
-						update pgconductor.executions e
-						set
-							last_error = coalesce(r.error, 'unknown error'),
-							run_at = greatest(pgconductor.current_time(), e.run_at)
-								+ ((array[15, 30, 60, 120, 300, 600, 1200, 2400, 3600, 7200])[least(e.attempts, 10)] * interval '1 second'),
-							locked_by = null,
-							locked_at = null
-						from failed_results r
-						where e.id = r.execution_id
-							and e.attempts < (case ${maxAttemptsCases} end)::integer
-						returning e.id
-					)`);
-				}
-
-				// Handle released executions
-				if (released.length > 0) {
-					const releasedIds = released.map((r) => r.execution_id);
-
-					// Release execution back to queue (hangup case: sleep/invoke/checkpoint)
-					ctes.push(sql`updated_released as (
-						update pgconductor.executions
-						set
-							attempts = greatest(attempts - 1, 0),
-							locked_by = null,
-							locked_at = null
-						where id = any(${sql.array(releasedIds)}::uuid[])
-						returning id
-					)`);
-				}
-
-				if (ctes.length === 0) return;
-
-				const combined = ctes.reduce((acc, cte, i) =>
-					i === 0 ? cte : sql`${acc}, ${cte}`,
-				);
-
-				await sql`with ${combined} select 1`;
-			},
-			{ label: "returnExecutions", signal },
-		);
+		await this.query(query, { label: "returnExecutions", signal });
 	}
 
 	async removeExecutions(
@@ -727,68 +363,21 @@ export class DatabaseClient {
 		batchSize: number,
 		signal?: AbortSignal,
 	): Promise<boolean> {
-		return this.query(
-			async (sql) => {
-				// Only process tasks with retention days (not immediate deletion)
-				const tasksWithRetention = tasks.filter(
-					(t) =>
-						(typeof t.removeOnComplete === "object" && t.removeOnComplete.days) ||
-						(typeof t.removeOnFail === "object" && t.removeOnFail.days),
-				);
-
-				if (tasksWithRetention.length === 0) {
-					return false;
-				}
-
-				// Build WHERE clauses for each task's retention policy
-				const conditions = tasksWithRetention.flatMap((task) => {
-					const clauses = [];
-					if (
-						typeof task.removeOnComplete === "object" &&
-						task.removeOnComplete.days
-					) {
-						clauses.push(
-							sql`(task_key = ${task.name} and completed_at is not null and completed_at < pgconductor.current_time() - ${task.removeOnComplete.days} * interval '1 day')`,
-						);
-					}
-					if (typeof task.removeOnFail === "object" && task.removeOnFail.days) {
-						clauses.push(
-							sql`(task_key = ${task.name} and failed_at is not null and failed_at < pgconductor.current_time() - ${task.removeOnFail.days} * interval '1 day')`,
-						);
-					}
-					return clauses;
-				});
-
-				if (conditions.length === 0) {
-					return false;
-				}
-
-				const combinedConditions = conditions.reduce(
-					(acc, cond, i) => (i === 0 ? cond : sql`${acc} or ${cond}`),
-				);
-
-				// Delete old completed/failed executions from main executions table
-				const result = await sql<{ deleted_count: number }[]>`
-					with batch as (
-						select id from pgconductor.executions
-						where queue = ${queueName}
-							and (${combinedConditions})
-						limit ${batchSize}
-					),
-					deleted as (
-						delete from pgconductor.executions
-						using batch
-						where executions.id = batch.id
-						returning 1
-					)
-					select count(*)::int as deleted_count from deleted
-				`;
-
-				const deletedCount = result[0]?.deleted_count ?? 0;
-				return deletedCount >= batchSize; // true if hit limit (hasMore)
-			},
-			{ label: "removeExecutions", signal },
+		const query = this.builder.buildRemoveExecutions(
+			queueName,
+			tasks,
+			batchSize,
 		);
+
+		if (!query) return false;
+
+		const result = await this.query(query, {
+			label: "removeExecutions",
+			signal,
+		});
+
+		const deletedCount = result[0]?.deleted_count ?? 0;
+		return deletedCount >= batchSize;
 	}
 
 	async registerWorker(
@@ -797,95 +386,29 @@ export class DatabaseClient {
 		cronSchedules: ExecutionSpec[],
 		signal?: AbortSignal,
 	): Promise<void> {
-		return this.query(
-			async (sql) => {
-				const taskSpecRows = taskSpecs.map((spec) => ({
-					key: spec.key,
-					queue: spec.queue || null,
-					max_attempts: spec.maxAttempts || null,
-					window_start: spec.window?.[0] || null,
-					window_end: spec.window?.[1] || null,
-				}));
-
-				const cronScheduleRows = cronSchedules.map((spec) => {
-					assert.ok(
-						spec.cron_expression,
-						"cron_expression is required for cron schedules",
-					);
-
-					return {
-						task_key: spec.task_key,
-						payload: spec.payload || null,
-						run_at: spec.run_at,
-						dedupe_key: spec.dedupe_key,
-						cron_expression: spec.cron_expression,
-					};
-				});
-
-				await sql`
-					select pgconductor.register_worker(
-						p_queue_name := ${queueName}::text,
-						p_task_specs := array(
-							select json_populate_recordset(null::pgconductor.task_spec, ${sql.json(taskSpecRows)}::json)::pgconductor.task_spec
-						),
-						p_cron_schedules := array(
-							select json_populate_recordset(null::pgconductor.execution_spec, ${sql.json(cronScheduleRows)}::json)::pgconductor.execution_spec
-						)
-					)
-				`;
-			},
+		await this.query(
+			this.builder.buildRegisterWorker(queueName, taskSpecs, cronSchedules),
 			{ label: "registerWorker", signal },
 		);
 	}
 
 	async invoke(spec: ExecutionSpec, signal?: AbortSignal): Promise<string> {
-		return this.query(
-			async (sql) => {
-				const result = await sql<[{ id: string }]>`
-				select pgconductor.invoke(
-					task_key := ${spec.task_key}::text,
-					payload := ${spec.payload ? sql.json(spec.payload) : null}::jsonb,
-					run_at := ${spec.run_at ? spec.run_at.toISOString() : null}::timestamptz,
-					dedupe_key := ${spec.dedupe_key || null}::text,
-					cron_expression := ${spec.cron_expression || null}::text,
-					priority := ${spec.priority || null}::integer,
-					parent_execution_id := ${spec.parent_execution_id || null}::uuid,
-					parent_step_key := ${spec.parent_step_key || null}::text,
-					parent_timeout_ms := ${spec.parent_timeout_ms || null}::integer
-				) as id
-			`;
-				return result[0]!.id;
-			},
-			{ label: "invoke", signal },
-		);
+		const result = await this.query(this.builder.buildInvoke(spec), {
+			label: "invoke",
+			signal,
+		});
+		return result[0]!.id;
 	}
 
 	async invokeBatch(
 		specs: ExecutionSpec[],
 		signal?: AbortSignal,
 	): Promise<string[]> {
-		const specsArray = specs.map((spec) => ({
-			task_key: spec.task_key,
-			payload: spec.payload || null,
-			run_at: spec.run_at,
-			dedupe_key: spec.dedupe_key,
-			cron_expression: spec.cron_expression || null,
-			priority: spec.priority,
-		}));
-
-		return this.query(
-			async (sql) => {
-				const result = await sql<{ id: string }[]>`
-				select id from pgconductor.invoke(
-					specs := array(
-						select json_populate_recordset(null::pgconductor.execution_spec, ${sql.json(specsArray)})
-					)
-				)
-			`;
-				return result.map((r) => r.id);
-			},
-			{ label: "invokeBatch", signal },
-		);
+		const result = await this.query(this.builder.buildInvokeBatch(specs), {
+			label: "invokeBatch",
+			signal,
+		});
+		return result.map((r) => r.id);
 	}
 
 	async loadStep(
@@ -893,20 +416,15 @@ export class DatabaseClient {
 		key: string,
 		signal?: AbortSignal,
 	): Promise<Payload | null | undefined> {
-		return this.query(
-			async (sql) => {
-				const rows = await sql<[{ result: Payload | null }]>`
-					select result from pgconductor.steps
-					where execution_id = ${executionId}::uuid and key = ${key}::text
-				`;
-
-				if (!rows[0]) {
-					return undefined;
-				}
-				return rows[0].result;
-			},
+		const rows = await this.query(
+			this.builder.buildLoadStep(executionId, key),
 			{ label: "loadStep", signal },
 		);
+
+		if (!rows[0]) {
+			return undefined;
+		}
+		return rows[0].result;
 	}
 
 	async saveStep(
@@ -917,31 +435,8 @@ export class DatabaseClient {
 		runAtMs?: number,
 		signal?: AbortSignal,
 	): Promise<void> {
-		return this.query(
-			async (sql) => {
-				if (runAtMs) {
-					// Sleep case: insert step and update run_at
-					await sql`
-						with inserted as (
-							insert into pgconductor.steps (execution_id, queue, key, result)
-							values (${executionId}::uuid, ${queue}::text, ${key}::text, ${sql.json(result)}::jsonb)
-							on conflict (execution_id, key) do nothing
-							returning id
-						)
-						update pgconductor.executions
-						set run_at = pgconductor.current_time() + (${runAtMs}::integer || ' milliseconds')::interval
-						where id = ${executionId}::uuid
-							and exists (select 1 from inserted)
-					`;
-				} else {
-					// Regular step: just insert
-					await sql`
-						insert into pgconductor.steps (execution_id, queue, key, result)
-						values (${executionId}::uuid, ${queue}::text, ${key}::text, ${sql.json(result)}::jsonb)
-						on conflict (execution_id, key) do nothing
-					`;
-				}
-			},
+		await this.query(
+			this.builder.buildSaveStep(executionId, queue, key, result, runAtMs),
 			{ label: "saveStep", signal },
 		);
 	}
@@ -950,18 +445,10 @@ export class DatabaseClient {
 		executionId: string,
 		signal?: AbortSignal,
 	): Promise<void> {
-		return this.query(
-			async (sql) => {
-				await sql`
-					update pgconductor.executions
-					set
-						waiting_on_execution_id = null,
-						waiting_step_key = null
-					where id = ${executionId}::uuid
-				`;
-			},
-			{ label: "clearWaitingState", signal },
-		);
+		await this.query(this.builder.buildClearWaitingState(executionId), {
+			label: "clearWaitingState",
+			signal,
+		});
 	}
 
 	/**
@@ -971,7 +458,7 @@ export class DatabaseClient {
 	 * IMPORTANT: Test database connection pool must have max: 1 for this to work.
 	 */
 	async setFakeTime(date: Date, signal?: AbortSignal): Promise<void> {
-		return this.query(
+		await this.query(
 			async (sql) => {
 				await sql.unsafe(`set pgconductor.fake_now = '${date.toISOString()}'`);
 			},
@@ -983,7 +470,7 @@ export class DatabaseClient {
 	 * Clear fake time, returning to real clock_timestamp().
 	 */
 	async clearFakeTime(signal?: AbortSignal): Promise<void> {
-		return this.query(
+		await this.query(
 			async (sql) => {
 				await sql.unsafe(`set pgconductor.fake_now = ''`);
 			},
