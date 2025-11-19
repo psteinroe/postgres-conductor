@@ -24,13 +24,11 @@ describe("Basic Task Execution", () => {
 			payload: z.object({ name: z.string() }),
 		});
 
-		const tasks = [taskDefinitions] as const;
-
 		const contextFn = mock((s: string) => `Hello ${s}`);
 
-		const conductor = new Conductor({
+		const conductor = Conductor.create({
 			sql: db.sql,
-			tasks,
+			tasks: [taskDefinitions],
 			context: {
 				contextFn,
 			},
@@ -50,7 +48,7 @@ describe("Basic Task Execution", () => {
 			},
 		);
 
-		const orchestrator = new Orchestrator({
+		const orchestrator = Orchestrator.create({
 			conductor,
 			tasks: [helloTask],
 		});
@@ -59,7 +57,7 @@ describe("Basic Task Execution", () => {
 
 		const stoppedPromise = orchestrator.stopped;
 
-		await conductor.invoke("hello-task", {
+		await conductor.invoke({ name: "hello-task" }, {
 			name: "World",
 		});
 

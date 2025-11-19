@@ -52,11 +52,10 @@ describe("Maintenance Task", () => {
 			payload: z.object({}),
 		});
 
-		const tasks = [taskDefinition] as const;
 
-		const conductor = new Conductor({
+		const conductor = Conductor.create({
 			sql: db.sql,
-			tasks,
+			tasks: [taskDefinition],
 			context: {},
 		});
 
@@ -71,7 +70,7 @@ describe("Maintenance Task", () => {
 			async () => {},
 		);
 
-		const orchestrator = new Orchestrator({
+		const orchestrator = Orchestrator.create({
 			conductor,
 			tasks: [reportTask],
 		});
@@ -84,7 +83,7 @@ describe("Maintenance Task", () => {
 		await db.client.setFakeTime(thirtyDaysAgo);
 
 		// Create old completed execution (30 days old)
-		const oldExecId = await conductor.invoke("report-task", {});
+		const oldExecId = await conductor.invoke({ name: "report-task" }, {});
 
 		// Complete the execution manually
 		await db.sql`
@@ -99,7 +98,7 @@ describe("Maintenance Task", () => {
 		await db.client.setFakeTime(fiveDaysAgo);
 
 		// Create recent completed execution (5 days old)
-		const recentExecId = await conductor.invoke("report-task", {});
+		const recentExecId = await conductor.invoke({ name: "report-task" }, {});
 
 		await db.sql`
 			UPDATE pgconductor.executions
@@ -112,7 +111,7 @@ describe("Maintenance Task", () => {
 
 		// Manually invoke maintenance task (internal task created by Worker)
 		// @ts-expect-error - maintenance task is not in the conductor's task list
-		await conductor.invoke("pgconductor.maintenance", {});
+		await conductor.invoke({ name: "pgconductor.maintenance" }, {});
 
 		// Wait for execution
 		await new Promise((r) => setTimeout(r, 1000));
@@ -143,11 +142,10 @@ describe("Maintenance Task", () => {
 			payload: z.object({}),
 		});
 
-		const tasks = [taskDefinition] as const;
 
-		const conductor = new Conductor({
+		const conductor = Conductor.create({
 			sql: db.sql,
-			tasks,
+			tasks: [taskDefinition],
 			context: {},
 		});
 
@@ -165,7 +163,7 @@ describe("Maintenance Task", () => {
 			},
 		);
 
-		const orchestrator = new Orchestrator({
+		const orchestrator = Orchestrator.create({
 			conductor,
 			tasks: [failingTask],
 			defaultWorker: {
@@ -182,7 +180,7 @@ describe("Maintenance Task", () => {
 		await db.client.setFakeTime(twentyDaysAgo);
 
 		// Create old failed execution (20 days ago)
-		const oldExecId = await conductor.invoke("failing-task", {});
+		const oldExecId = await conductor.invoke({ name: "failing-task" }, {});
 
 		// Wait for first execution to fail with old timestamp
 		await new Promise((r) => setTimeout(r, 1000));
@@ -193,7 +191,7 @@ describe("Maintenance Task", () => {
 		await db.client.setFakeTime(tenDaysAgo);
 
 		// Create recent failed execution (10 days ago)
-		const recentExecId = await conductor.invoke("failing-task", {});
+		const recentExecId = await conductor.invoke({ name: "failing-task" }, {});
 
 		// Wait for second execution to fail
 		await new Promise((r) => setTimeout(r, 1000));
@@ -212,7 +210,7 @@ describe("Maintenance Task", () => {
 
 		// Manually invoke maintenance task (internal task created by Worker)
 		// @ts-expect-error - maintenance task is not in the conductor's task list
-		await conductor.invoke("pgconductor.maintenance", {});
+		await conductor.invoke({ name: "pgconductor.maintenance" }, {});
 
 		// Wait for execution
 		await new Promise((r) => setTimeout(r, 1000));
@@ -247,11 +245,9 @@ describe("Maintenance Task", () => {
 			payload: z.object({}),
 		});
 
-		const tasks = [task1Definition, task2Definition] as const;
-
-		const conductor = new Conductor({
+		const conductor = Conductor.create({
 			sql: db.sql,
-			tasks,
+			tasks: [task1Definition, task2Definition],
 			context: {},
 		});
 
@@ -277,7 +273,7 @@ describe("Maintenance Task", () => {
 			async () => {},
 		);
 
-		const orchestrator = new Orchestrator({
+		const orchestrator = Orchestrator.create({
 			conductor,
 			tasks: [shortTask, longTask],
 		});
@@ -290,8 +286,8 @@ describe("Maintenance Task", () => {
 		await db.client.setFakeTime(tenDaysAgo);
 
 		// Create executions 10 days ago
-		const shortExecId = await conductor.invoke("short-retention", {});
-		const longExecId = await conductor.invoke("long-retention", {});
+		const shortExecId = await conductor.invoke({ name: "short-retention" }, {});
+		const longExecId = await conductor.invoke({ name: "long-retention" }, {});
 
 		// Complete both
 		await db.sql`
@@ -305,7 +301,7 @@ describe("Maintenance Task", () => {
 
 		// Manually invoke maintenance task (internal task created by Worker)
 		// @ts-expect-error - maintenance task is not in the conductor's task list
-		await conductor.invoke("pgconductor.maintenance", {});
+		await conductor.invoke({ name: "pgconductor.maintenance" }, {});
 
 		// Wait for execution
 		await new Promise((r) => setTimeout(r, 1000));
@@ -335,11 +331,10 @@ describe("Maintenance Task", () => {
 			payload: z.object({}),
 		});
 
-		const tasks = [taskDefinition] as const;
 
-		const conductor = new Conductor({
+		const conductor = Conductor.create({
 			sql: db.sql,
-			tasks,
+			tasks: [taskDefinition],
 			context: {},
 		});
 
@@ -353,7 +348,7 @@ describe("Maintenance Task", () => {
 			async () => {},
 		);
 
-		const orchestrator = new Orchestrator({
+		const orchestrator = Orchestrator.create({
 			conductor,
 			tasks: [batchTask],
 		});
@@ -368,7 +363,7 @@ describe("Maintenance Task", () => {
 		// Create 50 old completed executions
 		const execIds = [];
 		for (let i = 0; i < 50; i++) {
-			const id = await conductor.invoke("batch-task", {});
+			const id = await conductor.invoke({ name: "batch-task" }, {});
 			execIds.push(id);
 		}
 
@@ -384,7 +379,7 @@ describe("Maintenance Task", () => {
 
 		// Manually invoke maintenance task (internal task created by Worker)
 		// @ts-expect-error - maintenance task is not in the conductor's task list
-		await conductor.invoke("pgconductor.maintenance", {});
+		await conductor.invoke({ name: "pgconductor.maintenance" }, {});
 
 		// Wait for execution (may need multiple cycles for batching)
 		await new Promise((r) => setTimeout(r, 2000));
@@ -407,11 +402,10 @@ describe("Maintenance Task", () => {
 			payload: z.object({}),
 		});
 
-		const tasks = [taskDefinition] as const;
 
-		const conductor = new Conductor({
+		const conductor = Conductor.create({
 			sql: db.sql,
-			tasks,
+			tasks: [taskDefinition],
 			context: {},
 		});
 
@@ -425,7 +419,7 @@ describe("Maintenance Task", () => {
 			async () => {},
 		);
 
-		const orchestrator = new Orchestrator({
+		const orchestrator = Orchestrator.create({
 			conductor,
 			tasks: [keepTask],
 		});
@@ -438,7 +432,7 @@ describe("Maintenance Task", () => {
 		await db.client.setFakeTime(oneYearAgo);
 
 		// Create very old completed execution
-		const execId = await conductor.invoke("keep-forever", {});
+		const execId = await conductor.invoke({ name: "keep-forever" }, {});
 
 		await db.sql`
 			UPDATE pgconductor.executions
@@ -451,7 +445,7 @@ describe("Maintenance Task", () => {
 
 		// Manually invoke maintenance task (internal task created by Worker)
 		// @ts-expect-error - maintenance task is not in the conductor's task list
-		await conductor.invoke("pgconductor.maintenance", {});
+		await conductor.invoke({ name: "pgconductor.maintenance" }, {});
 
 		// Wait for execution
 		await new Promise((r) => setTimeout(r, 1000));

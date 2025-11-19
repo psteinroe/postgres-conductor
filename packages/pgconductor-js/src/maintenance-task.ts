@@ -24,8 +24,8 @@ export const createMaintenanceTask = <Queue extends string = "default">(
 	const jitterMinutes = hashToJitter(queue);
 
 	return new Task<
-		Queue,
 		"pgconductor.maintenance",
+		Queue,
 		object,
 		void,
 		{ db: DatabaseClient },

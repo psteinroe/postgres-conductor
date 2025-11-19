@@ -5,10 +5,11 @@ import {
 	type TaskConfiguration,
 	type AnyTask,
 	type TaskEventFromTriggers,
+	type ValidateTasksQueue,
 } from "./task";
 import type { TaskContext } from "./task-context";
 import {
-	type FindTaskByName,
+	type FindTaskByIdentifier,
 	type InferPayload,
 	type InferReturns,
 	type NonEmptyArray,
@@ -23,8 +24,37 @@ type ConnectionOptions =
 	| { connectionString: string; sql?: never }
 	| { sql: Sql; connectionString?: never };
 
+// Helper types to avoid repetition in createTask
+type ResolvedQueue<TDef extends { readonly queue?: string }> =
+	TDef["queue"] extends string ? TDef["queue"] : "default";
+
+type ResolvedTaskDef<
+	Tasks extends readonly TaskDefinition<string, any, any, string>[],
+	TDef extends { readonly name: string; readonly queue?: string },
+> = FindTaskByIdentifier<Tasks, TDef["name"], ResolvedQueue<TDef>>;
+
+type ResolvedPayload<
+	Tasks extends readonly TaskDefinition<string, any, any, string>[],
+	TDef extends { readonly name: string; readonly queue?: string },
+> = TDef["name"] extends TaskName<Tasks>
+	? InferPayload<ResolvedTaskDef<Tasks, TDef>>
+	: {};
+
+type ResolvedReturns<
+	Tasks extends readonly TaskDefinition<string, any, any, string>[],
+	TDef extends { readonly name: string; readonly queue?: string },
+> = TDef["name"] extends TaskName<Tasks>
+	? InferReturns<ResolvedTaskDef<Tasks, TDef>>
+	: void;
+
+type ResolvedEvent<
+	Tasks extends readonly TaskDefinition<string, any, any, string>[],
+	TDef extends { readonly name: string; readonly queue?: string },
+	TTriggers extends NonEmptyArray<Trigger> | Trigger,
+> = TaskEventFromTriggers<TTriggers, ResolvedPayload<Tasks, TDef>>;
+
 export type ConductorOptions<
-	Tasks extends readonly TaskDefinition<string, any, any>[],
+	Tasks extends readonly TaskDefinition<string, any, any, string>[],
 	ExtraContext extends object,
 > = ConnectionOptions & {
 	tasks: Tasks;
@@ -39,7 +69,7 @@ export type ConductorOptions<
 // similar to inngest client
 // exposes the main createTask methods and handles types
 export class Conductor<
-	Tasks extends readonly TaskDefinition<string, any, any>[],
+	Tasks extends readonly TaskDefinition<string, any, any, string>[],
 	ExtraContext extends object = {},
 > {
 	/**
@@ -48,7 +78,9 @@ export class Conductor<
 	 */
 	readonly db: DatabaseClient;
 
-	constructor(public readonly options: ConductorOptions<Tasks, ExtraContext>) {
+	private constructor(
+		public readonly options: ConductorOptions<Tasks, ExtraContext>,
+	) {
 		if ("sql" in options && options.sql) {
 			this.db = new DatabaseClient({ sql: options.sql });
 		} else if ("connectionString" in options && options.connectionString) {
@@ -62,83 +94,115 @@ export class Conductor<
 		}
 	}
 
-	createTask<
-		TName extends string,
-		TQueue extends string = "default",
-		TTriggers extends NonEmptyArray<Trigger> | Trigger = Trigger,
-		TPayload extends object = TName extends TaskName<Tasks>
-			? InferPayload<FindTaskByName<Tasks, TName>>
-			: {},
+	static create<
+		const TTasks extends readonly TaskDefinition<string, any, any, string>[],
+		TExtraContext extends object,
 	>(
-		definition: TaskConfiguration<TName, TQueue>,
-		triggers: ValidateTriggers<Tasks, TName, TTriggers>,
-		fn: (
-			event: TaskEventFromTriggers<TTriggers, TPayload>,
-			ctx: TaskContext & ExtraContext,
-		) => Promise<
-			TName extends TaskName<Tasks>
-				? InferReturns<FindTaskByName<Tasks, TName>>
-				: void
-		>,
-	): Task<
-		TQueue,
-		TName,
-		TPayload,
-		TName extends TaskName<Tasks>
-			? InferReturns<FindTaskByName<Tasks, TName>>
-			: void,
-		TaskContext & ExtraContext,
-		TaskEventFromTriggers<TTriggers, TPayload>
-	> {
-		return new Task(definition, triggers as TTriggers, fn);
+		options: ConnectionOptions & {
+			tasks: TTasks;
+			context: TExtraContext;
+		},
+	): Conductor<TTasks, TExtraContext> {
+		return new Conductor<TTasks, TExtraContext>(options);
 	}
 
-	createWorker(
-		queueName: string,
-		tasks: AnyTask[],
-		config?: Partial<WorkerConfig>,
-	): Worker {
-		return new Worker(queueName, tasks, this.db, config, this.options.context);
+	createTask<
+		const TDef extends { readonly name: string; readonly queue?: string },
+		const TTriggers extends NonEmptyArray<Trigger> | Trigger,
+	>(
+		definition: TDef,
+		triggers: ValidateTriggers<
+			Tasks,
+			TDef["name"],
+			TTriggers,
+			ResolvedQueue<TDef>
+		>,
+		fn: (
+			event: ResolvedEvent<Tasks, TDef, TTriggers>,
+			ctx: TaskContext<Tasks> & ExtraContext,
+		) => Promise<ResolvedReturns<Tasks, TDef>>,
+	): Task<
+		TDef["name"],
+		ResolvedQueue<TDef>,
+		ResolvedPayload<Tasks, TDef>,
+		ResolvedReturns<Tasks, TDef>,
+		TaskContext<Tasks> & ExtraContext,
+		ResolvedEvent<Tasks, TDef, TTriggers>
+	> {
+		return Task.create<
+			TDef["name"],
+			ResolvedQueue<TDef>,
+			ResolvedPayload<Tasks, TDef>,
+			ResolvedReturns<Tasks, TDef>,
+			TaskContext<Tasks> & ExtraContext,
+			ResolvedEvent<Tasks, TDef, TTriggers>
+		>(
+			definition as TaskConfiguration<TDef["name"], ResolvedQueue<TDef>>,
+			triggers as TTriggers,
+			fn,
+		);
+	}
+
+	createWorker<
+		const TQueue extends string,
+		const TTasks extends readonly Task<any, any, any, any, any, any>[],
+	>(options: {
+		queue: TQueue;
+		tasks: ValidateTasksQueue<TQueue, TTasks>;
+		config?: Partial<WorkerConfig>;
+	}): Worker<Tasks> {
+		return new Worker<Tasks>(
+			options.queue,
+			options.tasks as AnyTask[],
+			this.db,
+			options.config,
+			this.options.context,
+		);
 	}
 
 	async invoke<
-		TName extends TaskName<Tasks>,
-		TDef extends FindTaskByName<Tasks, TName>,
+		const TTask extends { readonly name: string; readonly queue?: string },
 	>(
-		task_key: TName,
-		payload: InferPayload<TDef>,
-		opts?: Omit<ExecutionSpec, "task_key" | "payload">,
+		task: TTask,
+		payload: InferPayload<
+			FindTaskByIdentifier<
+				Tasks,
+				TTask["name"],
+				TTask["queue"] extends string ? TTask["queue"] : "default"
+			>
+		>,
+		opts?: Omit<ExecutionSpec, "task_key" | "payload" | "queue">,
 	): Promise<string>;
 	async invoke<
-		TName extends TaskName<Tasks>,
-		TDef extends FindTaskByName<Tasks, TName>,
+		const TTask extends { readonly name: string; readonly queue?: string },
 	>(
-		task_key: TName,
+		task: TTask,
 		items: Array<
-			{ payload: InferPayload<TDef> } & Omit<
-				ExecutionSpec,
-				"task_key" | "payload"
-			>
+			{
+				payload: InferPayload<
+					FindTaskByIdentifier<
+						Tasks,
+						TTask["name"],
+						TTask["queue"] extends string ? TTask["queue"] : "default"
+					>
+				>;
+			} & Omit<ExecutionSpec, "task_key" | "payload" | "queue">
 		>,
 	): Promise<string[]>;
 	async invoke<
-		TName extends TaskName<Tasks>,
-		TDef extends FindTaskByName<Tasks, TName>,
+		const TTask extends { readonly name: string; readonly queue?: string },
 	>(
-		task_key: TName,
-		payloadOrItems:
-			| InferPayload<TDef>
-			| Array<
-					{ payload: InferPayload<TDef> } & Omit<
-						ExecutionSpec,
-						"task_key" | "payload"
-					>
-			  >,
-		opts?: Omit<ExecutionSpec, "task_key" | "payload">,
+		task: TTask,
+		payloadOrItems: any,
+		opts?: Omit<ExecutionSpec, "task_key" | "payload" | "queue">,
 	): Promise<string | string[]> {
+		const taskName = task.name;
+		const queue = task.queue || "default";
+
 		if (Array.isArray(payloadOrItems)) {
 			const specs = payloadOrItems.map((item) => ({
-				task_key,
+				task_key: taskName,
+				queue,
 				payload: item.payload,
 				run_at: item.run_at,
 				dedupe_key: item.dedupe_key,
@@ -148,7 +212,8 @@ export class Conductor<
 		}
 
 		return this.db.invoke({
-			task_key,
+			task_key: taskName,
+			queue,
 			payload: payloadOrItems,
 			...opts,
 		});

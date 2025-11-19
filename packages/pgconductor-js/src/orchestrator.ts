@@ -4,12 +4,21 @@ import { MigrationStore } from "./migration-store";
 import { SchemaManager } from "./schema-manager";
 import { Deferred } from "./lib/deferred";
 import type { Conductor } from "./conductor";
-import type { AnyTask } from "./task";
+import { type AnyTask, type ValidateTasksQueue, Task } from "./task";
 import { PACKAGE_VERSION } from "./versions";
 
-export type OrchestratorOptions = {
+export type OrchestratorOptions<
+	TTasks extends readonly AnyTask[] = readonly AnyTask[],
+> = {
 	conductor: Conductor<any, any>;
-	tasks?: AnyTask[];
+	tasks?: ValidateTasksQueue<"default", TTasks>;
+	defaultWorker?: Partial<WorkerConfig>;
+	workers?: Worker[];
+};
+
+type InternalOrchestratorOptions = {
+	conductor: Conductor<any, any>;
+	tasks?: readonly AnyTask[];
 	defaultWorker?: Partial<WorkerConfig>;
 	workers?: Worker[];
 };
@@ -36,7 +45,7 @@ export class Orchestrator {
 	private _startDeferred: Deferred<void> | null = null;
 	private _abortController: AbortController | null = null;
 
-	constructor(options: OrchestratorOptions) {
+	private constructor(options: InternalOrchestratorOptions) {
 		this.orchestratorId = crypto.randomUUID();
 		this.db = options.conductor.db;
 		this.migrationStore = new MigrationStore();
@@ -60,6 +69,12 @@ export class Orchestrator {
 
 			this.workers.push(w);
 		}
+	}
+
+	static create<
+		const TTasks extends readonly Task<any, "default", any, any, any, any>[],
+	>(options: OrchestratorOptions<TTasks>): Orchestrator {
+		return new Orchestrator(options);
 	}
 
 	/**

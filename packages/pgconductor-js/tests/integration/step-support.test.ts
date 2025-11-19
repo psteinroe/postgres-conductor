@@ -25,13 +25,12 @@ describe("Step Support", () => {
 			returns: z.object({ result: z.number() }),
 		});
 
-		const tasks = [taskDefinitions] as const;
 
 		const expensiveFn = mock((n: number) => n * 2);
 
-		const conductor = new Conductor({
+		const conductor = Conductor.create({
 			sql: db.sql,
-			tasks,
+			tasks: [taskDefinitions],
 			context: {},
 		});
 
@@ -50,14 +49,14 @@ describe("Step Support", () => {
 			},
 		);
 
-		const orchestrator = new Orchestrator({
+		const orchestrator = Orchestrator.create({
 			conductor,
 			tasks: [stepTask],
 		});
 
 		await orchestrator.start();
 
-		await conductor.invoke("step-task", { value: 5 });
+		await conductor.invoke({ name: "step-task" }, { value: 5 });
 
 		await new Promise((r) => setTimeout(r, 2000));
 
@@ -77,13 +76,12 @@ describe("Step Support", () => {
 			returns: z.object({ completed: z.boolean() }),
 		});
 
-		const tasks = [taskDefinitions] as const;
 
 		const executionSteps = mock((step: string) => step);
 
-		const conductor = new Conductor({
+		const conductor = Conductor.create({
 			sql: db.sql,
-			tasks,
+			tasks: [taskDefinitions],
 			context: {},
 		});
 
@@ -101,14 +99,14 @@ describe("Step Support", () => {
 			},
 		);
 
-		const orchestrator = new Orchestrator({
+		const orchestrator = Orchestrator.create({
 			conductor,
 			tasks: [sleepTask],
 		});
 
 		await orchestrator.start();
 
-		await conductor.invoke("sleep-task", { delay: 2000 });
+		await conductor.invoke({ name: "sleep-task" }, { delay: 2000 });
 
 		// Wait for initial execution (should hit sleep and release)
 		await new Promise((r) => setTimeout(r, 1500));
@@ -135,13 +133,12 @@ describe("Step Support", () => {
 			returns: z.object({ processed: z.number() }),
 		});
 
-		const tasks = [taskDefinitions] as const;
 
 		const processedItems = mock((item: number) => item);
 
-		const conductor = new Conductor({
+		const conductor = Conductor.create({
 			sql: db.sql,
-			tasks,
+			tasks: [taskDefinitions],
 			context: {},
 		});
 
@@ -162,14 +159,14 @@ describe("Step Support", () => {
 			},
 		);
 
-		const orchestrator = new Orchestrator({
+		const orchestrator = Orchestrator.create({
 			conductor,
 			tasks: [checkpointTask],
 		});
 
 		await orchestrator.start();
 
-		await conductor.invoke("checkpoint-task", { items: 5 });
+		await conductor.invoke({ name: "checkpoint-task" }, { items: 5 });
 
 		// Wait for task to complete
 		await new Promise((r) => setTimeout(r, 2000));
@@ -189,15 +186,14 @@ describe("Step Support", () => {
 			returns: z.object({ result: z.number() }),
 		});
 
-		const tasks = [taskDefinitions] as const;
 
 		const step1Fn = mock((n: number) => n + 1);
 		const step2Fn = mock((n: number) => n * 2);
 		const step3Fn = mock((n: number) => n - 3);
 
-		const conductor = new Conductor({
+		const conductor = Conductor.create({
 			sql: db.sql,
-			tasks,
+			tasks: [taskDefinitions],
 			context: {},
 		});
 
@@ -215,14 +211,14 @@ describe("Step Support", () => {
 			},
 		);
 
-		const orchestrator = new Orchestrator({
+		const orchestrator = Orchestrator.create({
 			conductor,
 			tasks: [multiStepTask],
 		});
 
 		await orchestrator.start();
 
-		await conductor.invoke("multi-step-task", { x: 5 });
+		await conductor.invoke({ name: "multi-step-task" }, { x: 5 });
 
 		await new Promise((r) => setTimeout(r, 2000));
 

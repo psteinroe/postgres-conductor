@@ -79,7 +79,7 @@ CREATE TABLE pgconductor.executions (
     created_at timestamptz default pgconductor.current_time() not null,
     failed_at timestamptz,
     completed_at timestamptz,
-    payload jsonb default '{}'::jsonb not null,
+    payload jsonb,
     run_at timestamptz default pgconductor.current_time() not null,
     locked_at timestamptz,
     locked_by uuid,
@@ -203,6 +203,7 @@ $function$;
 
 create type pgconductor.execution_spec as (
     task_key text,
+    queue text,
     payload jsonb,
     run_at timestamptz,
     dedupe_key text,
@@ -254,13 +255,12 @@ BEGIN
   INSERT INTO pgconductor.executions (task_key, queue, payload, run_at, dedupe_key, cron_expression)
   SELECT
     spec.task_key,
-    COALESCE(t.queue, 'default'),
+    COALESCE(spec.queue, 'default'),
     COALESCE(spec.payload, '{}'::jsonb),
     COALESCE(spec.run_at, pgconductor.current_time()),
     spec.dedupe_key,
     spec.cron_expression
   FROM unnest(p_cron_schedules) AS spec
-  LEFT JOIN pgconductor.tasks t ON t.key = spec.task_key
   WHERE spec.dedupe_key IS NOT NULL
   ON CONFLICT (task_key, dedupe_key, queue) DO NOTHING;
 
@@ -277,7 +277,7 @@ BEGIN
 END;
 $function$;
 
-CREATE OR REPLACE FUNCTION pgconductor.invoke(
+CREATE OR REPLACE FUNCTION pgconductor.invoke_batch(
     specs pgconductor.execution_spec[]
 )
  RETURNS TABLE(id uuid)
@@ -286,49 +286,51 @@ CREATE OR REPLACE FUNCTION pgconductor.invoke(
  SET search_path TO ''
 AS $function$
 begin
-  -- Clear keys that are currently locked so a subsequent insert can succeed.
-  update pgconductor.executions as e
-  set
-    dedupe_key = null,
-    attempts = w.max_attempts,
-    locked_by = null,
-    locked_at = null,
-    last_error = 'superseded by reinvoke'
-  from unnest(specs) spec
-  join pgconductor.tasks w on w.key = spec.task_key
-  where spec.dedupe_key is not null
-  and e.dedupe_key = spec.dedupe_key
-  and e.task_key = spec.task_key
-  and e.locked_at is not null;
+    -- Clear locked dedupe keys before batch insert
+    update pgconductor.executions as e
+    set
+        dedupe_key = null,
+        locked_by = null,
+        locked_at = null,
+        failed_at = pgconductor.current_time(),
+        last_error = 'superseded by reinvoke'
+    from unnest(specs) as spec
+    where e.dedupe_key = spec.dedupe_key
+        and e.task_key = spec.task_key
+        and e.queue = coalesce(spec.queue, 'default')
+        and e.locked_at is not null
+        and spec.dedupe_key is not null;
 
-  return query insert into pgconductor.executions as e (
-    id,
-    task_key,
-    queue,
-    payload,
-    run_at,
-    dedupe_key,
-    cron_expression,
-    priority
-  )
+    -- Batch insert all executions
+    return query
+    insert into pgconductor.executions (
+        id,
+        task_key,
+        queue,
+        payload,
+        run_at,
+        dedupe_key,
+        cron_expression,
+        priority
+    )
     select
-      pgconductor.portable_uuidv7(),
-      spec.task_key,
-      COALESCE(t.queue, 'default'),
-      coalesce(spec.payload, '{}'::jsonb),
-      coalesce(spec.run_at, pgconductor.current_time()),
-      spec.dedupe_key,
-      spec.cron_expression,
-      coalesce(spec.priority, 0)
-    from unnest(specs) spec
-    left join pgconductor.tasks t on t.key = spec.task_key
-  returning e.id;
+        pgconductor.portable_uuidv7(),
+        spec.task_key,
+        coalesce(spec.queue, 'default'),
+        spec.payload,
+        coalesce(spec.run_at, pgconductor.current_time()),
+        spec.dedupe_key,
+        spec.cron_expression,
+        coalesce(spec.priority, 0)
+    from unnest(specs) as spec
+    returning id;
 end;
 $function$
 ;
 
-CREATE OR REPLACE FUNCTION pgconductor.invoke(
+CREATE OR REPLACE FUNCTION pgconductor.invoke_child(
     task_key text,
+    queue text default 'default',
     payload jsonb default null,
     run_at timestamptz default null,
     dedupe_key text default null,
@@ -339,50 +341,91 @@ CREATE OR REPLACE FUNCTION pgconductor.invoke(
     parent_timeout_ms integer default null
 )
  RETURNS uuid
- LANGUAGE sql
+ LANGUAGE plpgsql
  VOLATILE
  SET search_path TO ''
 AS $function$
-WITH inserted_child AS (
-  INSERT INTO pgconductor.executions (
+declare
+    v_execution_id uuid;
+begin
+    select id from pgconductor.invoke(
+        invoke_child.task_key,
+        invoke_child.queue,
+        invoke_child.payload,
+        invoke_child.run_at,
+        invoke_child.dedupe_key,
+        invoke_child.cron_expression,
+        invoke_child.priority
+    ) into v_execution_id;
+
+    update pgconductor.executions
+    set
+        waiting_on_execution_id = v_execution_id,
+        waiting_step_key = invoke_child.parent_step_key,
+        run_at = case
+            when invoke_child.parent_timeout_ms is not null then
+                pgconductor.current_time() + (invoke_child.parent_timeout_ms || ' milliseconds')::interval
+            else
+                'infinity'::timestamptz
+        end
+    where id = invoke_child.parent_execution_id
+      and invoke_child.parent_execution_id is not null;
+
+    return v_execution_id;
+end;
+$function$
+;
+
+
+CREATE OR REPLACE FUNCTION pgconductor.invoke(
+    task_key text,
+    queue text default 'default',
+    payload jsonb default null,
+    run_at timestamptz default null,
+    dedupe_key text default null,
+    cron_expression text default null,
+    priority integer default null
+)
+ RETURNS TABLE(id uuid)
+ LANGUAGE plpgsql
+ VOLATILE
+ SET search_path TO ''
+AS $function$
+begin
+  if invoke.dedupe_key is not null then
+      -- Clear keys that are currently locked so a subsequent insert can succeed.
+      update pgconductor.executions as e
+      set
+        dedupe_key = null,
+        locked_by = null,
+        locked_at = null,
+        failed_at = pgconductor.current_time(),
+        last_error = 'superseded by reinvoke'
+      where e.dedupe_key = invoke.dedupe_key
+        and e.task_key = invoke.task_key
+        and e.queue = invoke.queue
+        and e.locked_at is not null;
+  end if;
+
+  return query insert into pgconductor.executions as e (
     id,
     task_key,
     queue,
     payload,
     run_at,
-    cron_expression,
     dedupe_key,
+    cron_expression,
     priority
-  )
-  SELECT
+  ) values (
     pgconductor.portable_uuidv7(),
     invoke.task_key,
-    COALESCE(t.queue, 'default'),
-    COALESCE(invoke.payload, '{}'::jsonb),
-    COALESCE(invoke.run_at, pgconductor.current_time()),
-    invoke.cron_expression,
+    invoke.queue,
+    invoke.payload,
+    coalesce(invoke.run_at, pgconductor.current_time()),
     invoke.dedupe_key,
-    COALESCE(invoke.priority, 0)
-  FROM (SELECT 1) AS dummy
-  LEFT JOIN pgconductor.tasks t ON t.key = invoke.task_key
-  RETURNING id
-),
-updated_parent AS (
-  UPDATE pgconductor.executions
-  SET
-    waiting_on_execution_id = (SELECT id FROM inserted_child),
-    waiting_step_key = invoke.parent_step_key,
-    run_at = CASE
-      WHEN invoke.parent_timeout_ms IS NOT NULL THEN
-        pgconductor.current_time() + (invoke.parent_timeout_ms || ' milliseconds')::interval
-      ELSE
-        'infinity'::timestamptz
-    END
-  WHERE id = invoke.parent_execution_id
-    AND invoke.parent_execution_id IS NOT NULL
-  RETURNING 1
-)
-SELECT id FROM inserted_child;
+    invoke.cron_expression,
+    coalesce(invoke.priority, 0)
+  ) returning e.id;
+end;
 $function$
 ;
-

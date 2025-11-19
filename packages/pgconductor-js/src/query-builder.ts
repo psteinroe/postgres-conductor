@@ -486,10 +486,12 @@ export class QueryBuilder {
 
 			return {
 				task_key: spec.task_key,
+				queue: spec.queue,
 				payload: spec.payload || null,
 				run_at: spec.run_at,
 				dedupe_key: spec.dedupe_key,
 				cron_expression: spec.cron_expression,
+				priority: spec.priority || null,
 			};
 		});
 
@@ -508,8 +510,23 @@ export class QueryBuilder {
 
 	buildInvoke(spec: ExecutionSpec): PendingQuery<[{ id: string }]> {
 		return this.sql<[{ id: string }]>`
-			select pgconductor.invoke(
+			select id from pgconductor.invoke(
 				task_key := ${spec.task_key}::text,
+				queue := ${spec.queue}::text,
+				payload := ${spec.payload ? this.sql.json(spec.payload) : null}::jsonb,
+				run_at := ${spec.run_at ? spec.run_at.toISOString() : null}::timestamptz,
+				dedupe_key := ${spec.dedupe_key || null}::text,
+				cron_expression := ${spec.cron_expression || null}::text,
+				priority := ${spec.priority || null}::integer
+			)
+		`;
+	}
+
+	buildInvokeChild(spec: ExecutionSpec): PendingQuery<[{ id: string }]> {
+		return this.sql<[{ id: string }]>`
+			select pgconductor.invoke_child(
+				task_key := ${spec.task_key}::text,
+				queue := ${spec.queue}::text,
 				payload := ${spec.payload ? this.sql.json(spec.payload) : null}::jsonb,
 				run_at := ${spec.run_at ? spec.run_at.toISOString() : null}::timestamptz,
 				dedupe_key := ${spec.dedupe_key || null}::text,
@@ -525,6 +542,7 @@ export class QueryBuilder {
 	buildInvokeBatch(specs: ExecutionSpec[]): PendingQuery<{ id: string }[]> {
 		const specsArray = specs.map((spec) => ({
 			task_key: spec.task_key,
+			queue: spec.queue,
 			payload: spec.payload || null,
 			run_at: spec.run_at,
 			dedupe_key: spec.dedupe_key,
@@ -533,8 +551,8 @@ export class QueryBuilder {
 		}));
 
 		return this.sql<{ id: string }[]>`
-			select id from pgconductor.invoke(
-				specs := array(
+			select id from pgconductor.invoke_batch(
+				array(
 					select json_populate_recordset(null::pgconductor.execution_spec, ${this.sql.json(specsArray)})
 				)
 			)

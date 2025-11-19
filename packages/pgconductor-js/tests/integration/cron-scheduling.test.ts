@@ -24,23 +24,22 @@ describe("Cron Scheduling", () => {
 			name: "daily-report",
 		});
 
-		const tasks = [taskDefinition] as const;
 
-		const conductor = new Conductor({
+		const conductor = Conductor.create({
 			sql: db.sql,
-			tasks,
+			tasks: [taskDefinition],
 			context: {},
 		});
 
 		const reportTask = conductor.createTask(
 			{ name: "daily-report" },
-			[{ invocable: true }, { cron: "0 0 9 * * *" }] as const, // Every day at 9am
+			[{ invocable: true }, { cron: "0 0 9 * * *" }], // Every day at 9am
 			async () => {},
 		);
 
-		const orchestrator = new Orchestrator({
+		const orchestrator = Orchestrator.create({
 			conductor,
-			tasks: [reportTask] as const,
+			tasks: [reportTask],
 		});
 
 		await orchestrator.start();
@@ -77,11 +76,10 @@ describe("Cron Scheduling", () => {
 			name: "frequent-sync",
 		});
 
-		const tasks = [taskDefinition] as const;
 
-		const conductor = new Conductor({
+		const conductor = Conductor.create({
 			sql: db.sql,
-			tasks,
+			tasks: [taskDefinition],
 			context: {},
 		});
 
@@ -89,15 +87,15 @@ describe("Cron Scheduling", () => {
 
 		const syncTask = conductor.createTask(
 			{ name: "frequent-sync" },
-			[{ invocable: true }, { cron: "*/3 * * * * *" }] as const, // Every 3 seconds
+			[{ invocable: true }, { cron: "*/3 * * * * *" }], // Every 3 seconds
 			async () => {
 				executions();
 			},
 		);
 
-		const orchestrator = new Orchestrator({
+		const orchestrator = Orchestrator.create({
 			conductor,
-			tasks: [syncTask] as const,
+			tasks: [syncTask],
 			defaultWorker: {
 				pollIntervalMs: 100,
 				flushIntervalMs: 100,
@@ -138,11 +136,10 @@ describe("Cron Scheduling", () => {
 			name: "multi-schedule",
 		});
 
-		const tasks = [taskDefinition] as const;
 
-		const conductor = new Conductor({
+		const conductor = Conductor.create({
 			sql: db.sql,
-			tasks,
+			tasks: [taskDefinition],
 			context: {},
 		});
 
@@ -154,15 +151,15 @@ describe("Cron Scheduling", () => {
 				{ invocable: true },
 				{ cron: "0 0 9 * * *" }, // 9 AM daily
 				{ cron: "0 0 17 * * *" }, // 5 PM daily
-			] as const,
+			],
 			async () => {
 				executions();
 			},
 		);
 
-		const orchestrator = new Orchestrator({
+		const orchestrator = Orchestrator.create({
 			conductor,
-			tasks: [multiTask] as const,
+			tasks: [multiTask],
 			defaultWorker: {
 				pollIntervalMs: 100,
 				flushIntervalMs: 100,
@@ -208,11 +205,10 @@ describe("Cron Scheduling", () => {
 			name: "cleanup-test",
 		});
 
-		const tasks = [taskDefinition] as const;
 
-		const conductor = new Conductor({
+		const conductor = Conductor.create({
 			sql: db.sql,
-			tasks,
+			tasks: [taskDefinition],
 			context: {},
 		});
 
@@ -223,13 +219,13 @@ describe("Cron Scheduling", () => {
 				{ invocable: true },
 				{ cron: "0 0 9 * * *" }, // 9 AM
 				{ cron: "0 0 17 * * *" }, // 5 PM
-			] as const,
+			],
 			async () => {},
 		);
 
-		let orchestrator = new Orchestrator({
+		let orchestrator = Orchestrator.create({
 			conductor,
-			tasks: [task1] as const,
+			tasks: [task1],
 		});
 
 		await orchestrator.start();
@@ -248,13 +244,13 @@ describe("Cron Scheduling", () => {
 		// Second worker with only one cron schedule
 		const task2 = conductor.createTask(
 			{ name: "cleanup-test" },
-			[{ invocable: true }, { cron: "0 0 9 * * *" }] as const, // Only 9 AM
+			[{ invocable: true }, { cron: "0 0 9 * * *" }], // Only 9 AM
 			async () => {},
 		);
 
-		orchestrator = new Orchestrator({
+		orchestrator = Orchestrator.create({
 			conductor,
-			tasks: [task2] as const,
+			tasks: [task2],
 		});
 
 		await orchestrator.start();
@@ -282,11 +278,10 @@ describe("Cron Scheduling", () => {
 			payload: z.object({ value: z.number() }),
 		});
 
-		const tasks = [taskDefinition] as const;
 
-		const conductor = new Conductor({
+		const conductor = Conductor.create({
 			sql: db.sql,
-			tasks,
+			tasks: [taskDefinition],
 			context: {},
 		});
 
@@ -297,7 +292,7 @@ describe("Cron Scheduling", () => {
 			[
 				{ invocable: true },
 				{ cron: "0 0 12 * * *" }, // Noon daily
-			] as const,
+			],
 			async (event) => {
 				if (event.event === "pgconductor.invoke") {
 					executions(event.payload);
@@ -305,9 +300,9 @@ describe("Cron Scheduling", () => {
 			},
 		);
 
-		const orchestrator = new Orchestrator({
+		const orchestrator = Orchestrator.create({
 			conductor,
-			tasks: [hybridTask] as const,
+			tasks: [hybridTask],
 			defaultWorker: {
 				pollIntervalMs: 100,
 				flushIntervalMs: 100,
@@ -317,7 +312,7 @@ describe("Cron Scheduling", () => {
 		await orchestrator.start();
 
 		// Manual invocation should work
-		await conductor.invoke("hybrid-task", { value: 42 });
+		await conductor.invoke({ name: "hybrid-task" }, { value: 42 });
 		await waitFor(500);
 
 		expect(executions).toHaveBeenCalledTimes(1);
@@ -334,11 +329,10 @@ describe("Cron Scheduling", () => {
 			name: "frequent-task",
 		});
 
-		const tasks = [taskDefinition] as const;
 
-		const conductor = new Conductor({
+		const conductor = Conductor.create({
 			sql: db.sql,
-			tasks,
+			tasks: [taskDefinition],
 			context: {},
 		});
 
@@ -346,15 +340,15 @@ describe("Cron Scheduling", () => {
 
 		const frequentTask = conductor.createTask(
 			{ name: "frequent-task" },
-			[{ invocable: true }, { cron: "*/2 * * * * *" }] as const, // Every 2 seconds
+			[{ invocable: true }, { cron: "*/2 * * * * *" }], // Every 2 seconds
 			async () => {
 				executions();
 			},
 		);
 
-		const orchestrator = new Orchestrator({
+		const orchestrator = Orchestrator.create({
 			conductor,
-			tasks: [frequentTask] as const,
+			tasks: [frequentTask],
 			defaultWorker: {
 				pollIntervalMs: 50,
 				flushIntervalMs: 50,
@@ -379,11 +373,10 @@ describe("Cron Scheduling", () => {
 			name: "flaky-cron",
 		});
 
-		const tasks = [taskDefinition] as const;
 
-		const conductor = new Conductor({
+		const conductor = Conductor.create({
 			sql: db.sql,
-			tasks,
+			tasks: [taskDefinition],
 			context: {},
 		});
 
@@ -398,15 +391,15 @@ describe("Cron Scheduling", () => {
 
 		const flakyTask = conductor.createTask(
 			{ name: "flaky-cron", maxAttempts: 5 },
-			[{ invocable: true }, { cron: "*/2 * * * * *" }] as const, // Every 2 seconds
+			[{ invocable: true }, { cron: "*/2 * * * * *" }], // Every 2 seconds
 			async () => {
 				executions();
 			},
 		);
 
-		const orchestrator = new Orchestrator({
+		const orchestrator = Orchestrator.create({
 			conductor,
-			tasks: [flakyTask] as const,
+			tasks: [flakyTask],
 			defaultWorker: {
 				pollIntervalMs: 50,
 				flushIntervalMs: 50,
@@ -446,11 +439,10 @@ describe("Cron Scheduling", () => {
 			name: "dedupe-cron",
 		});
 
-		const tasks = [taskDefinition] as const;
 
-		const conductor = new Conductor({
+		const conductor = Conductor.create({
 			sql: db.sql,
-			tasks,
+			tasks: [taskDefinition],
 			context: {},
 		});
 
@@ -458,21 +450,21 @@ describe("Cron Scheduling", () => {
 
 		const cronTask = conductor.createTask(
 			{ name: "dedupe-cron" },
-			[{ invocable: true }, { cron: "0 0 14 * * *" }] as const, // 2 PM daily
+			[{ invocable: true }, { cron: "0 0 14 * * *" }], // 2 PM daily
 			async () => {
 				executions();
 			},
 		);
 
 		// Start two orchestrators with same cron
-		const orchestrator1 = new Orchestrator({
+		const orchestrator1 = Orchestrator.create({
 			conductor,
-			tasks: [cronTask] as const,
+			tasks: [cronTask],
 		});
 
-		const orchestrator2 = new Orchestrator({
+		const orchestrator2 = Orchestrator.create({
 			conductor,
-			tasks: [cronTask] as const,
+			tasks: [cronTask],
 		});
 
 		await orchestrator1.start();

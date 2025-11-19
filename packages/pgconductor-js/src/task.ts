@@ -5,15 +5,18 @@ import type {
 	HasCron,
 } from "./task-definition";
 
-export type TaskConfiguration<
+export type TaskIdentifier<
 	TName extends string = string,
 	TQueue extends string = "default",
 > = {
-	// identifier
-	name: TName;
-	queue?: TQueue;
+	readonly name: TName;
+	readonly queue?: TQueue;
+};
 
-	// configuration
+export type TaskConfiguration<
+	TName extends string = string,
+	TQueue extends string = "default",
+> = TaskIdentifier<TName, TQueue> & {
 	maxAttempts?: number;
 	window?: [string, string];
 	removeOnComplete?: RetentionSettings;
@@ -44,8 +47,8 @@ export type ExecuteFunction<
 
 // Represents a task definition that can be invoked or triggered by events
 export class Task<
-	Queue extends string = "default",
 	Key extends string = string,
+	Queue extends string = "default",
 	Payload extends object = object,
 	Returns extends object | void = void,
 	Context extends object = object,
@@ -76,6 +79,35 @@ export class Task<
 
 		this.triggers = Array.isArray(triggers) ? triggers : [triggers];
 	}
+
+	static create<
+		Key extends string,
+		Queue extends string,
+		Payload extends object,
+		Returns extends object | void,
+		Context extends object,
+		EventType,
+	>(
+		definition: TaskConfiguration<Key, Queue>,
+		triggers: NonEmptyArray<Trigger> | Trigger,
+		execute: ExecuteFunction<EventType, Returns, Context>,
+	): Task<Key, Queue, Payload, Returns, Context, EventType> {
+		return new Task<Key, Queue, Payload, Returns, Context, EventType>(
+			definition,
+			triggers,
+			execute,
+		);
+	}
 }
 
-export type AnyTask = Task<string, string, any, any, any, any>;
+export type AnyTask = Task<string, string, any, any, any, any>; // Task<Key, Queue, ...>
+
+// Type-level check that all tasks in array belong to a specific queue
+export type ValidateTasksQueue<
+	TQueue extends string,
+	TTasks extends readonly Task<any, any, any, any, any, any>[],
+> = TTasks extends readonly Task<any, infer Q, any, any, any, any>[]
+	? Q extends TQueue
+		? TTasks
+		: `All tasks must belong to queue "${TQueue}". Found task with queue "${Q & string}".`
+	: TTasks;

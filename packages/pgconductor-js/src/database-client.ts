@@ -16,6 +16,7 @@ export type Payload = { [key: string]: JsonValue };
 
 export interface ExecutionSpec {
 	task_key: string;
+	queue: string;
 	payload?: Payload | null;
 	run_at?: Date | null;
 	dedupe_key?: string | null;
@@ -395,6 +396,17 @@ export class DatabaseClient {
 	async invoke(spec: ExecutionSpec, signal?: AbortSignal): Promise<string> {
 		const result = await this.query(this.builder.buildInvoke(spec), {
 			label: "invoke",
+			signal,
+		});
+		return result[0]!.id;
+	}
+
+	async invokeChild(
+		spec: ExecutionSpec,
+		signal?: AbortSignal,
+	): Promise<string> {
+		const result = await this.query(this.builder.buildInvokeChild(spec), {
+			label: "invokeChild",
 			signal,
 		});
 		return result[0]!.id;

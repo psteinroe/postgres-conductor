@@ -4,6 +4,7 @@ import { Conductor } from "../../src/conductor";
 import { Orchestrator } from "../../src/orchestrator";
 import { defineTask } from "../../src/task-definition";
 import { TestDatabasePool } from "../fixtures/test-database";
+import { Worker } from "../../src";
 
 describe("Invoke Support", () => {
 	let pool: TestDatabasePool;
@@ -31,13 +32,11 @@ describe("Invoke Support", () => {
 			returns: z.object({ output: z.number() }),
 		});
 
-		const tasks = [parentDefinition, childDefinition] as const;
-
 		const childFn = mock((n: number) => n * 2);
 
-		const conductor = new Conductor({
+		const conductor = Conductor.create({
 			sql: db.sql,
-			tasks,
+			tasks: [parentDefinition, childDefinition],
 			context: {},
 		});
 
@@ -58,9 +57,9 @@ describe("Invoke Support", () => {
 			{ invocable: true },
 			async (event, ctx) => {
 				if (event.event === "pgconductor.invoke") {
-					const childResult = await ctx.invoke<{ output: number }>(
+					const childResult = await ctx.invoke(
 						"invoke-child",
-						"child-task",
+						{ name: "child-task" },
 						{ input: event.payload.value },
 					);
 					return { result: childResult.output };
@@ -69,14 +68,14 @@ describe("Invoke Support", () => {
 			},
 		);
 
-		const orchestrator = new Orchestrator({
+		const orchestrator = Orchestrator.create({
 			conductor,
 			tasks: [parentTask, childTask],
 		});
 
 		await orchestrator.start();
 
-		await conductor.invoke("parent-task", { value: 5 });
+		await conductor.invoke({ name: "parent-task" }, { value: 5 });
 
 		await new Promise((r) => setTimeout(r, 1500));
 
@@ -101,13 +100,11 @@ describe("Invoke Support", () => {
 			returns: z.object({ completed: z.boolean() }),
 		});
 
-		const tasks = [parentDefinition, childDefinition] as const;
-
 		const parentError = mock((err: Error) => err.message);
 
-		const conductor = new Conductor({
+		const conductor = Conductor.create({
 			sql: db.sql,
-			tasks,
+			tasks: [parentDefinition, childDefinition],
 			context: {},
 		});
 
@@ -125,7 +122,7 @@ describe("Invoke Support", () => {
 			{ invocable: true },
 			async (_event, ctx) => {
 				try {
-					await ctx.invoke("invoke-slow", "slow-child", {}, 1000);
+					await ctx.invoke("invoke-slow", { name: "slow-child" }, {}, 1000);
 					return { success: true };
 				} catch (err) {
 					parentError(err as Error);
@@ -137,7 +134,7 @@ describe("Invoke Support", () => {
 		const startTime = new Date("2024-01-01T00:00:00Z");
 		await db.client.setFakeTime(startTime);
 
-		const orchestrator = new Orchestrator({
+		const orchestrator = Orchestrator.create({
 			conductor,
 			tasks: [timeoutParentTask, slowChildTask],
 			defaultWorker: {
@@ -148,7 +145,7 @@ describe("Invoke Support", () => {
 
 		await orchestrator.start();
 
-		await conductor.invoke("timeout-parent", {});
+		await conductor.invoke({ name: "timeout-parent" }, {});
 
 		await new Promise((r) => setTimeout(r, 500));
 
@@ -182,13 +179,11 @@ describe("Invoke Support", () => {
 			returns: z.object({ output: z.number() }),
 		});
 
-		const tasks = [parentDefinition, childDefinition] as const;
-
 		const childFn = mock((n: number) => n * 3);
 
-		const conductor = new Conductor({
+		const conductor = Conductor.create({
 			sql: db.sql,
-			tasks,
+			tasks: [parentDefinition, childDefinition],
 			context: {},
 		});
 
@@ -211,9 +206,9 @@ describe("Invoke Support", () => {
 			async (event, ctx) => {
 				if (event.event === "pgconductor.invoke") {
 					parentAttempts++;
-					const childResult = await ctx.invoke<{ output: number }>(
+					const childResult = await ctx.invoke(
 						"invoke-once",
-						"once-child",
+						{ name: "once-child" },
 						{ input: event.payload.value },
 					);
 
@@ -228,14 +223,14 @@ describe("Invoke Support", () => {
 			},
 		);
 
-		const orchestrator = new Orchestrator({
+		const orchestrator = Orchestrator.create({
 			conductor,
 			tasks: [retryParentTask, onceChildTask],
 		});
 
 		await orchestrator.start();
 
-		await conductor.invoke("retry-parent", { value: 7 });
+		await conductor.invoke({ name: "retry-parent" }, { value: 7 });
 
 		await new Promise((r) => setTimeout(r, 5000));
 
@@ -260,13 +255,11 @@ describe("Invoke Support", () => {
 			returns: z.object({ result: z.string() }),
 		});
 
-		const tasks = [parentDefinition, childDefinition] as const;
-
 		const childFn = mock(() => "completed");
 
-		const conductor = new Conductor({
+		const conductor = Conductor.create({
 			sql: db.sql,
-			tasks,
+			tasks: [parentDefinition, childDefinition],
 			context: {},
 		});
 
@@ -284,23 +277,23 @@ describe("Invoke Support", () => {
 			{ name: "patient-parent" },
 			{ invocable: true },
 			async (_event, ctx) => {
-				const childResult = await ctx.invoke<{ result: string }>(
+				const childResult = await ctx.invoke(
 					"invoke-eventual",
-					"eventual-child",
+					{ name: "eventual-child" },
 					{},
 				);
 				return { childResult: childResult.result };
 			},
 		);
 
-		const orchestrator = new Orchestrator({
+		const orchestrator = Orchestrator.create({
 			conductor,
 			tasks: [patientParentTask, eventualChildTask],
 		});
 
 		await orchestrator.start();
 
-		await conductor.invoke("patient-parent", {});
+		await conductor.invoke({ name: "patient-parent" }, {});
 
 		await new Promise((r) => setTimeout(r, 6000));
 
@@ -324,15 +317,13 @@ describe("Invoke Support", () => {
 			returns: z.object({ result: z.string() }),
 		});
 
-		const tasks = [parentDefinition, childDefinition] as const;
-
 		const childFn = mock(() => {
 			throw new Error("Child always fails");
 		});
 
-		const conductor = new Conductor({
+		const conductor = Conductor.create({
 			sql: db.sql,
-			tasks,
+			tasks: [parentDefinition, childDefinition],
 			context: {},
 		});
 
@@ -349,7 +340,7 @@ describe("Invoke Support", () => {
 			{ name: "cascade-parent" },
 			{ invocable: true },
 			async (_event, ctx) => {
-				await ctx.invoke("invoke-failing", "failing-child", {});
+				await ctx.invoke("invoke-failing", { name: "failing-child" }, {});
 				return { success: true };
 			},
 		);
@@ -357,7 +348,7 @@ describe("Invoke Support", () => {
 		const startTime = new Date("2024-01-01T00:00:00Z");
 		await db.client.setFakeTime(startTime);
 
-		const orchestrator = new Orchestrator({
+		const orchestrator = Orchestrator.create({
 			conductor,
 			tasks: [cascadeParentTask, failingChildTask],
 			defaultWorker: {
@@ -368,7 +359,7 @@ describe("Invoke Support", () => {
 
 		await orchestrator.start();
 
-		await conductor.invoke("cascade-parent", {});
+		await conductor.invoke({ name: "cascade-parent" }, {});
 
 		// Wait for first execution cycle: parent runs → invokes child → child fails
 		await new Promise((r) => setTimeout(r, 500));
@@ -398,4 +389,87 @@ describe("Invoke Support", () => {
 		expect(failedParents.length).toBe(1);
 		expect(failedParents[0]?.last_error).toContain("Child execution failed");
 	}, 5000);
+
+	test("invoke() works across queues", async () => {
+		const db = await pool.child();
+
+		const parentDefinition = defineTask({
+			queue: "parent-queue",
+			name: "parent-task",
+			payload: z.object({ value: z.number() }),
+			returns: z.object({ result: z.number() }),
+		});
+
+		const childDefinition = defineTask({
+			queue: "child-queue",
+			name: "child-task",
+			payload: z.object({ input: z.number() }),
+			returns: z.object({ output: z.number() }),
+		});
+
+		const childFn = mock((n: number) => n * 2);
+
+		const conductor = Conductor.create({
+			sql: db.sql,
+			tasks: [parentDefinition, childDefinition],
+			context: {},
+		});
+
+		const parentTask = conductor.createTask(
+			{ queue: "parent-queue", name: "parent-task" },
+			{ invocable: true },
+			async (event, ctx) => {
+				if (event.event === "pgconductor.invoke") {
+					const childResult = await ctx.invoke(
+						"invoke-child",
+						{ queue: "child-queue", name: "child-task" },
+						{ input: event.payload.value },
+					);
+					return { result: childResult.output };
+				}
+				throw new Error("Unexpected event type");
+			},
+		);
+
+		const parentWorker = conductor.createWorker({
+			queue: "parent-queue",
+			tasks: [parentTask],
+		});
+
+		const childTask = conductor.createTask(
+			{ queue: "child-queue", name: "child-task" },
+			{ invocable: true },
+			async (event, _ctx) => {
+				if (event.event === "pgconductor.invoke") {
+					const result = childFn(event.payload.input);
+					return { output: result };
+				}
+				throw new Error("Unexpected event type");
+			},
+		);
+
+		const childWorker = conductor.createWorker({
+			queue: "child-queue",
+			tasks: [childTask],
+		});
+
+		const orchestrator = Orchestrator.create({
+			conductor,
+			workers: [parentWorker, childWorker],
+		});
+
+		await orchestrator.start();
+
+		await conductor.invoke(
+			{ queue: "parent-queue", name: "parent-task" },
+			{ value: 5 },
+		);
+
+		await new Promise((r) => setTimeout(r, 1500));
+
+		await orchestrator.stop();
+
+		expect(childFn).toHaveBeenCalledTimes(1);
+		expect(childFn).toHaveBeenCalledWith(5);
+	}, 30000);
 });

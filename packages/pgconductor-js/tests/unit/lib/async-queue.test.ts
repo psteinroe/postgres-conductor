@@ -139,7 +139,7 @@ describe("AsyncQueue", () => {
 
 		// Next push should wait
 		let pushComplete = false;
-		const pushPromise = queue.push(4).then(() => {
+		queue.push(4).then(() => {
 			pushComplete = false;
 		});
 

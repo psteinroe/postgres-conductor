@@ -4,7 +4,8 @@ import type {
 	ExecutionResult,
 	ExecutionSpec,
 } from "./database-client";
-import type { AnyTask, Task } from "./task";
+import type { AnyTask } from "./task";
+import type { TaskDefinition } from "./task-definition";
 import { waitFor } from "./lib/wait-for";
 import { mapConcurrent } from "./lib/map-concurrent";
 import { Deferred } from "./lib/deferred";
@@ -38,7 +39,14 @@ export const DEFAULT_WORKER_CONFIG: WorkerConfig = {
  *
  * Queue-aware: Processes multiple tasks from a single queue.
  */
-export class Worker {
+export class Worker<
+	Tasks extends readonly TaskDefinition<
+		string,
+		any,
+		any,
+		string
+	>[] = readonly TaskDefinition<string, any, any, string>[],
+> {
 	private orchestratorId: string | null = null;
 
 	private readonly tasks: Map<string, AnyTask>;
@@ -54,7 +62,7 @@ export class Worker {
 
 	constructor(
 		public readonly queueName: string,
-		tasks: AnyTask[],
+		tasks: readonly AnyTask[],
 		private readonly db: DatabaseClient,
 		config: Partial<WorkerConfig> = {},
 		private readonly extraContext: object = {},
@@ -162,6 +170,7 @@ export class Worker {
 
 				cronSchedules.push({
 					task_key: task.name,
+					queue: this.queueName,
 					run_at: nextTimestamp,
 					dedupe_key: dedupeKey,
 					cron_expression: trigger.cron,
@@ -278,7 +287,7 @@ export class Worker {
 					const output = await Promise.race([
 						task.execute(
 							taskEvent,
-							TaskContext.create(
+							TaskContext.create<Tasks, typeof extraContext>(
 								{
 									signal: this.signal,
 									db: this.db,
@@ -333,6 +342,7 @@ export class Worker {
 		await this.db.invoke(
 			{
 				task_key: execution.task_key,
+				queue: execution.queue,
 				run_at: nextTimestamp,
 				dedupe_key: nextDedupeKey,
 				cron_expression: execution.cron_expression,

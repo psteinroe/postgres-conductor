@@ -11,15 +11,15 @@ describe("task event types", () => {
 			payload: z.object({ value: z.number() }),
 		});
 
-		const conductor = new Conductor({
+		const conductor = Conductor.create({
 			connectionString: "postgres://test",
-			tasks: [taskDef] as const,
+			tasks: [taskDef], // ✅ No as const needed!
 			context: {},
 		});
 
 		const task = conductor.createTask(
 			{ name: "test-task" },
-			[{ invocable: true }, { cron: "0 0 * * *" }] as const,
+			[{ invocable: true }, { cron: "0 0 * * *" }],
 			async (event, _ctx) => {
 				expectTypeOf(event).toExtend<
 					| { event: "pgconductor.cron" }
@@ -51,15 +51,15 @@ describe("task event types", () => {
 			name: "empty-task",
 		});
 
-		const conductor = new Conductor({
+		const conductor = Conductor.create({
 			connectionString: "postgres://test",
-			tasks: [taskDef] as const,
+			tasks: [taskDef],
 			context: {},
 		});
 
 		const task = conductor.createTask(
 			{ name: "empty-task" },
-			[{ invocable: true }, { cron: "*/5 * * * *" }] as const,
+			[{ invocable: true }, { cron: "*/5 * * * *" }],
 			async (event, _ctx) => {
 				if (event.event === "pgconductor.cron") {
 					expectTypeOf(event).toEqualTypeOf<{ event: "pgconductor.cron" }>();
@@ -80,15 +80,15 @@ describe("task event types", () => {
 			name: "empty-task",
 		});
 
-		const conductor = new Conductor({
+		const conductor = Conductor.create({
 			connectionString: "postgres://test",
-			tasks: [taskDef] as const,
+			tasks: [taskDef],
 			context: {},
 		});
 
 		const task = conductor.createTask(
 			{ name: "my-cron" },
-			[{ cron: "*/5 * * * *" }] as const,
+			[{ cron: "*/5 * * * *" }],
 			async (event, _ctx) => {
 				// Event should only be cron, no invoke event possible
 				expectTypeOf(event).toEqualTypeOf<{ event: "pgconductor.cron" }>();
@@ -107,9 +107,9 @@ describe("task event types", () => {
 			payload: z.object({ data: z.string() }),
 		});
 
-		const conductor = new Conductor({
+		const conductor = Conductor.create({
 			connectionString: "postgres://test",
-			tasks: [taskDef] as const,
+			tasks: [taskDef],
 			context: {},
 		});
 
@@ -139,15 +139,15 @@ describe("task event types", () => {
 			payload: z.object({ value: z.number() }),
 		});
 
-		const conductor = new Conductor({
+		const conductor = Conductor.create({
 			connectionString: "postgres://test",
-			tasks: [taskDef] as const,
+			tasks: [taskDef],
 			context: {},
 		});
 
 		const task = conductor.createTask(
 			{ name: "both-task" },
-			[{ invocable: true }, { cron: "0 0 * * *" }] as const,
+			[{ invocable: true }, { cron: "0 0 * * *" }],
 			async (event, _ctx) => {
 				// Event can be either cron or invoke
 				expectTypeOf(event).toExtend<
@@ -171,9 +171,9 @@ describe("task event types", () => {
 	});
 
 	test("type error: invocable trigger without task definition", () => {
-		const conductor = new Conductor({
+		const conductor = Conductor.create({
 			connectionString: "postgres://test",
-			tasks: [] as const,
+			tasks: [],
 			context: {},
 		});
 
@@ -190,9 +190,9 @@ describe("task event types", () => {
 			name: "defined-task",
 		});
 
-		const conductor = new Conductor({
+		const conductor = Conductor.create({
 			connectionString: "postgres://test",
-			tasks: [taskDef] as const,
+			tasks: [taskDef],
 			context: {},
 		});
 

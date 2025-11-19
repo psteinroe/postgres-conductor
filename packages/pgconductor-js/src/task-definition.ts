@@ -8,56 +8,63 @@ export type TaskDefinition<
 	Returns extends ObjectSchema | undefined = undefined,
 	Queue extends string = "default",
 > = {
-	name: Name;
-	queue: Queue;
-	payload: Payload;
-	returns: Returns;
+	readonly name: Name;
+	readonly queue: Queue;
+	readonly payload: Payload;
+	readonly returns: Returns;
 };
 
+export function defineTask<Name extends string, Queue extends string>(def: {
+	name: Name;
+	queue: Queue;
+}): TaskDefinition<Name, undefined, undefined, Queue>;
 export function defineTask<Name extends string>(def: {
 	name: Name;
-	queue?: string;
-}): TaskDefinition<
-	Name,
-	undefined,
-	undefined,
-	typeof def.queue extends string ? typeof def.queue : "default"
->;
+	queue?: never;
+}): TaskDefinition<Name, undefined, undefined, "default">;
 export function defineTask<
 	Name extends string,
+	Queue extends string,
 	Payload extends ObjectSchema,
 >(def: {
 	name: Name;
-	queue?: string;
+	queue: Queue;
 	payload: Payload;
-}): TaskDefinition<
-	Name,
-	Payload,
-	undefined,
-	typeof def.queue extends string ? typeof def.queue : "default"
->;
+}): TaskDefinition<Name, Payload, undefined, Queue>;
+export function defineTask<Name extends string, Payload extends ObjectSchema>(def: {
+	name: Name;
+	queue?: never;
+	payload: Payload;
+}): TaskDefinition<Name, Payload, undefined, "default">;
+export function defineTask<
+	Name extends string,
+	Queue extends string,
+	Payload extends ObjectSchema,
+	Returns extends ObjectSchema,
+>(def: {
+	name: Name;
+	queue: Queue;
+	payload?: Payload;
+	returns?: Returns;
+}): TaskDefinition<Name, Payload, Returns, Queue>;
 export function defineTask<
 	Name extends string,
 	Payload extends ObjectSchema,
 	Returns extends ObjectSchema,
 >(def: {
 	name: Name;
-	queue?: string;
+	queue?: never;
 	payload?: Payload;
 	returns?: Returns;
-}): TaskDefinition<
-	Name,
-	Payload,
-	Returns,
-	typeof def.queue extends string ? typeof def.queue : "default"
->;
+}): TaskDefinition<Name, Payload, Returns, "default">;
+
 export function defineTask(def: any) {
 	return { ...def, queue: def.queue || "default" };
 }
 
 type EnsureObject<T> = T extends object ? T : {};
 
-export type InferPayload<T> = T extends TaskDefinition<string, infer P, any>
+export type InferPayload<T> = T extends TaskDefinition<string, infer P, any, string>
 	? P extends undefined
 		? {}
 		: P extends StandardSchemaV1<any, infer O>
@@ -65,7 +72,7 @@ export type InferPayload<T> = T extends TaskDefinition<string, infer P, any>
 			: never
 	: never;
 
-export type InferReturns<T> = T extends TaskDefinition<string, any, infer R>
+export type InferReturns<T> = T extends TaskDefinition<string, any, infer R, string>
 	? R extends undefined
 		? void
 		: R extends StandardSchemaV1<any, infer O>
@@ -74,13 +81,14 @@ export type InferReturns<T> = T extends TaskDefinition<string, any, infer R>
 	: never;
 
 export type TaskName<
-	TTasks extends readonly TaskDefinition<string, any, any>[],
+	TTasks extends readonly TaskDefinition<string, any, any, string>[],
 > = TTasks[number]["name"];
 
-export type FindTaskByName<
-	TTasks extends readonly TaskDefinition<string, any, any>[],
+export type FindTaskByIdentifier<
+	TTasks extends readonly TaskDefinition<string, any, any, string>[],
 	TName extends string,
-> = Extract<TTasks[number], { name: TName }>;
+	TQueue extends string = "default",
+> = Extract<TTasks[number], { name: TName; queue: TQueue }>;
 
 // Trigger types
 export type InvocableTrigger = { invocable: true };
@@ -126,33 +134,35 @@ type NoneOf<TArray extends readonly any[], TForbidden> = Extract<
 	? TArray
 	: never;
 
-// Check if task name exists in the conductor's task catalog
-type TaskIsDefined<
-	Tasks extends readonly TaskDefinition<string, any, any>[],
+// Check if task identifier exists in the conductor's task catalog
+type TaskIdentifierIsDefined<
+	Tasks extends readonly TaskDefinition<string, any, any, string>[],
 	TName extends string,
-> = TName extends Tasks[number]["name"] ? true : false;
+	TQueue extends string,
+> = Extract<Tasks[number], { name: TName; queue: TQueue }> extends never ? false : true;
 
 // Validate triggers based on whether task is defined
 export type ValidateTriggers<
-	Tasks extends readonly TaskDefinition<string, any, any>[],
+	Tasks extends readonly TaskDefinition<string, any, any, string>[],
 	TName extends string,
 	TTriggers extends NonEmptyArray<Trigger> | Trigger,
+	TQueue extends string = "default",
 > = TTriggers extends readonly Trigger[]
 	? // Array case - must be non-empty
 		TTriggers extends NonEmptyArray<Trigger>
-		? TaskIsDefined<Tasks, TName> extends true
+		? TaskIdentifierIsDefined<Tasks, TName, TQueue> extends true
 			? RequireAtLeastOneWith<TTriggers, InvocableTrigger> extends never
-				? `Task "${TName}" is defined in the conductor catalog. You must include { invocable: true } in the triggers array to allow manual invocations.`
+				? `Task "${TName}" of queue "${TQueue}" is defined in the conductor catalog. You must include { invocable: true } in the triggers array to allow manual invocations.`
 				: TTriggers
 			: NoneOf<TTriggers, InvocableTrigger> extends never
-				? `Task "${TName}" is not defined in the conductor catalog. Either remove { invocable: true } from triggers (for cron-only tasks), or add a task definition to the conductor's tasks array.`
+				? `Task "${TName}" of queue "${TQueue}" is not defined in the conductor catalog. Either remove { invocable: true } from triggers (for cron-only tasks), or add a task definition to the conductor's tasks array.`
 				: TTriggers
 		: `Triggers array cannot be empty. Provide at least one trigger.`
 	: // Single trigger case
-		TaskIsDefined<Tasks, TName> extends true
+		TaskIdentifierIsDefined<Tasks, TName, TQueue> extends true
 		? TTriggers extends InvocableTrigger
 			? TTriggers
-			: `Task "${TName}" is defined in the conductor catalog. You must include { invocable: true } in the triggers to allow manual invocations.`
+			: `Task "${TName}" of queue "${TQueue}" is defined in the conductor catalog. You must include { invocable: true } in the triggers to allow manual invocations.`
 		: TTriggers extends InvocableTrigger
-			? `Task "${TName}" is not defined in the conductor catalog. Remove { invocable: true } from triggers (for cron-only tasks), or add a task definition to the conductor's tasks array.`
+			? `Task "${TName}" of queue "${TQueue}" is not defined in the conductor catalog. Remove { invocable: true } from triggers (for cron-only tasks), or add a task definition to the conductor's tasks array.`
 			: TTriggers;

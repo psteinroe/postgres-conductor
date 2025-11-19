@@ -4,6 +4,14 @@ import type {
 	JsonValue,
 	Execution,
 } from "./database-client";
+import type {
+	TaskDefinition,
+	TaskName,
+	FindTaskByIdentifier,
+	InferPayload,
+	InferReturns,
+} from "./task-definition";
+import type { TaskIdentifier } from "./task";
 
 export type TaskContextOptions = {
 	signal: AbortSignal;
@@ -13,15 +21,25 @@ export type TaskContextOptions = {
 };
 
 // second argument for tasks
-export class TaskContext {
+export class TaskContext<
+	Tasks extends readonly TaskDefinition<string, any, any, string>[] = readonly TaskDefinition<
+		string,
+		any,
+		any,
+		string
+	>[],
+> {
 	constructor(private readonly opts: TaskContextOptions) {}
 
-	static create<Extra extends object>(
+	static create<
+		Tasks extends readonly TaskDefinition<string, any, any, string>[],
+		Extra extends object,
+	>(
 		opts: TaskContextOptions,
 		extra?: Extra,
-	): TaskContext & Extra {
-		const base = new TaskContext(opts);
-		return Object.assign(base, extra);
+	): TaskContext<Tasks> & Extra {
+		const base = new TaskContext<Tasks>(opts);
+		return Object.assign(base, extra) as TaskContext<Tasks> & Extra;
 	}
 
 	async step<T extends JsonValue | void>(
@@ -94,12 +112,20 @@ export class TaskContext {
 		return this.abortAndHangup();
 	}
 
-	async invoke<T extends JsonValue | void>(
+	async invoke<
+		TName extends TaskName<Tasks>,
+		TQueue extends string = "default",
+		TDef extends FindTaskByIdentifier<
+			Tasks,
+			TName,
+			TQueue
+		> = FindTaskByIdentifier<Tasks, TName, TQueue>,
+	>(
 		id: string,
-		taskKey: string,
-		payload: Payload = {},
+		task: TaskIdentifier<TName, TQueue>,
+		payload: InferPayload<TDef> = {} as InferPayload<TDef>,
 		timeout?: number,
-	): Promise<T> {
+	): Promise<InferReturns<TDef>> {
 		const cached = await this.opts.db.loadStep(
 			this.opts.execution.id,
 			id,
@@ -107,7 +133,7 @@ export class TaskContext {
 		);
 
 		if (cached !== undefined) {
-			return cached as T;
+			return cached as InferReturns<TDef>;
 		}
 
 		// Check if we're already waiting (distinguishes first invoke from timeout)
@@ -126,13 +152,20 @@ export class TaskContext {
 			);
 		}
 
-		await this.opts.db.invoke({
-			task_key: taskKey,
-			payload,
-			parent_execution_id: this.opts.execution.id,
-			parent_step_key: id,
-			parent_timeout_ms: timeout || null,
-		});
+		const taskName = task.name;
+		const queue = task.queue || "default";
+
+		await this.opts.db.invokeChild(
+			{
+				task_key: taskName,
+				queue,
+				payload,
+				parent_execution_id: this.opts.execution.id,
+				parent_step_key: id,
+				parent_timeout_ms: timeout || null,
+			},
+			this.opts.signal,
+		);
 
 		return this.abortAndHangup();
 	}

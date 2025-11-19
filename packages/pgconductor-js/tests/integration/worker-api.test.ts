@@ -26,11 +26,9 @@ describe("Worker API", () => {
 			payload: z.object({ to: z.string() }),
 		});
 
-		const tasks = [taskDefEmail] as const;
-
-		const conductor = new Conductor({
+		const conductor = Conductor.create({
 			sql: db.sql,
-			tasks,
+			tasks: [taskDefEmail],
 			context: {},
 		});
 
@@ -46,20 +44,23 @@ describe("Worker API", () => {
 			},
 		);
 
-		const notificationWorker = conductor.createWorker(
-			"notifications",
-			[emailTask],
-			{ concurrency: 2 },
-		);
+		const notificationWorker = conductor.createWorker({
+			queue: "notifications",
+			tasks: [emailTask],
+			config: { concurrency: 2 },
+		});
 
-		const orchestrator = new Orchestrator({
+		const orchestrator = Orchestrator.create({
 			conductor,
 			workers: [notificationWorker],
 		});
 
 		await orchestrator.start();
 
-		await conductor.invoke("send-email", { to: "user@example.com" });
+		await conductor.invoke(
+			{ name: "send-email", queue: "notifications" },
+			{ to: "user@example.com" },
+		);
 
 		// Wait for execution to complete
 		await waitFor(2000);
@@ -79,11 +80,9 @@ describe("Worker API", () => {
 			payload: z.object({ value: z.string() }),
 		});
 
-		const tasks = [taskDef] as const;
-
-		const conductor = new Conductor({
+		const conductor = Conductor.create({
 			sql: db.sql,
-			tasks,
+			tasks: [taskDef],
 			context: {},
 		});
 
@@ -99,14 +98,14 @@ describe("Worker API", () => {
 			},
 		);
 
-		const orchestrator = new Orchestrator({
+		const orchestrator = Orchestrator.create({
 			conductor,
 			tasks: [testTask],
 		});
 
 		await orchestrator.start();
 
-		await conductor.invoke("test-task", { value: "test" });
+		await conductor.invoke({ name: "test-task" }, { value: "test" });
 
 		await waitFor(2000);
 
