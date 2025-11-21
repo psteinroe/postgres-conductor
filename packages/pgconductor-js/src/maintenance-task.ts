@@ -1,4 +1,4 @@
-import { Task, type TaskConfiguration } from "./task";
+import { Task, type AnyTask } from "./task";
 import type { DatabaseClient } from "./database-client";
 import crypto from "crypto";
 
@@ -15,10 +15,6 @@ const BATCH_SIZE = 1000;
 
 export const createMaintenanceTask = <Queue extends string = "default">(
 	queue: Queue,
-	tasks: Pick<
-		TaskConfiguration<Queue>,
-		"name" | "removeOnComplete" | "removeOnFail"
-	>[],
 ) => {
 	// Add consistent jitter based on queue name to spread load between midnight and 1am
 	const jitterMinutes = hashToJitter(queue);
@@ -28,7 +24,7 @@ export const createMaintenanceTask = <Queue extends string = "default">(
 		Queue,
 		object,
 		void,
-		{ db: DatabaseClient },
+		{ db: DatabaseClient; tasks: Map<string, AnyTask> },
 		{ event: "pgconductor.cron" }
 	>(
 		{
@@ -39,12 +35,20 @@ export const createMaintenanceTask = <Queue extends string = "default">(
 			// Run daily between 00:00 and 01:00, with consistent jitter per queue
 			cron: `${jitterMinutes} 0 * * *`,
 		},
-		async (_, { db }) => {
+		async (_, { db, tasks }) => {
+			// Skip if no tasks have retention settings (check in-memory config)
+			const hasRetention = Array.from(tasks.values()).some(
+				(t) => t.removeOnComplete || t.removeOnFail,
+			);
+			if (!hasRetention) {
+				return;
+			}
+
 			// Delete old completed/failed executions based on retention settings
 			// Steps are automatically deleted via CASCADE foreign key
 			let hasMore = true;
 			while (hasMore) {
-				hasMore = await db.removeExecutions(queue, tasks, BATCH_SIZE);
+				hasMore = await db.removeExecutions(queue, BATCH_SIZE);
 			}
 		},
 	);

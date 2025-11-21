@@ -103,6 +103,7 @@ CREATE TABLE pgconductor.executions (
     run_at timestamptz default pgconductor.current_time() not null,
     locked_at timestamptz,
     locked_by uuid,
+    is_available boolean generated always as (locked_at is null and failed_at is null and completed_at is null) stored not null,
     attempts integer default 0 not null,
     last_error text,
     priority integer default 0 not null,
@@ -120,6 +121,10 @@ CREATE TABLE pgconductor.tasks (
 
     -- retry settings - uses fixed Inngest-style backoff schedule
     max_attempts integer default 3 not null,
+
+    -- retention settings: NULL=keep forever, 0=delete immediately, N=delete after N days
+    remove_on_complete_days integer,
+    remove_on_fail_days integer,
 
     -- task can be executed only within certain time windows
     -- e.g. business hours, weekends, nights, ...
@@ -147,6 +152,8 @@ CREATE TABLE pgconductor.steps (
     CONSTRAINT fk_execution FOREIGN KEY (execution_id, queue) REFERENCES pgconductor.executions(id, queue) ON DELETE CASCADE
 );
 
+create index idx_steps_execution_id on pgconductor.steps (execution_id);
+
 -- Trigger function to manage executions partitions per queue
 -- Automatically creates partition when queue is inserted
 CREATE OR REPLACE FUNCTION pgconductor.manage_queue_partition()
@@ -166,6 +173,22 @@ BEGIN
       'CREATE TABLE IF NOT EXISTS pgconductor.%I PARTITION OF pgconductor.executions FOR VALUES IN (%L) WITH (fillfactor=70)',
       v_partition_name,
       NEW.name
+    );
+
+    -- create indices
+
+    -- main index for fetching available executions
+    EXECUTE format(
+      'CREATE INDEX IF NOT EXISTS %I ON pgconductor.%I (priority, run_at) INCLUDE (id, task_key) WHERE is_available = true',
+      'idx_' || v_partition_name || '_get_executions',
+      v_partition_name
+    );
+
+    -- index for waiting executions lookup
+    EXECUTE format(
+      'CREATE INDEX IF NOT EXISTS %I ON pgconductor.%I (waiting_on_execution_id) where waiting_on_execution_id is not null',
+      'idx_' || v_partition_name || '_waiting_on_execution_id',
+      v_partition_name
     );
 
     RETURN NEW;
@@ -235,6 +258,8 @@ create type pgconductor.task_spec as (
     key text,
     queue text,
     max_attempts integer,
+    remove_on_complete_days integer,
+    remove_on_fail_days integer,
     window_start timetz,
     window_end timetz
 );
@@ -256,11 +281,13 @@ BEGIN
   ON CONFLICT (name) DO NOTHING;
 
   -- Step 2: Register/update tasks
-  INSERT INTO pgconductor.tasks (key, queue, max_attempts, window_start, window_end)
+  INSERT INTO pgconductor.tasks (key, queue, max_attempts, remove_on_complete_days, remove_on_fail_days, window_start, window_end)
   SELECT
     spec.key,
     COALESCE(spec.queue, 'default'),
     COALESCE(spec.max_attempts, 3),
+    spec.remove_on_complete_days,
+    spec.remove_on_fail_days,
     spec.window_start,
     spec.window_end
   FROM unnest(p_task_specs) AS spec
@@ -268,6 +295,8 @@ BEGIN
   DO UPDATE SET
     queue = COALESCE(EXCLUDED.queue, pgconductor.tasks.queue),
     max_attempts = COALESCE(EXCLUDED.max_attempts, pgconductor.tasks.max_attempts),
+    remove_on_complete_days = EXCLUDED.remove_on_complete_days,
+    remove_on_fail_days = EXCLUDED.remove_on_fail_days,
     window_start = EXCLUDED.window_start,
     window_end = EXCLUDED.window_end;
 

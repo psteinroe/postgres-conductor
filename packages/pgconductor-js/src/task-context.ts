@@ -1,9 +1,4 @@
-import type {
-	DatabaseClient,
-	Payload,
-	JsonValue,
-	Execution,
-} from "./database-client";
+import type { DatabaseClient, JsonValue, Execution } from "./database-client";
 import type {
 	TaskDefinition,
 	TaskName,
@@ -12,34 +7,37 @@ import type {
 	InferReturns,
 } from "./task-definition";
 import type { TaskIdentifier } from "./task";
+import type { Logger } from "./lib/logger";
 
 export type TaskContextOptions = {
 	signal: AbortSignal;
 	abortController: AbortController;
 	db: DatabaseClient;
 	execution: Execution;
+	logger: Logger;
 };
 
 // second argument for tasks
 export class TaskContext<
-	Tasks extends readonly TaskDefinition<string, any, any, string>[] = readonly TaskDefinition<
+	Tasks extends readonly TaskDefinition<
 		string,
 		any,
 		any,
 		string
-	>[],
+	>[] = readonly TaskDefinition<string, any, any, string>[],
 > {
 	constructor(private readonly opts: TaskContextOptions) {}
 
 	static create<
 		Tasks extends readonly TaskDefinition<string, any, any, string>[],
 		Extra extends object,
-	>(
-		opts: TaskContextOptions,
-		extra?: Extra,
-	): TaskContext<Tasks> & Extra {
+	>(opts: TaskContextOptions, extra?: Extra): TaskContext<Tasks> & Extra {
 		const base = new TaskContext<Tasks>(opts);
 		return Object.assign(base, extra) as TaskContext<Tasks> & Extra;
+	}
+
+	get logger(): Logger {
+		return this.opts.logger;
 	}
 
 	async step<T extends JsonValue | void>(

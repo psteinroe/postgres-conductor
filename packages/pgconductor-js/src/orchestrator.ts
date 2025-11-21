@@ -6,6 +6,7 @@ import { Deferred } from "./lib/deferred";
 import type { Conductor } from "./conductor";
 import { type AnyTask, type ValidateTasksQueue, Task } from "./task";
 import { PACKAGE_VERSION } from "./versions";
+import { makeChildLogger, type Logger } from "./lib/logger";
 
 export type OrchestratorOptions<
 	TTasks extends readonly AnyTask[] = readonly AnyTask[],
@@ -39,6 +40,7 @@ export class Orchestrator {
 	private readonly orchestratorId: string;
 	private readonly migrationStore: MigrationStore;
 	private readonly schemaManager: SchemaManager;
+	private readonly logger: Logger;
 
 	private heartbeatTimer: Timer | null = null;
 	private _stopDeferred: Deferred<void> | null = null;
@@ -48,6 +50,10 @@ export class Orchestrator {
 	private constructor(options: InternalOrchestratorOptions) {
 		this.orchestratorId = crypto.randomUUID();
 		this.db = options.conductor.db;
+		this.logger = makeChildLogger(options.conductor.logger, {
+			component: "orchestrator",
+			orchestratorId: this.orchestratorId,
+		});
 		this.migrationStore = new MigrationStore();
 		this.schemaManager = new SchemaManager(this.db);
 
@@ -115,7 +121,7 @@ export class Orchestrator {
 
 				// Step 1: Check if we're too old (should never happen, but safety check)
 				if (installedVersion > ourVersion) {
-					console.log(
+					this.logger.info(
 						`Orchestrator version ${ourVersion} is older than installed version ${installedVersion}, shutting down`,
 					);
 					this.stopDeferred.resolve();
@@ -135,7 +141,7 @@ export class Orchestrator {
 				);
 
 				if (shouldShutdown) {
-					console.log(
+					this.logger.info(
 						`Orchestrator ${this.orchestratorId} could not acquire migration lock, shutting down`,
 					);
 					this.stopDeferred.resolve();
@@ -151,7 +157,7 @@ export class Orchestrator {
 				);
 
 				if (hbShutdown) {
-					console.log(
+					this.logger.info(
 						`Orchestrator ${this.orchestratorId} detected newer schema after migrations, shutting down`,
 					);
 					this.stopDeferred.resolve();
@@ -181,7 +187,7 @@ export class Orchestrator {
 
 				this.stopDeferred.resolve();
 			} catch (err) {
-				console.error("Orchestrator error:", err);
+				this.logger.error(err);
 				this.stopDeferred.reject(err);
 				this.startDeferred.reject(err);
 			} finally {
@@ -250,13 +256,11 @@ export class Orchestrator {
 				);
 
 				if (shouldShutdown && !this.signal.aborted) {
-					console.log(
-						`Orchestrator ${this.orchestratorId} received shutdown signal`,
-					);
+					this.logger.info(`Received shutdown signal`);
 					this.abortController.abort();
 				}
 			} catch (err) {
-				console.error("Heartbeat error:", err);
+				this.logger.error("Heartbeat error:", err);
 			} finally {
 				// Schedule next heartbeat if not shutting down
 				if (!this.abortController.signal.aborted) {

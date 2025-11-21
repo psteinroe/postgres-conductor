@@ -19,6 +19,7 @@ import {
 	type ValidateTriggers,
 } from "./task-definition";
 import { Worker, type WorkerConfig } from "./worker";
+import { DefaultLogger, type Logger } from "./lib/logger";
 
 type ConnectionOptions =
 	| { connectionString: string; sql?: never }
@@ -61,7 +62,7 @@ export type ConductorOptions<
 
 	context: ExtraContext;
 
-	// logger
+	logger?: Logger;
 
 	// events
 };
@@ -78,6 +79,12 @@ export class Conductor<
 	 */
 	readonly db: DatabaseClient;
 
+	/**
+	 * @internal
+	 * Internal logger
+	 */
+	readonly logger: Logger;
+
 	private constructor(
 		public readonly options: ConductorOptions<Tasks, ExtraContext>,
 	) {
@@ -92,6 +99,8 @@ export class Conductor<
 				"Conductor requires either a connectionString or sql instance",
 			);
 		}
+
+		this.logger = options.logger || new DefaultLogger();
 	}
 
 	static create<
@@ -101,6 +110,7 @@ export class Conductor<
 		options: ConnectionOptions & {
 			tasks: TTasks;
 			context: TExtraContext;
+			logger?: Logger;
 		},
 	): Conductor<TTasks, TExtraContext> {
 		return new Conductor<TTasks, TExtraContext>(options);

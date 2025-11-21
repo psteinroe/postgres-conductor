@@ -31,6 +31,8 @@ export interface TaskSpec {
 	key: string;
 	queue?: string | null;
 	maxAttempts?: number | null;
+	removeOnCompleteDays?: number | null;
+	removeOnFailDays?: number | null;
 	window?: [string, string] | null;
 }
 
@@ -205,20 +207,20 @@ export class DatabaseClient {
 		maxAge: string,
 		signal: AbortSignal,
 	): Promise<void> {
-		await this.query(
-			this.builder.buildRecoverStaleOrchestrators(maxAge),
-			{ label: "recoverStaleOrchestrators", signal },
-		);
+		await this.query(this.builder.buildRecoverStaleOrchestrators(maxAge), {
+			label: "recoverStaleOrchestrators",
+			signal,
+		});
 	}
 
 	async sweepOrchestrators(
 		migrationNumber: number,
 		signal: AbortSignal,
 	): Promise<void> {
-		await this.query(
-			this.builder.buildSweepOrchestrators(migrationNumber),
-			{ label: "sweepOrchestrators", signal },
-		);
+		await this.query(this.builder.buildSweepOrchestrators(migrationNumber), {
+			label: "sweepOrchestrators",
+			signal,
+		});
 	}
 
 	/**
@@ -310,18 +312,17 @@ export class DatabaseClient {
 		orchestratorId: string,
 		signal: AbortSignal,
 	): Promise<void> {
-		await this.query(
-			this.builder.buildOrchestratorShutdown(orchestratorId),
-			{ label: "orchestratorShutdown", signal },
-		);
+		await this.query(this.builder.buildOrchestratorShutdown(orchestratorId), {
+			label: "orchestratorShutdown",
+			signal,
+		});
 	}
 
 	async getExecutions(
 		orchestratorId: string,
 		queueName: string,
 		batchSize: number,
-		taskKeys: string[],
-		taskMaxAttempts: Record<string, number>,
+		filterTaskKeys: string[],
 		signal: AbortSignal,
 	): Promise<Execution[]> {
 		return this.query(
@@ -329,8 +330,7 @@ export class DatabaseClient {
 				orchestratorId,
 				queueName,
 				batchSize,
-				taskKeys,
-				taskMaxAttempts,
+				filterTaskKeys,
 			),
 			{ label: "getExecutions", signal },
 		);
@@ -338,17 +338,9 @@ export class DatabaseClient {
 
 	async returnExecutions(
 		results: ExecutionResult[],
-		taskMaxAttempts: Record<string, number>,
-		taskRemoveOnComplete: Record<string, boolean>,
-		taskRemoveOnFail: Record<string, boolean>,
 		signal?: AbortSignal,
 	): Promise<void> {
-		const query = this.builder.buildReturnExecutions(
-			results,
-			taskMaxAttempts,
-			taskRemoveOnComplete,
-			taskRemoveOnFail,
-		);
+		const query = this.builder.buildReturnExecutions(results);
 
 		if (!query) return;
 
@@ -357,20 +349,10 @@ export class DatabaseClient {
 
 	async removeExecutions(
 		queueName: string,
-		tasks: Pick<
-			TaskConfiguration,
-			"name" | "removeOnComplete" | "removeOnFail"
-		>[],
 		batchSize: number,
 		signal?: AbortSignal,
 	): Promise<boolean> {
-		const query = this.builder.buildRemoveExecutions(
-			queueName,
-			tasks,
-			batchSize,
-		);
-
-		if (!query) return false;
+		const query = this.builder.buildRemoveExecutions(queueName, batchSize);
 
 		const result = await this.query(query, {
 			label: "removeExecutions",

@@ -14,6 +14,7 @@ import CronExpressionParser from "cron-parser";
 import { TaskContext } from "./task-context";
 import * as assert from "./lib/assert";
 import { createMaintenanceTask } from "./maintenance-task";
+import { makeChildLogger, type Logger } from "./lib/logger";
 
 const HANGUP = Symbol("hangup");
 
@@ -64,17 +65,11 @@ export class Worker<
 		public readonly queueName: string,
 		tasks: readonly AnyTask[],
 		private readonly db: DatabaseClient,
+		private readonly logger: Logger,
 		config: Partial<WorkerConfig> = {},
 		private readonly extraContext: object = {},
 	) {
-		const maintenanceTask = createMaintenanceTask(
-			this.queueName,
-			tasks.map((t) => ({
-				name: t.name,
-				removeOnComplete: t.removeOnComplete,
-				removeOnFail: t.removeOnFail,
-			})),
-		);
+		const maintenanceTask = createMaintenanceTask(this.queueName);
 		this.tasks = tasks.reduce(
 			(m, task) => {
 				m.set(task.name, task);
@@ -119,7 +114,7 @@ export class Worker<
 
 				this.deferred.resolve();
 			} catch (err) {
-				console.error("Worker pipeline error:", err);
+				this.logger.error("Worker pipeline error:", err);
 				this.deferred.reject(err);
 			} finally {
 				queue.close();
@@ -149,10 +144,21 @@ export class Worker<
 	}
 
 	private async register(): Promise<void> {
+		// Convert RetentionSettings to integer: null=keep, 0=delete now, N=delete after N days
+		const retentionToDays = (
+			setting: boolean | { days: number } | undefined,
+		): number | null => {
+			if (setting === undefined || setting === false) return null;
+			if (setting === true) return 0;
+			return setting.days;
+		};
+
 		const taskSpecs = Array.from(this.tasks.values()).map((task) => ({
 			key: task.name,
 			queue: this.queueName,
 			maxAttempts: task.maxAttempts,
+			removeOnCompleteDays: retentionToDays(task.removeOnComplete),
+			removeOnFailDays: retentionToDays(task.removeOnFail),
 			window: task.window,
 		}));
 
@@ -204,16 +210,20 @@ export class Worker<
 			try {
 				// Filter tasks based on time windows (if any)
 				const now = new Date();
-				const allowedTaskKeys = allTasks
-					.filter((task) => {
-						if (!task.window) return true;
-						const [start, end] = task.window;
-						const currentTime = now.toTimeString().slice(0, 8);
-						return currentTime >= start && currentTime < end;
-					})
+
+				function isWithinWindow(task: AnyTask, now: Date): boolean {
+					if (!task.window) return true;
+					const [start, end] = task.window;
+					const currentTime = now.toTimeString().slice(0, 8);
+					return currentTime >= start && currentTime < end;
+				}
+
+				const disallowedTaskKeys = allTasks
+					.filter((task) => !isWithinWindow(task, now))
 					.map((t) => t.name);
 
-				if (allowedTaskKeys.length === 0) {
+				if (disallowedTaskKeys.length === this.tasks.size) {
+					// skip fetch if no tasks are allowed to run now
 					await waitFor(this.pollIntervalMs, { signal: this.signal });
 					continue;
 				}
@@ -222,8 +232,7 @@ export class Worker<
 					this.orchestratorId,
 					this.queueName,
 					this.fetchBatchSize,
-					allowedTaskKeys,
-					taskMaxAttempts,
+					disallowedTaskKeys,
 					this.signal,
 				);
 
@@ -278,10 +287,10 @@ export class Worker<
 						? ({ event: "pgconductor.cron" } as const)
 						: ({ event: "pgconductor.invoke", payload: exec.payload } as const);
 
-					// Pass db as extra context to maintenance task
+					// Pass db and tasks as extra context to maintenance task
 					const extraContext =
 						task.name === "pgconductor.maintenance"
-							? { ...this.extraContext, db: this.db }
+							? { ...this.extraContext, db: this.db, tasks: this.tasks }
 							: this.extraContext;
 
 					const output = await Promise.race([
@@ -293,6 +302,11 @@ export class Worker<
 									db: this.db,
 									abortController: taskAbortController,
 									execution: exec,
+									logger: makeChildLogger(this.logger, {
+										execution_id: exec.id,
+										task_key: exec.task_key,
+										queue: exec.queue,
+									}),
 								},
 								extraContext,
 							),
@@ -358,16 +372,6 @@ export class Worker<
 		let buffer: ExecutionResult[] = [];
 		let flushTimer: Timer | null = null;
 
-		// Pre-compute task metadata once
-		const taskMaxAttempts: Record<string, number> = {};
-		const taskRemoveOnComplete: Record<string, boolean> = {};
-		const taskRemoveOnFail: Record<string, boolean> = {};
-		for (const task of this.tasks.values()) {
-			taskMaxAttempts[task.name] = task.maxAttempts || 3;
-			taskRemoveOnComplete[task.name] = task.removeOnComplete === true;
-			taskRemoveOnFail[task.name] = task.removeOnFail === true;
-		}
-
 		const flushNow = async (isCleanup = false) => {
 			if (buffer.length === 0) return;
 
@@ -382,13 +386,10 @@ export class Worker<
 			try {
 				await this.db.returnExecutions(
 					batch,
-					taskMaxAttempts,
-					taskRemoveOnComplete,
-					taskRemoveOnFail,
 					isCleanup ? undefined : this.signal,
 				);
 			} catch (err) {
-				console.error("Flush failed:", err);
+				this.logger.error("Error flushing results:", err);
 				if (!isCleanup) {
 					buffer.push(...batch);
 				}
