@@ -42,6 +42,7 @@ export interface Execution {
 	queue: string;
 	payload: Payload;
 	waiting_on_execution_id: string | null;
+	waiting_step_key: string | null;
 	dedupe_key?: string | null;
 	cron_expression?: string | null;
 }
@@ -470,5 +471,84 @@ export class DatabaseClient {
 			},
 			{ label: "clearFakeTime", signal },
 		);
+	}
+
+	/**
+	 * Subscribe to an event and wait for it.
+	 * Returns the subscription id.
+	 */
+	async subscribeEvent(
+		executionId: string,
+		queue: string,
+		stepKey: string,
+		eventKey: string,
+		timeoutMs?: number,
+		signal?: AbortSignal,
+	): Promise<string> {
+		const result = await this.query(
+			this.sql`
+				select pgconductor.subscribe_event(
+					${executionId}::uuid,
+					${queue},
+					${stepKey},
+					${eventKey},
+					${timeoutMs || null}::integer
+				) as id
+			`,
+			{ label: "subscribeEvent", signal },
+		);
+		return result[0]!.id;
+	}
+
+	/**
+	 * Subscribe to a database change and wait for it.
+	 * Returns the subscription id.
+	 */
+	async subscribeDbChange(
+		executionId: string,
+		queue: string,
+		stepKey: string,
+		schemaName: string,
+		tableName: string,
+		operation: "insert" | "update" | "delete",
+		timeoutMs?: number,
+		signal?: AbortSignal,
+	): Promise<string> {
+		const result = await this.query(
+			this.sql`
+				select pgconductor.subscribe_db_change(
+					${executionId}::uuid,
+					${queue},
+					${stepKey},
+					${schemaName},
+					${tableName},
+					${operation},
+					${timeoutMs || null}::integer
+				) as id
+			`,
+			{ label: "subscribeDbChange", signal },
+		);
+		return result[0]!.id;
+	}
+
+	/**
+	 * Emit a custom event.
+	 * Returns the event id.
+	 */
+	async emitEvent(
+		eventKey: string,
+		payload?: JsonValue,
+		signal?: AbortSignal,
+	): Promise<string> {
+		const result = await this.query(
+			this.sql`
+				select pgconductor.emit_event(
+					${eventKey},
+					${this.sql.json(payload || null)}
+				) as id
+			`,
+			{ label: "emitEvent", signal },
+		);
+		return result[0]!.id;
 	}
 }

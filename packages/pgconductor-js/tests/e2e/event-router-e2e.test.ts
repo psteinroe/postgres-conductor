@@ -1,0 +1,386 @@
+import { z } from "zod";
+import { test, expect, describe, beforeAll, afterAll } from "bun:test";
+import { Conductor } from "../../src/conductor";
+import { Orchestrator } from "../../src/orchestrator";
+import { defineTask } from "../../src/task-definition";
+import postgres from "postgres";
+import {
+	GenericContainer,
+	type StartedTestContainer,
+	Wait,
+} from "testcontainers";
+import { Network } from "testcontainers";
+import * as path from "path";
+
+describe("Event Router E2E", () => {
+	let network: any;
+	let pgContainer: StartedTestContainer;
+	let eventRouterContainer: StartedTestContainer;
+	let sql: ReturnType<typeof postgres>;
+	let masterUrl: string;
+
+	beforeAll(async () => {
+		// Create a shared network
+		network = await new Network().start();
+
+		// Start PostgreSQL with logical replication enabled
+		pgContainer = await new GenericContainer("postgres:15")
+			.withNetwork(network)
+			.withNetworkAliases("postgres")
+			.withEnvironment({
+				POSTGRES_PASSWORD: "postgres",
+				POSTGRES_USER: "postgres",
+				POSTGRES_DB: "postgres",
+			})
+			.withCommand([
+				"postgres",
+				"-c", "wal_level=logical",
+				"-c", "max_replication_slots=10",
+				"-c", "max_wal_senders=10",
+			])
+			.withExposedPorts(5432)
+			.withWaitStrategy(
+				Wait.forLogMessage(/database system is ready to accept connections/, 2),
+			)
+			.start();
+
+		const host = pgContainer.getHost();
+		const port = pgContainer.getMappedPort(5432);
+
+		// Connect to default database to create test database
+		const adminSql = postgres(`postgres://postgres:postgres@${host}:${port}/postgres`, { max: 1 });
+		await adminSql.unsafe(`CREATE DATABASE pgconductor_test`);
+		await adminSql.end();
+
+		// Connect to the new test database
+		masterUrl = `postgres://postgres:postgres@${host}:${port}/pgconductor_test`;
+		sql = postgres(masterUrl, { max: 1 });
+
+		// Install uuid-ossp extension (needed by migrations)
+		await sql`CREATE EXTENSION IF NOT EXISTS "uuid-ossp"`;
+
+		// Run a setup orchestrator to apply migrations
+		const setupTask = defineTask({
+			name: "setup-task",
+			payload: z.object({}),
+		});
+
+		const setupConductor = Conductor.create({
+			sql,
+			tasks: [setupTask],
+			context: {},
+		});
+
+		const setupOrchestrator = Orchestrator.create({
+			conductor: setupConductor,
+			tasks: [setupConductor.createTask({ name: "setup-task" }, { invocable: true }, async () => {})],
+		});
+
+		await setupOrchestrator.start();
+		await setupOrchestrator.stop();
+
+		// Create application tables for testing database events
+		await sql.unsafe(`
+			CREATE TABLE address_book (
+				id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+				name text NOT NULL,
+				description text,
+				created_at timestamptz NOT NULL DEFAULT now(),
+				updated_at timestamptz NOT NULL DEFAULT now()
+			);
+
+			CREATE TABLE contact (
+				id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+				address_book_id uuid NOT NULL REFERENCES address_book(id),
+				first_name text NOT NULL,
+				last_name text,
+				email text,
+				phone text,
+				is_favorite boolean NOT NULL DEFAULT false,
+				metadata jsonb,
+				created_at timestamptz NOT NULL DEFAULT now()
+			);
+		`);
+
+		// Create publication for CDC (now that tables exist)
+		await sql.unsafe(`
+			CREATE PUBLICATION pgconductor_events
+			FOR TABLE pgconductor.events, pgconductor.subscriptions, address_book, contact
+			WITH (publish_via_partition_root = true)
+		`);
+
+		// Build and start event-router container from Dockerfile
+		// Note: First run takes ~5-10 minutes to build Rust. Image is cached for subsequent runs.
+		// To force rebuild: docker rmi pgconductor-event-router:test
+		const projectRoot = path.resolve(__dirname, "../../../..");
+		const imageName = "pgconductor-event-router:test";
+
+		// Check if image already exists
+		const { execSync } = await import("child_process");
+		let imageExists = false;
+		try {
+			execSync(`docker image inspect ${imageName}`, { stdio: "ignore" });
+			imageExists = true;
+		} catch {
+			imageExists = false;
+		}
+
+		let eventRouterImage;
+		if (imageExists) {
+			eventRouterImage = new GenericContainer(imageName);
+		} else {
+			eventRouterImage = await GenericContainer.fromDockerfile(projectRoot, "crates/event-router/Dockerfile")
+				.withCache(true)
+				.build(imageName);
+		}
+
+		eventRouterContainer = await eventRouterImage
+			.withNetwork(network)
+			.withEnvironment({
+				PGHOST: "postgres",
+				PGPORT: "5432",
+				PGDATABASE: "pgconductor_test",
+				PGUSER: "postgres",
+				PGPASSWORD: "postgres",
+				PUBLICATION_NAME: "pgconductor_events",
+				RUST_LOG: "debug,event_router=debug",
+			})
+			.withWaitStrategy(
+				Wait.forLogMessage(/Subscriptions loaded, starting pipeline/)
+			)
+			.start();
+
+		// Give the event-router time to establish CDC connection
+		await new Promise(r => setTimeout(r, 2000));
+	}, 600000); // 10 minutes - Rust build takes time
+
+	afterAll(async () => {
+		await sql?.end();
+		await eventRouterContainer?.stop();
+		await pgContainer?.stop();
+		await network?.stop();
+	});
+
+	test("event-router wakes execution when event is emitted", async () => {
+		const taskDefinition = defineTask({
+			name: "e2e-waiter",
+			payload: z.object({}),
+			returns: z.object({ eventData: z.any() }),
+		});
+
+		let receivedData: any = null;
+
+		const conductor = Conductor.create({
+			sql,
+			tasks: [taskDefinition],
+			context: {},
+		});
+
+		const waiterTask = conductor.createTask(
+			{ name: "e2e-waiter" },
+			{ invocable: true },
+			async (_event, ctx) => {
+				const eventData = await ctx.waitForEvent<{ userId: number }>(
+					"wait-for-user",
+					"user.created",
+				);
+				receivedData = eventData;
+				return { eventData };
+			},
+		);
+
+		const orchestrator = Orchestrator.create({
+			conductor,
+			tasks: [waiterTask],
+			defaultWorker: {
+				pollIntervalMs: 100,
+				flushIntervalMs: 100,
+			},
+		});
+
+		await orchestrator.start();
+
+		// Invoke the task that will wait for an event
+		await conductor.invoke({ name: "e2e-waiter" }, {});
+
+		// Wait for task to create subscription
+		await new Promise(r => setTimeout(r, 1000));
+
+		// Verify subscription was created
+		const subscriptions = await sql`
+			SELECT * FROM pgconductor.subscriptions
+			WHERE event_key = 'user.created'
+		`;
+		expect(subscriptions.length).toBe(1);
+
+		// Emit the event - this will be picked up by event-router via CDC
+		await sql`
+			INSERT INTO pgconductor.events (event_key, payload)
+			VALUES ('user.created', ${sql.json({ userId: 456 })})
+		`;
+
+		// Wait for event-router to process the event and wake the execution
+		// This is the actual E2E test - the event-router should:
+		// 1. Detect the new event via CDC
+		// 2. Match it to the subscription
+		// 3. Call wake_execution to save the step and wake the task
+		await new Promise(r => setTimeout(r, 3000));
+
+		await orchestrator.stop();
+
+		// Verify the task received the event data
+		expect(receivedData).toEqual({ userId: 456 });
+
+		// Verify execution completed
+		const executions = await sql`
+			SELECT completed_at FROM pgconductor.executions
+			WHERE task_key = 'e2e-waiter'
+		`;
+		expect(executions[0]?.completed_at).not.toBeNull();
+	}, 30000);
+
+	test("event-router handles multiple subscriptions", async () => {
+		const taskDefinition = defineTask({
+			name: "multi-waiter",
+			payload: z.object({ eventKey: z.string() }),
+			returns: z.object({ received: z.boolean() }),
+		});
+
+		const receivedEvents: string[] = [];
+
+		const conductor = Conductor.create({
+			sql,
+			tasks: [taskDefinition],
+			context: {},
+		});
+
+		const multiWaiterTask = conductor.createTask(
+			{ name: "multi-waiter" },
+			{ invocable: true },
+			async (event, ctx) => {
+				if (event.event === "pgconductor.invoke") {
+					await ctx.waitForEvent("wait-step", event.payload.eventKey);
+					receivedEvents.push(event.payload.eventKey);
+					return { received: true };
+				}
+				throw new Error("Unexpected event");
+			},
+		);
+
+		const orchestrator = Orchestrator.create({
+			conductor,
+			tasks: [multiWaiterTask],
+			defaultWorker: {
+				pollIntervalMs: 100,
+				flushIntervalMs: 100,
+			},
+		});
+
+		await orchestrator.start();
+
+		// Invoke multiple tasks waiting for different events
+		await conductor.invoke({ name: "multi-waiter" }, { eventKey: "order.created" });
+		await conductor.invoke({ name: "multi-waiter" }, { eventKey: "payment.completed" });
+
+		// Wait for subscriptions to be created
+		await new Promise(r => setTimeout(r, 1000));
+
+		// Emit both events
+		await sql`
+			INSERT INTO pgconductor.events (event_key, payload)
+			VALUES ('order.created', ${sql.json({ orderId: 1 })})
+		`;
+		await sql`
+			INSERT INTO pgconductor.events (event_key, payload)
+			VALUES ('payment.completed', ${sql.json({ paymentId: 2 })})
+		`;
+
+		// Wait for event-router to process
+		await new Promise(r => setTimeout(r, 3000));
+
+		await orchestrator.stop();
+
+		// Both events should have been received
+		expect(receivedEvents).toContain("order.created");
+		expect(receivedEvents).toContain("payment.completed");
+	}, 30000);
+
+	test("event-router handles database table CDC events", async () => {
+		const taskDefinition = defineTask({
+			name: "contact-watcher",
+			payload: z.object({}),
+			returns: z.object({ contactId: z.string().optional() }),
+		});
+
+		let receivedContactId: string | undefined = undefined;
+
+		const conductor = Conductor.create({
+			sql,
+			tasks: [taskDefinition],
+			context: {},
+		});
+
+		const contactWatcherTask = conductor.createTask(
+			{ name: "contact-watcher" },
+			{ invocable: true },
+			async (_event, ctx) => {
+				// Wait for a contact to be created via database CDC
+				// Payload is trigger-like: { old, new, tg_table, tg_op }
+				const data = await ctx.waitForDbChange<{
+					old: null;
+					new: string[];
+					tg_table: string;
+					tg_op: string;
+				}>(
+					"wait-for-contact",
+					"public",
+					"contact",
+					"insert",
+				);
+				// new is an array of cell values from the row
+				// First element is the id (uuid)
+				receivedContactId = data.new[0];
+				return { contactId: data.new[0] };
+			},
+		);
+
+		const orchestrator = Orchestrator.create({
+			conductor,
+			tasks: [contactWatcherTask],
+			defaultWorker: {
+				pollIntervalMs: 100,
+				flushIntervalMs: 100,
+			},
+		});
+
+		await orchestrator.start();
+
+		// Invoke the task that will wait for a contact creation
+		await conductor.invoke({ name: "contact-watcher" }, {});
+
+		// Wait for task to create subscription
+		await new Promise(r => setTimeout(r, 1000));
+
+		// Create an address book first (required by foreign key)
+		const [addressBook] = await sql`
+			INSERT INTO address_book (name, description)
+			VALUES ('Test Address Book', 'For E2E testing')
+			RETURNING id
+		`;
+
+		// Insert a contact - this will be picked up by CDC automatically
+		const [contact] = await sql`
+			INSERT INTO contact (address_book_id, first_name, last_name, email)
+			VALUES (${addressBook!.id}, 'John', 'Doe', 'john@example.com')
+			RETURNING id
+		`;
+
+		// Wait for event-router to process the CDC event
+		await new Promise(r => setTimeout(r, 3000));
+
+		await orchestrator.stop();
+
+		// Verify the task received the contact data
+		expect(receivedContactId).toBe(contact!.id);
+	}, 30000);
+});

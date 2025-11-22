@@ -8,6 +8,21 @@ import type {
 } from "./task-definition";
 import type { TaskIdentifier } from "./task";
 import type { Logger } from "./lib/logger";
+import type {
+	CustomEventConfig,
+	DatabaseEventConfig,
+	DatabaseEventPayload,
+	EventDefinition,
+	EventName,
+	FindEventByIdentifier,
+	GenericDatabase,
+	InferEventPayload,
+	RowType,
+	SchemaName,
+	SharedEventConfig,
+	TableName,
+} from "./event-definition";
+import type { SelectionInput } from "./select-columns";
 
 export type TaskContextOptions = {
 	signal: AbortSignal;
@@ -25,14 +40,20 @@ export class TaskContext<
 		any,
 		string
 	>[] = readonly TaskDefinition<string, any, any, string>[],
+	Events extends readonly EventDefinition<
+		string,
+		any
+	>[] = readonly EventDefinition<string, any>[],
+	TDatabase extends GenericDatabase = GenericDatabase,
 > {
 	constructor(private readonly opts: TaskContextOptions) {}
 
 	static create<
 		Tasks extends readonly TaskDefinition<string, any, any, string>[],
+		Events extends readonly EventDefinition<string, any>[],
 		Extra extends object,
 	>(opts: TaskContextOptions, extra?: Extra): TaskContext<Tasks> & Extra {
-		const base = new TaskContext<Tasks>(opts);
+		const base = new TaskContext<Tasks, Events>(opts);
 		return Object.assign(base, extra) as TaskContext<Tasks> & Extra;
 	}
 
@@ -168,7 +189,106 @@ export class TaskContext<
 		return this.abortAndHangup();
 	}
 
-	// async waitForEvent(name: string): Promise<void> {}
-	//
-	// async emitEvent(name: string): Promise<void> {}
+	/**
+	 * Wait for a custom event to arrive.
+	 */
+	async waitForEvent<
+		TName extends EventName<Events>,
+		TDef extends FindEventByIdentifier<Events, TName> = FindEventByIdentifier<
+			Events,
+			TName
+		>,
+	>(
+		id: string,
+		config: CustomEventConfig<TName> & SharedEventConfig,
+	): Promise<InferEventPayload<TDef>>;
+
+	/**
+	 * Wait for a database change event.
+	 */
+	async waitForEvent<
+		TSchema extends SchemaName<TDatabase>,
+		TTable extends TableName<TDatabase, TSchema>,
+		TOp extends "insert" | "update" | "delete",
+		TSelection extends
+			| SelectionInput<RowType<TDatabase, TSchema, TTable>>
+			| undefined = undefined,
+	>(
+		id: string,
+		config: DatabaseEventConfig<TDatabase, TSchema, TTable, TOp, TSelection>,
+	): Promise<
+		DatabaseEventPayload<RowType<TDatabase, TSchema, TTable>, TOp, TSelection>
+	>;
+
+	async waitForEvent(
+		id: string,
+		config: (
+			| CustomEventConfig<string>
+			| DatabaseEventConfig<TDatabase, any, any, any, any>
+		) &
+			SharedEventConfig,
+	): Promise<unknown> {
+		// Check if we already received the event
+		const cached = await this.opts.db.loadStep(
+			this.opts.execution.id,
+			id,
+			this.opts.signal,
+		);
+
+		if (cached !== undefined) {
+			return cached;
+		}
+
+		// Check if we're already waiting (distinguishes first call from timeout)
+		if (this.opts.execution.waiting_step_key !== null) {
+			// We resumed but no step exists → timeout occurred
+			// Clear waiting state before throwing
+			await this.opts.db.clearWaitingState(
+				this.opts.execution.id,
+				this.opts.signal,
+			);
+
+			throw new Error(
+				config.timeout
+					? `Event wait timed out after ${config.timeout}ms`
+					: "Event wait timeout",
+			);
+		}
+
+		// Determine if this is a custom event or database event
+		if ("event" in config) {
+			// Custom event
+			await this.opts.db.subscribeEvent(
+				this.opts.execution.id,
+				this.opts.execution.queue,
+				id,
+				config.event,
+				config.timeout,
+				this.opts.signal,
+			);
+		} else {
+			// Database event
+			await this.opts.db.subscribeDbChange(
+				this.opts.execution.id,
+				this.opts.execution.queue,
+				id,
+				config.schema,
+				config.table,
+				config.operation,
+				config.timeout,
+				this.opts.signal,
+			);
+		}
+
+		return this.abortAndHangup();
+	}
+
+	/**
+	 * Emit a custom event that can wake up waiting executions.
+	 * @param eventKey - The event key to emit
+	 * @param payload - Optional payload to send with the event
+	 */
+	async emitEvent(eventKey: string, payload?: JsonValue): Promise<void> {
+		await this.opts.db.emitEvent(eventKey, payload, this.opts.signal);
+	}
 }

@@ -20,6 +20,14 @@ import {
 } from "./task-definition";
 import { Worker, type WorkerConfig } from "./worker";
 import { DefaultLogger, type Logger } from "./lib/logger";
+import type {
+	CustomEventConfig,
+	EventDefinition,
+	EventName,
+	FindEventByIdentifier,
+	GenericDatabase,
+	InferEventPayload,
+} from "./event-definition";
 
 type ConnectionOptions =
 	| { connectionString: string; sql?: never }
@@ -56,21 +64,27 @@ type ResolvedEvent<
 
 export type ConductorOptions<
 	Tasks extends readonly TaskDefinition<string, any, any, string>[],
+	Events extends readonly EventDefinition<string, any>[],
+	Database extends GenericDatabase,
 	ExtraContext extends object,
 > = ConnectionOptions & {
 	tasks: Tasks;
+
+	events?: Events;
 
 	context: ExtraContext;
 
 	logger?: Logger;
 
-	// events
+	database?: Database;
 };
 
 // similar to inngest client
 // exposes the main createTask methods and handles types
 export class Conductor<
 	Tasks extends readonly TaskDefinition<string, any, any, string>[],
+	Events extends readonly EventDefinition<string, any>[],
+	Database extends GenericDatabase = {},
 	ExtraContext extends object = {},
 > {
 	/**
@@ -86,7 +100,12 @@ export class Conductor<
 	readonly logger: Logger;
 
 	private constructor(
-		public readonly options: ConductorOptions<Tasks, ExtraContext>,
+		public readonly options: ConductorOptions<
+			Tasks,
+			Events,
+			Database,
+			ExtraContext
+		>,
 	) {
 		if ("sql" in options && options.sql) {
 			this.db = new DatabaseClient({ sql: options.sql });
@@ -105,15 +124,18 @@ export class Conductor<
 
 	static create<
 		const TTasks extends readonly TaskDefinition<string, any, any, string>[],
+		const TEvents extends readonly EventDefinition<string, any>[],
+		const TDatabase extends GenericDatabase,
 		TExtraContext extends object,
 	>(
 		options: ConnectionOptions & {
 			tasks: TTasks;
 			context: TExtraContext;
 			logger?: Logger;
+			events?: TEvents;
 		},
-	): Conductor<TTasks, TExtraContext> {
-		return new Conductor<TTasks, TExtraContext>(options);
+	): Conductor<TTasks, TEvents, TDatabase, TExtraContext> {
+		return new Conductor<TTasks, TEvents, TDatabase, TExtraContext>(options);
 	}
 
 	createTask<
@@ -165,6 +187,7 @@ export class Conductor<
 			options.queue,
 			options.tasks as AnyTask[],
 			this.db,
+			this.logger,
 			options.config,
 			this.options.context,
 		);
@@ -229,5 +252,16 @@ export class Conductor<
 		});
 	}
 
-	// emit(name: string): Promise<void> {}
+	async emit<
+		TName extends EventName<Events>,
+		TDef extends FindEventByIdentifier<Events, TName> = FindEventByIdentifier<
+			Events,
+			TName
+		>,
+	>(
+		{ event }: CustomEventConfig<TName>,
+		payload: InferEventPayload<TDef>,
+	): Promise<string> {
+		return this.db.emitEvent(event, payload);
+	}
 }

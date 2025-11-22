@@ -28,6 +28,9 @@ export class MockDatabaseClient implements IDatabaseClient {
 	clearWaitingState = mock(async () => {});
 	setFakeTime = mock(async () => {});
 	clearFakeTime = mock(async () => {});
+	subscribeEvent = mock(async () => "mock-subscription-id");
+	subscribeDbChange = mock(async () => "mock-subscription-id");
+	emitEvent = mock(async () => "mock-event-id");
 
 	constructor(overrides: Partial<IDatabaseClient> = {}) {
 		Object.assign(this, overrides);

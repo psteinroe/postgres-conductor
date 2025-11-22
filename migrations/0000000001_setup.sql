@@ -10,6 +10,7 @@ CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
 -- Returns either the actual current timestamp or a fake one for tests.
 -- Uses session variable (current_setting) for test time control.
+-- TODO: dynamically use this only when test mode is enabled
 create function pgconductor.current_time ()
   returns timestamptz
   language plpgsql
@@ -237,6 +238,25 @@ CREATE TRIGGER manage_queue_partition_trigger
 
 -- Create default queue (trigger will create executions_default partition)
 INSERT INTO pgconductor.queues (name) VALUES ('default');
+
+CREATE TABLE IF NOT EXISTS pgconductor.subscriptions (
+    id uuid PRIMARY KEY default pgconductor.portable_uuidv7(),
+    source text NOT NULL, -- 'db' or 'event'
+    schema_name text,
+    table_name text,
+    operation text, -- 'insert', 'update', 'delete'
+    event_key text,
+    execution_id uuid NOT NULL,
+    queue text not null default 'default',
+    step_key text -- step key to save result to when event arrives
+);
+
+CREATE TABLE IF NOT EXISTS pgconductor.events (
+    id uuid PRIMARY KEY default pgconductor.portable_uuidv7(),
+    event_key text NOT NULL,
+    payload jsonb,
+    created_at timestamptz DEFAULT pgconductor.current_time() NOT NULL
+);
 
 -- Drop a queue (will trigger partition deletion via trigger)
 CREATE OR REPLACE FUNCTION pgconductor.drop_queue(queue_name text)
@@ -482,3 +502,128 @@ begin
 end;
 $function$
 ;
+
+-- Subscribe to an event and wait for it
+-- Returns the subscription id
+create or replace function pgconductor.subscribe_event(
+    p_execution_id uuid,
+    p_queue text,
+    p_step_key text,
+    p_event_key text,
+    p_timeout_ms integer default null
+)
+returns uuid
+language plpgsql
+volatile
+set search_path to ''
+as $function$
+declare
+    v_subscription_id uuid;
+begin
+    -- Create subscription
+    insert into pgconductor.subscriptions (source, event_key, execution_id, step_key)
+    values ('event', p_event_key, p_execution_id, p_step_key)
+    returning id into v_subscription_id;
+
+    -- Update execution to wait
+    update pgconductor.executions
+    set
+        waiting_step_key = p_step_key,
+        run_at = case
+            when p_timeout_ms is not null then
+                pgconductor.current_time() + (p_timeout_ms || ' milliseconds')::interval
+            else
+                'infinity'::timestamptz
+        end
+    where id = p_execution_id and queue = p_queue;
+
+    return v_subscription_id;
+end;
+$function$;
+
+-- Subscribe to a database change and wait for it
+-- Returns the subscription id
+create or replace function pgconductor.subscribe_db_change(
+    p_execution_id uuid,
+    p_queue text,
+    p_step_key text,
+    p_schema_name text,
+    p_table_name text,
+    p_operation text, -- 'insert', 'update', 'delete'
+    p_timeout_ms integer default null
+)
+returns uuid
+language plpgsql
+volatile
+set search_path to ''
+as $function$
+declare
+    v_subscription_id uuid;
+begin
+    -- Create subscription
+    insert into pgconductor.subscriptions (source, schema_name, table_name, operation, execution_id, step_key)
+    values ('db', p_schema_name, p_table_name, p_operation, p_execution_id, p_step_key)
+    returning id into v_subscription_id;
+
+    -- Update execution to wait
+    update pgconductor.executions
+    set
+        waiting_step_key = p_step_key,
+        run_at = case
+            when p_timeout_ms is not null then
+                pgconductor.current_time() + (p_timeout_ms || ' milliseconds')::interval
+            else
+                'infinity'::timestamptz
+        end
+    where id = p_execution_id and queue = p_queue;
+
+    return v_subscription_id;
+end;
+$function$;
+
+-- Wake up an execution waiting for an event
+-- Called by event-router when event arrives
+create or replace function pgconductor.wake_execution(
+    p_execution_id uuid,
+    p_queue text,
+    p_step_key text,
+    p_result jsonb
+)
+returns void
+language plpgsql
+volatile
+set search_path to ''
+as $function$
+begin
+    -- Save step result
+    insert into pgconductor.steps (key, execution_id, queue, result)
+    values (p_step_key, p_execution_id, p_queue, p_result)
+    on conflict (key, execution_id) do nothing;
+
+    -- Wake up execution
+    update pgconductor.executions
+    set
+        waiting_step_key = null,
+        run_at = pgconductor.current_time()
+    where id = p_execution_id and queue = v_queue;
+
+    -- Delete subscription
+    delete from pgconductor.subscriptions
+    where execution_id = p_execution_id;
+end;
+$function$;
+
+-- Emit a custom event
+create or replace function pgconductor.emit_event(
+    p_event_key text,
+    p_payload jsonb default null
+)
+returns uuid
+language sql
+volatile
+set search_path to ''
+as $function$
+    insert into pgconductor.events (event_key, payload)
+    values (p_event_key, p_payload)
+    returning id;
+$function$;

@@ -62,6 +62,7 @@ export class Orchestrator {
 				"default",
 				options.tasks,
 				this.db,
+				this.logger,
 				options.defaultWorker,
 				options.conductor.options.context,
 			);

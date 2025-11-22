@@ -15,6 +15,7 @@ import { TaskContext } from "./task-context";
 import * as assert from "./lib/assert";
 import { createMaintenanceTask } from "./maintenance-task";
 import { makeChildLogger, type Logger } from "./lib/logger";
+import type { EventDefinition } from "./event-definition";
 
 const HANGUP = Symbol("hangup");
 
@@ -47,6 +48,10 @@ export class Worker<
 		any,
 		string
 	>[] = readonly TaskDefinition<string, any, any, string>[],
+	Events extends readonly EventDefinition<
+		string,
+		any
+	>[] = readonly EventDefinition<string, any>[],
 > {
 	private orchestratorId: string | null = null;
 
@@ -296,7 +301,7 @@ export class Worker<
 					const output = await Promise.race([
 						task.execute(
 							taskEvent,
-							TaskContext.create<Tasks, typeof extraContext>(
+							TaskContext.create<Tasks, Events, typeof extraContext>(
 								{
 									signal: this.signal,
 									db: this.db,

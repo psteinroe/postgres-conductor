@@ -145,6 +145,7 @@ export class QueryBuilder {
 				executions.queue,
 				executions.payload,
 				executions.waiting_on_execution_id,
+				executions.waiting_step_key,
 				executions.dedupe_key,
 				executions.cron_expression
 		`;
