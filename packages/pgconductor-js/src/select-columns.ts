@@ -87,35 +87,57 @@ type Split<S extends string> = S extends `${infer Head},${infer Rest}`
 	? [Head, ...Split<Rest>]
 	: [S];
 
-type HasError<T extends readonly any[]> = T[number] extends { error: string }
-	? true
-	: false;
+export type ColumnSelectionError<Message extends string> = {
+	readonly __columnSelectionError: Message;
+};
 
-type ExtractKeys<T extends readonly any[]> = Extract<T[number], string>;
+type IsError<T> = T extends `[Column Selection Error]: ${string}` ? true : false;
+
+type HasError<T extends readonly any[]> = true extends IsError<T[number]> ? true : false;
+
+type ExtractKeys<T extends readonly any[]> = T[number] extends infer U
+	? U extends string
+		? IsError<U> extends true
+			? never
+			: U
+		: never
+	: never;
+
+type FirstError<T extends readonly any[]> = T extends [infer Head, ...infer Tail]
+	? Head extends string
+		? IsError<Head> extends true
+			? Head
+			: Tail extends readonly any[]
+				? FirstError<Tail>
+				: undefined
+		: Tail extends readonly any[]
+			? FirstError<Tail>
+			: undefined
+	: undefined;
 
 type PickFromKeys<Keys extends keyof Obj, Obj> = { [K in Keys]: Obj[K] };
 
 type ValidatePart<Part extends string, Obj> = Trim<Part> extends infer P extends
 	string
 	? P extends ""
-		? { error: "Empty selection entry" }
+		? `[Column Selection Error]: Empty entry. Remove trailing commas or extra spaces.`
 		: // quoted identifier
 			P extends `"${infer Body}"`
 			? // forbid raw " inside quoted body
 				Body extends `${string}"${string}`
-				? { error: `Invalid \" inside quoted identifier: '${P}'` }
+				? `[Column Selection Error]: Invalid quote in "${P}". Use "" to escape quotes inside identifiers.`
 				: Body extends keyof Obj
 					? Body
-					: { error: `Unknown field: '${Body}'` }
+					: `[Column Selection Error]: Column "${Body}" does not exist.`
 			: // malformed quoting
 				P extends `${string}"${string}`
-				? { error: `Malformed quoted identifier: '${P}'` }
+				? `[Column Selection Error]: Malformed quotes in "${P}". Quoted identifiers must be fully wrapped.`
 				: // unquoted identifier
 					IsValidUnquoted<P> extends false
-					? { error: `Invalid PostgreSQL identifier: '${P}'` }
+					? `[Column Selection Error]: Invalid identifier "${P}". Must start with a letter or underscore.`
 					: Lowercase<P> extends keyof Obj
 						? Lowercase<P>
-						: { error: `Unknown field: '${Lowercase<P>}' (from '${P}')` }
+						: `[Column Selection Error]: Column "${Lowercase<P>}" does not exist.`
 	: never;
 
 type ValidateParts<Parts extends readonly string[], Obj> = {
@@ -128,22 +150,24 @@ export type ParseSelection<
 > = Split<S> extends infer Parts extends string[]
 	? ValidateParts<Parts, Obj> extends infer V extends any[]
 		? HasError<V> extends true
-			? V[number] // union of actual error messages
+			? FirstError<V> extends string
+				? ColumnSelectionError<FirstError<V>>
+				: never
 			: PickFromKeys<ExtractKeys<V>, Obj>
 		: never
 	: never;
 
-// suggestions for one entry (best-effort)
-type IdToken<K extends string> =
-	| Lowercase<K> // unquoted form
-	| `"${K}"`; // quoted exact form
-
-// autocomplete applies only to each segment,
-// not recursively (fast + stable)
-export type SelectionInput<Obj> = string & IdToken<keyof Obj & string>;
+// SelectionInput accepts any string - validation happens via ParseSelection
+// which splits by comma and validates each part, surfacing errors through SelectedRow
+export type SelectionInput<Obj> = string;
 
 export type SelectedRow<Row, S extends string | undefined> = S extends string
-	? ParseSelection<S, Row> extends { error: string }
-		? never // surface error in config
-		: ParseSelection<S, Row>
-	: Row; // no selection -> full row
+	? ParseSelection<S, Row>
+	: Row;
+
+// Validate columns string - returns the string if valid, or error string if invalid
+export type ValidateColumns<S extends string, Row> = ParseSelection<S, Row> extends ColumnSelectionError<
+	infer Message
+>
+	? Message
+	: S;

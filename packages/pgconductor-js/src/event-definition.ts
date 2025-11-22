@@ -1,5 +1,9 @@
 import type { StandardSchemaV1 } from "@standard-schema/spec";
-import type { SelectedRow, SelectionInput } from "./select-columns";
+import type {
+	ColumnSelectionError,
+	SelectedRow,
+	ValidateColumns,
+} from "./select-columns";
 
 type ObjectSchema = StandardSchemaV1<unknown, object>;
 
@@ -80,12 +84,16 @@ export type DatabaseEventPayload<
 	TRow,
 	TOp extends "insert" | "update" | "delete",
 	TSelection extends string | undefined,
-> = {
-	old: TOp extends "delete" | "update" ? SelectedRow<TRow, TSelection> : null;
-	new: TOp extends "insert" | "update" ? SelectedRow<TRow, TSelection> : null;
-	tg_table: string;
-	tg_op: Uppercase<TOp>;
-};
+> = SelectedRow<TRow, TSelection> extends infer Selection
+	? Selection extends ColumnSelectionError<any>
+		? Selection
+		: {
+			old: TOp extends "delete" | "update" ? Selection : null;
+			new: TOp extends "insert" | "update" ? Selection : null;
+			tg_table: string;
+			tg_op: Uppercase<TOp>;
+		}
+	: never;
 
 export type SharedEventConfig = { timeout?: number };
 export type CustomEventConfig<TName extends string> = {
@@ -96,12 +104,12 @@ export type DatabaseEventConfig<
 	TSchema extends SchemaName<TDatabase>,
 	TTable extends TableName<TDatabase, TSchema>,
 	TOp extends "insert" | "update" | "delete",
-	TSelection extends
-		| SelectionInput<RowType<TDatabase, TSchema, TTable>>
-		| undefined = undefined,
+	TSelection extends string | undefined = undefined,
 > = {
 	schema: TSchema;
 	table: TTable;
 	operation: TOp;
-	columns?: TSelection;
+	columns?: TSelection extends string
+		? ValidateColumns<TSelection, RowType<TDatabase, TSchema, TTable>>
+		: undefined;
 } & SharedEventConfig;

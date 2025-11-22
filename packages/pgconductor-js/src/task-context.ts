@@ -210,9 +210,7 @@ export class TaskContext<
 		TSchema extends SchemaName<TDatabase>,
 		TTable extends TableName<TDatabase, TSchema>,
 		TOp extends "insert" | "update" | "delete",
-		TSelection extends
-			| SelectionInput<RowType<TDatabase, TSchema, TTable>>
-			| undefined = undefined,
+		const TSelection extends string | undefined = undefined,
 	>(
 		id: string,
 		config: DatabaseEventConfig<TDatabase, TSchema, TTable, TOp, TSelection>,
@@ -268,6 +266,12 @@ export class TaskContext<
 			);
 		} else {
 			// Database event
+			// Parse columns string into array if provided
+			const columnsStr = config.columns as string | undefined;
+			const columns = columnsStr
+				? columnsStr.split(",").map((c: string) => c.trim().toLowerCase())
+				: undefined;
+
 			await this.opts.db.subscribeDbChange(
 				this.opts.execution.id,
 				this.opts.execution.queue,
@@ -276,6 +280,7 @@ export class TaskContext<
 				config.table,
 				config.operation,
 				config.timeout,
+				columns,
 				this.opts.signal,
 			);
 		}

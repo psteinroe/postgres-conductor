@@ -2,7 +2,7 @@
 
 import postgres from "postgres";
 import prettier from "prettier";
-import { ok } from "./lib/assert";
+import * as assert from "./lib/assert";
 
 interface Column {
   table_schema: string;
@@ -81,12 +81,12 @@ async function generateTypes(
         schemaMap[col.table_schema] = {};
       }
       const schemaEntry = schemaMap[col.table_schema];
-      ok(schemaEntry, `Schema entry for ${col.table_schema} should exist`);
+      assert.ok(schemaEntry, `Schema entry for ${col.table_schema} should exist`);
       if (!schemaEntry[col.table_name]) {
         schemaEntry[col.table_name] = [];
       }
       const tableEntry = schemaEntry[col.table_name];
-      ok(tableEntry, `Table entry for ${col.table_name} should exist`);
+      assert.ok(tableEntry, `Table entry for ${col.table_name} should exist`);
       tableEntry.push(col);
     }
 

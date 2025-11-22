@@ -382,4 +382,99 @@ describe("Event Router E2E", () => {
 		// Verify the task received the contact data
 		expect(receivedContactId).toBe(contact!.id);
 	}, 30000);
+
+	test("event-router filters columns in database CDC events", async () => {
+		const taskDefinition = defineTask({
+			name: "column-filter-watcher",
+			payload: z.object({}),
+			returns: z.object({ data: z.any() }),
+		});
+
+		let receivedData: any = null;
+
+		const conductor = Conductor.create({
+			sql,
+			tasks: TaskSchemas.fromSchema([taskDefinition]),
+			context: {},
+		});
+
+		const columnWatcherTask = conductor.createTask(
+			{ name: "column-filter-watcher" },
+			{ invocable: true },
+			async (_event, ctx) => {
+				// Wait for a contact to be created, but only receive id and email columns
+				// Note: Using type assertion since e2e creates tables dynamically
+				const data = await ctx.waitForEvent(
+					"wait-for-contact-columns",
+					{
+						schema: "public",
+						table: "contact",
+						operation: "insert",
+						columns: "id, email" as any,
+					},
+				);
+				receivedData = data;
+				return { data };
+			},
+		);
+
+		const orchestrator = Orchestrator.create({
+			conductor,
+			tasks: [columnWatcherTask],
+			defaultWorker: {
+				pollIntervalMs: 100,
+				flushIntervalMs: 100,
+			},
+		});
+
+		await orchestrator.start();
+
+		// Invoke the task that will wait for a contact creation with column filter
+		await conductor.invoke({ name: "column-filter-watcher" }, {});
+
+		// Wait for task to create subscription
+		await new Promise(r => setTimeout(r, 1000));
+
+		// Verify subscription was created with columns
+		const subscriptions = await sql`
+			SELECT * FROM pgconductor.subscriptions
+			WHERE step_key = 'wait-for-contact-columns'
+		`;
+		expect(subscriptions.length).toBe(1);
+		expect(subscriptions[0]?.columns).toEqual(["id", "email"]);
+
+		// Create an address book first (required by foreign key)
+		const [addressBook] = await sql`
+			INSERT INTO address_book (name, description)
+			VALUES ('Column Filter Test', 'For column filtering E2E testing')
+			RETURNING id
+		`;
+
+		// Insert a contact with many fields
+		const [contact] = await sql`
+			INSERT INTO contact (address_book_id, first_name, last_name, email, phone)
+			VALUES (${addressBook!.id}, 'Jane', 'Smith', 'jane@example.com', '555-1234')
+			RETURNING id
+		`;
+
+		// Wait for event-router to process the CDC event
+		await new Promise(r => setTimeout(r, 3000));
+
+		await orchestrator.stop();
+
+		// Verify the task received only the selected columns
+		expect(receivedData).toBeDefined();
+		expect(receivedData.tg_op).toBe("INSERT");
+		expect(receivedData.old).toBeNull();
+
+		// The new object should only have id and email, not first_name, last_name, phone, etc.
+		const newData = receivedData.new;
+		expect(newData.id).toBe(contact!.id);
+		expect(newData.email).toBe("jane@example.com");
+
+		// These should NOT be present due to column filtering
+		expect(newData.first_name).toBeUndefined();
+		expect(newData.last_name).toBeUndefined();
+		expect(newData.phone).toBeUndefined();
+	}, 30000);
 });

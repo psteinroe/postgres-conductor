@@ -248,7 +248,8 @@ CREATE TABLE IF NOT EXISTS pgconductor.subscriptions (
     event_key text,
     execution_id uuid NOT NULL,
     queue text not null default 'default',
-    step_key text -- step key to save result to when event arrives
+    step_key text, -- step key to save result to when event arrives
+    columns text[] -- columns to select for db events
 );
 
 CREATE TABLE IF NOT EXISTS pgconductor.events (
@@ -550,7 +551,8 @@ create or replace function pgconductor.subscribe_db_change(
     p_schema_name text,
     p_table_name text,
     p_operation text, -- 'insert', 'update', 'delete'
-    p_timeout_ms integer default null
+    p_timeout_ms integer default null,
+    p_columns text[] default null
 )
 returns uuid
 language plpgsql
@@ -561,8 +563,8 @@ declare
     v_subscription_id uuid;
 begin
     -- Create subscription
-    insert into pgconductor.subscriptions (source, schema_name, table_name, operation, execution_id, step_key)
-    values ('db', p_schema_name, p_table_name, p_operation, p_execution_id, p_step_key)
+    insert into pgconductor.subscriptions (source, schema_name, table_name, operation, execution_id, step_key, columns)
+    values ('db', p_schema_name, p_table_name, p_operation, p_execution_id, p_step_key, p_columns)
     returning id into v_subscription_id;
 
     -- Update execution to wait

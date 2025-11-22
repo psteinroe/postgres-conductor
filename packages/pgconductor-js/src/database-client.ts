@@ -512,6 +512,7 @@ export class DatabaseClient {
 		tableName: string,
 		operation: "insert" | "update" | "delete",
 		timeoutMs?: number,
+		columns?: string[],
 		signal?: AbortSignal,
 	): Promise<string> {
 		const result = await this.query(
@@ -523,7 +524,8 @@ export class DatabaseClient {
 					${schemaName},
 					${tableName},
 					${operation},
-					${timeoutMs || null}::integer
+					${timeoutMs || null}::integer,
+					${columns || null}::text[]
 				) as id
 			`,
 			{ label: "subscribeDbChange", signal },

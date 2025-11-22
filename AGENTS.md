@@ -1,3 +1,3 @@
 # pgconductor
 
-@CLAUDE.md
+Read @CLAUDE.md
