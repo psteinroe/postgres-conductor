@@ -4,6 +4,7 @@ import { Conductor } from "../../src/conductor";
 import { Orchestrator } from "../../src/orchestrator";
 import { defineTask } from "../../src/task-definition";
 import { TestDatabasePool } from "../fixtures/test-database";
+import { TaskSchemas } from "../../src/schemas";
 
 describe("WaitForEvent Support", () => {
 	let pool: TestDatabasePool;
@@ -27,7 +28,7 @@ describe("WaitForEvent Support", () => {
 
 		const conductor = Conductor.create({
 			sql: db.sql,
-			tasks: [taskDefinition],
+			tasks: TaskSchemas.fromSchema([taskDefinition]),
 			context: {},
 		});
 
@@ -35,7 +36,7 @@ describe("WaitForEvent Support", () => {
 			{ name: "waiter-task" },
 			{ invocable: true },
 			async (_event, ctx) => {
-				await ctx.waitForEvent("wait-step", "user.created");
+				await ctx.waitForEvent("wait-step", { event: "user.created" });
 				return { received: true };
 			},
 		);
@@ -91,7 +92,7 @@ describe("WaitForEvent Support", () => {
 
 		const conductor = Conductor.create({
 			sql: db.sql,
-			tasks: [taskDefinition],
+			tasks: TaskSchemas.fromSchema([taskDefinition]),
 			context: {},
 		});
 
@@ -150,7 +151,7 @@ describe("WaitForEvent Support", () => {
 
 		const conductor = Conductor.create({
 			sql: db.sql,
-			tasks: [taskDefinition],
+			tasks: TaskSchemas.fromSchema([taskDefinition]),
 			context: {},
 		});
 
@@ -159,7 +160,7 @@ describe("WaitForEvent Support", () => {
 			{ invocable: true },
 			async (_event, ctx) => {
 				try {
-					await ctx.waitForEvent("wait-step", "never.arrives", 1000);
+					await ctx.waitForEvent("wait-step", { event: "never.arrives", timeout: 1000 });
 					return { received: true };
 				} catch (err) {
 					errorFn(err as Error);
@@ -215,7 +216,7 @@ describe("WaitForEvent Support", () => {
 
 		const conductor = Conductor.create({
 			sql: db.sql,
-			tasks: [taskDefinition],
+			tasks: TaskSchemas.fromSchema([taskDefinition]),
 			context: {},
 		});
 
@@ -223,9 +224,9 @@ describe("WaitForEvent Support", () => {
 			{ name: "wake-test" },
 			{ invocable: true },
 			async (_event, ctx) => {
-				const eventData = await ctx.waitForEvent<{ message: string }>(
+				const eventData = await ctx.waitForEvent(
 					"wait-for-wake",
-					"test.event",
+					{ event: "test.event" },
 				);
 				resultFn(eventData);
 				return { eventData };
@@ -288,7 +289,7 @@ describe("WaitForEvent Support", () => {
 
 		const conductor = Conductor.create({
 			sql: db.sql,
-			tasks: [taskDefinition],
+			tasks: TaskSchemas.fromSchema([taskDefinition]),
 			context: {},
 		});
 
@@ -297,9 +298,9 @@ describe("WaitForEvent Support", () => {
 			{ invocable: true },
 			async (_event, ctx) => {
 				attemptFn();
-				const eventData = await ctx.waitForEvent<{ value: number }>(
+				const eventData = await ctx.waitForEvent(
 					"cached-wait",
-					"test.event",
+					{ event: "test.event" },
 				);
 
 				// Fail on first attempt after receiving event

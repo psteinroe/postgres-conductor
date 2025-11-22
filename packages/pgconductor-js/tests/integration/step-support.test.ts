@@ -4,6 +4,7 @@ import { Conductor } from "../../src/conductor";
 import { Orchestrator } from "../../src/orchestrator";
 import { defineTask } from "../../src/task-definition";
 import { TestDatabasePool } from "../fixtures/test-database";
+import { TaskSchemas } from "../../src/schemas";
 
 describe("Step Support", () => {
 	let pool: TestDatabasePool;
@@ -30,7 +31,7 @@ describe("Step Support", () => {
 
 		const conductor = Conductor.create({
 			sql: db.sql,
-			tasks: [taskDefinitions],
+			tasks: TaskSchemas.fromSchema([taskDefinitions]),
 			context: {},
 		});
 
@@ -81,7 +82,7 @@ describe("Step Support", () => {
 
 		const conductor = Conductor.create({
 			sql: db.sql,
-			tasks: [taskDefinitions],
+			tasks: TaskSchemas.fromSchema([taskDefinitions]),
 			context: {},
 		});
 
@@ -138,7 +139,7 @@ describe("Step Support", () => {
 
 		const conductor = Conductor.create({
 			sql: db.sql,
-			tasks: [taskDefinitions],
+			tasks: TaskSchemas.fromSchema([taskDefinitions]),
 			context: {},
 		});
 
@@ -193,7 +194,7 @@ describe("Step Support", () => {
 
 		const conductor = Conductor.create({
 			sql: db.sql,
-			tasks: [taskDefinitions],
+			tasks: TaskSchemas.fromSchema([taskDefinitions]),
 			context: {},
 		});
 

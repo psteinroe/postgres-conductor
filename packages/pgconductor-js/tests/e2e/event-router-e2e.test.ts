@@ -3,6 +3,7 @@ import { test, expect, describe, beforeAll, afterAll } from "bun:test";
 import { Conductor } from "../../src/conductor";
 import { Orchestrator } from "../../src/orchestrator";
 import { defineTask } from "../../src/task-definition";
+import { TaskSchemas } from "../../src/schemas";
 import postgres from "postgres";
 import {
 	GenericContainer,
@@ -67,7 +68,7 @@ describe("Event Router E2E", () => {
 
 		const setupConductor = Conductor.create({
 			sql,
-			tasks: [setupTask],
+			tasks: TaskSchemas.fromSchema([setupTask]),
 			context: {},
 		});
 
@@ -172,7 +173,7 @@ describe("Event Router E2E", () => {
 
 		const conductor = Conductor.create({
 			sql,
-			tasks: [taskDefinition],
+			tasks: TaskSchemas.fromSchema([taskDefinition]),
 			context: {},
 		});
 
@@ -180,9 +181,9 @@ describe("Event Router E2E", () => {
 			{ name: "e2e-waiter" },
 			{ invocable: true },
 			async (_event, ctx) => {
-				const eventData = await ctx.waitForEvent<{ userId: number }>(
+				const eventData = await ctx.waitForEvent(
 					"wait-for-user",
-					"user.created",
+					{ event: "user.created" },
 				);
 				receivedData = eventData;
 				return { eventData };
@@ -250,7 +251,7 @@ describe("Event Router E2E", () => {
 
 		const conductor = Conductor.create({
 			sql,
-			tasks: [taskDefinition],
+			tasks: TaskSchemas.fromSchema([taskDefinition]),
 			context: {},
 		});
 
@@ -259,8 +260,9 @@ describe("Event Router E2E", () => {
 			{ invocable: true },
 			async (event, ctx) => {
 				if (event.event === "pgconductor.invoke") {
-					await ctx.waitForEvent("wait-step", event.payload.eventKey);
-					receivedEvents.push(event.payload.eventKey);
+					const payload = event.payload as { eventKey: string };
+					await ctx.waitForEvent("wait-step", { event: payload.eventKey });
+					receivedEvents.push(payload.eventKey);
 					return { received: true };
 				}
 				throw new Error("Unexpected event");
@@ -316,7 +318,7 @@ describe("Event Router E2E", () => {
 
 		const conductor = Conductor.create({
 			sql,
-			tasks: [taskDefinition],
+			tasks: TaskSchemas.fromSchema([taskDefinition]),
 			context: {},
 		});
 
@@ -326,21 +328,18 @@ describe("Event Router E2E", () => {
 			async (_event, ctx) => {
 				// Wait for a contact to be created via database CDC
 				// Payload is trigger-like: { old, new, tg_table, tg_op }
-				const data = await ctx.waitForDbChange<{
-					old: null;
-					new: string[];
-					tg_table: string;
-					tg_op: string;
-				}>(
+				const data = await ctx.waitForEvent(
 					"wait-for-contact",
-					"public",
-					"contact",
-					"insert",
+					{
+						schema: "public",
+						table: "contact",
+						operation: "insert",
+					},
 				);
 				// new is an array of cell values from the row
 				// First element is the id (uuid)
-				receivedContactId = data.new[0];
-				return { contactId: data.new[0] };
+				receivedContactId = (data.new as string[])[0];
+				return { contactId: (data.new as string[])[0] };
 			},
 		);
 

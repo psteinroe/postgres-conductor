@@ -11,14 +11,14 @@ import { makeChildLogger, type Logger } from "./lib/logger";
 export type OrchestratorOptions<
 	TTasks extends readonly AnyTask[] = readonly AnyTask[],
 > = {
-	conductor: Conductor<any, any>;
+	conductor: Conductor<any, any, any, any, any, any, any>;
 	tasks?: ValidateTasksQueue<"default", TTasks>;
 	defaultWorker?: Partial<WorkerConfig>;
 	workers?: Worker[];
 };
 
 type InternalOrchestratorOptions = {
-	conductor: Conductor<any, any>;
+	conductor: Conductor<any, any, any, any, any, any, any>;
 	tasks?: readonly AnyTask[];
 	defaultWorker?: Partial<WorkerConfig>;
 	workers?: Worker[];

@@ -355,3 +355,5 @@ bun test tests/integration/        # Run integration tests
 - always add AGENT=1 as an env var when running anything
 - always use lower-case in sql
 - prefer || ofer ?? in typescript. good: runAtMs || null. bad: runAtMs ?? null
+- NEVER use `as unknown` or `as any`
+- never use `!` in typescript

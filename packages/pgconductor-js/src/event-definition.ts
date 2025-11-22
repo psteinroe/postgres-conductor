@@ -5,11 +5,28 @@ type ObjectSchema = StandardSchemaV1<unknown, object>;
 
 export type EventDefinition<
 	Name extends string,
-	Payload extends ObjectSchema | undefined = undefined,
+	Payload = undefined,
 > = {
 	readonly name: Name;
 	readonly payload: Payload;
 };
+
+/**
+ * Type helper for defining events using pure TypeScript types (no runtime schema).
+ *
+ * @example
+ * type AppAccountCreated = DefineEvent<{
+ *   name: "app/account.created";
+ *   payload: { userId: string };
+ * }>;
+ */
+export type DefineEvent<T extends {
+	name: string;
+	payload?: unknown;
+}> = EventDefinition<
+	T["name"],
+	T extends { payload: infer P } ? P : undefined
+>;
 
 export function defineEvent<
 	Name extends string,
@@ -45,7 +62,7 @@ export type InferEventPayload<T> = T extends EventDefinition<string, infer P>
 		? {}
 		: P extends StandardSchemaV1<any, infer O>
 			? EnsureObject<O>
-			: never
+			: EnsureObject<P> // Plain type (type-only definition)
 	: never;
 
 export type GenericDatabase = Record<string, Record<string, unknown>>;

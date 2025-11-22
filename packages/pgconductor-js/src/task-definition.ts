@@ -4,8 +4,8 @@ type ObjectSchema = StandardSchemaV1<unknown, object>;
 
 export type TaskDefinition<
 	Name extends string,
-	Payload extends ObjectSchema | undefined = undefined,
-	Returns extends ObjectSchema | undefined = undefined,
+	Payload = undefined,
+	Returns = undefined,
 	Queue extends string = "default",
 > = {
 	readonly name: Name;
@@ -13,6 +13,29 @@ export type TaskDefinition<
 	readonly payload: Payload;
 	readonly returns: Returns;
 };
+
+/**
+ * Type helper for defining tasks using pure TypeScript types (no runtime schema).
+ *
+ * @example
+ * type SendEmail = DefineTask<{
+ *   name: "send-email";
+ *   queue: "notifications";
+ *   payload: { to: string };
+ *   returns: { sent: boolean };
+ * }>;
+ */
+export type DefineTask<T extends {
+	name: string;
+	queue?: string;
+	payload?: unknown;
+	returns?: unknown;
+}> = TaskDefinition<
+	T["name"],
+	T extends { payload: infer P } ? P : undefined,
+	T extends { returns: infer R } ? R : undefined,
+	T extends { queue: infer Q extends string } ? Q : "default"
+>;
 
 export function defineTask<Name extends string, Queue extends string>(def: {
 	name: Name;
@@ -69,7 +92,7 @@ export type InferPayload<T> = T extends TaskDefinition<string, infer P, any, str
 		? {}
 		: P extends StandardSchemaV1<any, infer O>
 			? EnsureObject<O>
-			: never
+			: EnsureObject<P> // Plain type (type-only definition)
 	: never;
 
 export type InferReturns<T> = T extends TaskDefinition<string, any, infer R, string>
@@ -77,7 +100,7 @@ export type InferReturns<T> = T extends TaskDefinition<string, any, infer R, str
 		? void
 		: R extends StandardSchemaV1<any, infer O>
 			? EnsureObject<O>
-			: never
+			: EnsureObject<R> // Plain type (type-only definition)
 	: never;
 
 export type TaskName<

@@ -5,6 +5,7 @@ import { Orchestrator } from "../../src/orchestrator";
 import { defineTask } from "../../src/task-definition";
 import { TestDatabasePool } from "../fixtures/test-database";
 import { Worker } from "../../src";
+import { TaskSchemas } from "../../src/schemas";
 
 describe("Invoke Support", () => {
 	let pool: TestDatabasePool;
@@ -36,7 +37,7 @@ describe("Invoke Support", () => {
 
 		const conductor = Conductor.create({
 			sql: db.sql,
-			tasks: [parentDefinition, childDefinition],
+			tasks: TaskSchemas.fromSchema([parentDefinition, childDefinition]),
 			context: {},
 		});
 
@@ -104,7 +105,7 @@ describe("Invoke Support", () => {
 
 		const conductor = Conductor.create({
 			sql: db.sql,
-			tasks: [parentDefinition, childDefinition],
+			tasks: TaskSchemas.fromSchema([parentDefinition, childDefinition]),
 			context: {},
 		});
 
@@ -183,7 +184,7 @@ describe("Invoke Support", () => {
 
 		const conductor = Conductor.create({
 			sql: db.sql,
-			tasks: [parentDefinition, childDefinition],
+			tasks: TaskSchemas.fromSchema([parentDefinition, childDefinition]),
 			context: {},
 		});
 
@@ -259,7 +260,7 @@ describe("Invoke Support", () => {
 
 		const conductor = Conductor.create({
 			sql: db.sql,
-			tasks: [parentDefinition, childDefinition],
+			tasks: TaskSchemas.fromSchema([parentDefinition, childDefinition]),
 			context: {},
 		});
 
@@ -323,7 +324,7 @@ describe("Invoke Support", () => {
 
 		const conductor = Conductor.create({
 			sql: db.sql,
-			tasks: [parentDefinition, childDefinition],
+			tasks: TaskSchemas.fromSchema([parentDefinition, childDefinition]),
 			context: {},
 		});
 
@@ -411,7 +412,7 @@ describe("Invoke Support", () => {
 
 		const conductor = Conductor.create({
 			sql: db.sql,
-			tasks: [parentDefinition, childDefinition],
+			tasks: TaskSchemas.fromSchema([parentDefinition, childDefinition]),
 			context: {},
 		});
 

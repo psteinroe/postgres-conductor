@@ -5,6 +5,7 @@ import { Orchestrator } from "../../src/orchestrator";
 import { defineTask } from "../../src/task-definition";
 import { TestDatabasePool } from "../fixtures/test-database";
 import crypto from "crypto";
+import { TaskSchemas } from "../../src/schemas";
 
 function hashToJitter(str: string): number {
 	const hash = crypto.createHash("sha256").update(str).digest();
@@ -55,7 +56,7 @@ describe("Maintenance Task", () => {
 
 		const conductor = Conductor.create({
 			sql: db.sql,
-			tasks: [taskDefinition],
+			tasks: TaskSchemas.fromSchema([taskDefinition]),
 			context: {},
 		});
 
@@ -145,7 +146,7 @@ describe("Maintenance Task", () => {
 
 		const conductor = Conductor.create({
 			sql: db.sql,
-			tasks: [taskDefinition],
+			tasks: TaskSchemas.fromSchema([taskDefinition]),
 			context: {},
 		});
 
@@ -247,7 +248,7 @@ describe("Maintenance Task", () => {
 
 		const conductor = Conductor.create({
 			sql: db.sql,
-			tasks: [task1Definition, task2Definition],
+			tasks: TaskSchemas.fromSchema([task1Definition, task2Definition]),
 			context: {},
 		});
 
@@ -334,7 +335,7 @@ describe("Maintenance Task", () => {
 
 		const conductor = Conductor.create({
 			sql: db.sql,
-			tasks: [taskDefinition],
+			tasks: TaskSchemas.fromSchema([taskDefinition]),
 			context: {},
 		});
 
@@ -405,7 +406,7 @@ describe("Maintenance Task", () => {
 
 		const conductor = Conductor.create({
 			sql: db.sql,
-			tasks: [taskDefinition],
+			tasks: TaskSchemas.fromSchema([taskDefinition]),
 			context: {},
 		});
 

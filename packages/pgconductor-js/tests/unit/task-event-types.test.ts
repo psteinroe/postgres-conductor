@@ -2,6 +2,7 @@ import { test, expect, describe } from "bun:test";
 import { expectTypeOf } from "expect-type";
 import { Conductor } from "../../src/conductor";
 import { defineTask } from "../../src/task-definition";
+import { TaskSchemas } from "../../src/schemas";
 import { z } from "zod";
 
 describe("task event types", () => {
@@ -13,7 +14,7 @@ describe("task event types", () => {
 
 		const conductor = Conductor.create({
 			connectionString: "postgres://test",
-			tasks: [taskDef], // ✅ No as const needed!
+			tasks: TaskSchemas.fromSchema([taskDef]),
 			context: {},
 		});
 
@@ -53,7 +54,7 @@ describe("task event types", () => {
 
 		const conductor = Conductor.create({
 			connectionString: "postgres://test",
-			tasks: [taskDef],
+			tasks: TaskSchemas.fromSchema([taskDef]),
 			context: {},
 		});
 
@@ -82,7 +83,7 @@ describe("task event types", () => {
 
 		const conductor = Conductor.create({
 			connectionString: "postgres://test",
-			tasks: [taskDef],
+			tasks: TaskSchemas.fromSchema([taskDef]),
 			context: {},
 		});
 
@@ -109,7 +110,7 @@ describe("task event types", () => {
 
 		const conductor = Conductor.create({
 			connectionString: "postgres://test",
-			tasks: [taskDef],
+			tasks: TaskSchemas.fromSchema([taskDef]),
 			context: {},
 		});
 
@@ -141,7 +142,7 @@ describe("task event types", () => {
 
 		const conductor = Conductor.create({
 			connectionString: "postgres://test",
-			tasks: [taskDef],
+			tasks: TaskSchemas.fromSchema([taskDef]),
 			context: {},
 		});
 
@@ -173,7 +174,7 @@ describe("task event types", () => {
 	test("type error: invocable trigger without task definition", () => {
 		const conductor = Conductor.create({
 			connectionString: "postgres://test",
-			tasks: [],
+			tasks: TaskSchemas.fromSchema([]),
 			context: {},
 		});
 
@@ -192,7 +193,7 @@ describe("task event types", () => {
 
 		const conductor = Conductor.create({
 			connectionString: "postgres://test",
-			tasks: [taskDef],
+			tasks: TaskSchemas.fromSchema([taskDef]),
 			context: {},
 		});
 

@@ -5,6 +5,7 @@ import { Orchestrator } from "../../src/orchestrator";
 import { defineTask } from "../../src/task-definition";
 import { TestDatabasePool } from "../fixtures/test-database";
 import { waitFor } from "../../src/lib/wait-for";
+import { TaskSchemas } from "../../src/schemas";
 
 describe("Worker API", () => {
 	let pool: TestDatabasePool;
@@ -28,7 +29,7 @@ describe("Worker API", () => {
 
 		const conductor = Conductor.create({
 			sql: db.sql,
-			tasks: [taskDefEmail],
+			tasks: TaskSchemas.fromSchema([taskDefEmail]),
 			context: {},
 		});
 
@@ -82,7 +83,7 @@ describe("Worker API", () => {
 
 		const conductor = Conductor.create({
 			sql: db.sql,
-			tasks: [taskDef],
+			tasks: TaskSchemas.fromSchema([taskDef]),
 			context: {},
 		});
 

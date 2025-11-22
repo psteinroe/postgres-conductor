@@ -5,6 +5,7 @@ import { Orchestrator } from "../../src/orchestrator";
 import { defineTask } from "../../src/task-definition";
 import { TestDatabasePool } from "../fixtures/test-database";
 import { waitFor } from "../../src/lib/wait-for";
+import { TaskSchemas } from "../../src/schemas";
 
 describe("Cron Scheduling", () => {
 	let pool: TestDatabasePool;
@@ -27,7 +28,7 @@ describe("Cron Scheduling", () => {
 
 		const conductor = Conductor.create({
 			sql: db.sql,
-			tasks: [taskDefinition],
+			tasks: TaskSchemas.fromSchema([taskDefinition]),
 			context: {},
 		});
 
@@ -79,7 +80,7 @@ describe("Cron Scheduling", () => {
 
 		const conductor = Conductor.create({
 			sql: db.sql,
-			tasks: [taskDefinition],
+			tasks: TaskSchemas.fromSchema([taskDefinition]),
 			context: {},
 		});
 
@@ -139,7 +140,7 @@ describe("Cron Scheduling", () => {
 
 		const conductor = Conductor.create({
 			sql: db.sql,
-			tasks: [taskDefinition],
+			tasks: TaskSchemas.fromSchema([taskDefinition]),
 			context: {},
 		});
 
@@ -208,7 +209,7 @@ describe("Cron Scheduling", () => {
 
 		const conductor = Conductor.create({
 			sql: db.sql,
-			tasks: [taskDefinition],
+			tasks: TaskSchemas.fromSchema([taskDefinition]),
 			context: {},
 		});
 
@@ -281,7 +282,7 @@ describe("Cron Scheduling", () => {
 
 		const conductor = Conductor.create({
 			sql: db.sql,
-			tasks: [taskDefinition],
+			tasks: TaskSchemas.fromSchema([taskDefinition]),
 			context: {},
 		});
 
@@ -332,7 +333,7 @@ describe("Cron Scheduling", () => {
 
 		const conductor = Conductor.create({
 			sql: db.sql,
-			tasks: [taskDefinition],
+			tasks: TaskSchemas.fromSchema([taskDefinition]),
 			context: {},
 		});
 
@@ -376,7 +377,7 @@ describe("Cron Scheduling", () => {
 
 		const conductor = Conductor.create({
 			sql: db.sql,
-			tasks: [taskDefinition],
+			tasks: TaskSchemas.fromSchema([taskDefinition]),
 			context: {},
 		});
 
@@ -442,7 +443,7 @@ describe("Cron Scheduling", () => {
 
 		const conductor = Conductor.create({
 			sql: db.sql,
-			tasks: [taskDefinition],
+			tasks: TaskSchemas.fromSchema([taskDefinition]),
 			context: {},
 		});
 

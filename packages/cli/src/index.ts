@@ -2,6 +2,7 @@
 
 import postgres from "postgres";
 import prettier from "prettier";
+import { ok } from "./lib/assert";
 
 interface Column {
   table_schema: string;
@@ -79,10 +80,14 @@ async function generateTypes(
       if (!schemaMap[col.table_schema]) {
         schemaMap[col.table_schema] = {};
       }
-      if (!schemaMap[col.table_schema][col.table_name]) {
-        schemaMap[col.table_schema][col.table_name] = [];
+      const schemaEntry = schemaMap[col.table_schema];
+      ok(schemaEntry, `Schema entry for ${col.table_schema} should exist`);
+      if (!schemaEntry[col.table_name]) {
+        schemaEntry[col.table_name] = [];
       }
-      schemaMap[col.table_schema][col.table_name].push(col);
+      const tableEntry = schemaEntry[col.table_name];
+      ok(tableEntry, `Table entry for ${col.table_name} should exist`);
+      tableEntry.push(col);
     }
 
     // Generate output
@@ -97,7 +102,7 @@ export type Database = {
 
       const tableNames = Object.keys(tables).sort();
       for (const tableName of tableNames) {
-        const cols = tables[tableName];
+        const cols = tables[tableName] || [];
         output += `    ${JSON.stringify(tableName)}: {\n`;
 
         for (const col of cols) {
@@ -145,11 +150,12 @@ function parseArgs(args: string[]): { dbUrl: string; schemas: string[] } {
   let schemasArg = "public";
 
   for (let i = 0; i < args.length; i++) {
-    if (args[i] === "--db-url" && args[i + 1]) {
-      dbUrl = args[i + 1];
+    const nextArg = args[i + 1];
+    if (args[i] === "--db-url" && nextArg) {
+      dbUrl = nextArg;
       i++;
-    } else if (args[i] === "--schemas" && args[i + 1]) {
-      schemasArg = args[i + 1];
+    } else if (args[i] === "--schemas" && nextArg) {
+      schemasArg = nextArg;
       i++;
     }
   }

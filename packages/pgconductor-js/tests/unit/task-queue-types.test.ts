@@ -2,6 +2,7 @@ import { test, expect, describe } from "bun:test";
 import { Conductor } from "../../src/conductor";
 import { Orchestrator } from "../../src/orchestrator";
 import { defineTask } from "../../src/task-definition";
+import { TaskSchemas } from "../../src/schemas";
 import { z } from "zod";
 
 describe("task queue type constraints", () => {
@@ -14,7 +15,7 @@ describe("task queue type constraints", () => {
 
 		const conductor = Conductor.create({
 			connectionString: "postgres://test",
-			tasks: [notificationTask],
+			tasks: TaskSchemas.fromSchema([notificationTask]),
 			context: {},
 		});
 
@@ -42,7 +43,7 @@ describe("task queue type constraints", () => {
 
 		const conductor = Conductor.create({
 			connectionString: "postgres://test",
-			tasks: [notificationTask],
+			tasks: TaskSchemas.fromSchema([notificationTask]),
 			context: {},
 		});
 
@@ -73,7 +74,7 @@ describe("task queue type constraints", () => {
 
 		const conductor = Conductor.create({
 			connectionString: "postgres://test",
-			tasks: [notificationTask, defaultTask],
+			tasks: TaskSchemas.fromSchema([notificationTask, defaultTask]),
 			context: {},
 		});
 
@@ -108,7 +109,7 @@ describe("task queue type constraints", () => {
 
 		const conductor = Conductor.create({
 			connectionString: "postgres://test",
-			tasks: [defaultTask],
+			tasks: TaskSchemas.fromSchema([defaultTask]),
 			context: {},
 		});
 
@@ -136,7 +137,7 @@ describe("task queue type constraints", () => {
 
 		const conductor = Conductor.create({
 			connectionString: "postgres://test",
-			tasks: [notificationTask],
+			tasks: TaskSchemas.fromSchema([notificationTask]),
 			context: {},
 		});
 
@@ -167,7 +168,7 @@ describe("task queue type constraints", () => {
 
 		const conductor = Conductor.create({
 			connectionString: "postgres://test",
-			tasks: [notificationTask, defaultTask],
+			tasks: TaskSchemas.fromSchema([notificationTask, defaultTask]),
 			context: {},
 		});
 
