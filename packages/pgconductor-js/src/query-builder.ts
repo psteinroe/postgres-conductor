@@ -74,6 +74,19 @@ export class QueryBuilder {
 		`;
 	}
 
+	buildCleanupTriggers(): PendingQuery<RowList<Row[]>> {
+		return this.sql`
+            delete from pgconductor.triggers t
+            where not exists (
+                select 1
+                from pgconductor.subscriptions s
+                where s.schema_name = t.schema_name
+                  and s.table_name = t.table_name
+                  and s.operation = t.operation
+            )
+		`;
+	}
+
 	buildSweepOrchestrators(
 		migrationNumber: number,
 	): PendingQuery<RowList<Row[]>> {

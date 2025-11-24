@@ -32,12 +32,8 @@ async fn setup_database(pool: &sqlx::PgPool) -> Result<(), sqlx::Error> {
     // Setup CDC for subscriptions and events tables
     pool.execute(
         r#"
-        -- Set REPLICA IDENTITY for CDC to receive old row values on update/delete
-        ALTER TABLE pgconductor.subscriptions REPLICA IDENTITY FULL;
-        ALTER TABLE pgconductor.events REPLICA IDENTITY FULL;
-
-        -- Create publication for CDC with partition root support
-        CREATE PUBLICATION pgconductor_events FOR ALL TABLES WITH (publish_via_partition_root = true);
+        -- Create publication for CDC
+        CREATE PUBLICATION pgconductor_events FOR TABLE pgconductor.events, pgconductor.subscriptions;
         "#,
     )
     .await?;

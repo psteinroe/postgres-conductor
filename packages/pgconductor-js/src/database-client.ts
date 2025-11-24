@@ -330,6 +330,13 @@ export class DatabaseClient {
 		});
 	}
 
+	async cleanupTriggers(signal?: AbortSignal): Promise<void> {
+		await this.query(this.builder.buildCleanupTriggers(), {
+			label: "getExecutions",
+			signal,
+		});
+	}
+
 	async getExecutions(
 		orchestratorId: string,
 		queueName: string,
@@ -383,7 +390,12 @@ export class DatabaseClient {
 		signal?: AbortSignal,
 	): Promise<void> {
 		await this.query(
-			this.builder.buildRegisterWorker(queueName, taskSpecs, cronSchedules, eventSubscriptions),
+			this.builder.buildRegisterWorker(
+				queueName,
+				taskSpecs,
+				cronSchedules,
+				eventSubscriptions,
+			),
 			{ label: "registerWorker", signal },
 		);
 	}

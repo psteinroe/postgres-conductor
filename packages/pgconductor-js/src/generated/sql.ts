@@ -273,12 +273,97 @@ CREATE TABLE IF NOT EXISTS pgconductor.subscriptions (
     columns text[] -- columns to select for db events
 );
 
+create index if not exists idx_subscriptions_triggers_lookup
+on pgconductor.subscriptions (schema_name, table_name, operation);
+
 CREATE TABLE IF NOT EXISTS pgconductor.events (
     id uuid PRIMARY KEY default pgconductor.portable_uuidv7(),
     event_key text NOT NULL,
+    schema_name text,
+    table_name text,
+    operation text,
+    source text NOT NULL DEFAULT 'event', -- 'db' or 'event'
     payload jsonb,
     created_at timestamptz DEFAULT pgconductor.current_time() NOT NULL
 );
+-- TODO: partition management
+
+-- we would need to extract columns the user filters on to filter event payloads already here
+CREATE TABLE IF NOT EXISTS pgconductor.triggers (
+    schema_name text NOT NULL,
+    table_name text NOT NULL,
+    operation text NOT NULL, -- 'insert', 'update', 'delete'
+    columns text[], -- columns to select for db events
+    created_at timestamptz DEFAULT pgconductor.current_time() NOT NULL,
+    primary key (schema_name, table_name, operation)
+);
+
+create or replace function pgconductor.publish_event ()
+    returns trigger
+    language plpgsql
+    security definer
+    as $$
+begin
+    insert into pgconductor.events(
+       event_key,
+       schema_name,
+       table_name,
+       operation,
+       source,
+       payload
+    )
+    values (
+        tg_table_schema || '.' || tg_table_name || '.' || tg_op,
+        tg_table_schema,
+        tg_table_name,
+        tg_op,
+        'db',
+        jsonb_build_object(
+            'tg_op', tg_op,
+            'old', to_jsonb(old),
+            'new', to_jsonb(new)
+        )
+    );
+    return new;
+end
+$$;
+
+CREATE OR REPLACE FUNCTION pgconductor.sync_database_trigger() RETURNS "trigger"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    AS $_$
+declare
+    v_table_name text := coalesce(new.table_name, old.table_name);
+    v_schema_name text := coalesce(new.schema_name, old.schema_name);
+    v_op text := coalesce(new.operation, old.operation);
+begin
+    if tg_op = 'INSERT' then
+        execute format(
+            $sql$
+                create constraint trigger pgconductor_after_%s
+                after %s on %I.%I
+                deferrable initially deferred
+                for each row
+                execute procedure pgconductor.publish_event()
+            $sql$,
+            lower(v_op), lower(v_op), v_schema_name, v_table_name
+        );
+    end if;
+
+    if tg_op = 'DELETE' then
+        execute format(
+            $sql$drop trigger if exists pgconductor_after_%s on %I.%I;$sql$,
+            lower(v_op), v_schema_name, v_table_name
+        );
+    end if;
+
+    return new;
+end
+$_$;
+
+create or replace trigger "sync_database_trigger"
+after insert or delete
+on pgconductor.triggers
+for each row execute function pgconductor.sync_database_trigger();
 
 -- Drop a queue (will trigger partition deletion via trigger)
 CREATE OR REPLACE FUNCTION pgconductor.drop_queue(queue_name text)
@@ -402,6 +487,17 @@ BEGIN
     spec.operation,
     spec.columns
   FROM unnest(p_event_subscriptions) AS spec;
+
+ -- Step 7: Make sure we sync database triggers if required
+ insert into pgconductor.triggers (schema_name, table_name, operation, columns)
+  select
+    spec.schema_name,
+    spec.table_name,
+    spec.operation,
+    spec.columns
+  from unnest(p_event_subscriptions) as spec
+  where spec.schema_name is not null
+  on conflict (schema_name, table_name, operation) do nothing;
 END;
 $function$;
 
@@ -576,8 +672,8 @@ declare
     v_subscription_id uuid;
 begin
     -- Create subscription
-    insert into pgconductor.subscriptions (source, event_key, execution_id, step_key)
-    values ('event', p_event_key, p_execution_id, p_step_key)
+    insert into pgconductor.subscriptions (source, event_key, execution_id, queue, step_key)
+    values ('event', p_event_key, p_execution_id, p_queue, p_step_key)
     returning id into v_subscription_id;
 
     -- Update execution to wait
@@ -617,9 +713,14 @@ declare
     v_subscription_id uuid;
 begin
     -- Create subscription
-    insert into pgconductor.subscriptions (source, schema_name, table_name, operation, execution_id, step_key, columns)
-    values ('db', p_schema_name, p_table_name, p_operation, p_execution_id, p_step_key, p_columns)
+    insert into pgconductor.subscriptions (source, schema_name, table_name, operation, execution_id, queue, step_key, columns)
+    values ('db', p_schema_name, p_table_name, p_operation, p_execution_id, p_queue, p_step_key, p_columns)
     returning id into v_subscription_id;
+
+    -- Insert triggers
+    insert into pgconductor.triggers (schema_name, table_name, operation, columns)
+    values (p_schema_name, p_table_name, p_operation, p_columns)
+      on conflict (schema_name, table_name, operation) do nothing;
 
     -- Update execution to wait
     update pgconductor.executions

@@ -50,6 +50,9 @@ export const createMaintenanceTask = <Queue extends string = "default">(
 			while (hasMore) {
 				hasMore = await db.removeExecutions(queue, BATCH_SIZE);
 			}
+
+			// If we are running within the default queue, also remove unused triggers
+			await db.cleanupTriggers();
 		},
 	);
 };

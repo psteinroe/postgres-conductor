@@ -116,18 +116,17 @@ describe("Event Router E2E", () => {
 			);
 		`);
 
-		// Create publication for CDC (now that tables exist)
+		// Create publication for CDC - only need events and subscriptions tables
 		await sql.unsafe(`
 			CREATE PUBLICATION pgconductor_events
-			FOR TABLE pgconductor.events, pgconductor.subscriptions, address_book, contact
-			WITH (publish_via_partition_root = true)
+			FOR TABLE pgconductor.events, pgconductor.subscriptions
 		`);
 
 		// Build and start event-router container from Dockerfile
-		// Note: First run takes ~5-10 minutes to build Rust. Image is cached for subsequent runs.
-		// To force rebuild: docker rmi pgconductor-event-router:test
+		// Note: Using debug build for faster compilation during tests
+		// To force rebuild: docker rmi pgconductor-event-router:test-debug
 		const projectRoot = path.resolve(__dirname, "../../../..");
-		const imageName = "pgconductor-event-router:test";
+		const imageName = "pgconductor-event-router:test-debug";
 
 		// Check if image already exists
 		const { execSync } = await import("child_process");
@@ -145,7 +144,7 @@ describe("Event Router E2E", () => {
 		} else {
 			eventRouterImage = await GenericContainer.fromDockerfile(
 				projectRoot,
-				"crates/event-router/Dockerfile",
+				"crates/event-router/Dockerfile.debug",
 			)
 				.withCache(true)
 				.build(imageName);
