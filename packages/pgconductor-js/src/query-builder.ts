@@ -4,6 +4,7 @@ import type {
 	Execution,
 	ExecutionResult,
 	ExecutionSpec,
+	EventSubscriptionSpec,
 	Payload,
 	TaskSpec,
 } from "./database-client";
@@ -389,6 +390,7 @@ export class QueryBuilder {
 		queueName: string,
 		taskSpecs: TaskSpec[],
 		cronSchedules: ExecutionSpec[],
+		eventSubscriptions: EventSubscriptionSpec[],
 	): PendingQuery<RowList<Row[]>> {
 		const taskSpecRows = taskSpecs.map((spec) => ({
 			key: spec.key,
@@ -417,6 +419,17 @@ export class QueryBuilder {
 			};
 		});
 
+		const eventSubscriptionRows = eventSubscriptions.map((spec) => ({
+			task_key: spec.task_key,
+			queue: spec.queue,
+			source: spec.source,
+			event_key: spec.event_key || null,
+			schema_name: spec.schema_name || null,
+			table_name: spec.table_name || null,
+			operation: spec.operation || null,
+			columns: spec.columns || null,
+		}));
+
 		return this.sql`
 			select pgconductor.register_worker(
 				p_queue_name := ${queueName}::text,
@@ -425,6 +438,9 @@ export class QueryBuilder {
 				),
 				p_cron_schedules := array(
 					select json_populate_recordset(null::pgconductor.execution_spec, ${this.sql.json(cronScheduleRows)}::json)::pgconductor.execution_spec
+				),
+				p_event_subscriptions := array(
+					select json_populate_recordset(null::pgconductor.subscription_spec, ${this.sql.json(eventSubscriptionRows)}::json)::pgconductor.subscription_spec
 				)
 			)
 		`;

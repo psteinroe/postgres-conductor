@@ -3,7 +3,8 @@ import { test, expect, describe, beforeAll, afterAll } from "bun:test";
 import { Conductor } from "../../src/conductor";
 import { Orchestrator } from "../../src/orchestrator";
 import { defineTask } from "../../src/task-definition";
-import { TaskSchemas } from "../../src/schemas";
+import { defineEvent } from "../../src/event-definition";
+import { TaskSchemas, EventSchemas } from "../../src/schemas";
 import postgres from "postgres";
 import {
 	GenericContainer,
@@ -35,9 +36,12 @@ describe("Event Router E2E", () => {
 			})
 			.withCommand([
 				"postgres",
-				"-c", "wal_level=logical",
-				"-c", "max_replication_slots=10",
-				"-c", "max_wal_senders=10",
+				"-c",
+				"wal_level=logical",
+				"-c",
+				"max_replication_slots=10",
+				"-c",
+				"max_wal_senders=10",
 			])
 			.withExposedPorts(5432)
 			.withWaitStrategy(
@@ -49,7 +53,10 @@ describe("Event Router E2E", () => {
 		const port = pgContainer.getMappedPort(5432);
 
 		// Connect to default database to create test database
-		const adminSql = postgres(`postgres://postgres:postgres@${host}:${port}/postgres`, { max: 1 });
+		const adminSql = postgres(
+			`postgres://postgres:postgres@${host}:${port}/postgres`,
+			{ max: 1 },
+		);
 		await adminSql.unsafe(`CREATE DATABASE pgconductor_test`);
 		await adminSql.end();
 
@@ -74,7 +81,13 @@ describe("Event Router E2E", () => {
 
 		const setupOrchestrator = Orchestrator.create({
 			conductor: setupConductor,
-			tasks: [setupConductor.createTask({ name: "setup-task" }, { invocable: true }, async () => {})],
+			tasks: [
+				setupConductor.createTask(
+					{ name: "setup-task" },
+					{ invocable: true },
+					async () => {},
+				),
+			],
 		});
 
 		await setupOrchestrator.start();
@@ -130,7 +143,10 @@ describe("Event Router E2E", () => {
 		if (imageExists) {
 			eventRouterImage = new GenericContainer(imageName);
 		} else {
-			eventRouterImage = await GenericContainer.fromDockerfile(projectRoot, "crates/event-router/Dockerfile")
+			eventRouterImage = await GenericContainer.fromDockerfile(
+				projectRoot,
+				"crates/event-router/Dockerfile",
+			)
 				.withCache(true)
 				.build(imageName);
 		}
@@ -147,12 +163,12 @@ describe("Event Router E2E", () => {
 				RUST_LOG: "debug,event_router=debug",
 			})
 			.withWaitStrategy(
-				Wait.forLogMessage(/Subscriptions loaded, starting pipeline/)
+				Wait.forLogMessage(/Subscriptions loaded, starting pipeline/),
 			)
 			.start();
 
 		// Give the event-router time to establish CDC connection
-		await new Promise(r => setTimeout(r, 2000));
+		await new Promise((r) => setTimeout(r, 2000));
 	}, 600000); // 10 minutes - Rust build takes time
 
 	afterAll(async () => {
@@ -181,10 +197,9 @@ describe("Event Router E2E", () => {
 			{ name: "e2e-waiter" },
 			{ invocable: true },
 			async (_event, ctx) => {
-				const eventData = await ctx.waitForEvent(
-					"wait-for-user",
-					{ event: "user.created" },
-				);
+				const eventData = await ctx.waitForEvent("wait-for-user", {
+					event: "user.created",
+				});
 				receivedData = eventData;
 				return { eventData };
 			},
@@ -205,7 +220,7 @@ describe("Event Router E2E", () => {
 		await conductor.invoke({ name: "e2e-waiter" }, {});
 
 		// Wait for task to create subscription
-		await new Promise(r => setTimeout(r, 1000));
+		await new Promise((r) => setTimeout(r, 1000));
 
 		// Verify subscription was created
 		const subscriptions = await sql`
@@ -225,7 +240,7 @@ describe("Event Router E2E", () => {
 		// 1. Detect the new event via CDC
 		// 2. Match it to the subscription
 		// 3. Call wake_execution to save the step and wake the task
-		await new Promise(r => setTimeout(r, 3000));
+		await new Promise((r) => setTimeout(r, 3000));
 
 		await orchestrator.stop();
 
@@ -281,11 +296,17 @@ describe("Event Router E2E", () => {
 		await orchestrator.start();
 
 		// Invoke multiple tasks waiting for different events
-		await conductor.invoke({ name: "multi-waiter" }, { eventKey: "order.created" });
-		await conductor.invoke({ name: "multi-waiter" }, { eventKey: "payment.completed" });
+		await conductor.invoke(
+			{ name: "multi-waiter" },
+			{ eventKey: "order.created" },
+		);
+		await conductor.invoke(
+			{ name: "multi-waiter" },
+			{ eventKey: "payment.completed" },
+		);
 
 		// Wait for subscriptions to be created
-		await new Promise(r => setTimeout(r, 1000));
+		await new Promise((r) => setTimeout(r, 1000));
 
 		// Emit both events
 		await sql`
@@ -298,7 +319,7 @@ describe("Event Router E2E", () => {
 		`;
 
 		// Wait for event-router to process
-		await new Promise(r => setTimeout(r, 3000));
+		await new Promise((r) => setTimeout(r, 3000));
 
 		await orchestrator.stop();
 
@@ -328,18 +349,15 @@ describe("Event Router E2E", () => {
 			async (_event, ctx) => {
 				// Wait for a contact to be created via database CDC
 				// Payload is trigger-like: { old, new, tg_table, tg_op }
-				const data = await ctx.waitForEvent(
-					"wait-for-contact",
-					{
-						schema: "public",
-						table: "contact",
-						operation: "insert",
-					},
-				);
-				// new is an array of cell values from the row
-				// First element is the id (uuid)
-				receivedContactId = (data.new as string[])[0];
-				return { contactId: (data.new as string[])[0] };
+				const data = await ctx.waitForEvent("wait-for-contact", {
+					schema: "public",
+					table: "contact",
+					operation: "insert",
+				});
+				// new is a JSON object with column names as keys
+				const newData = data.new as { id: string };
+				receivedContactId = newData.id;
+				return { contactId: newData.id };
 			},
 		);
 
@@ -358,7 +376,7 @@ describe("Event Router E2E", () => {
 		await conductor.invoke({ name: "contact-watcher" }, {});
 
 		// Wait for task to create subscription
-		await new Promise(r => setTimeout(r, 1000));
+		await new Promise((r) => setTimeout(r, 1000));
 
 		// Create an address book first (required by foreign key)
 		const [addressBook] = await sql`
@@ -375,7 +393,7 @@ describe("Event Router E2E", () => {
 		`;
 
 		// Wait for event-router to process the CDC event
-		await new Promise(r => setTimeout(r, 3000));
+		await new Promise((r) => setTimeout(r, 3000));
 
 		await orchestrator.stop();
 
@@ -404,15 +422,12 @@ describe("Event Router E2E", () => {
 			async (_event, ctx) => {
 				// Wait for a contact to be created, but only receive id and email columns
 				// Note: Using type assertion since e2e creates tables dynamically
-				const data = await ctx.waitForEvent(
-					"wait-for-contact-columns",
-					{
-						schema: "public",
-						table: "contact",
-						operation: "insert",
-						columns: "id, email" as any,
-					},
-				);
+				const data = await ctx.waitForEvent("wait-for-contact-columns", {
+					schema: "public",
+					table: "contact",
+					operation: "insert",
+					columns: "id, email" as any,
+				});
 				receivedData = data;
 				return { data };
 			},
@@ -433,7 +448,7 @@ describe("Event Router E2E", () => {
 		await conductor.invoke({ name: "column-filter-watcher" }, {});
 
 		// Wait for task to create subscription
-		await new Promise(r => setTimeout(r, 1000));
+		await new Promise((r) => setTimeout(r, 1000));
 
 		// Verify subscription was created with columns
 		const subscriptions = await sql`
@@ -458,7 +473,7 @@ describe("Event Router E2E", () => {
 		`;
 
 		// Wait for event-router to process the CDC event
-		await new Promise(r => setTimeout(r, 3000));
+		await new Promise((r) => setTimeout(r, 3000));
 
 		await orchestrator.stop();
 
@@ -476,5 +491,161 @@ describe("Event Router E2E", () => {
 		expect(newData.first_name).toBeUndefined();
 		expect(newData.last_name).toBeUndefined();
 		expect(newData.phone).toBeUndefined();
+	}, 30000);
+
+	test("event-router invokes task from custom event trigger", async () => {
+		// Define the event
+		const userCreated = defineEvent({
+			name: "user.registered",
+			payload: z.object({ userId: z.string(), email: z.string() }),
+		});
+
+		const taskDefinition = defineTask({
+			name: "on-user-registered",
+		});
+
+		const receivedPayloads: any[] = [];
+
+		const conductor = Conductor.create({
+			sql,
+			tasks: TaskSchemas.fromSchema([taskDefinition]),
+			events: EventSchemas.fromSchema([userCreated]),
+			context: {},
+		});
+
+		// Create task with event trigger (not invocable)
+		const onUserRegisteredTask = conductor.createTask(
+			{ name: "on-user-registered" },
+			{ event: "user.registered" },
+			async (event, _ctx) => {
+				if (event.event === "user.registered") {
+					receivedPayloads.push(event.payload);
+				}
+			},
+		);
+
+		const orchestrator = Orchestrator.create({
+			conductor,
+			tasks: [onUserRegisteredTask],
+			defaultWorker: {
+				pollIntervalMs: 100,
+				flushIntervalMs: 100,
+			},
+		});
+
+		await orchestrator.start();
+
+		// Give time for worker to register subscriptions
+		await new Promise((r) => setTimeout(r, 1000));
+
+		// Verify subscription was created
+		const subscriptions = await sql`
+			SELECT * FROM pgconductor.subscriptions
+			WHERE event_key = 'user.registered' AND task_key = 'on-user-registered'
+		`;
+		expect(subscriptions.length).toBe(1);
+		expect(subscriptions[0]?.execution_id).toBeNull(); // Trigger-based has no execution_id
+
+		// Emit the event - this should invoke the task
+		await sql`
+			INSERT INTO pgconductor.events (event_key, payload)
+			VALUES ('user.registered', ${sql.json({ userId: "123", email: "test@example.com" })})
+		`;
+
+		// Wait for event-router to process and task to execute
+		await new Promise((r) => setTimeout(r, 3000));
+
+		await orchestrator.stop();
+
+		// Verify the task was invoked with the event payload
+		expect(receivedPayloads.length).toBe(1);
+		expect(receivedPayloads[0]).toEqual({
+			userId: "123",
+			email: "test@example.com",
+		});
+
+		// Verify execution was created and completed
+		const executions = await sql`
+			SELECT * FROM pgconductor.executions
+			WHERE task_key = 'on-user-registered'
+		`;
+		expect(executions.length).toBe(1);
+		expect(executions[0]?.completed_at).not.toBeNull();
+	}, 30000);
+
+	test("event-router invokes task from database event trigger", async () => {
+		const taskDefinition = defineTask({
+			name: "on-contact-created",
+		});
+
+		const receivedPayloads: any[] = [];
+
+		const conductor = Conductor.create({
+			sql,
+			tasks: TaskSchemas.fromSchema([taskDefinition]),
+			context: {},
+		});
+
+		// Create task with database event trigger
+		const onContactCreatedTask = conductor.createTask(
+			{ name: "on-contact-created" },
+			{ schema: "public", table: "contact", operation: "insert" },
+			async (event, _ctx) => {
+				// Event payload has the structure: { event, payload: { old, new, tg_table, tg_op } }
+				receivedPayloads.push(event);
+			},
+		);
+
+		const orchestrator = Orchestrator.create({
+			conductor,
+			tasks: [onContactCreatedTask],
+			defaultWorker: {
+				pollIntervalMs: 100,
+				flushIntervalMs: 100,
+			},
+		});
+
+		await orchestrator.start();
+
+		// Give time for worker to register subscriptions
+		await new Promise((r) => setTimeout(r, 1000));
+
+		// Verify subscription was created
+		const subscriptions = await sql`
+			SELECT * FROM pgconductor.subscriptions
+			WHERE task_key = 'on-contact-created' AND source = 'db'
+		`;
+		expect(subscriptions.length).toBe(1);
+		expect(subscriptions[0]?.execution_id).toBeNull(); // Trigger-based
+
+		// Create an address book first
+		const [addressBook] = await sql`
+			INSERT INTO address_book (name, description)
+			VALUES ('Trigger Test', 'For trigger-based E2E testing')
+			RETURNING id
+		`;
+
+		// Insert a contact - this should trigger the task
+		const [contact] = await sql`
+			INSERT INTO contact (address_book_id, first_name, last_name, email)
+			VALUES (${addressBook!.id}, 'Trigger', 'Test', 'trigger@example.com')
+			RETURNING id
+		`;
+
+		// Wait for event-router to process and task to execute
+		await new Promise((r) => setTimeout(r, 3000));
+
+		await orchestrator.stop();
+
+		// Verify the task was invoked
+		expect(receivedPayloads.length).toBe(1);
+
+		// Verify execution was created and completed
+		const executions = await sql`
+			SELECT * FROM pgconductor.executions
+			WHERE task_key = 'on-contact-created'
+		`;
+		expect(executions.length).toBe(1);
+		expect(executions[0]?.completed_at).not.toBeNull();
 	}, 30000);
 });

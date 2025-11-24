@@ -1,5 +1,6 @@
 import type {
 	DatabaseClient,
+	EventSubscriptionSpec,
 	Execution,
 	ExecutionResult,
 	ExecutionSpec,
@@ -167,32 +168,58 @@ export class Worker<
 			window: task.window,
 		}));
 
-		const cronSchedules: ExecutionSpec[] = [];
-		for (const task of this.tasks.values()) {
-			const cronTriggers = task.triggers.filter(
-				(t): t is { cron: string } => "cron" in t,
-			);
+		const allTasks = Array.from(this.tasks.values());
 
-			for (const trigger of cronTriggers) {
-				const interval = CronExpressionParser.parse(trigger.cron);
-				const nextTimestamp = interval.next().toDate();
-				const timestampSeconds = Math.floor(nextTimestamp.getTime() / 1000);
-				const dedupeKey = `repeated::${trigger.cron}::${timestampSeconds}`;
+		const cronSchedules: ExecutionSpec[] = allTasks.flatMap((task) =>
+			task.triggers
+				.filter((t): t is { cron: string } => "cron" in t)
+				.map((trigger) => {
+					const interval = CronExpressionParser.parse(trigger.cron);
+					const nextTimestamp = interval.next().toDate();
+					const timestampSeconds = Math.floor(nextTimestamp.getTime() / 1000);
+					return {
+						task_key: task.name,
+						queue: this.queueName,
+						run_at: nextTimestamp,
+						dedupe_key: `repeated::${trigger.cron}::${timestampSeconds}`,
+						cron_expression: trigger.cron,
+					};
+				})
+		);
 
-				cronSchedules.push({
+		const eventSubscriptions: EventSubscriptionSpec[] = allTasks.flatMap((task) => {
+			const customEvents = task.triggers
+				.filter((t): t is { event: string } => "event" in t && typeof (t as any).event === "string")
+				.map((trigger): EventSubscriptionSpec => ({
 					task_key: task.name,
 					queue: this.queueName,
-					run_at: nextTimestamp,
-					dedupe_key: dedupeKey,
-					cron_expression: trigger.cron,
+					source: "event",
+					event_key: trigger.event,
+				}));
+
+			const dbEvents = task.triggers
+				.filter((t) => "schema" in t && "table" in t && "operation" in t)
+				.map((trigger): EventSubscriptionSpec => {
+					const dbTrigger = trigger as { schema: string; table: string; operation: string; columns?: string };
+					return {
+						task_key: task.name,
+						queue: this.queueName,
+						source: "db",
+						schema_name: dbTrigger.schema,
+						table_name: dbTrigger.table,
+						operation: dbTrigger.operation,
+						columns: dbTrigger.columns?.split(",").map((c: string) => c.trim().toLowerCase()),
+					};
 				});
-			}
-		}
+
+			return [...customEvents, ...dbEvents];
+		});
 
 		await this.db.registerWorker(
 			this.queueName,
 			taskSpecs,
 			cronSchedules,
+			eventSubscriptions,
 			this.signal,
 		);
 	}
@@ -288,9 +315,17 @@ export class Worker<
 				try {
 					await this.scheduleNextExecution(exec);
 
-					const taskEvent = exec.cron_expression
-						? ({ event: "pgconductor.cron" } as const)
-						: ({ event: "pgconductor.invoke", payload: exec.payload } as const);
+					// Determine event type based on execution data
+					let taskEvent: any;
+					if (exec.cron_expression) {
+						taskEvent = { event: "pgconductor.cron" };
+					} else if (exec.payload && typeof exec.payload === "object" && "event" in exec.payload && exec.payload.event !== "pgconductor.invoke") {
+						// Event-triggered execution (custom event or db event)
+						taskEvent = { event: exec.payload.event, payload: exec.payload.payload };
+					} else {
+						// Direct invoke
+						taskEvent = { event: "pgconductor.invoke", payload: exec.payload };
+					}
 
 					// Pass db and tasks as extra context to maintenance task
 					const extraContext =

@@ -55,6 +55,17 @@ export interface ExecutionResult {
 	error?: string;
 }
 
+export interface EventSubscriptionSpec {
+	task_key: string;
+	queue: string;
+	source: "event" | "db";
+	event_key?: string;
+	schema_name?: string;
+	table_name?: string;
+	operation?: string;
+	columns?: string[];
+}
+
 const RETRYABLE_SQLSTATE_CODES = new Set([
 	"40001", // serialization_failure
 	"40P01", // deadlock_detected
@@ -368,10 +379,11 @@ export class DatabaseClient {
 		queueName: string,
 		taskSpecs: TaskSpec[],
 		cronSchedules: ExecutionSpec[],
+		eventSubscriptions: EventSubscriptionSpec[],
 		signal?: AbortSignal,
 	): Promise<void> {
 		await this.query(
-			this.builder.buildRegisterWorker(queueName, taskSpecs, cronSchedules),
+			this.builder.buildRegisterWorker(queueName, taskSpecs, cronSchedules, eventSubscriptions),
 			{ label: "registerWorker", signal },
 		);
 	}

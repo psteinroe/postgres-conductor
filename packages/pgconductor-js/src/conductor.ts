@@ -66,9 +66,11 @@ type ResolvedReturns<
 
 type ResolvedEvent<
 	Tasks extends readonly TaskDefinition<string, any, any, string>[],
+	Events extends readonly EventDefinition<string, any>[],
+	Database extends GenericDatabase,
 	TDef extends { readonly name: string; readonly queue?: string },
-	TTriggers extends NonEmptyArray<Trigger> | Trigger,
-> = TaskEventFromTriggers<TTriggers, ResolvedPayload<Tasks, TDef>>;
+	TTriggers,
+> = TaskEventFromTriggers<TTriggers, ResolvedPayload<Tasks, TDef>, Events, Database>;
 
 export type ConductorOptions<
 	TTaskSchemas extends TaskSchemas<any> | undefined,
@@ -166,17 +168,18 @@ export class Conductor<
 
 	createTask<
 		const TDef extends { readonly name: string; readonly queue?: string },
-		const TTriggers extends NonEmptyArray<Trigger> | Trigger,
+		const TTriggers extends object | readonly object[],
 	>(
 		definition: TDef,
-		triggers: ValidateTriggers<
+		triggers: TTriggers & ValidateTriggers<
 			Tasks,
+			Events,
 			TDef["name"],
 			TTriggers,
 			ResolvedQueue<TDef>
 		>,
 		fn: (
-			event: ResolvedEvent<Tasks, TDef, TTriggers>,
+			event: ResolvedEvent<Tasks, Events, Database, TDef, TTriggers>,
 			ctx: TaskContext<Tasks, Events, Database> & ExtraContext,
 		) => Promise<ResolvedReturns<Tasks, TDef>>,
 	): Task<
@@ -185,7 +188,7 @@ export class Conductor<
 		ResolvedPayload<Tasks, TDef>,
 		ResolvedReturns<Tasks, TDef>,
 		TaskContext<Tasks, Events, Database> & ExtraContext,
-		ResolvedEvent<Tasks, TDef, TTriggers>
+		ResolvedEvent<Tasks, Events, Database, TDef, TTriggers>
 	> {
 		return Task.create<
 			TDef["name"],
@@ -193,10 +196,10 @@ export class Conductor<
 			ResolvedPayload<Tasks, TDef>,
 			ResolvedReturns<Tasks, TDef>,
 			TaskContext<Tasks, Events, Database> & ExtraContext,
-			ResolvedEvent<Tasks, TDef, TTriggers>
+			ResolvedEvent<Tasks, Events, Database, TDef, TTriggers>
 		>(
 			definition as TaskConfiguration<TDef["name"], ResolvedQueue<TDef>>,
-			triggers as TTriggers,
+			triggers as NonEmptyArray<Trigger> | Trigger,
 			fn,
 		);
 	}

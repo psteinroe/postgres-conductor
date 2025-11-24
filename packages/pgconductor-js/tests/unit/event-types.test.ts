@@ -671,4 +671,137 @@ describe("event types", () => {
 			);
 		});
 	});
+
+	describe("event triggers", () => {
+		test("task with custom event trigger receives typed event", () => {
+			const userCreated = defineEvent({
+				name: "user.created",
+				payload: z.object({ userId: z.string(), email: z.string() }),
+			});
+
+			const taskDef = defineTask({
+				name: "on-user-created",
+				payload: z.object({}),
+			});
+
+			const conductor = Conductor.create({
+				connectionString: "postgres://test",
+				tasks: TaskSchemas.fromSchema([taskDef]),
+				events: EventSchemas.fromSchema([userCreated]),
+				context: {},
+			});
+
+			// Task with custom event trigger - not invocable, triggered by event
+			conductor.createTask(
+				{ name: "on-user-created" },
+				{ event: "user.created" },
+				async (event) => {
+					// Event should be typed as the custom event
+					expectTypeOf(event).toEqualTypeOf<{
+						event: "user.created";
+						payload: { userId: string; email: string };
+					}>();
+				},
+			);
+		});
+
+		test("task with database event trigger receives typed payload", () => {
+			const taskDef = defineTask({
+				name: "on-contact-insert",
+				payload: z.object({}),
+			});
+
+			const conductor = Conductor.create({
+				connectionString: "postgres://test",
+				tasks: TaskSchemas.fromSchema([taskDef]),
+				database: DatabaseSchema.fromGeneratedTypes<Database>(),
+				context: {},
+			});
+
+			// Task triggered by database insert - not invocable
+			conductor.createTask(
+				{ name: "on-contact-insert" },
+				{ schema: "public", table: "contact", operation: "insert" },
+				async (event) => {
+					// Event should have database event payload with schema.table.op format
+					expectTypeOf(event.event).toEqualTypeOf<"public.contact.insert">();
+					expectTypeOf(event.payload.tg_op).toEqualTypeOf<"INSERT">();
+					expectTypeOf(event.payload.old).toEqualTypeOf<null>();
+					// new should have all contact columns
+					if (event.payload.new) {
+						expectTypeOf(event.payload.new.id).toEqualTypeOf<string>();
+						expectTypeOf(event.payload.new.email).toEqualTypeOf<
+							string | null
+						>();
+					}
+				},
+			);
+		});
+
+		test("task with multiple triggers including event trigger", () => {
+			const userCreated = defineEvent({
+				name: "user.created",
+				payload: z.object({ userId: z.string() }),
+			});
+
+			const taskDef = defineTask({
+				name: "multi-trigger",
+				payload: z.object({ data: z.string() }),
+			});
+
+			const conductor = Conductor.create({
+				connectionString: "postgres://test",
+				tasks: TaskSchemas.fromSchema([taskDef]),
+				events: EventSchemas.fromSchema([userCreated]),
+				context: {},
+			});
+
+			// Task with both invocable and custom event trigger
+			conductor.createTask(
+				{ name: "multi-trigger" },
+				[{ invocable: true }, { event: "user.created" }],
+				async (event) => {
+					// Event should be union of invoke and custom event
+					if (event.event === "pgconductor.invoke") {
+						expectTypeOf(event.payload).toEqualTypeOf<{ data: string }>();
+					} else if (event.event === "user.created") {
+						expectTypeOf(event.payload).toEqualTypeOf<{ userId: string }>();
+					}
+				},
+			);
+		});
+
+		test("task with cron and event triggers", () => {
+			const taskDef = defineTask({
+				name: "cron-and-event",
+				payload: z.object({}),
+			});
+
+			const conductor = Conductor.create({
+				connectionString: "postgres://test",
+				tasks: TaskSchemas.fromSchema([taskDef]),
+				database: DatabaseSchema.fromGeneratedTypes<Database>(),
+				context: {},
+			});
+
+			// Task with cron and database event trigger - neither is invocable
+			conductor.createTask(
+				{ name: "cron-and-event" },
+				[
+					{ cron: "0 * * * *" },
+					{ schema: "public", table: "contact", operation: "update" },
+				],
+				async (event) => {
+					// Event should be union of cron and database event
+					if (event.event === "pgconductor.cron") {
+						// Cron event has no payload
+						expectTypeOf(event).toEqualTypeOf<{ event: "pgconductor.cron" }>();
+					} else if (event.event === "public.contact.update") {
+						// Database update event
+						expectTypeOf(event.payload.tg_op).toEqualTypeOf<"UPDATE">();
+					}
+				},
+			);
+		});
+	});
 });

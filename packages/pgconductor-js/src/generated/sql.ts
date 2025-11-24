@@ -266,8 +266,11 @@ CREATE TABLE IF NOT EXISTS pgconductor.subscriptions (
     table_name text,
     operation text, -- 'insert', 'update', 'delete'
     event_key text,
-    execution_id uuid NOT NULL,
-    step_key text -- step key to save result to when event arrives
+    execution_id uuid, -- NULL for trigger-based (persistent) subscriptions
+    queue text not null default 'default',
+    step_key text, -- step key to save result to when event arrives; NULL = persistent
+    task_key text, -- task to invoke for trigger-based subscriptions
+    columns text[] -- columns to select for db events
 );
 
 CREATE TABLE IF NOT EXISTS pgconductor.events (
@@ -307,10 +310,22 @@ create type pgconductor.task_spec as (
     window_end timetz
 );
 
+create type pgconductor.subscription_spec as (
+    task_key text,
+    queue text,
+    source text,
+    event_key text,
+    schema_name text,
+    table_name text,
+    operation text,
+    columns text[]
+);
+
 CREATE OR REPLACE FUNCTION pgconductor.register_worker(
     p_queue_name text,
     p_task_specs pgconductor.task_spec[],
-    p_cron_schedules pgconductor.execution_spec[]
+    p_cron_schedules pgconductor.execution_spec[],
+    p_event_subscriptions pgconductor.subscription_spec[] default array[]::pgconductor.subscription_spec[]
 )
 RETURNS void
 LANGUAGE plpgsql
@@ -366,6 +381,27 @@ BEGIN
       FROM unnest(p_cron_schedules) AS spec
       WHERE spec.cron_expression IS NOT NULL
     );
+
+  -- Step 5: Delete old trigger-based subscriptions for this queue
+  DELETE FROM pgconductor.subscriptions
+  WHERE queue = p_queue_name
+    AND step_key IS NULL  -- Only persistent/trigger subscriptions
+    AND task_key IS NOT NULL;
+
+  -- Step 6: Insert new trigger-based subscriptions
+  INSERT INTO pgconductor.subscriptions (
+    task_key, queue, source, event_key, schema_name, table_name, operation, columns
+  )
+  SELECT
+    spec.task_key,
+    spec.queue,
+    spec.source,
+    spec.event_key,
+    spec.schema_name,
+    spec.table_name,
+    spec.operation,
+    spec.columns
+  FROM unnest(p_event_subscriptions) AS spec;
 END;
 $function$;
 
@@ -569,7 +605,8 @@ create or replace function pgconductor.subscribe_db_change(
     p_schema_name text,
     p_table_name text,
     p_operation text, -- 'insert', 'update', 'delete'
-    p_timeout_ms integer default null
+    p_timeout_ms integer default null,
+    p_columns text[] default null
 )
 returns uuid
 language plpgsql
@@ -580,8 +617,8 @@ declare
     v_subscription_id uuid;
 begin
     -- Create subscription
-    insert into pgconductor.subscriptions (source, schema_name, table_name, operation, execution_id, step_key)
-    values ('db', p_schema_name, p_table_name, p_operation, p_execution_id, p_step_key)
+    insert into pgconductor.subscriptions (source, schema_name, table_name, operation, execution_id, step_key, columns)
+    values ('db', p_schema_name, p_table_name, p_operation, p_execution_id, p_step_key, p_columns)
     returning id into v_subscription_id;
 
     -- Update execution to wait
@@ -601,9 +638,10 @@ end;
 $function$;
 
 -- Wake up an execution waiting for an event
--- Called by event-router when event arrives
+-- Called by event-router when event arrives for step-based subscriptions
 create or replace function pgconductor.wake_execution(
     p_execution_id uuid,
+    p_queue text,
     p_step_key text,
     p_result jsonb
 )
@@ -612,21 +650,10 @@ language plpgsql
 volatile
 set search_path to ''
 as $function$
-declare
-    v_queue text;
 begin
-    -- Get queue for the execution
-    select queue into v_queue
-    from pgconductor.executions
-    where id = p_execution_id;
-
-    if v_queue is null then
-        return;
-    end if;
-
     -- Save step result
     insert into pgconductor.steps (key, execution_id, queue, result)
-    values (p_step_key, p_execution_id, v_queue, p_result)
+    values (p_step_key, p_execution_id, p_queue, p_result)
     on conflict (key, execution_id) do nothing;
 
     -- Wake up execution
@@ -634,12 +661,40 @@ begin
     set
         waiting_step_key = null,
         run_at = pgconductor.current_time()
-    where id = p_execution_id and queue = v_queue;
+    where id = p_execution_id and queue = p_queue;
 
-    -- Delete subscription
+    -- Delete subscription (step-based subscriptions are one-time)
     delete from pgconductor.subscriptions
     where execution_id = p_execution_id;
 end;
+$function$;
+
+-- Invoke a task from an event trigger
+-- Called by event-router when event arrives for trigger-based (persistent) subscriptions
+create or replace function pgconductor.invoke_from_event(
+    p_task_key text,
+    p_queue text,
+    p_event_name text,
+    p_payload jsonb
+)
+returns uuid
+language sql
+volatile
+set search_path to ''
+as $function$
+    insert into pgconductor.executions (
+        task_key,
+        queue,
+        payload,
+        run_at
+    )
+    values (
+        p_task_key,
+        p_queue,
+        jsonb_build_object('event', p_event_name, 'payload', p_payload),
+        pgconductor.current_time()
+    )
+    returning id;
 $function$;
 
 -- Emit a custom event
@@ -648,19 +703,13 @@ create or replace function pgconductor.emit_event(
     p_payload jsonb default null
 )
 returns uuid
-language plpgsql
+language sql
 volatile
 set search_path to ''
 as $function$
-declare
-    v_event_id uuid;
-begin
     insert into pgconductor.events (event_key, payload)
     values (p_event_key, p_payload)
-    returning id into v_event_id;
-
-    return v_event_id;
-end;
+    returning id;
 $function$;
 `,
 });
