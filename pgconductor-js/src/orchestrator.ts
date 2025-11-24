@@ -238,6 +238,11 @@ export class Orchestrator {
 
 		const beat = async () => {
 			try {
+				if (this.abortController.signal.aborted) {
+					// if we are aborting, do not run heartbeat
+					return;
+				}
+
 				heartbeatCount = (heartbeatCount % 4) + 1;
 
 				// Every 8th heartbeat, recover stale orchestrators

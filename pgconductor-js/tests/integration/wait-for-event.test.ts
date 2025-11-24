@@ -160,7 +160,10 @@ describe("WaitForEvent Support", () => {
 			{ invocable: true },
 			async (_event, ctx) => {
 				try {
-					await ctx.waitForEvent("wait-step", { event: "never.arrives", timeout: 1000 });
+					await ctx.waitForEvent("wait-step", {
+						event: "never.arrives",
+						timeout: 1000,
+					});
 					return { received: true };
 				} catch (err) {
 					errorFn(err as Error);
@@ -224,10 +227,9 @@ describe("WaitForEvent Support", () => {
 			{ name: "wake-test" },
 			{ invocable: true },
 			async (_event, ctx) => {
-				const eventData = await ctx.waitForEvent(
-					"wait-for-wake",
-					{ event: "test.event" },
-				);
+				const eventData = await ctx.waitForEvent("wait-for-wake", {
+					event: "test.event",
+				});
 				resultFn(eventData);
 				return { eventData };
 			},
@@ -261,6 +263,7 @@ describe("WaitForEvent Support", () => {
 		await db.sql`
 			SELECT pgconductor.wake_execution(
 				${executionId!}::uuid,
+                'default',
 				'wait-for-wake',
 				${db.sql.json({ message: "hello from event" })}
 			)
@@ -272,7 +275,9 @@ describe("WaitForEvent Support", () => {
 		await orchestrator.stop();
 
 		expect(resultFn).toHaveBeenCalledTimes(1);
-		expect(resultFn.mock.results[0]?.value).toEqual({ message: "hello from event" });
+		expect(resultFn.mock.results[0]?.value).toEqual({
+			message: "hello from event",
+		});
 	}, 10000);
 
 	test("waitForEvent returns cached result on retry", async () => {
@@ -298,10 +303,9 @@ describe("WaitForEvent Support", () => {
 			{ invocable: true },
 			async (_event, ctx) => {
 				attemptFn();
-				const eventData = await ctx.waitForEvent(
-					"cached-wait",
-					{ event: "test.event" },
-				);
+				const eventData = await ctx.waitForEvent("cached-wait", {
+					event: "test.event",
+				});
 
 				// Fail on first attempt after receiving event
 				if (attempts === 1) {
@@ -342,6 +346,7 @@ describe("WaitForEvent Support", () => {
 		await db.sql`
 			SELECT pgconductor.wake_execution(
 				${executionId!}::uuid,
+                'default',
 				'cached-wait',
 				${db.sql.json({ value: 42 })}
 			)

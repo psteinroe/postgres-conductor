@@ -10,17 +10,17 @@
 		"typecheck": "tsc --noEmit"
 	},
 	"devDependencies": {
-		"@testcontainers/postgresql": "11.8.1",
-		"@types/bun": "latest",
-		"expect-type": "1.2.2",
-		"zod": "4.1.12"
+		"@testcontainers/postgresql": "catalog:",
+		"@types/bun": "catalog:",
+		"expect-type": "catalog:",
+		"zod": "catalog:",
 	},
 	"peerDependencies": {
-		"typescript": "5.9.3"
+		"typescript": "catalog:"
 	},
 	"dependencies": {
-		"@standard-schema/spec": "1.0.0",
-		"cron-parser": "5.4.0",
-		"postgres": "3.4.7"
+		"@standard-schema/spec": "catalog:",
+		"cron-parser": "catalog:",
+		"postgres": "catalog:"
 	}
 }
