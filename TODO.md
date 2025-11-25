@@ -3,7 +3,6 @@
 - bring column selection back
 - add dynamic scheduling of cron jobs
 - make sure database api makes it clear what is public api and what is private api (e.g. add `_private_` prefix)
-- migrate database-client to args, signal pattern
 - add management ui
 - only use custom current_time if running tests
 - add throttling (limit, period, key)
