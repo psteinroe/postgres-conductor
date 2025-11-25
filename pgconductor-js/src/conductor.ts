@@ -302,6 +302,6 @@ export class Conductor<
 		{ event }: CustomEventConfig<TName>,
 		payload: InferEventPayload<TDef>,
 	): Promise<string> {
-		return this.db.emitEvent(event, payload);
+		return this.db.emitEvent({ eventKey: event, payload });
 	}
 }

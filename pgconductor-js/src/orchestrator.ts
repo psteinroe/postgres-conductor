@@ -175,11 +175,11 @@ export class Orchestrator {
 					return;
 				}
 
-				const hbShutdown = await this.db.orchestratorHeartbeat(
-					this.orchestratorId,
-					PACKAGE_VERSION,
-					this.migrationStore.getLatestMigrationNumber(),
-				);
+				const hbShutdown = await this.db.orchestratorHeartbeat({
+					orchestratorId: this.orchestratorId,
+					version: PACKAGE_VERSION,
+					migrationNumber: this.migrationStore.getLatestMigrationNumber(),
+				});
 
 				if (hbShutdown) {
 					this.logger.info(
@@ -278,17 +278,17 @@ export class Orchestrator {
 
 				// Every 8th heartbeat, recover stale orchestrators
 				if (heartbeatCount === 8) {
-					await this.db.recoverStaleOrchestrators(
-						`${STALE_ORCHESTRATOR_MAX_AGE_MS} milliseconds`,
-					);
+					await this.db.recoverStaleOrchestrators({
+						maxAge: `${STALE_ORCHESTRATOR_MAX_AGE_MS} milliseconds`,
+					});
 				}
 
 				// Send heartbeat and check for shutdown signal
-				const shouldShutdown = await this.db.orchestratorHeartbeat(
-					this.orchestratorId,
-					PACKAGE_VERSION,
-					this.migrationStore.getLatestMigrationNumber(),
-				);
+				const shouldShutdown = await this.db.orchestratorHeartbeat({
+					orchestratorId: this.orchestratorId,
+					version: PACKAGE_VERSION,
+					migrationNumber: this.migrationStore.getLatestMigrationNumber(),
+				});
 
 				if (shouldShutdown && !this.signal.aborted) {
 					this.logger.info(`Received shutdown signal`);
@@ -345,7 +345,9 @@ export class Orchestrator {
 		}
 
 		// Remove ourselves from orchestrators table and release locked executions
-		await this.db.orchestratorShutdown(this.orchestratorId);
+		await this.db.orchestratorShutdown({
+			orchestratorId: this.orchestratorId,
+		});
 
 		// Close database client (no-op if user supplied their own instance)
 		await this.db.close();

@@ -1,6 +1,6 @@
-import type { TestDatabase } from "../../tests/fixtures/test-database";
-import { SchemaManager } from "../../src/schema-manager";
-import type { TaskSpec } from "../../src/database-client";
+import type { TestDatabase } from "../../../tests/fixtures/test-database";
+import { SchemaManager } from "../../../src/schema-manager";
+import type { TaskSpec } from "../../../src/database-client";
 
 export class Fixtures {
 	private readonly schemaManager;

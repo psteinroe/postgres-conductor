@@ -58,7 +58,9 @@ export class SchemaManager {
 			}
 
 			if (nextMigration.breaking) {
-				await this.db.sweepOrchestrators(nextMigration.version);
+				await this.db.sweepOrchestrators({
+					migrationNumber: nextMigration.version,
+				});
 				await this.waitForOlderOrchestratorsToExit(
 					nextMigration.version,
 					signal,
@@ -88,9 +90,9 @@ export class SchemaManager {
 		const start = Date.now();
 
 		while (Date.now() - start < maxWaitMs) {
-			const remaining = await this.db.countActiveOrchestratorsBelow(
-				targetVersion,
-			);
+			const remaining = await this.db.countActiveOrchestratorsBelow({
+				version: targetVersion,
+			});
 
 			if (remaining === 0) {
 				return;

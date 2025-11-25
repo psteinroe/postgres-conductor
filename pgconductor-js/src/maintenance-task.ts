@@ -48,7 +48,10 @@ export const createMaintenanceTask = <Queue extends string = "default">(
 			// Steps are automatically deleted via CASCADE foreign key
 			let hasMore = true;
 			while (hasMore) {
-				hasMore = await db.removeExecutions(queue, BATCH_SIZE);
+				hasMore = await db.removeExecutions({
+					queueName: queue,
+					batchSize: BATCH_SIZE,
+				});
 			}
 
 			// If we are running within the default queue, also remove unused triggers

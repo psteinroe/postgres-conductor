@@ -67,7 +67,7 @@ export class TaskContext<
 	}
 
 	get signal(): AbortSignal {
-		return this.opts.signal;
+		return this.opts.abortController.signal;
 	}
 
 	async step<T extends JsonValue | void>(
@@ -75,10 +75,10 @@ export class TaskContext<
 		fn: () => Promise<T> | T,
 	): Promise<T> {
 		// Check if step already completed
-		const cached = await this.opts.db.loadStep(
-			this.opts.execution.id,
-			name,
-		);
+		const cached = await this.opts.db.loadStep({
+			executionId: this.opts.execution.id,
+			key: name,
+		});
 
 		if (cached !== undefined) {
 			return cached as T;
@@ -87,13 +87,13 @@ export class TaskContext<
 		// Execute and save
 		const result = await fn();
 
-		await this.opts.db.saveStep(
-			this.opts.execution.id,
-			this.opts.execution.queue,
-			name,
-			{ result: result as JsonValue },
-			undefined,
-		);
+		await this.opts.db.saveStep({
+			executionId: this.opts.execution.id,
+			queue: this.opts.execution.queue,
+			key: name,
+			result: { result: result as JsonValue },
+			runAtMs: undefined,
+		});
 
 		return result;
 	}
@@ -106,23 +106,23 @@ export class TaskContext<
 
 	async sleep(id: string, ms: number): Promise<void> {
 		// Check if we already slept
-		const cached = await this.opts.db.loadStep(
-			this.opts.execution.id,
-			id,
-		);
+		const cached = await this.opts.db.loadStep({
+			executionId: this.opts.execution.id,
+			key: id,
+		});
 
 		if (cached !== undefined) {
 			return; // Already slept, continue
 		}
 
 		// Save sleep step with ms - time calculation happens in SQL
-		await this.opts.db.saveStep(
-			this.opts.execution.id,
-			this.opts.execution.queue,
-			id,
-			null,
-			ms,
-		);
+		await this.opts.db.saveStep({
+			executionId: this.opts.execution.id,
+			queue: this.opts.execution.queue,
+			key: id,
+			result: null,
+			runAtMs: ms,
+		});
 
 		return this.abortAndHangup();
 	}
@@ -141,10 +141,10 @@ export class TaskContext<
 		payload: InferPayload<TDef> = {} as InferPayload<TDef>,
 		timeout?: number,
 	): Promise<InferReturns<TDef>> {
-		const cached = await this.opts.db.loadStep(
-			this.opts.execution.id,
-			id,
-		);
+		const cached = await this.opts.db.loadStep({
+			executionId: this.opts.execution.id,
+			key: id,
+		});
 
 		if (cached !== undefined) {
 			return cached as InferReturns<TDef>;
@@ -154,9 +154,9 @@ export class TaskContext<
 		if (this.opts.execution.waiting_on_execution_id !== null) {
 			// we resumed but no step exists → timeout occurred
 			// clear waiting state before throwing
-			await this.opts.db.clearWaitingState(
-				this.opts.execution.id,
-			);
+			await this.opts.db.clearWaitingState({
+				executionId: this.opts.execution.id,
+			});
 
 			throw new Error(
 				timeout
@@ -168,16 +168,14 @@ export class TaskContext<
 		const taskName = task.name;
 		const queue = task.queue || "default";
 
-		await this.opts.db.invokeChild(
-			{
-				task_key: taskName,
-				queue,
-				payload,
-				parent_execution_id: this.opts.execution.id,
-				parent_step_key: id,
-				parent_timeout_ms: timeout || null,
-			},
-		);
+		await this.opts.db.invokeChild({
+			task_key: taskName,
+			queue,
+			payload,
+			parent_execution_id: this.opts.execution.id,
+			parent_step_key: id,
+			parent_timeout_ms: timeout || null,
+		});
 
 		return this.abortAndHangup();
 	}
@@ -212,8 +210,8 @@ export class TaskContext<
 		const nextTimestamp = interval.next().toDate();
 		const queue = task.queue || "default";
 
-		await this.opts.db.scheduleCronExecution(
-			{
+		await this.opts.db.scheduleCronExecution({
+			spec: {
 				task_key: task.name,
 				queue,
 				payload,
@@ -222,7 +220,7 @@ export class TaskContext<
 				priority: options.priority || null,
 			},
 			scheduleName,
-		);
+		});
 	}
 
 	async unschedule<
@@ -241,11 +239,11 @@ export class TaskContext<
 		}
 
 		const queue = task.queue || "default";
-		return this.opts.db.unscheduleCronExecution(
-			task.name,
+		return this.opts.db.unscheduleCronExecution({
+			taskKey: task.name,
 			queue,
 			scheduleName,
-		);
+		});
 	}
 
 	/**
@@ -286,10 +284,10 @@ export class TaskContext<
 			SharedEventConfig,
 	): Promise<unknown> {
 		// Check if we already received the event
-		const cached = await this.opts.db.loadStep(
-			this.opts.execution.id,
-			id,
-		);
+		const cached = await this.opts.db.loadStep({
+			executionId: this.opts.execution.id,
+			key: id,
+		});
 
 		if (cached !== undefined) {
 			return cached;
@@ -299,9 +297,9 @@ export class TaskContext<
 		if (this.opts.execution.waiting_step_key !== null) {
 			// We resumed but no step exists → timeout occurred
 			// Clear waiting state before throwing
-			await this.opts.db.clearWaitingState(
-				this.opts.execution.id,
-			);
+			await this.opts.db.clearWaitingState({
+				executionId: this.opts.execution.id,
+			});
 
 			throw new Error(
 				config.timeout
@@ -313,13 +311,13 @@ export class TaskContext<
 		// Determine if this is a custom event or database event
 		if ("event" in config) {
 			// Custom event
-			await this.opts.db.subscribeEvent(
-				this.opts.execution.id,
-				this.opts.execution.queue,
-				id,
-				config.event,
-				config.timeout,
-			);
+			await this.opts.db.subscribeEvent({
+				executionId: this.opts.execution.id,
+				queue: this.opts.execution.queue,
+				stepKey: id,
+				eventKey: config.event,
+				timeoutMs: config.timeout,
+			});
 		} else {
 			// Database event
 			// Parse columns string into array if provided
@@ -328,16 +326,16 @@ export class TaskContext<
 				? columnsStr.split(",").map((c: string) => c.trim().toLowerCase())
 				: undefined;
 
-			await this.opts.db.subscribeDbChange(
-				this.opts.execution.id,
-				this.opts.execution.queue,
-				id,
-				config.schema,
-				config.table,
-				config.operation,
-				config.timeout,
+			await this.opts.db.subscribeDbChange({
+				executionId: this.opts.execution.id,
+				queue: this.opts.execution.queue,
+				stepKey: id,
+				schemaName: config.schema,
+				tableName: config.table,
+				operation: config.operation,
+				timeoutMs: config.timeout,
 				columns,
-			);
+			});
 		}
 
 		return this.abortAndHangup();
@@ -358,7 +356,7 @@ export class TaskContext<
 		{ event }: CustomEventConfig<TName>,
 		payload: InferEventPayload<TDef>,
 	): Promise<string> {
-		return this.opts.db.emitEvent(event, payload);
+		return this.opts.db.emitEvent({ eventKey: event, payload });
 	}
 
 	/**

@@ -1,5 +1,5 @@
 import { writeFileSync } from "node:fs";
-import { QueryBuilder } from "../src/query-builder";
+import { QueryBuilder } from "../../src/query-builder";
 import postgres from "postgres";
 
 // Create a dummy sql instance just for query building
@@ -9,7 +9,12 @@ const qb = new QueryBuilder(sql);
 // 1. heavy-single-queue batch-10-filtered
 const orchestratorId = crypto.randomUUID();
 const filterKeys = ["task-1", "task-2"];
-const query1 = qb.buildGetExecutions(orchestratorId, "default", 10, filterKeys);
+const query1 = qb.buildGetExecutions({
+	orchestratorId,
+	queueName: "default",
+	batchSize: 10,
+	filterTaskKeys: filterKeys,
+});
 writeFileSync("perf/to-analyse/heavy-single-queue-batch-10-filtered-query.sql",
 	`-- heavy-single-queue: batch-10-filtered (122ms execution)
 -- Scenario: 1 queue, 1 task, 1M pending

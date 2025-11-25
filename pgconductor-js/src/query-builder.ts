@@ -7,16 +7,110 @@ import type {
 	EventSubscriptionSpec,
 	Payload,
 	TaskSpec,
+	JsonValue,
 } from "./database-client";
+
+export type OrchestratorHeartbeatArgs = {
+	orchestratorId: string;
+	version: string;
+	migrationNumber: number;
+};
+
+export type RecoverStaleOrchestratorsArgs = {
+	maxAge: string;
+};
+
+export type SweepOrchestratorsArgs = {
+	migrationNumber: number;
+};
+
+export type OrchestratorShutdownArgs = {
+	orchestratorId: string;
+};
+
+export type CountActiveOrchestratorsBelowArgs = {
+	version: number;
+};
+
+export type GetExecutionsArgs = {
+	orchestratorId: string;
+	queueName: string;
+	batchSize: number;
+	filterTaskKeys: string[];
+};
+
+export type RemoveExecutionsArgs = {
+	queueName: string;
+	batchSize: number;
+};
+
+export type RegisterWorkerArgs = {
+	queueName: string;
+	taskSpecs: TaskSpec[];
+	cronSchedules: ExecutionSpec[];
+	eventSubscriptions: EventSubscriptionSpec[];
+};
+
+export type ScheduleCronExecutionArgs = {
+	spec: ExecutionSpec;
+	scheduleName: string;
+};
+
+export type UnscheduleCronExecutionArgs = {
+	taskKey: string;
+	queue: string;
+	scheduleName: string;
+};
+
+export type LoadStepArgs = {
+	executionId: string;
+	key: string;
+};
+
+export type SaveStepArgs = {
+	executionId: string;
+	queue: string;
+	key: string;
+	result: Payload | null;
+	runAtMs?: number;
+};
+
+export type ClearWaitingStateArgs = {
+	executionId: string;
+};
+
+export type SubscribeEventArgs = {
+	executionId: string;
+	queue: string;
+	stepKey: string;
+	eventKey: string;
+	timeoutMs?: number;
+};
+
+export type SubscribeDbChangeArgs = {
+	executionId: string;
+	queue: string;
+	stepKey: string;
+	schemaName: string;
+	tableName: string;
+	operation: "insert" | "update" | "delete";
+	timeoutMs?: number;
+	columns?: string[];
+};
+
+export type EmitEventArgs = {
+	eventKey: string;
+	payload?: JsonValue;
+};
 
 export class QueryBuilder {
 	constructor(private readonly sql: Sql) {}
 
-	buildOrchestratorHeartbeat(
-		orchestratorId: string,
-		version: string,
-		migrationNumber: number,
-	): PendingQuery<[{ shutdown_signal: boolean }]> {
+	buildOrchestratorHeartbeat({
+		orchestratorId,
+		version,
+		migrationNumber,
+	}: OrchestratorHeartbeatArgs): PendingQuery<[{ shutdown_signal: boolean }]> {
 		return this.sql<[{ shutdown_signal: boolean }]>`
 			with latest as (
 				select coalesce(max(version), -1) as db_version
@@ -49,7 +143,9 @@ export class QueryBuilder {
 		`;
 	}
 
-	buildRecoverStaleOrchestrators(maxAge: string): PendingQuery<RowList<Row[]>> {
+	buildRecoverStaleOrchestrators({
+		maxAge,
+	}: RecoverStaleOrchestratorsArgs): PendingQuery<RowList<Row[]>> {
 		return this.sql`
 			with expired as (
 				delete from pgconductor.orchestrators o
@@ -78,9 +174,9 @@ export class QueryBuilder {
 		`;
 	}
 
-	buildSweepOrchestrators(
-		migrationNumber: number,
-	): PendingQuery<RowList<Row[]>> {
+	buildSweepOrchestrators({
+		migrationNumber,
+	}: SweepOrchestratorsArgs): PendingQuery<RowList<Row[]>> {
 		return this.sql`
 			update pgconductor.orchestrators
 			set shutdown_signal = true
@@ -97,9 +193,9 @@ export class QueryBuilder {
 		`;
 	}
 
-	buildOrchestratorShutdown(
-		orchestratorId: string,
-	): PendingQuery<RowList<Row[]>> {
+	buildOrchestratorShutdown({
+		orchestratorId,
+	}: OrchestratorShutdownArgs): PendingQuery<RowList<Row[]>> {
 		return this.sql`
 			with deleted as (
 				delete from pgconductor.orchestrators
@@ -115,12 +211,12 @@ export class QueryBuilder {
 		`;
 	}
 
-	buildGetExecutions(
-		orchestratorId: string,
-		queueName: string,
-		batchSize: number,
-		filterTaskKeys: string[] | null,
-	): PendingQuery<Execution[] | any> {
+	buildGetExecutions({
+		orchestratorId,
+		queueName,
+		batchSize,
+		filterTaskKeys,
+	}: GetExecutionsArgs): PendingQuery<Execution[] | any> {
 		return this.sql<Execution[]>`
 			with e as (
 				select
@@ -363,10 +459,10 @@ export class QueryBuilder {
 		return this.sql<[{ result: number }]>`with ${combined} select 1 as result`;
 	}
 
-	buildRemoveExecutions(
-		queueName: string,
-		batchSize: number,
-	): PendingQuery<{ deleted_count: number }[]> {
+	buildRemoveExecutions({
+		queueName,
+		batchSize,
+	}: RemoveExecutionsArgs): PendingQuery<{ deleted_count: number }[]> {
 		return this.sql<{ deleted_count: number }[]>`
 			with batch as (
 				select e.id
@@ -390,12 +486,12 @@ export class QueryBuilder {
 		`;
 	}
 
-	buildRegisterWorker(
-		queueName: string,
-		taskSpecs: TaskSpec[],
-		cronSchedules: ExecutionSpec[],
-		eventSubscriptions: EventSubscriptionSpec[],
-	): PendingQuery<RowList<Row[]>> {
+	buildRegisterWorker({
+		queueName,
+		taskSpecs,
+		cronSchedules,
+		eventSubscriptions,
+	}: RegisterWorkerArgs): PendingQuery<RowList<Row[]>> {
 		const taskSpecRows = taskSpecs.map((spec) => ({
 			key: spec.key,
 			queue: spec.queue || null,
@@ -464,10 +560,10 @@ export class QueryBuilder {
 		`;
 	}
 
-	buildScheduleCronExecution(
-		spec: ExecutionSpec,
-		scheduleName: string,
-	): PendingQuery<[{ id: string }]> {
+	buildScheduleCronExecution({
+		spec,
+		scheduleName,
+	}: ScheduleCronExecutionArgs): PendingQuery<[{ id: string }]> {
 		assert.ok(spec.run_at, "scheduleCronExecution requires run_at");
 		assert.ok(
 			spec.cron_expression,
@@ -501,11 +597,11 @@ export class QueryBuilder {
 		`;
 	}
 
-	buildUnscheduleCronExecution(
-		taskKey: string,
-		queue: string,
-		scheduleName: string,
-	): PendingQuery<[{ deleted_count: number }]> {
+	buildUnscheduleCronExecution({
+		taskKey,
+		queue,
+		scheduleName,
+	}: UnscheduleCronExecutionArgs): PendingQuery<[{ deleted_count: number }]> {
 		return this.sql<[{ deleted_count: number }]>`
 			with deleted as (
 				delete from pgconductor.executions
@@ -558,23 +654,23 @@ export class QueryBuilder {
 		`;
 	}
 
-	buildLoadStep(
-		executionId: string,
-		key: string,
-	): PendingQuery<[{ result: Payload | null }]> {
+	buildLoadStep({
+		executionId,
+		key,
+	}: LoadStepArgs): PendingQuery<[{ result: Payload | null }]> {
 		return this.sql<[{ result: Payload | null }]>`
 			select result from pgconductor.steps
 			where execution_id = ${executionId}::uuid and key = ${key}::text
 		`;
 	}
 
-	buildSaveStep(
-		executionId: string,
-		queue: string,
-		key: string,
-		result: Payload | null,
-		runAtMs?: number,
-	): PendingQuery<RowList<Row[]>> {
+	buildSaveStep({
+		executionId,
+		queue,
+		key,
+		result,
+		runAtMs,
+	}: SaveStepArgs): PendingQuery<RowList<Row[]>> {
 		if (runAtMs) {
 			return this.sql`
 				with inserted as (
@@ -598,7 +694,9 @@ export class QueryBuilder {
 		`;
 	}
 
-	buildClearWaitingState(executionId: string): PendingQuery<RowList<Row[]>> {
+	buildClearWaitingState({
+		executionId,
+	}: ClearWaitingStateArgs): PendingQuery<RowList<Row[]>> {
 		return this.sql`
 			update pgconductor.executions
 			set
@@ -608,9 +706,9 @@ export class QueryBuilder {
 		`;
 	}
 
-	buildCountActiveOrchestratorsBelow(
-		version: number,
-	): PendingQuery<{ count: number }[]> {
+	buildCountActiveOrchestratorsBelow({
+		version,
+	}: CountActiveOrchestratorsBelowArgs): PendingQuery<{ count: number }[]> {
 		return this.sql<{ count: number }[]>`
 			select count(*) as count
 			from pgconductor.orchestrators

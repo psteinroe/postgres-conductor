@@ -76,7 +76,8 @@ create table pgconductor.orchestrators (
     last_heartbeat_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     version text,
     migration_number integer,
-    shutdown_signal boolean default false not null
+    shutdown_signal boolean default false not null,
+    cancellation_signal boolean default false not null
 );
 
 create index idx_orchestrators_heartbeat on pgconductor.orchestrators (last_heartbeat_at);
@@ -212,6 +213,13 @@ begin
     execute format(
       'create index if not exists %I on pgconductor.%I ((split_part(dedupe_key, ''::'', 2))) where dedupe_key like ''dynamic::%%'' and cron_expression is not null',
       'idx_' || v_partition_name || '_dynamic_schedule',
+      v_partition_name
+    );
+
+    -- index for task_key joins (used in return_executions)
+    execute format(
+      'create index if not exists %I on pgconductor.%I (task_key)',
+      'idx_' || v_partition_name || '_task_key',
       v_partition_name
     );
 

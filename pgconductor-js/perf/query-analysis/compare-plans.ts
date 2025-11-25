@@ -1,11 +1,11 @@
 import { writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { TestDatabasePool } from "../tests/fixtures/test-database";
-import type { TestDatabase } from "../tests/fixtures/test-database";
+import { TestDatabasePool } from "../../tests/fixtures/test-database";
+import type { TestDatabase } from "../../tests/fixtures/test-database";
 import { scenarios, type Scenario } from "./scenarios";
 import { Fixtures } from "./lib/fixtures";
-import { QueryBuilder } from "../src/query-builder";
-import type { ExecutionResult } from "../src/database-client";
+import { QueryBuilder } from "../../src/query-builder";
+import type { ExecutionResult } from "../../src/database-client";
 
 // Query definition with variations
 type QueryVariation = {
@@ -92,12 +92,12 @@ const queries: QueryDefinition[] = [
 				setup: async () => {},
 				execute: (qb, scenario) => {
 					const orchestratorId = crypto.randomUUID();
-					return qb.buildGetExecutions(
+					return qb.buildGetExecutions({
 						orchestratorId,
-						scenario.queues[0] || "default",
-						10,
-						null,
-					);
+						queueName: scenario.queues[0] || "default",
+						batchSize: 10,
+						filterTaskKeys: [],
+					});
 				},
 			},
 			{
@@ -106,12 +106,12 @@ const queries: QueryDefinition[] = [
 				setup: async () => {},
 				execute: (qb, scenario) => {
 					const orchestratorId = crypto.randomUUID();
-					return qb.buildGetExecutions(
+					return qb.buildGetExecutions({
 						orchestratorId,
-						scenario.queues[0] || "default",
-						100,
-						null,
-					);
+						queueName: scenario.queues[0] || "default",
+						batchSize: 100,
+						filterTaskKeys: [],
+					});
 				},
 			},
 			{
@@ -121,12 +121,12 @@ const queries: QueryDefinition[] = [
 				execute: (qb, scenario) => {
 					const orchestratorId = crypto.randomUUID();
 					const filterKeys = scenario.tasks.slice(0, 2).map((t) => t.key);
-					return qb.buildGetExecutions(
+					return qb.buildGetExecutions({
 						orchestratorId,
-						scenario.queues[0] || "default",
-						10,
-						filterKeys,
-					);
+						queueName: scenario.queues[0] || "default",
+						batchSize: 10,
+						filterTaskKeys: filterKeys,
+					});
 				},
 			},
 		],

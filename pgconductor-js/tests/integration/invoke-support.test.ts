@@ -133,7 +133,7 @@ describe("Invoke Support", () => {
 		);
 
 		const startTime = new Date("2024-01-01T00:00:00Z");
-		await db.client.setFakeTime(startTime);
+		await db.client.setFakeTime({ date: startTime });
 
 		const orchestrator = Orchestrator.create({
 			conductor,
@@ -152,7 +152,7 @@ describe("Invoke Support", () => {
 
 		// Advance time past timeout (1 second) but before sleep completes (5 seconds)
 		const afterTimeout = new Date(startTime.getTime() + 1500);
-		await db.client.setFakeTime(afterTimeout);
+		await db.client.setFakeTime({ date: afterTimeout });
 
 		await new Promise((r) => setTimeout(r, 500));
 
@@ -347,7 +347,7 @@ describe("Invoke Support", () => {
 		);
 
 		const startTime = new Date("2024-01-01T00:00:00Z");
-		await db.client.setFakeTime(startTime);
+		await db.client.setFakeTime({ date: startTime });
 
 		const orchestrator = Orchestrator.create({
 			conductor,
@@ -368,7 +368,7 @@ describe("Invoke Support", () => {
 
 		// Advance fake time past first backoff (15 seconds)
 		const afterFirstBackoff = new Date(startTime.getTime() + 15000);
-		await db.client.setFakeTime(afterFirstBackoff);
+		await db.client.setFakeTime({ date: afterFirstBackoff });
 
 		// Wait for second execution cycle: child retries and fails permanently
 		await new Promise((r) => setTimeout(r, 500));

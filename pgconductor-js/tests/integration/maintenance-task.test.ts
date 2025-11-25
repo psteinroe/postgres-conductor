@@ -81,7 +81,7 @@ describe("Maintenance Task", () => {
 		// Set fake time to 30 days ago
 		const thirtyDaysAgo = new Date();
 		thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
-		await db.client.setFakeTime(thirtyDaysAgo);
+		await db.client.setFakeTime({ date: thirtyDaysAgo });
 
 		// Create old completed execution (30 days old)
 		const oldExecId = await conductor.invoke({ name: "report-task" }, {});
@@ -96,7 +96,7 @@ describe("Maintenance Task", () => {
 		// Set fake time to 5 days ago
 		const fiveDaysAgo = new Date();
 		fiveDaysAgo.setDate(fiveDaysAgo.getDate() - 5);
-		await db.client.setFakeTime(fiveDaysAgo);
+		await db.client.setFakeTime({ date: fiveDaysAgo });
 
 		// Create recent completed execution (5 days old)
 		const recentExecId = await conductor.invoke({ name: "report-task" }, {});
@@ -178,7 +178,7 @@ describe("Maintenance Task", () => {
 		// Set fake time to 20 days ago
 		const twentyDaysAgo = new Date();
 		twentyDaysAgo.setDate(twentyDaysAgo.getDate() - 20);
-		await db.client.setFakeTime(twentyDaysAgo);
+		await db.client.setFakeTime({ date: twentyDaysAgo });
 
 		// Create old failed execution (20 days ago)
 		const oldExecId = await conductor.invoke({ name: "failing-task" }, {});
@@ -189,7 +189,7 @@ describe("Maintenance Task", () => {
 		// Set fake time to 10 days ago
 		const tenDaysAgo = new Date();
 		tenDaysAgo.setDate(tenDaysAgo.getDate() - 10);
-		await db.client.setFakeTime(tenDaysAgo);
+		await db.client.setFakeTime({ date: tenDaysAgo });
 
 		// Create recent failed execution (10 days ago)
 		const recentExecId = await conductor.invoke({ name: "failing-task" }, {});
@@ -284,7 +284,7 @@ describe("Maintenance Task", () => {
 		// Set fake time to 10 days ago
 		const tenDaysAgo = new Date();
 		tenDaysAgo.setDate(tenDaysAgo.getDate() - 10);
-		await db.client.setFakeTime(tenDaysAgo);
+		await db.client.setFakeTime({ date: tenDaysAgo });
 
 		// Create executions 10 days ago
 		const shortExecId = await conductor.invoke({ name: "short-retention" }, {});
@@ -359,7 +359,7 @@ describe("Maintenance Task", () => {
 		// Set fake time to 7 days ago
 		const sevenDaysAgo = new Date();
 		sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
-		await db.client.setFakeTime(sevenDaysAgo);
+		await db.client.setFakeTime({ date: sevenDaysAgo });
 
 		// Create 50 old completed executions
 		const execIds = [];
@@ -430,7 +430,7 @@ describe("Maintenance Task", () => {
 		// Set fake time to 365 days ago
 		const oneYearAgo = new Date();
 		oneYearAgo.setDate(oneYearAgo.getDate() - 365);
-		await db.client.setFakeTime(oneYearAgo);
+		await db.client.setFakeTime({ date: oneYearAgo });
 
 		// Create very old completed execution
 		const execId = await conductor.invoke({ name: "keep-forever" }, {});

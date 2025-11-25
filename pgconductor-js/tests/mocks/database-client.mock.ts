@@ -27,7 +27,7 @@ export class MockDatabaseClient implements IDatabaseClient {
 	invokeChild = mock(async () => "mock-child-id");
 	invokeBatch = mock(async () => ["mock-id"]);
 	loadStep = mock(async () => null);
-	saveStep = mock(async (executionId, queue, key, result, runAtMs) => {});
+	saveStep = mock(async (args) => {});
 	clearWaitingState = mock(async () => {});
 	setFakeTime = mock(async () => {});
 	clearFakeTime = mock(async () => {});

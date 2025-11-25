@@ -3,7 +3,25 @@ import * as assert from "./lib/assert";
 import { waitFor } from "./lib/wait-for";
 import type { Migration } from "./migration-store";
 import type { TaskConfiguration } from "./task";
-import { QueryBuilder } from "./query-builder";
+import {
+	QueryBuilder,
+	type OrchestratorHeartbeatArgs,
+	type RecoverStaleOrchestratorsArgs,
+	type SweepOrchestratorsArgs,
+	type OrchestratorShutdownArgs,
+	type CountActiveOrchestratorsBelowArgs,
+	type GetExecutionsArgs,
+	type RemoveExecutionsArgs,
+	type RegisterWorkerArgs,
+	type ScheduleCronExecutionArgs,
+	type UnscheduleCronExecutionArgs,
+	type LoadStepArgs,
+	type SaveStepArgs,
+	type ClearWaitingStateArgs,
+	type SubscribeEventArgs,
+	type SubscribeDbChangeArgs,
+	type EmitEventArgs,
+} from "./query-builder";
 
 export type JsonValue =
 	| string
@@ -117,6 +135,10 @@ type QueryOptions = {
 
 type ErrorWithOptionalCode = Error & { code?: string };
 
+export type SetFakeTimeArgs = {
+	date: Date;
+};
+
 export class DatabaseClient {
 	private readonly sql: Sql;
 	private readonly builder: QueryBuilder;
@@ -190,16 +212,10 @@ export class DatabaseClient {
 	}
 
 	async orchestratorHeartbeat(
-		orchestratorId: string,
-		version: string,
-		migrationNumber: number,
+		args: OrchestratorHeartbeatArgs,
 	): Promise<boolean> {
 		const result = await this.query(
-			this.builder.buildOrchestratorHeartbeat(
-				orchestratorId,
-				version,
-				migrationNumber,
-			),
+			this.builder.buildOrchestratorHeartbeat(args),
 			{ label: "orchestratorHeartbeat" },
 		);
 
@@ -209,14 +225,16 @@ export class DatabaseClient {
 		return row.shutdown_signal;
 	}
 
-	async recoverStaleOrchestrators(maxAge: string): Promise<void> {
-		await this.query(this.builder.buildRecoverStaleOrchestrators(maxAge), {
+	async recoverStaleOrchestrators(
+		args: RecoverStaleOrchestratorsArgs,
+	): Promise<void> {
+		await this.query(this.builder.buildRecoverStaleOrchestrators(args), {
 			label: "recoverStaleOrchestrators",
 		});
 	}
 
-	async sweepOrchestrators(migrationNumber: number): Promise<void> {
-		await this.query(this.builder.buildSweepOrchestrators(migrationNumber), {
+	async sweepOrchestrators(args: SweepOrchestratorsArgs): Promise<void> {
+		await this.query(this.builder.buildSweepOrchestrators(args), {
 			label: "sweepOrchestrators",
 		});
 	}
@@ -284,10 +302,12 @@ export class DatabaseClient {
 		);
 	}
 
-	async countActiveOrchestratorsBelow(version: number): Promise<number> {
+	async countActiveOrchestratorsBelow(
+		args: CountActiveOrchestratorsBelowArgs,
+	): Promise<number> {
 		try {
 			const result = await this.query(
-				this.builder.buildCountActiveOrchestratorsBelow(version),
+				this.builder.buildCountActiveOrchestratorsBelow(args),
 				{ label: "countActiveOrchestratorsBelow" },
 			);
 			return Number(result[0]?.count || 0);
@@ -300,8 +320,8 @@ export class DatabaseClient {
 		}
 	}
 
-	async orchestratorShutdown(orchestratorId: string): Promise<void> {
-		await this.query(this.builder.buildOrchestratorShutdown(orchestratorId), {
+	async orchestratorShutdown(args: OrchestratorShutdownArgs): Promise<void> {
+		await this.query(this.builder.buildOrchestratorShutdown(args), {
 			label: "orchestratorShutdown",
 		});
 	}
@@ -312,21 +332,10 @@ export class DatabaseClient {
 		});
 	}
 
-	async getExecutions(
-		orchestratorId: string,
-		queueName: string,
-		batchSize: number,
-		filterTaskKeys: string[],
-	): Promise<Execution[]> {
-		return this.query(
-			this.builder.buildGetExecutions(
-				orchestratorId,
-				queueName,
-				batchSize,
-				filterTaskKeys,
-			),
-			{ label: "getExecutions" },
-		);
+	async getExecutions(args: GetExecutionsArgs): Promise<Execution[]> {
+		return this.query(this.builder.buildGetExecutions(args), {
+			label: "getExecutions",
+		});
 	}
 
 	async returnExecutions(results: ExecutionResult[]): Promise<void> {
@@ -337,55 +346,38 @@ export class DatabaseClient {
 		await this.query(query, { label: "returnExecutions" });
 	}
 
-	async removeExecutions(
-		queueName: string,
-		batchSize: number,
-	): Promise<boolean> {
-		const query = this.builder.buildRemoveExecutions(queueName, batchSize);
+	async removeExecutions(args: RemoveExecutionsArgs): Promise<boolean> {
+		const query = this.builder.buildRemoveExecutions(args);
 
 		const result = await this.query(query, {
 			label: "removeExecutions",
 		});
 
 		const deletedCount = result[0]?.deleted_count ?? 0;
-		return deletedCount >= batchSize;
+		return deletedCount >= args.batchSize;
 	}
 
-	async registerWorker(
-		queueName: string,
-		taskSpecs: TaskSpec[],
-		cronSchedules: ExecutionSpec[],
-		eventSubscriptions: EventSubscriptionSpec[],
-	): Promise<void> {
-		await this.query(
-			this.builder.buildRegisterWorker(
-				queueName,
-				taskSpecs,
-				cronSchedules,
-				eventSubscriptions,
-			),
-			{ label: "registerWorker" },
-		);
+	async registerWorker(args: RegisterWorkerArgs): Promise<void> {
+		await this.query(this.builder.buildRegisterWorker(args), {
+			label: "registerWorker",
+		});
 	}
 
 	async scheduleCronExecution(
-		spec: ExecutionSpec,
-		scheduleName: string,
+		args: ScheduleCronExecutionArgs,
 	): Promise<string> {
 		const result = await this.query(
-			this.builder.buildScheduleCronExecution(spec, scheduleName),
+			this.builder.buildScheduleCronExecution(args),
 			{ label: "scheduleCronExecution" },
 		);
 		return result[0]!.id;
 	}
 
 	async unscheduleCronExecution(
-		taskKey: string,
-		queue: string,
-		scheduleName: string,
+		args: UnscheduleCronExecutionArgs,
 	): Promise<boolean> {
 		const result = await this.query(
-			this.builder.buildUnscheduleCronExecution(taskKey, queue, scheduleName),
+			this.builder.buildUnscheduleCronExecution(args),
 			{ label: "unscheduleCronExecution" },
 		);
 		return result[0]?.deleted_count > 0;
@@ -412,14 +404,10 @@ export class DatabaseClient {
 		return result.map((r) => r.id);
 	}
 
-	async loadStep(
-		executionId: string,
-		key: string,
-	): Promise<Payload | null | undefined> {
-		const rows = await this.query(
-			this.builder.buildLoadStep(executionId, key),
-			{ label: "loadStep" },
-		);
+	async loadStep(args: LoadStepArgs): Promise<Payload | null | undefined> {
+		const rows = await this.query(this.builder.buildLoadStep(args), {
+			label: "loadStep",
+		});
 
 		if (!rows[0]) {
 			return undefined;
@@ -427,21 +415,12 @@ export class DatabaseClient {
 		return rows[0].result;
 	}
 
-	async saveStep(
-		executionId: string,
-		queue: string,
-		key: string,
-		result: Payload | null,
-		runAtMs?: number,
-	): Promise<void> {
-		await this.query(
-			this.builder.buildSaveStep(executionId, queue, key, result, runAtMs),
-			{ label: "saveStep" },
-		);
+	async saveStep(args: SaveStepArgs): Promise<void> {
+		await this.query(this.builder.buildSaveStep(args), { label: "saveStep" });
 	}
 
-	async clearWaitingState(executionId: string): Promise<void> {
-		await this.query(this.builder.buildClearWaitingState(executionId), {
+	async clearWaitingState(args: ClearWaitingStateArgs): Promise<void> {
+		await this.query(this.builder.buildClearWaitingState(args), {
 			label: "clearWaitingState",
 		});
 	}
@@ -452,7 +431,7 @@ export class DatabaseClient {
 	 *
 	 * IMPORTANT: Test database connection pool must have max: 1 for this to work.
 	 */
-	async setFakeTime(date: Date): Promise<void> {
+	async setFakeTime({ date }: SetFakeTimeArgs): Promise<void> {
 		await this.query(
 			async (sql) => {
 				await sql.unsafe(`set pgconductor.fake_now = '${date.toISOString()}'`);
@@ -477,13 +456,13 @@ export class DatabaseClient {
 	 * Subscribe to an event and wait for it.
 	 * Returns the subscription id.
 	 */
-	async subscribeEvent(
-		executionId: string,
-		queue: string,
-		stepKey: string,
-		eventKey: string,
-		timeoutMs?: number,
-	): Promise<string> {
+	async subscribeEvent({
+		executionId,
+		queue,
+		stepKey,
+		eventKey,
+		timeoutMs,
+	}: SubscribeEventArgs): Promise<string> {
 		const result = await this.query(
 			this.sql`
 				select pgconductor.subscribe_event(
@@ -503,16 +482,16 @@ export class DatabaseClient {
 	 * Subscribe to a database change and wait for it.
 	 * Returns the subscription id.
 	 */
-	async subscribeDbChange(
-		executionId: string,
-		queue: string,
-		stepKey: string,
-		schemaName: string,
-		tableName: string,
-		operation: "insert" | "update" | "delete",
-		timeoutMs?: number,
-		columns?: string[],
-	): Promise<string> {
+	async subscribeDbChange({
+		executionId,
+		queue,
+		stepKey,
+		schemaName,
+		tableName,
+		operation,
+		timeoutMs,
+		columns,
+	}: SubscribeDbChangeArgs): Promise<string> {
 		const result = await this.query(
 			this.sql`
 				select pgconductor.subscribe_db_change(
@@ -535,7 +514,7 @@ export class DatabaseClient {
 	 * Emit a custom event.
 	 * Returns the event id.
 	 */
-	async emitEvent(eventKey: string, payload?: JsonValue): Promise<string> {
+	async emitEvent({ eventKey, payload }: EmitEventArgs): Promise<string> {
 		const result = await this.query(
 			this.sql`
 				select pgconductor.emit_event(

@@ -196,6 +196,13 @@ begin
       v_partition_name
     );
 
+    -- index for task_key joins (used in return_executions)
+    execute format(
+      'create index if not exists %I on pgconductor.%I (task_key)',
+      'idx_' || v_partition_name || '_task_key',
+      v_partition_name
+    );
+
     RETURN NEW;
 
   elsif tg_op = 'UPDATE' then

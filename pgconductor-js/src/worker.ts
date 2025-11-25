@@ -17,12 +17,13 @@ import * as assert from "./lib/assert";
 import { createMaintenanceTask } from "./maintenance-task";
 import { makeChildLogger, type Logger } from "./lib/logger";
 import type { EventDefinition } from "./event-definition";
+import { coerceError } from "./lib/coerce-error";
 
 const HANGUP = Symbol("hangup");
 
 export type WorkerConfig = {
 	concurrency: number;
-	localBuffer: number;
+	flushBatchSize: number;
 	fetchBatchSize: number;
 	pollIntervalMs: number;
 	flushIntervalMs: number;
@@ -30,7 +31,7 @@ export type WorkerConfig = {
 
 export const DEFAULT_WORKER_CONFIG: WorkerConfig = {
 	concurrency: 1,
-	localBuffer: 2,
+	flushBatchSize: 2,
 	fetchBatchSize: 2,
 	pollIntervalMs: 1000,
 	flushIntervalMs: 2000,
@@ -91,7 +92,7 @@ export class Worker<
 		this.pollIntervalMs = fullConfig.pollIntervalMs;
 		this.flushIntervalMs = fullConfig.flushIntervalMs;
 		this.fetchBatchSize = fullConfig.fetchBatchSize;
-		this.flushBatchSize = fullConfig.localBuffer;
+		this.flushBatchSize = fullConfig.flushBatchSize;
 	}
 
 	/**
@@ -282,12 +283,12 @@ export class Worker<
 			},
 		);
 
-		await this.db.registerWorker(
-			this.queueName,
+		await this.db.registerWorker({
+			queueName: this.queueName,
 			taskSpecs,
 			cronSchedules,
 			eventSubscriptions,
-		);
+		});
 	}
 
 	// --- Stage 1: Fetch executions from database ---
@@ -329,19 +330,18 @@ export class Worker<
 					continue;
 				}
 
-				const executions = await this.db.getExecutions(
-					this.orchestratorId,
-					this.queueName,
-					this.fetchBatchSize,
-					disallowedTaskKeys,
-				);
+				const executions = await this.db.getExecutions({
+					orchestratorId: this.orchestratorId,
+					queueName: this.queueName,
+					batchSize: this.fetchBatchSize,
+					filterTaskKeys: disallowedTaskKeys,
+				});
 
 				if (executions.length === 0) {
 					if (runOnce) {
 						queue.close();
 						break;
 					}
-
 					await waitFor(this.pollIntervalMs, { signal: this.signal });
 					continue;
 				}
@@ -454,8 +454,7 @@ export class Worker<
 						execution_id: exec.id,
 						task_key: exec.task_key,
 						status: "failed",
-						// todo: properly serialize errors
-						error: (err as Error).message,
+						error: coerceError(err).message,
 					} as const;
 				}
 			},
