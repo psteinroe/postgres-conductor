@@ -323,6 +323,171 @@ describe("Cron Scheduling", () => {
 		await db.destroy();
 	}, 30000);
 
+	test("task context can dynamically schedule cron executions", async () => {
+		const db = await pool.child();
+
+		const schedulerDefinition = defineTask({
+			name: "dynamic-scheduler",
+		});
+
+		const dynamicTargetDefinition = defineTask({
+			name: "dynamic-target",
+		});
+
+		const conductor = Conductor.create({
+			sql: db.sql,
+			tasks: TaskSchemas.fromSchema([
+				schedulerDefinition,
+				dynamicTargetDefinition,
+			]),
+			context: {},
+		});
+
+		const targetExecutions = mock(() => {});
+
+		const dynamicTask = conductor.createTask(
+			{ name: "dynamic-target" },
+			{ invocable: true },
+			async () => {
+				targetExecutions();
+			},
+		);
+
+		const schedulerTask = conductor.createTask(
+			{ name: "dynamic-scheduler" },
+			{ invocable: true },
+			async (_event, ctx) => {
+				await ctx.schedule(
+					{ name: "dynamic-target" },
+					"reporting",
+					{ cron: "*/2 * * * * *" },
+					{ source: "dynamic" },
+				);
+			},
+		);
+
+		const orchestrator = Orchestrator.create({
+			conductor,
+			tasks: [dynamicTask, schedulerTask],
+			defaultWorker: {
+				pollIntervalMs: 100,
+				flushIntervalMs: 100,
+			},
+		});
+
+		await orchestrator.start();
+		await conductor.invoke({ name: "dynamic-scheduler" }, {});
+		await waitFor(4000);
+		expect(targetExecutions.mock.calls.length).toBeGreaterThanOrEqual(1);
+
+		const nextSchedules = await db.sql<Array<{ dedupe_key: string }>>`
+			SELECT dedupe_key
+			FROM pgconductor.executions
+			WHERE task_key = 'dynamic-target'
+				AND cron_expression IS NOT NULL
+				AND run_at > pgconductor.current_time()
+			ORDER BY run_at
+			LIMIT 1
+		`;
+
+		expect(nextSchedules.length).toBe(1);
+		expect(nextSchedules[0]!.dedupe_key).toMatch(/^dynamic::reporting::\d+$/);
+
+		await orchestrator.stop();
+		await db.destroy();
+	}, 40000);
+
+	test("task context can unschedule dynamic cron executions", async () => {
+		const db = await pool.child();
+
+		const schedulerDefinition = defineTask({
+			name: "dynamic-scheduler",
+		});
+
+		const unschedulerDefinition = defineTask({
+			name: "dynamic-unscheduler",
+		});
+
+		const dynamicTargetDefinition = defineTask({
+			name: "dynamic-target",
+		});
+
+		const conductor = Conductor.create({
+			sql: db.sql,
+			tasks: TaskSchemas.fromSchema([
+				schedulerDefinition,
+				unschedulerDefinition,
+				dynamicTargetDefinition,
+			]),
+			context: {},
+		});
+
+		const targetExecutions = mock(() => {});
+
+		const dynamicTask = conductor.createTask(
+			{ name: "dynamic-target" },
+			{ invocable: true },
+			async () => {
+				targetExecutions();
+			},
+		);
+
+		const schedulerTask = conductor.createTask(
+			{ name: "dynamic-scheduler" },
+			{ invocable: true },
+			async (_event, ctx) => {
+				await ctx.schedule(
+					{ name: "dynamic-target" },
+					"reporting",
+					{ cron: "*/2 * * * * *" },
+					{},
+				);
+			},
+		);
+
+		const unschedulerTask = conductor.createTask(
+			{ name: "dynamic-unscheduler" },
+			{ invocable: true },
+			async (_event, ctx) => {
+				await ctx.unschedule({ name: "dynamic-target" }, "reporting");
+			},
+		);
+
+		const orchestrator = Orchestrator.create({
+			conductor,
+			tasks: [dynamicTask, schedulerTask, unschedulerTask],
+			defaultWorker: {
+				pollIntervalMs: 100,
+				flushIntervalMs: 100,
+			},
+		});
+
+		await orchestrator.start();
+		await conductor.invoke({ name: "dynamic-scheduler" }, {});
+		await waitFor(4000);
+		expect(targetExecutions.mock.calls.length).toBeGreaterThanOrEqual(1);
+
+		const runsBeforeUnschedule = targetExecutions.mock.calls.length;
+		await conductor.invoke({ name: "dynamic-unscheduler" }, {});
+		await waitFor(200);
+
+		const futureSchedules = await db.sql<Array<{ id: string }>>`
+			SELECT id
+			FROM pgconductor.executions
+			WHERE task_key = 'dynamic-target'
+				AND cron_expression IS NOT NULL
+				AND run_at > pgconductor.current_time()
+		`;
+
+		expect(futureSchedules.length).toBe(0);
+
+		await waitFor(3000);
+		expect(targetExecutions.mock.calls.length).toBe(runsBeforeUnschedule);
+
+		await orchestrator.stop();
+		await db.destroy();
+	}, 40000);
+
 	test("cron with second-level precision executes frequently", async () => {
 		const db = await pool.child();
 

@@ -116,9 +116,7 @@ export class Orchestrator {
 		(async () => {
 			try {
 				const ourVersion = this.migrationStore.getLatestMigrationNumber();
-				const installedVersion = await this.db.getInstalledMigrationNumber(
-					this.signal,
-				);
+				const installedVersion = await this.db.getInstalledMigrationNumber();
 
 				// Step 1: Check if we're too old (should never happen, but safety check)
 				if (installedVersion > ourVersion) {
@@ -137,9 +135,7 @@ export class Orchestrator {
 				// - Signal others to shut down (if schema exists)
 				// - Wait for them to exit
 				// - Apply migrations
-				const { shouldShutdown } = await this.schemaManager.ensureLatest(
-					this.signal,
-				);
+				const { shouldShutdown } = await this.schemaManager.ensureLatest(this.signal);
 
 				if (shouldShutdown) {
 					this.logger.info(
@@ -154,7 +150,6 @@ export class Orchestrator {
 					this.orchestratorId,
 					PACKAGE_VERSION,
 					this.migrationStore.getLatestMigrationNumber(),
-					this.signal,
 				);
 
 				if (hbShutdown) {
@@ -249,7 +244,6 @@ export class Orchestrator {
 				if (heartbeatCount === 8) {
 					await this.db.recoverStaleOrchestrators(
 						`${STALE_ORCHESTRATOR_MAX_AGE_MS} milliseconds`,
-						this.signal,
 					);
 				}
 
@@ -258,7 +252,6 @@ export class Orchestrator {
 					this.orchestratorId,
 					PACKAGE_VERSION,
 					this.migrationStore.getLatestMigrationNumber(),
-					this.signal,
 				);
 
 				if (shouldShutdown && !this.signal.aborted) {
@@ -315,10 +308,8 @@ export class Orchestrator {
 			this.heartbeatTimer = null;
 		}
 
-		const cleanupSignal = new AbortController().signal;
-
 		// Remove ourselves from orchestrators table and release locked executions
-		await this.db.orchestratorShutdown(this.orchestratorId, cleanupSignal);
+		await this.db.orchestratorShutdown(this.orchestratorId);
 
 		// Close database client (no-op if user supplied their own instance)
 		await this.db.close();

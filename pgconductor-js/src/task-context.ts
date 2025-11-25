@@ -1,3 +1,4 @@
+import CronExpressionParser from "cron-parser";
 import type { DatabaseClient, JsonValue, Execution } from "./database-client";
 import type {
 	TaskDefinition,
@@ -22,7 +23,6 @@ import type {
 	SharedEventConfig,
 	TableName,
 } from "./event-definition";
-import type { SelectionInput } from "./select-columns";
 
 export type TaskContextOptions = {
 	signal: AbortSignal;
@@ -30,6 +30,11 @@ export type TaskContextOptions = {
 	db: DatabaseClient;
 	execution: Execution;
 	logger: Logger;
+};
+
+type ScheduleOptions = {
+	cron: string;
+	priority?: number;
 };
 
 // second argument for tasks
@@ -61,6 +66,10 @@ export class TaskContext<
 		return this.opts.logger;
 	}
 
+	get signal(): AbortSignal {
+		return this.opts.signal;
+	}
+
 	async step<T extends JsonValue | void>(
 		name: string,
 		fn: () => Promise<T> | T,
@@ -69,7 +78,6 @@ export class TaskContext<
 		const cached = await this.opts.db.loadStep(
 			this.opts.execution.id,
 			name,
-			this.opts.signal,
 		);
 
 		if (cached !== undefined) {
@@ -85,7 +93,6 @@ export class TaskContext<
 			name,
 			{ result: result as JsonValue },
 			undefined,
-			this.opts.signal,
 		);
 
 		return result;
@@ -97,21 +104,11 @@ export class TaskContext<
 		}
 	}
 
-	/**
-	 * Abort the current execution and hang up indefinitely
-	 * @return Promise that never resolves
-	 **/
-	private abortAndHangup(): Promise<never> {
-		this.opts.abortController.abort();
-		return new Promise(() => {});
-	}
-
 	async sleep(id: string, ms: number): Promise<void> {
 		// Check if we already slept
 		const cached = await this.opts.db.loadStep(
 			this.opts.execution.id,
 			id,
-			this.opts.signal,
 		);
 
 		if (cached !== undefined) {
@@ -125,7 +122,6 @@ export class TaskContext<
 			id,
 			null,
 			ms,
-			this.opts.signal,
 		);
 
 		return this.abortAndHangup();
@@ -148,7 +144,6 @@ export class TaskContext<
 		const cached = await this.opts.db.loadStep(
 			this.opts.execution.id,
 			id,
-			this.opts.signal,
 		);
 
 		if (cached !== undefined) {
@@ -161,7 +156,6 @@ export class TaskContext<
 			// clear waiting state before throwing
 			await this.opts.db.clearWaitingState(
 				this.opts.execution.id,
-				this.opts.signal,
 			);
 
 			throw new Error(
@@ -183,10 +177,75 @@ export class TaskContext<
 				parent_step_key: id,
 				parent_timeout_ms: timeout || null,
 			},
-			this.opts.signal,
 		);
 
 		return this.abortAndHangup();
+	}
+
+	async schedule<
+		TName extends TaskName<Tasks>,
+		TQueue extends string = "default",
+		TDef extends FindTaskByIdentifier<
+			Tasks,
+			TName,
+			TQueue
+		> = FindTaskByIdentifier<Tasks, TName, TQueue>,
+	>(
+		task: TaskIdentifier<TName, TQueue>,
+		scheduleName: string,
+		options: ScheduleOptions,
+		payload: InferPayload<TDef> = {} as InferPayload<TDef>,
+	): Promise<void> {
+		if (!scheduleName) {
+			throw new Error("scheduleName is required");
+		}
+
+		if (scheduleName.includes("::")) {
+			throw new Error("scheduleName cannot contain '::'");
+		}
+
+		if (!options?.cron) {
+			throw new Error("cron expression is required");
+		}
+
+		const interval = CronExpressionParser.parse(options.cron);
+		const nextTimestamp = interval.next().toDate();
+		const queue = task.queue || "default";
+
+		await this.opts.db.scheduleCronExecution(
+			{
+				task_key: task.name,
+				queue,
+				payload,
+				run_at: nextTimestamp,
+				cron_expression: options.cron,
+				priority: options.priority || null,
+			},
+			scheduleName,
+		);
+	}
+
+	async unschedule<
+		TName extends TaskName<Tasks>,
+		TQueue extends string = "default",
+	>(
+		task: TaskIdentifier<TName, TQueue>,
+		scheduleName: string,
+	): Promise<boolean> {
+		if (!scheduleName) {
+			throw new Error("scheduleName is required");
+		}
+
+		if (scheduleName.includes("::")) {
+			throw new Error("scheduleName cannot contain '::'");
+		}
+
+		const queue = task.queue || "default";
+		return this.opts.db.unscheduleCronExecution(
+			task.name,
+			queue,
+			scheduleName,
+		);
 	}
 
 	/**
@@ -230,7 +289,6 @@ export class TaskContext<
 		const cached = await this.opts.db.loadStep(
 			this.opts.execution.id,
 			id,
-			this.opts.signal,
 		);
 
 		if (cached !== undefined) {
@@ -243,7 +301,6 @@ export class TaskContext<
 			// Clear waiting state before throwing
 			await this.opts.db.clearWaitingState(
 				this.opts.execution.id,
-				this.opts.signal,
 			);
 
 			throw new Error(
@@ -262,7 +319,6 @@ export class TaskContext<
 				id,
 				config.event,
 				config.timeout,
-				this.opts.signal,
 			);
 		} else {
 			// Database event
@@ -281,7 +337,6 @@ export class TaskContext<
 				config.operation,
 				config.timeout,
 				columns,
-				this.opts.signal,
 			);
 		}
 
@@ -289,11 +344,29 @@ export class TaskContext<
 	}
 
 	/**
-	 * Emit a custom event that can wake up waiting executions.
-	 * @param eventKey - The event key to emit
-	 * @param payload - Optional payload to send with the event
+	 * Emit a typed custom event.
+	 * @param config - Event configuration with event name
+	 * @param payload - Typed event payload
 	 */
-	async emitEvent(eventKey: string, payload?: JsonValue): Promise<void> {
-		await this.opts.db.emitEvent(eventKey, payload, this.opts.signal);
+	async emit<
+		TName extends EventName<Events>,
+		TDef extends FindEventByIdentifier<Events, TName> = FindEventByIdentifier<
+			Events,
+			TName
+		>,
+	>(
+		{ event }: CustomEventConfig<TName>,
+		payload: InferEventPayload<TDef>,
+	): Promise<string> {
+		return this.opts.db.emitEvent(event, payload);
+	}
+
+	/**
+	 * Abort the current execution and hang up indefinitely
+	 * @return Promise that never resolves
+	 **/
+	private abortAndHangup(): Promise<never> {
+		this.opts.abortController.abort();
+		return new Promise(() => {});
 	}
 }

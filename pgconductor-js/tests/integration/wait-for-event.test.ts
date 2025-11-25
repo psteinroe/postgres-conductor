@@ -101,7 +101,7 @@ describe("WaitForEvent Support", () => {
 			{ invocable: true },
 			async (event, ctx) => {
 				if (event.event === "pgconductor.invoke") {
-					await ctx.emitEvent("user.created", { userId: event.payload.userId });
+					await (ctx as any).emit({ event: "user.created" }, { userId: event.payload.userId });
 					emittedFn();
 					return { emitted: true };
 				}

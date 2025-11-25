@@ -113,7 +113,6 @@ type DatabaseClientOptions =
 
 type QueryOptions = {
 	label?: string;
-	signal?: AbortSignal;
 };
 
 type ErrorWithOptionalCode = Error & { code?: string };
@@ -152,9 +151,6 @@ export class DatabaseClient {
 	): Promise<T> {
 		let attempt = 0;
 		while (true) {
-			if (options?.signal?.aborted) {
-				throw new Error("Operation aborted");
-			}
 			try {
 				if (typeof queryOrCallback === "function") {
 					return await queryOrCallback(this.sql);
@@ -177,7 +173,6 @@ export class DatabaseClient {
 				);
 				await waitFor(delay, {
 					jitter: delay / 2,
-					signal: options?.signal,
 				});
 			}
 		}
@@ -198,7 +193,6 @@ export class DatabaseClient {
 		orchestratorId: string,
 		version: string,
 		migrationNumber: number,
-		signal: AbortSignal,
 	): Promise<boolean> {
 		const result = await this.query(
 			this.builder.buildOrchestratorHeartbeat(
@@ -206,7 +200,7 @@ export class DatabaseClient {
 				version,
 				migrationNumber,
 			),
-			{ label: "orchestratorHeartbeat", signal },
+			{ label: "orchestratorHeartbeat" },
 		);
 
 		const row = result[0];
@@ -215,23 +209,15 @@ export class DatabaseClient {
 		return row.shutdown_signal;
 	}
 
-	async recoverStaleOrchestrators(
-		maxAge: string,
-		signal: AbortSignal,
-	): Promise<void> {
+	async recoverStaleOrchestrators(maxAge: string): Promise<void> {
 		await this.query(this.builder.buildRecoverStaleOrchestrators(maxAge), {
 			label: "recoverStaleOrchestrators",
-			signal,
 		});
 	}
 
-	async sweepOrchestrators(
-		migrationNumber: number,
-		signal: AbortSignal,
-	): Promise<void> {
+	async sweepOrchestrators(migrationNumber: number): Promise<void> {
 		await this.query(this.builder.buildSweepOrchestrators(migrationNumber), {
 			label: "sweepOrchestrators",
-			signal,
 		});
 	}
 
@@ -240,11 +226,11 @@ export class DatabaseClient {
 	 * Returns -1 if schema doesn't exist (not installed)
 	 * Returns the highest migration version from schema_migrations table
 	 */
-	async getInstalledMigrationNumber(signal: AbortSignal): Promise<number> {
+	async getInstalledMigrationNumber(): Promise<number> {
 		try {
 			const result = await this.query(
 				this.builder.buildGetInstalledMigrationNumber(),
-				{ label: "getInstalledVersion", signal },
+				{ label: "getInstalledVersion" },
 			);
 			return result[0]?.version || -1;
 		} catch (err) {
@@ -256,10 +242,7 @@ export class DatabaseClient {
 		}
 	}
 
-	async applyMigration(
-		migration: Migration,
-		signal: AbortSignal,
-	): Promise<"applied" | "busy"> {
+	async applyMigration(migration: Migration): Promise<"applied" | "busy"> {
 		return this.query(
 			async (sql) => {
 				return sql.begin(async (tx) => {
@@ -297,18 +280,15 @@ export class DatabaseClient {
 					return "applied" as const;
 				});
 			},
-			{ label: "applyMigration", signal },
+			{ label: "applyMigration" },
 		);
 	}
 
-	async countActiveOrchestratorsBelow(
-		version: number,
-		signal: AbortSignal,
-	): Promise<number> {
+	async countActiveOrchestratorsBelow(version: number): Promise<number> {
 		try {
 			const result = await this.query(
 				this.builder.buildCountActiveOrchestratorsBelow(version),
-				{ label: "countActiveOrchestratorsBelow", signal },
+				{ label: "countActiveOrchestratorsBelow" },
 			);
 			return Number(result[0]?.count || 0);
 		} catch (err) {
@@ -320,20 +300,15 @@ export class DatabaseClient {
 		}
 	}
 
-	async orchestratorShutdown(
-		orchestratorId: string,
-		signal: AbortSignal,
-	): Promise<void> {
+	async orchestratorShutdown(orchestratorId: string): Promise<void> {
 		await this.query(this.builder.buildOrchestratorShutdown(orchestratorId), {
 			label: "orchestratorShutdown",
-			signal,
 		});
 	}
 
-	async cleanupTriggers(signal?: AbortSignal): Promise<void> {
+	async cleanupTriggers(): Promise<void> {
 		await this.query(this.builder.buildCleanupTriggers(), {
 			label: "getExecutions",
-			signal,
 		});
 	}
 
@@ -342,7 +317,6 @@ export class DatabaseClient {
 		queueName: string,
 		batchSize: number,
 		filterTaskKeys: string[],
-		signal: AbortSignal,
 	): Promise<Execution[]> {
 		return this.query(
 			this.builder.buildGetExecutions(
@@ -351,31 +325,26 @@ export class DatabaseClient {
 				batchSize,
 				filterTaskKeys,
 			),
-			{ label: "getExecutions", signal },
+			{ label: "getExecutions" },
 		);
 	}
 
-	async returnExecutions(
-		results: ExecutionResult[],
-		signal?: AbortSignal,
-	): Promise<void> {
+	async returnExecutions(results: ExecutionResult[]): Promise<void> {
 		const query = this.builder.buildReturnExecutions(results);
 
 		if (!query) return;
 
-		await this.query(query, { label: "returnExecutions", signal });
+		await this.query(query, { label: "returnExecutions" });
 	}
 
 	async removeExecutions(
 		queueName: string,
 		batchSize: number,
-		signal?: AbortSignal,
 	): Promise<boolean> {
 		const query = this.builder.buildRemoveExecutions(queueName, batchSize);
 
 		const result = await this.query(query, {
 			label: "removeExecutions",
-			signal,
 		});
 
 		const deletedCount = result[0]?.deleted_count ?? 0;
@@ -387,7 +356,6 @@ export class DatabaseClient {
 		taskSpecs: TaskSpec[],
 		cronSchedules: ExecutionSpec[],
 		eventSubscriptions: EventSubscriptionSpec[],
-		signal?: AbortSignal,
 	): Promise<void> {
 		await this.query(
 			this.builder.buildRegisterWorker(
@@ -396,36 +364,50 @@ export class DatabaseClient {
 				cronSchedules,
 				eventSubscriptions,
 			),
-			{ label: "registerWorker", signal },
+			{ label: "registerWorker" },
 		);
 	}
 
-	async invoke(spec: ExecutionSpec, signal?: AbortSignal): Promise<string> {
+	async scheduleCronExecution(
+		spec: ExecutionSpec,
+		scheduleName: string,
+	): Promise<string> {
+		const result = await this.query(
+			this.builder.buildScheduleCronExecution(spec, scheduleName),
+			{ label: "scheduleCronExecution" },
+		);
+		return result[0]!.id;
+	}
+
+	async unscheduleCronExecution(
+		taskKey: string,
+		queue: string,
+		scheduleName: string,
+	): Promise<boolean> {
+		const result = await this.query(
+			this.builder.buildUnscheduleCronExecution(taskKey, queue, scheduleName),
+			{ label: "unscheduleCronExecution" },
+		);
+		return result[0]?.deleted_count > 0;
+	}
+
+	async invoke(spec: ExecutionSpec): Promise<string> {
 		const result = await this.query(this.builder.buildInvoke(spec), {
 			label: "invoke",
-			signal,
 		});
 		return result[0]!.id;
 	}
 
-	async invokeChild(
-		spec: ExecutionSpec,
-		signal?: AbortSignal,
-	): Promise<string> {
+	async invokeChild(spec: ExecutionSpec): Promise<string> {
 		const result = await this.query(this.builder.buildInvokeChild(spec), {
 			label: "invokeChild",
-			signal,
 		});
 		return result[0]!.id;
 	}
 
-	async invokeBatch(
-		specs: ExecutionSpec[],
-		signal?: AbortSignal,
-	): Promise<string[]> {
+	async invokeBatch(specs: ExecutionSpec[]): Promise<string[]> {
 		const result = await this.query(this.builder.buildInvokeBatch(specs), {
 			label: "invokeBatch",
-			signal,
 		});
 		return result.map((r) => r.id);
 	}
@@ -433,11 +415,10 @@ export class DatabaseClient {
 	async loadStep(
 		executionId: string,
 		key: string,
-		signal?: AbortSignal,
 	): Promise<Payload | null | undefined> {
 		const rows = await this.query(
 			this.builder.buildLoadStep(executionId, key),
-			{ label: "loadStep", signal },
+			{ label: "loadStep" },
 		);
 
 		if (!rows[0]) {
@@ -452,21 +433,16 @@ export class DatabaseClient {
 		key: string,
 		result: Payload | null,
 		runAtMs?: number,
-		signal?: AbortSignal,
 	): Promise<void> {
 		await this.query(
 			this.builder.buildSaveStep(executionId, queue, key, result, runAtMs),
-			{ label: "saveStep", signal },
+			{ label: "saveStep" },
 		);
 	}
 
-	async clearWaitingState(
-		executionId: string,
-		signal?: AbortSignal,
-	): Promise<void> {
+	async clearWaitingState(executionId: string): Promise<void> {
 		await this.query(this.builder.buildClearWaitingState(executionId), {
 			label: "clearWaitingState",
-			signal,
 		});
 	}
 
@@ -476,24 +452,24 @@ export class DatabaseClient {
 	 *
 	 * IMPORTANT: Test database connection pool must have max: 1 for this to work.
 	 */
-	async setFakeTime(date: Date, signal?: AbortSignal): Promise<void> {
+	async setFakeTime(date: Date): Promise<void> {
 		await this.query(
 			async (sql) => {
 				await sql.unsafe(`set pgconductor.fake_now = '${date.toISOString()}'`);
 			},
-			{ label: "setFakeTime", signal },
+			{ label: "setFakeTime" },
 		);
 	}
 
 	/**
 	 * Clear fake time, returning to real clock_timestamp().
 	 */
-	async clearFakeTime(signal?: AbortSignal): Promise<void> {
+	async clearFakeTime(): Promise<void> {
 		await this.query(
 			async (sql) => {
 				await sql.unsafe(`set pgconductor.fake_now = ''`);
 			},
-			{ label: "clearFakeTime", signal },
+			{ label: "clearFakeTime" },
 		);
 	}
 
@@ -507,7 +483,6 @@ export class DatabaseClient {
 		stepKey: string,
 		eventKey: string,
 		timeoutMs?: number,
-		signal?: AbortSignal,
 	): Promise<string> {
 		const result = await this.query(
 			this.sql`
@@ -519,7 +494,7 @@ export class DatabaseClient {
 					${timeoutMs || null}::integer
 				) as id
 			`,
-			{ label: "subscribeEvent", signal },
+			{ label: "subscribeEvent" },
 		);
 		return result[0]!.id;
 	}
@@ -537,7 +512,6 @@ export class DatabaseClient {
 		operation: "insert" | "update" | "delete",
 		timeoutMs?: number,
 		columns?: string[],
-		signal?: AbortSignal,
 	): Promise<string> {
 		const result = await this.query(
 			this.sql`
@@ -552,7 +526,7 @@ export class DatabaseClient {
 					${columns || null}::text[]
 				) as id
 			`,
-			{ label: "subscribeDbChange", signal },
+			{ label: "subscribeDbChange" },
 		);
 		return result[0]!.id;
 	}
@@ -561,11 +535,7 @@ export class DatabaseClient {
 	 * Emit a custom event.
 	 * Returns the event id.
 	 */
-	async emitEvent(
-		eventKey: string,
-		payload?: JsonValue,
-		signal?: AbortSignal,
-	): Promise<string> {
+	async emitEvent(eventKey: string, payload?: JsonValue): Promise<string> {
 		const result = await this.query(
 			this.sql`
 				select pgconductor.emit_event(
@@ -573,7 +543,7 @@ export class DatabaseClient {
 					${this.sql.json(payload || null)}
 				) as id
 			`,
-			{ label: "emitEvent", signal },
+			{ label: "emitEvent" },
 		);
 		return result[0]!.id;
 	}

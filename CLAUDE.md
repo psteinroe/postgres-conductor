@@ -353,7 +353,7 @@ bun test tests/integration/        # Run integration tests
   function process(items: Array<string>): Array<number> { }
   ```
 - always add AGENT=1 as an env var when running anything
-- always use lower-case in sql
+- always use lower-case when writing SQL, also for keywords
 - prefer || ofer ?? in typescript. good: runAtMs || null. bad: runAtMs ?? null
 - NEVER use `as unknown` or `as any`
 - never use `!` in typescript

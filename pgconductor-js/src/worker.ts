@@ -220,7 +220,6 @@ export class Worker<
 			taskSpecs,
 			cronSchedules,
 			eventSubscriptions,
-			this.signal,
 		);
 	}
 
@@ -265,7 +264,6 @@ export class Worker<
 					this.queueName,
 					this.fetchBatchSize,
 					disallowedTaskKeys,
-					this.signal,
 				);
 
 				if (executions.length === 0) {
@@ -391,18 +389,22 @@ export class Worker<
 		const interval = CronExpressionParser.parse(execution.cron_expression);
 		const nextTimestamp = interval.next().toDate();
 		const timestampSeconds = Math.floor(nextTimestamp.getTime() / 1000);
-		const nextDedupeKey = `repeated::${execution.cron_expression}::${timestampSeconds}`;
+		let dedupePrefix = `repeated::${execution.cron_expression}`;
+		if (execution.dedupe_key && execution.dedupe_key.startsWith("dynamic::")) {
+			const parts = execution.dedupe_key.split("::");
+			if (parts.length >= 2) {
+				dedupePrefix = `${parts[0]}::${parts[1]}`;
+			}
+		}
+		const nextDedupeKey = `${dedupePrefix}::${timestampSeconds}`;
 
-		await this.db.invoke(
-			{
-				task_key: execution.task_key,
-				queue: execution.queue,
-				run_at: nextTimestamp,
-				dedupe_key: nextDedupeKey,
-				cron_expression: execution.cron_expression,
-			},
-			this.signal,
-		);
+		await this.db.invoke({
+			task_key: execution.task_key,
+			queue: execution.queue,
+			run_at: nextTimestamp,
+			dedupe_key: nextDedupeKey,
+			cron_expression: execution.cron_expression,
+		});
 	}
 
 	// --- Stage 3: Flush results to database ---
@@ -424,10 +426,7 @@ export class Worker<
 			}
 
 			try {
-				await this.db.returnExecutions(
-					batch,
-					isCleanup ? undefined : this.signal,
-				);
+				await this.db.returnExecutions(batch);
 			} catch (err) {
 				this.logger.error("Error flushing results:", err);
 				if (!isCleanup) {

@@ -18,19 +18,11 @@ CREATE TABLE pgconductor.schema_migrations (
 );
 `,
   "0000000001_setup.sql": String.raw`
--- todo:
--- - throttling (limit, period, key),
--- - concurrency (limit, key),
--- - rateLimit (limit, period, key),
--- - debounce (period, key) -> via invoke
--- throttling, concurrency and rateLimit: key and seconds - fetch and group by - USE SLOTS similar to https://planetscale.com/blog/the-slotted-counter-pattern
--- batch processing via array payloads?
 
-CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+create extension if not exists "uuid-ossp";
 
 -- Returns either the actual current timestamp or a fake one for tests.
 -- Uses session variable (current_setting) for test time control.
--- TODO: dynamically use this only when test mode is enabled
 create function pgconductor.current_time ()
   returns timestamptz
   language plpgsql
@@ -79,7 +71,7 @@ begin
 end;
 $$;
 
-CREATE TABLE pgconductor.orchestrators (
+create table pgconductor.orchestrators (
     id uuid default pgconductor.portable_uuidv7() primary key,
     last_heartbeat_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     version text,
@@ -90,11 +82,11 @@ CREATE TABLE pgconductor.orchestrators (
 create index idx_orchestrators_heartbeat on pgconductor.orchestrators (last_heartbeat_at);
 create index idx_orchestrators_sweep on pgconductor.orchestrators (migration_number);
 
-CREATE TABLE pgconductor.queues (
+create table pgconductor.queues (
     name text primary key
 );
 
-CREATE TABLE pgconductor.executions (
+create table pgconductor.executions (
     id uuid default pgconductor.portable_uuidv7(),
     task_key text not null,
     queue text not null default 'default',
@@ -115,9 +107,9 @@ CREATE TABLE pgconductor.executions (
     waiting_step_key text,
     primary key (id, queue),
     unique (task_key, dedupe_key, queue)
-) PARTITION BY LIST (queue);
+) partition by list (queue);
 
-CREATE TABLE pgconductor.tasks (
+create table pgconductor.tasks (
     key text primary key,
 
     -- queue that this task belongs to (used for queue-based worker assignment)
@@ -135,17 +127,17 @@ CREATE TABLE pgconductor.tasks (
     -- we will stop the execution of executions outside of these time windows at step boundaries
     window_start timetz,
     window_end timetz,
-    CONSTRAINT "windows" CHECK (
-        (window_start IS NULL AND window_end IS NULL) OR
+    constraint "windows" check (
+        (window_start is null and window_end is null) or
         (
-            window_start IS NOT NULL AND
-            window_end IS NOT NULL AND
+            window_start is not null and
+            window_end is not null and
             window_start != window_end
         )
     )
 );
 
-CREATE TABLE pgconductor.steps (
+create table pgconductor.steps (
     id uuid default pgconductor.portable_uuidv7() primary key,
     key text not null,
     execution_id uuid not null,
@@ -153,122 +145,129 @@ CREATE TABLE pgconductor.steps (
     result jsonb,
     created_at timestamptz default pgconductor.current_time() not null,
     unique (key, execution_id),
-    CONSTRAINT fk_execution FOREIGN KEY (execution_id, queue) REFERENCES pgconductor.executions(id, queue) ON DELETE CASCADE
+    constraint fk_execution foreign key (execution_id, queue) references pgconductor.executions(id, queue) on delete cascade
 );
 
 create index idx_steps_execution_id on pgconductor.steps (execution_id);
 
 -- Trigger function to manage executions partitions per queue
 -- Automatically creates partition when queue is inserted
-CREATE OR REPLACE FUNCTION pgconductor.manage_queue_partition()
- RETURNS trigger
- LANGUAGE plpgsql
- VOLATILE
- SET search_path TO ''
-AS $function$
-DECLARE
+create or replace function pgconductor.manage_queue_partition()
+ returns trigger
+ language plpgsql
+ volatile
+ set search_path to ''
+as $function$
+declare
   v_partition_name text;
-BEGIN
-  IF TG_OP = 'INSERT' THEN
-    v_partition_name := 'executions_' || replace(NEW.name, '-', '_');
+begin
+  if tg_op = 'INSERT' then
+    v_partition_name := 'executions_' || replace(new.name, '-', '_');
 
     -- Create partition for this queue: executions_default, executions_reports, etc.
-    EXECUTE format(
-      'CREATE TABLE IF NOT EXISTS pgconductor.%I PARTITION OF pgconductor.executions FOR VALUES IN (%L) WITH (fillfactor=70)',
+    execute format(
+      'create table if not exists pgconductor.%I partition of pgconductor.executions for values in (%L) with (fillfactor=70)',
       v_partition_name,
-      NEW.name
+      new.name
     );
 
     -- create indices
 
     -- main index for fetching available executions
-    EXECUTE format(
-      'CREATE INDEX IF NOT EXISTS %I ON pgconductor.%I (priority, run_at) INCLUDE (id, task_key) WHERE is_available = true',
+    execute format(
+      'create index if not exists %I on pgconductor.%I (priority, run_at) include (id, task_key) where is_available = true',
       'idx_' || v_partition_name || '_get_executions',
       v_partition_name
     );
 
     -- index for waiting executions lookup
-    EXECUTE format(
-      'CREATE INDEX IF NOT EXISTS %I ON pgconductor.%I (waiting_on_execution_id) where waiting_on_execution_id is not null',
+    execute format(
+      'create index if not exists %I on pgconductor.%I (waiting_on_execution_id) where waiting_on_execution_id is not null',
       'idx_' || v_partition_name || '_waiting_on_execution_id',
       v_partition_name
     );
 
     -- index for unlocking locked executions
-    EXECUTE format(
-      'CREATE INDEX IF NOT EXISTS %I ON pgconductor.%I (locked_by) WHERE locked_by IS NOT NULL',
+    execute format(
+      'create index if not exists %I on pgconductor.%I (locked_by) where locked_by is not null',
       'idx_' || v_partition_name || '_locked_by',
       v_partition_name
     );
 
     -- index for cleanup of completed
-    EXECUTE format(
-      'CREATE INDEX IF NOT EXISTS %I ON pgconductor.%I (completed_at) WHERE completed_at IS NOT NULL',
+    execute format(
+      'create index if not exists %I on pgconductor.%I (completed_at) where completed_at is not null',
       'idx_' || v_partition_name || '_completed_cleanup',
       v_partition_name
     );
 
     -- index for cleanup of failed
-    EXECUTE format(
-      'CREATE INDEX IF NOT EXISTS %I ON pgconductor.%I (failed_at) WHERE failed_at IS NOT NULL',
+    execute format(
+      'create index if not exists %I on pgconductor.%I (failed_at) where failed_at is not null',
       'idx_' || v_partition_name || '_failed_cleanup',
       v_partition_name
     );
 
-    RETURN NEW;
-
-  ELSIF TG_OP = 'UPDATE' THEN
-    -- Protect default queue from modification
-    IF OLD.name = 'default' OR NEW.name = 'default' THEN
-      RAISE EXCEPTION 'Modifying the default queue is not allowed';
-    END IF;
-
-    -- Disallow renaming queues
-    IF NEW.name != OLD.name THEN
-      RAISE EXCEPTION 'Renaming queues is not allowed. Queue name cannot be changed from % to %', OLD.name, NEW.name;
-    END IF;
-
-    RETURN NEW;
-
-  ELSIF TG_OP = 'DELETE' THEN
-    -- Protect default queue from deletion
-    IF OLD.name = 'default' THEN
-      RAISE EXCEPTION 'Deleting the default queue is not allowed';
-    END IF;
-
-    v_partition_name := 'executions_' || replace(OLD.name, '-', '_');
-
-    -- Drop the partition for this queue
-    EXECUTE format(
-      'DROP TABLE IF EXISTS pgconductor.%I',
+    -- index for dynamic schedule lookups
+    execute format(
+      'create index if not exists %I on pgconductor.%I ((split_part(dedupe_key, ''::'', 2))) where dedupe_key like ''dynamic::%%'' and cron_expression is not null',
+      'idx_' || v_partition_name || '_dynamic_schedule',
       v_partition_name
     );
 
-    RETURN OLD;
-  END IF;
-END;
+    RETURN NEW;
+
+  elsif tg_op = 'UPDATE' then
+    -- protect default queue from modification
+    if old.name = 'default' or new.name = 'default' then
+      raise exception 'Modifying the default queue is not allowed';
+    end if;
+
+    -- disallow renaming queues
+    if new.name != old.name then
+      raise exception 'Renaming queues is not allowed. Queue name cannot be changed from % to %', old.name, new.name;
+    end if;
+
+    return new;
+
+  elsif tg_op = 'DELETE' then
+    -- protect default queue from deletion
+    if old.name = 'default' then
+      raise exception 'Deleting the default queue is not allowed';
+    end if;
+
+    v_partition_name := 'executions_' || replace(old.name, '-', '_');
+
+    -- drop the partition for this queue
+    execute format(
+      'drop table if exists pgconductor.%I',
+      v_partition_name
+    );
+
+    return old;
+  end if;
+end;
 $function$;
 
--- Attach trigger to queues table
-CREATE TRIGGER manage_queue_partition_trigger
-  AFTER INSERT OR UPDATE OR DELETE ON pgconductor.queues
-  FOR EACH ROW
-  EXECUTE FUNCTION pgconductor.manage_queue_partition();
+-- attach trigger to queues table
+create trigger manage_queue_partition_trigger
+  after insert or update or delete on pgconductor.queues
+  for each row
+  execute function pgconductor.manage_queue_partition();
 
--- Create default queue (trigger will create executions_default partition)
-INSERT INTO pgconductor.queues (name) VALUES ('default');
+-- create default queue (trigger will create executions_default partition)
+insert into pgconductor.queues (name) values ('default');
 
-CREATE TABLE IF NOT EXISTS pgconductor.subscriptions (
-    id uuid PRIMARY KEY default pgconductor.portable_uuidv7(),
-    source text NOT NULL, -- 'db' or 'event'
+create table if not exists pgconductor.subscriptions (
+    id uuid primary key default pgconductor.portable_uuidv7(),
+    source text not null, -- 'db' or 'event'
     schema_name text,
     table_name text,
     operation text, -- 'insert', 'update', 'delete'
     event_key text,
-    execution_id uuid, -- NULL for trigger-based (persistent) subscriptions
+    execution_id uuid, -- null for trigger-based (persistent) subscriptions
     queue text not null default 'default',
-    step_key text, -- step key to save result to when event arrives; NULL = persistent
+    step_key text, -- step key to save result to when event arrives; null = persistent
     task_key text, -- task to invoke for trigger-based subscriptions
     columns text[] -- columns to select for db events
 );
@@ -276,25 +275,25 @@ CREATE TABLE IF NOT EXISTS pgconductor.subscriptions (
 create index if not exists idx_subscriptions_triggers_lookup
 on pgconductor.subscriptions (schema_name, table_name, operation);
 
-CREATE TABLE IF NOT EXISTS pgconductor.events (
-    id uuid PRIMARY KEY default pgconductor.portable_uuidv7(),
-    event_key text NOT NULL,
+create table if not exists pgconductor.events (
+    id uuid primary key default pgconductor.portable_uuidv7(),
+    event_key text not null,
     schema_name text,
     table_name text,
     operation text,
-    source text NOT NULL DEFAULT 'event', -- 'db' or 'event'
+    source text not null default 'event', -- 'db' or 'event'
     payload jsonb,
-    created_at timestamptz DEFAULT pgconductor.current_time() NOT NULL
+    created_at timestamptz default pgconductor.current_time() not null
 );
--- TODO: partition management
+-- todo: partition management
 
 -- we would need to extract columns the user filters on to filter event payloads already here
-CREATE TABLE IF NOT EXISTS pgconductor.triggers (
-    schema_name text NOT NULL,
-    table_name text NOT NULL,
-    operation text NOT NULL, -- 'insert', 'update', 'delete'
+create table if not exists pgconductor.triggers (
+    schema_name text not null,
+    table_name text not null,
+    operation text not null, -- 'insert', 'update', 'delete'
     columns text[], -- columns to select for db events
-    created_at timestamptz DEFAULT pgconductor.current_time() NOT NULL,
+    created_at timestamptz default pgconductor.current_time() not null,
     primary key (schema_name, table_name, operation)
 );
 
@@ -328,9 +327,9 @@ begin
 end
 $$;
 
-CREATE OR REPLACE FUNCTION pgconductor.sync_database_trigger() RETURNS "trigger"
-    LANGUAGE "plpgsql" SECURITY DEFINER
-    AS $_$
+create or replace function pgconductor.sync_database_trigger() returns "trigger"
+    language "plpgsql" security definer
+    as $_$
 declare
     v_table_name text := coalesce(new.table_name, old.table_name);
     v_schema_name text := coalesce(new.schema_name, old.schema_name);
@@ -365,14 +364,14 @@ after insert or delete
 on pgconductor.triggers
 for each row execute function pgconductor.sync_database_trigger();
 
--- Drop a queue (will trigger partition deletion via trigger)
-CREATE OR REPLACE FUNCTION pgconductor.drop_queue(queue_name text)
- RETURNS void
- LANGUAGE sql
- VOLATILE
- SET search_path TO ''
-AS $function$
-  DELETE FROM pgconductor.queues WHERE name = drop_queue.queue_name;
+-- drop a queue (will trigger partition deletion via trigger)
+create or replace function pgconductor.drop_queue(queue_name text)
+ returns void
+ language sql
+ volatile
+ set search_path to ''
+as $function$
+  delete from pgconductor.queues where name = drop_queue.queue_name;
 $function$;
 
 create type pgconductor.execution_spec as (
@@ -406,78 +405,79 @@ create type pgconductor.subscription_spec as (
     columns text[]
 );
 
-CREATE OR REPLACE FUNCTION pgconductor.register_worker(
+create or replace function pgconductor.register_worker(
     p_queue_name text,
     p_task_specs pgconductor.task_spec[],
     p_cron_schedules pgconductor.execution_spec[],
     p_event_subscriptions pgconductor.subscription_spec[] default array[]::pgconductor.subscription_spec[]
 )
-RETURNS void
-LANGUAGE plpgsql
-VOLATILE
-SET search_path TO ''
-AS $function$
-BEGIN
-  -- Step 1: Upsert queue (triggers partition creation)
-  INSERT INTO pgconductor.queues (name)
-  VALUES (p_queue_name)
-  ON CONFLICT (name) DO NOTHING;
+returns void
+language plpgsql
+volatile
+set search_path to ''
+as $function$
+begin
+  -- step 1: upsert queue (triggers partition creation)
+  insert into pgconductor.queues (name)
+  values (p_queue_name)
+  on conflict (name) do nothing;
 
-  -- Step 2: Register/update tasks
-  INSERT INTO pgconductor.tasks (key, queue, max_attempts, remove_on_complete_days, remove_on_fail_days, window_start, window_end)
-  SELECT
+  -- step 2: register/update tasks
+  insert into pgconductor.tasks (key, queue, max_attempts, remove_on_complete_days, remove_on_fail_days, window_start, window_end)
+  select
     spec.key,
-    COALESCE(spec.queue, 'default'),
-    COALESCE(spec.max_attempts, 3),
+    coalesce(spec.queue, 'default'),
+    coalesce(spec.max_attempts, 3),
     spec.remove_on_complete_days,
     spec.remove_on_fail_days,
     spec.window_start,
     spec.window_end
-  FROM unnest(p_task_specs) AS spec
-  ON CONFLICT (key)
-  DO UPDATE SET
-    queue = COALESCE(EXCLUDED.queue, pgconductor.tasks.queue),
-    max_attempts = COALESCE(EXCLUDED.max_attempts, pgconductor.tasks.max_attempts),
-    remove_on_complete_days = EXCLUDED.remove_on_complete_days,
-    remove_on_fail_days = EXCLUDED.remove_on_fail_days,
-    window_start = EXCLUDED.window_start,
-    window_end = EXCLUDED.window_end;
+  from unnest(p_task_specs) as spec
+  on conflict (key)
+  do update set
+    queue = coalesce(excluded.queue, pgconductor.tasks.queue),
+    max_attempts = coalesce(excluded.max_attempts, pgconductor.tasks.max_attempts),
+    remove_on_complete_days = excluded.remove_on_complete_days,
+    remove_on_fail_days = excluded.remove_on_fail_days,
+    window_start = excluded.window_start,
+    window_end = excluded.window_end;
 
-  -- Step 3: Insert scheduled cron executions (ON CONFLICT DO NOTHING)
-  INSERT INTO pgconductor.executions (task_key, queue, payload, run_at, dedupe_key, cron_expression)
-  SELECT
+  -- step 3: insert scheduled cron executions (on conflict do nothing)
+  insert into pgconductor.executions (task_key, queue, payload, run_at, dedupe_key, cron_expression)
+  select
     spec.task_key,
-    COALESCE(spec.queue, 'default'),
-    COALESCE(spec.payload, '{}'::jsonb),
-    COALESCE(spec.run_at, pgconductor.current_time()),
+    coalesce(spec.queue, 'default'),
+    coalesce(spec.payload, '{}'::jsonb),
+    coalesce(spec.run_at, pgconductor.current_time()),
     spec.dedupe_key,
     spec.cron_expression
-  FROM unnest(p_cron_schedules) AS spec
-  WHERE spec.dedupe_key IS NOT NULL
-  ON CONFLICT (task_key, dedupe_key, queue) DO NOTHING;
+  from unnest(p_cron_schedules) as spec
+  where spec.dedupe_key is not null
+  on conflict (task_key, dedupe_key, queue) do nothing;
 
-  -- Step 4: Clean up stale schedules for this queue
-  DELETE FROM pgconductor.executions
-  WHERE queue = p_queue_name
-    AND cron_expression IS NOT NULL
-    AND run_at > pgconductor.current_time()
-    AND (task_key, cron_expression) NOT IN (
-      SELECT spec.task_key, spec.cron_expression
-      FROM unnest(p_cron_schedules) AS spec
-      WHERE spec.cron_expression IS NOT NULL
+  -- step 4: clean up stale schedules for this queue
+  delete from pgconductor.executions
+  where queue = p_queue_name
+    and cron_expression is not null
+    and run_at > pgconductor.current_time()
+    and dedupe_key like 'repeated::%'
+    and (task_key, cron_expression) not in (
+      select spec.task_key, spec.cron_expression
+      from unnest(p_cron_schedules) as spec
+      where spec.cron_expression is not null
     );
 
-  -- Step 5: Delete old trigger-based subscriptions for this queue
-  DELETE FROM pgconductor.subscriptions
-  WHERE queue = p_queue_name
-    AND step_key IS NULL  -- Only persistent/trigger subscriptions
-    AND task_key IS NOT NULL;
+  -- step 5: delete old trigger-based subscriptions for this queue
+  delete from pgconductor.subscriptions
+  where queue = p_queue_name
+    and step_key is null  -- only persistent/trigger subscriptions
+    and task_key is not null;
 
-  -- Step 6: Insert new trigger-based subscriptions
-  INSERT INTO pgconductor.subscriptions (
+  -- step 6: insert new trigger-based subscriptions
+  insert into pgconductor.subscriptions (
     task_key, queue, source, event_key, schema_name, table_name, operation, columns
   )
-  SELECT
+  select
     spec.task_key,
     spec.queue,
     spec.source,
@@ -486,9 +486,9 @@ BEGIN
     spec.table_name,
     spec.operation,
     spec.columns
-  FROM unnest(p_event_subscriptions) AS spec;
+  from unnest(p_event_subscriptions) as spec;
 
- -- Step 7: Make sure we sync database triggers if required
+ -- step 7: make sure we sync database triggers if required
  insert into pgconductor.triggers (schema_name, table_name, operation, columns)
   select
     spec.schema_name,
@@ -498,19 +498,19 @@ BEGIN
   from unnest(p_event_subscriptions) as spec
   where spec.schema_name is not null
   on conflict (schema_name, table_name, operation) do nothing;
-END;
+end;
 $function$;
 
-CREATE OR REPLACE FUNCTION pgconductor.invoke_batch(
+create or replace function pgconductor.invoke_batch(
     specs pgconductor.execution_spec[]
 )
- RETURNS TABLE(id uuid)
- LANGUAGE plpgsql
- VOLATILE
- SET search_path TO ''
-AS $function$
+ returns table(id uuid)
+ language plpgsql
+ volatile
+ set search_path to ''
+as $function$
 begin
-    -- Clear locked dedupe keys before batch insert
+    -- clear locked dedupe keys before batch insert
     update pgconductor.executions as e
     set
         dedupe_key = null,
@@ -525,7 +525,7 @@ begin
         and e.locked_at is not null
         and spec.dedupe_key is not null;
 
-    -- Batch insert all executions
+    -- batch insert all executions
     return query
     insert into pgconductor.executions (
         id,
@@ -552,7 +552,7 @@ end;
 $function$
 ;
 
-CREATE OR REPLACE FUNCTION pgconductor.invoke_child(
+create or replace function pgconductor.invoke_child(
     task_key text,
     queue text default 'default',
     payload jsonb default null,
@@ -564,11 +564,11 @@ CREATE OR REPLACE FUNCTION pgconductor.invoke_child(
     parent_step_key text default null,
     parent_timeout_ms integer default null
 )
- RETURNS uuid
- LANGUAGE plpgsql
- VOLATILE
- SET search_path TO ''
-AS $function$
+ returns uuid
+ language plpgsql
+ volatile
+ set search_path to ''
+as $function$
 declare
     v_execution_id uuid;
 begin
@@ -601,7 +601,7 @@ $function$
 ;
 
 
-CREATE OR REPLACE FUNCTION pgconductor.invoke(
+create or replace function pgconductor.invoke(
     task_key text,
     queue text default 'default',
     payload jsonb default null,
@@ -610,14 +610,14 @@ CREATE OR REPLACE FUNCTION pgconductor.invoke(
     cron_expression text default null,
     priority integer default null
 )
- RETURNS TABLE(id uuid)
- LANGUAGE plpgsql
- VOLATILE
- SET search_path TO ''
-AS $function$
+ returns table(id uuid)
+ language plpgsql
+ volatile
+ set search_path to ''
+as $function$
 begin
   if invoke.dedupe_key is not null then
-      -- Clear keys that are currently locked so a subsequent insert can succeed.
+      -- clear keys that are currently locked so a subsequent insert can succeed.
       update pgconductor.executions as e
       set
         dedupe_key = null,
@@ -654,8 +654,8 @@ end;
 $function$
 ;
 
--- Subscribe to an event and wait for it
--- Returns the subscription id
+-- subscribe to an event and wait for it
+-- returns the subscription id
 create or replace function pgconductor.subscribe_event(
     p_execution_id uuid,
     p_queue text,
@@ -671,12 +671,12 @@ as $function$
 declare
     v_subscription_id uuid;
 begin
-    -- Create subscription
+    -- create subscription
     insert into pgconductor.subscriptions (source, event_key, execution_id, queue, step_key)
     values ('event', p_event_key, p_execution_id, p_queue, p_step_key)
     returning id into v_subscription_id;
 
-    -- Update execution to wait
+    -- update execution to wait
     update pgconductor.executions
     set
         waiting_step_key = p_step_key,
@@ -692,8 +692,8 @@ begin
 end;
 $function$;
 
--- Subscribe to a database change and wait for it
--- Returns the subscription id
+-- subscribe to a database change and wait for it
+-- returns the subscription id
 create or replace function pgconductor.subscribe_db_change(
     p_execution_id uuid,
     p_queue text,
@@ -712,17 +712,17 @@ as $function$
 declare
     v_subscription_id uuid;
 begin
-    -- Create subscription
+    -- create subscription
     insert into pgconductor.subscriptions (source, schema_name, table_name, operation, execution_id, queue, step_key, columns)
     values ('db', p_schema_name, p_table_name, p_operation, p_execution_id, p_queue, p_step_key, p_columns)
     returning id into v_subscription_id;
 
-    -- Insert triggers
+    -- insert triggers
     insert into pgconductor.triggers (schema_name, table_name, operation, columns)
     values (p_schema_name, p_table_name, p_operation, p_columns)
       on conflict (schema_name, table_name, operation) do nothing;
 
-    -- Update execution to wait
+    -- update execution to wait
     update pgconductor.executions
     set
         waiting_step_key = p_step_key,
@@ -738,8 +738,8 @@ begin
 end;
 $function$;
 
--- Wake up an execution waiting for an event
--- Called by event-router when event arrives for step-based subscriptions
+-- wake up an execution waiting for an event
+-- called by event-router when event arrives for step-based subscriptions
 create or replace function pgconductor.wake_execution(
     p_execution_id uuid,
     p_queue text,
@@ -752,26 +752,26 @@ volatile
 set search_path to ''
 as $function$
 begin
-    -- Save step result
+    -- save step result
     insert into pgconductor.steps (key, execution_id, queue, result)
     values (p_step_key, p_execution_id, p_queue, p_result)
     on conflict (key, execution_id) do nothing;
 
-    -- Wake up execution
+    -- wake up execution
     update pgconductor.executions
     set
         waiting_step_key = null,
         run_at = pgconductor.current_time()
     where id = p_execution_id and queue = p_queue;
 
-    -- Delete subscription (step-based subscriptions are one-time)
+    -- delete subscription (step-based subscriptions are one-time)
     delete from pgconductor.subscriptions
     where execution_id = p_execution_id;
 end;
 $function$;
 
--- Invoke a task from an event trigger
--- Called by event-router when event arrives for trigger-based (persistent) subscriptions
+-- invoke a task from an event trigger
+-- called by event-router when event arrives for trigger-based (persistent) subscriptions
 create or replace function pgconductor.invoke_from_event(
     p_task_key text,
     p_queue text,
@@ -798,7 +798,7 @@ as $function$
     returning id;
 $function$;
 
--- Emit a custom event
+-- emit a custom event
 create or replace function pgconductor.emit_event(
     p_event_key text,
     p_payload jsonb default null

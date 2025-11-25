@@ -21,40 +21,31 @@ export class QueryBuilder {
 			with latest as (
 				select coalesce(max(version), -1) as db_version
 				from pgconductor.schema_migrations
-			), upsert as (
-				insert into pgconductor.orchestrators as o (
-					id,
-					version,
-					migration_number,
-					last_heartbeat_at
-				)
-				values (
-					${orchestratorId}::uuid,
-					${version}::text,
-					${migrationNumber}::integer,
-					pgconductor.current_time()
-				)
-				on conflict (id)
-				do update
-				set
-					last_heartbeat_at = pgconductor.current_time(),
-					version = excluded.version,
-					migration_number = excluded.migration_number
-				returning shutdown_signal
-			), marked as (
-				update pgconductor.orchestrators
-				set shutdown_signal = true
-				where id = ${orchestratorId}::uuid
-					and (select db_version from latest) > ${migrationNumber}::integer
-				returning shutdown_signal
 			)
-			select coalesce(
-				(select shutdown_signal from marked),
-				case
-					when (select db_version from latest) > ${migrationNumber}::integer then true
-					else (select shutdown_signal from upsert)
+			insert into pgconductor.orchestrators as o (
+				id,
+				version,
+				migration_number,
+				last_heartbeat_at,
+				shutdown_signal
+			)
+			select
+				${orchestratorId}::uuid,
+				${version}::text,
+				${migrationNumber}::integer,
+				pgconductor.current_time(),
+				(select db_version from latest) > ${migrationNumber}::integer
+			on conflict (id)
+			do update
+			set
+				last_heartbeat_at = pgconductor.current_time(),
+				version = excluded.version,
+				migration_number = excluded.migration_number,
+				shutdown_signal = case
+					when (select db_version from latest) > excluded.migration_number then true
+					else o.shutdown_signal
 				end
-			) as shutdown_signal
+			returning shutdown_signal
 		`;
 	}
 
@@ -470,6 +461,63 @@ export class QueryBuilder {
 				cron_expression := ${spec.cron_expression || null}::text,
 				priority := ${spec.priority || null}::integer
 			)
+		`;
+	}
+
+	buildScheduleCronExecution(
+		spec: ExecutionSpec,
+		scheduleName: string,
+	): PendingQuery<[{ id: string }]> {
+		assert.ok(spec.run_at, "scheduleCronExecution requires run_at");
+		assert.ok(
+			spec.cron_expression,
+			"scheduleCronExecution requires cron_expression",
+		);
+
+		const runAt = spec.run_at as Date;
+		const cronExpression = spec.cron_expression as string;
+		const timestampSeconds = Math.floor(runAt.getTime() / 1000);
+		const dedupeKey = `dynamic::${scheduleName}::${timestampSeconds}`;
+
+		return this.sql<[{ id: string }]>`
+			with removed as (
+				delete from pgconductor.executions
+				where task_key = ${spec.task_key}::text
+					and queue = ${spec.queue}::text
+					and dedupe_key like 'dynamic::%'
+					and split_part(dedupe_key, '::', 2) = ${scheduleName}::text
+					and cron_expression is not null
+					and run_at > pgconductor.current_time()
+			)
+			select id from pgconductor.invoke(
+				task_key := ${spec.task_key}::text,
+				queue := ${spec.queue}::text,
+				payload := ${spec.payload ? this.sql.json(spec.payload) : null}::jsonb,
+				run_at := ${runAt.toISOString()}::timestamptz,
+				dedupe_key := ${dedupeKey}::text,
+				cron_expression := ${cronExpression}::text,
+				priority := ${spec.priority || 0}::integer
+			)
+		`;
+	}
+
+	buildUnscheduleCronExecution(
+		taskKey: string,
+		queue: string,
+		scheduleName: string,
+	): PendingQuery<[{ deleted_count: number }]> {
+		return this.sql<[{ deleted_count: number }]>`
+			with deleted as (
+				delete from pgconductor.executions
+				where task_key = ${taskKey}::text
+					and queue = ${queue}::text
+					and dedupe_key like 'dynamic::%'
+					and split_part(dedupe_key, '::', 2) = ${scheduleName}::text
+					and cron_expression is not null
+					and run_at > pgconductor.current_time()
+				returning 1
+			)
+			select count(*)::int as deleted_count from deleted
 		`;
 	}
 

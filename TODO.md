@@ -1,3 +1,13 @@
-- restructure monorepo
+- bring column selection back!
 - add dynamic scheduling of cron jobs
+- migrate database-client to args, signal pattern
 - add management ui
+- only use custom current_time if running tests
+
+-- todo:
+-- - throttling (limit, period, key),
+-- - concurrency (limit, key),
+-- - rateLimit (limit, period, key),
+-- - debounce (period, key) -> via invoke
+-- throttling, concurrency and rateLimit: key and seconds - fetch and group by - USE SLOTS similar to https://planetscale.com/blog/the-slotted-counter-pattern
+-- batch processing via array payloads?
