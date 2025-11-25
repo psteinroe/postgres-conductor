@@ -85,26 +85,53 @@ export class Orchestrator {
 	}
 
 	/**
-	 * Promise that resolves when the orchestrator stops (either via stop() or error)
+	 * Promise that resolves when orchestrator has started.
+	 * (Migrations complete, workers registered and started)
 	 */
-	get stopped(): Promise<void> {
-		if (!this._stopDeferred) {
-			return Promise.resolve();
-		}
-		return this._stopDeferred.promise;
+	get started(): Promise<void> {
+		return this._startDeferred?.promise || Promise.resolve();
 	}
 
 	/**
-	 * Start the orchestrator:
-	 * 1. Get installed version (-1 if not installed, 0+ if installed)
-	 * 2. Check if we're too old (installed version > our version)
-	 * 3. Run migrations if needed (migrate() handles locking/signaling/waiting)
-	 * 4. Start heartbeat loop
-	 * 5. Start all workers
-	 *
-	 * Returns when the orchestrator has started (not when it stops)
+	 * Promise that resolves when orchestrator has stopped.
+	 * (All workers stopped, cleanup complete)
+	 */
+	get stopped(): Promise<void> {
+		return this._stopDeferred?.promise || Promise.resolve();
+	}
+
+	/**
+	 * Start the orchestrator.
+	 * Returns when startup is complete (all workers started).
+	 * Orchestrator continues running in background until stop() is called.
 	 */
 	async start(): Promise<void> {
+		return this._internalStart({ runOnce: false });
+	}
+
+	/**
+	 * Start the orchestrator and wait until it stops.
+	 * Equivalent to: await start(); return stopped;
+	 * Returns when orchestrator has fully stopped.
+	 */
+	async run(): Promise<void> {
+		await this._internalStart({ runOnce: false });
+		return this.stopped;
+	}
+
+	/**
+	 * Process all queued tasks once and stop automatically.
+	 * Returns when all work is complete.
+	 * Useful for testing and batch processing.
+	 */
+	async drain(): Promise<void> {
+		await this._internalStart({ runOnce: true });
+		return this.stopped;
+	}
+
+	private async _internalStart({
+		runOnce = false,
+	}: { runOnce?: boolean } = {}): Promise<void> {
 		if (this._stopDeferred) {
 			throw new Error("Orchestrator is already running");
 		}
@@ -135,7 +162,9 @@ export class Orchestrator {
 				// - Signal others to shut down (if schema exists)
 				// - Wait for them to exit
 				// - Apply migrations
-				const { shouldShutdown } = await this.schemaManager.ensureLatest(this.signal);
+				const { shouldShutdown } = await this.schemaManager.ensureLatest(
+					this.signal,
+				);
 
 				if (shouldShutdown) {
 					this.logger.info(
@@ -164,17 +193,24 @@ export class Orchestrator {
 				// Start heartbeat loop
 				this.startHeartbeatLoop();
 
-				// Start all workers
-				const workerPromises = this.workers.map((worker) =>
-					worker.start(this.orchestratorId),
-				);
+				// Kick off all workers (don't await yet!)
+				if (runOnce) {
+					// Drain mode: workers will process and stop
+					this.workers.forEach((w) => void w.drain(this.orchestratorId));
+				} else {
+					// Normal mode: workers will run continuously
+					this.workers.forEach((w) => void w.run(this.orchestratorId));
+				}
 
-				// Signal that we've started successfully
+				// Wait for ALL workers to finish starting (register() complete)
+				await Promise.all(this.workers.map((w) => w.started));
+
+				// NOW signal that orchestrator has started
 				this.startDeferred.resolve();
 
 				// Wait for shutdown signal or all workers to complete
 				await Promise.race([
-					Promise.all(workerPromises),
+					Promise.all(this.workers.map((w) => w.stopped)),
 					this.waitForShutdownSignal(),
 				]);
 

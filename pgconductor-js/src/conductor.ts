@@ -20,6 +20,7 @@ import {
 } from "./task-definition";
 import { Worker, type WorkerConfig } from "./worker";
 import { DefaultLogger, type Logger } from "./lib/logger";
+import { SchemaManager } from "./schema-manager";
 import type {
 	CustomEventConfig,
 	EventDefinition,
@@ -164,6 +165,16 @@ export class Conductor<
 			TDatabaseSchema,
 			TExtraContext
 		>(options);
+	}
+
+	/**
+	 * Ensure schema is at latest version.
+	 * Useful for tests to initialize schema without starting orchestrator.
+	 */
+	async ensureInstalled(): Promise<void> {
+		const schemaManager = new SchemaManager(this.db, {});
+		const signal = new AbortController().signal;
+		await schemaManager.ensureLatest(signal);
 	}
 
 	createTask<
