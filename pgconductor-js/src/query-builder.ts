@@ -1,8 +1,8 @@
 import type { PendingQuery, Row, RowList, Sql } from "postgres";
+import type { GroupedExecutionResults } from "./database-client";
 import * as assert from "./lib/assert";
 import type {
 	Execution,
-	ExecutionResult,
 	ExecutionSpec,
 	EventSubscriptionSpec,
 	Payload,
@@ -79,25 +79,6 @@ export type ClearWaitingStateArgs = {
 	executionId: string;
 };
 
-export type SubscribeEventArgs = {
-	executionId: string;
-	queue: string;
-	stepKey: string;
-	eventKey: string;
-	timeoutMs?: number;
-};
-
-export type SubscribeDbChangeArgs = {
-	executionId: string;
-	queue: string;
-	stepKey: string;
-	schemaName: string;
-	tableName: string;
-	operation: "insert" | "update" | "delete";
-	timeoutMs?: number;
-	columns?: string[];
-};
-
 export type EmitEventArgs = {
 	eventKey: string;
 	payload?: JsonValue;
@@ -110,36 +91,68 @@ export class QueryBuilder {
 		orchestratorId,
 		version,
 		migrationNumber,
-	}: OrchestratorHeartbeatArgs): PendingQuery<[{ shutdown_signal: boolean }]> {
-		return this.sql<[{ shutdown_signal: boolean }]>`
+	}: OrchestratorHeartbeatArgs): PendingQuery<
+		{
+			signal_type: string | null;
+			signal_execution_id: string | null;
+			signal_payload: Record<string, any> | null;
+		}[]
+	> {
+		return this.sql<
+			{
+				signal_type: string | null;
+				signal_execution_id: string | null;
+				signal_payload: Record<string, any> | null;
+			}[]
+		>`
 			with latest as (
 				select coalesce(max(version), -1) as db_version
 				from pgconductor.schema_migrations
-			)
-			insert into pgconductor.orchestrators as o (
-				id,
-				version,
-				migration_number,
-				last_heartbeat_at,
-				shutdown_signal
+			),
+			-- Insert/update orchestrator record
+			upserted_orchestrator as (
+				insert into pgconductor.orchestrators as o (
+					id,
+					version,
+					migration_number,
+					last_heartbeat_at
+				)
+				select
+					${orchestratorId}::uuid,
+					${version}::text,
+					${migrationNumber}::integer,
+					pgconductor.current_time()
+				on conflict (id)
+				do update
+				set
+					last_heartbeat_at = pgconductor.current_time(),
+					version = excluded.version,
+					migration_number = excluded.migration_number
+				returning id
+			),
+			-- Signal shutdown if newer migration exists
+			shutdown_signal_inserted as (
+				insert into pgconductor.orchestrator_signals (orchestrator_id, type, payload)
+				select
+					${orchestratorId}::uuid,
+					'shutdown',
+					jsonb_build_object('reason', 'newer_migration_detected')
+				from latest
+				where latest.db_version > ${migrationNumber}::integer
+				on conflict (orchestrator_id) where type = 'shutdown' do nothing
+			),
+			-- Read and delete all signals for this orchestrator (ordered by creation)
+			deleted_signals as (
+				delete from pgconductor.orchestrator_signals
+				where orchestrator_id = ${orchestratorId}::uuid
+				returning type, execution_id, payload, created_at
 			)
 			select
-				${orchestratorId}::uuid,
-				${version}::text,
-				${migrationNumber}::integer,
-				pgconductor.current_time(),
-				(select db_version from latest) > ${migrationNumber}::integer
-			on conflict (id)
-			do update
-			set
-				last_heartbeat_at = pgconductor.current_time(),
-				version = excluded.version,
-				migration_number = excluded.migration_number,
-				shutdown_signal = case
-					when (select db_version from latest) > excluded.migration_number then true
-					else o.shutdown_signal
-				end
-			returning shutdown_signal
+				type as signal_type,
+				execution_id as signal_execution_id,
+				payload as signal_payload
+			from deleted_signals
+			order by created_at asc
 		`;
 	}
 
@@ -151,13 +164,28 @@ export class QueryBuilder {
 				delete from pgconductor.orchestrators o
 				where o.last_heartbeat_at < pgconductor.current_time() - ${maxAge}::interval
 				returning o.id
+			),
+			-- fail cancelled executions from expired orchestrators
+			failed_cancelled as (
+				update pgconductor.executions e
+				set
+					failed_at = pgconductor.current_time(),
+					locked_by = null,
+					locked_at = null
+				from expired
+				where e.locked_by = expired.id
+					and e.cancelled = true
+					and e.failed_at is null
+					and e.completed_at is null
 			)
+			-- unlock remaining (non-cancelled) executions
 			update pgconductor.executions e
 			set
 				locked_by = null,
 				locked_at = null
 			from expired
 			where e.locked_by = expired.id
+				and e.cancelled = false
 		`;
 	}
 
@@ -178,9 +206,14 @@ export class QueryBuilder {
 		migrationNumber,
 	}: SweepOrchestratorsArgs): PendingQuery<RowList<Row[]>> {
 		return this.sql`
-			update pgconductor.orchestrators
-			set shutdown_signal = true
+			insert into pgconductor.orchestrator_signals (orchestrator_id, type, payload)
+			select
+				id,
+				'shutdown',
+				jsonb_build_object('reason', 'breaking_migration')
+			from pgconductor.orchestrators
 			where migration_number < ${migrationNumber}::integer
+			on conflict (orchestrator_id) where type = 'shutdown' do nothing
 		`;
 	}
 
@@ -201,13 +234,28 @@ export class QueryBuilder {
 				delete from pgconductor.orchestrators
 				where id = ${orchestratorId}::uuid
 				returning id
+			),
+			-- fail cancelled executions from this orchestrator
+			failed_cancelled as (
+				update pgconductor.executions e
+				set
+					failed_at = pgconductor.current_time(),
+					locked_by = null,
+					locked_at = null
+				from deleted
+				where e.locked_by = deleted.id
+					and e.cancelled = true
+					and e.failed_at is null
+					and e.completed_at is null
 			)
+			-- unlock remaining (non-cancelled) executions
 			update pgconductor.executions e
 			set
 				locked_by = null,
 				locked_at = null
 			from deleted
 			where e.locked_by = deleted.id
+				and e.cancelled = false
 		`;
 	}
 
@@ -247,20 +295,33 @@ export class QueryBuilder {
 				executions.payload,
 				executions.waiting_on_execution_id,
 				executions.waiting_step_key,
+				executions.cancelled,
+				executions.last_error,
 				executions.dedupe_key,
 				executions.cron_expression
 		`;
 	}
 
 	buildReturnExecutions(
-		results: ExecutionResult[],
-		explain?: boolean,
+		grouped: GroupedExecutionResults,
 	): PendingQuery<any> | null {
-		if (results.length === 0) return null;
+		const completed = grouped.completed;
+		const failed = grouped.failed;
+		const released = grouped.released;
+		const invokeChild = grouped.invokeChild;
+		const waitForCustomEvent = grouped.waitForCustomEvent;
+		const waitForDbEvent = grouped.waitForDbEvent;
 
-		const completed = results.filter((r) => r.status === "completed");
-		const failed = results.filter((r) => r.status === "failed");
-		const released = results.filter((r) => r.status === "released");
+		if (
+			completed.length === 0 &&
+			failed.length === 0 &&
+			released.length === 0 &&
+			invokeChild.length === 0 &&
+			waitForCustomEvent.length === 0 &&
+			waitForDbEvent.length === 0
+		) {
+			return null;
+		}
 
 		const ctes: PendingQuery<any>[] = [];
 
@@ -268,11 +329,10 @@ export class QueryBuilder {
 		ctes.push(this.sql`now_ts as (select pgconductor.current_time() as ts)`);
 
 		// Load task configs once for all task_keys we're processing
-		const allTaskKeys = [...new Set(results.map((r) => r.task_key))];
 		ctes.push(this.sql`task_configs as (
 			select key, max_attempts, remove_on_complete_days, remove_on_fail_days
 			from pgconductor.tasks
-			where key = any(${this.sql.array(allTaskKeys)}::text[])
+			where key = any(${this.sql.array(Array.from(grouped.taskKeys))}::text[])
 		)`);
 
 		// Completed results
@@ -299,6 +359,26 @@ export class QueryBuilder {
 				from completed_results r
 				join pgconductor.executions parent_e on parent_e.waiting_on_execution_id = r.execution_id
 				on conflict (execution_id, key) do nothing
+				returning execution_id
+			)`);
+
+			// Mark orphaned children (completed but no parent waiting) as failed
+			ctes.push(this.sql`orphaned_children as (
+				update pgconductor.executions e
+				set
+					failed_at = nt.ts,
+					completed_at = null,
+					last_error = 'Parent timed out before child completed',
+					locked_by = null,
+					locked_at = null
+				from now_ts nt, completed_results r
+				where e.id = r.execution_id
+					-- No parent is waiting for this child
+					and not exists (
+						select 1 from pgconductor.executions parent
+						where parent.waiting_on_execution_id = r.execution_id
+					)
+				returning e.id
 			)`);
 
 			// Update parents for all completed
@@ -307,18 +387,21 @@ export class QueryBuilder {
 				set
 					run_at = nt.ts,
 					waiting_on_execution_id = null,
-					waiting_step_key = null
+					waiting_step_key = null,
+					locked_by = null,
+					locked_at = null
 				from now_ts nt, completed_results r
 				where e.waiting_on_execution_id = r.execution_id
 			)`);
 
-			// Delete completed where remove_on_complete_days = 0
+			// Delete completed where remove_on_complete_days = 0 (excluding orphaned)
 			ctes.push(this.sql`deleted_completed as (
 				delete from pgconductor.executions e
 				using completed_results r, task_configs tc
 				where e.id = r.execution_id
 					and tc.key = r.task_key
 					and tc.remove_on_complete_days = 0
+					and not exists (select 1 from orphaned_children oc where oc.id = e.id)
 			)`);
 
 			// Update completed where remove_on_complete_days != 0 (keep)
@@ -332,20 +415,15 @@ export class QueryBuilder {
 				where e.id = r.execution_id
 					and tc.key = r.task_key
 					and (tc.remove_on_complete_days is null or tc.remove_on_complete_days != 0)
+					and not exists (select 1 from orphaned_children oc where oc.id = e.id)
 			)`);
 		}
 
 		// Failed results
 		if (failed.length > 0) {
-			const failedData = failed.map((r) => ({
-				execution_id: r.execution_id,
-				task_key: r.task_key,
-				error: r.error || "unknown error",
-			}));
-
 			ctes.push(this.sql`failed_results as (
-				select * from jsonb_to_recordset(${this.sql.json(failedData)}::jsonb)
-				as x(execution_id uuid, task_key text, error text)
+				select * from jsonb_to_recordset(${this.sql.json(failed as unknown as JsonValue)}::jsonb)
+				as x(execution_id uuid, task_key text, status text, error text)
 			)`);
 
 			// Permanently failed children (attempts >= max_attempts)
@@ -358,7 +436,7 @@ export class QueryBuilder {
 				from failed_results r, pgconductor.executions e, task_configs tc
 				where e.id = r.execution_id
 					and tc.key = r.task_key
-					and e.attempts >= tc.max_attempts
+					and (e.attempts >= tc.max_attempts or r.status = 'permanently_failed')
 			)`);
 
 			// Delete permanently failed children and their parents
@@ -433,15 +511,233 @@ export class QueryBuilder {
 
 		// Released
 		if (released.length > 0) {
-			const releasedIds = released.map((r) => r.execution_id);
+			// Save steps for released executions with step_key (e.g., sleep)
+			const releasedWithSteps = released.filter(
+				(r) => r.step_key !== undefined,
+			);
+			if (releasedWithSteps.length > 0) {
+				ctes.push(this.sql`released_steps as (
+					insert into pgconductor.steps (execution_id, queue, key, result)
+					select
+						r.execution_id,
+						r.queue,
+						r.step_key,
+						null::jsonb
+					from jsonb_to_recordset(${this.sql.json(releasedWithSteps as unknown as JsonValue)}::jsonb)
+						as r(execution_id uuid, queue text, step_key text)
+					on conflict (execution_id, key) do nothing
+					returning id
+				)`);
+			}
 
-			ctes.push(this.sql`updated_released as (
+			const shouldRescheduleSome = released.some(
+				(r) => r.reschedule_in_ms !== undefined,
+			);
+
+			if (shouldRescheduleSome) {
+				const releasedData = released.map((r) => ({
+					execution_id: r.execution_id,
+					reschedule_in_ms:
+						r.reschedule_in_ms === "infinity" ? -1 : r.reschedule_in_ms,
+				}));
+
+				ctes.push(this.sql`updated_released as (
+                update pgconductor.executions e
+                set
+                    attempts = greatest(attempts - 1, 0),
+                    run_at = case
+                        when r.reschedule_in_ms = -1 then
+                            'infinity'::timestamptz
+                        when r.reschedule_in_ms is not null then
+                            nt.ts + (r.reschedule_in_ms::integer || ' milliseconds')::interval
+                        else
+                            nt.ts
+                    end,
+                    locked_by = null,
+                    locked_at = null
+                from now_ts nt, jsonb_to_recordset(${this.sql.json(releasedData)}::jsonb)
+                    as r(execution_id uuid, reschedule_in_ms integer)
+                where e.id = r.execution_id
+            )`);
+			} else {
+				const releasedIds = released.map((r) => r.execution_id);
+
+				ctes.push(this.sql`updated_released as (
 				update pgconductor.executions
 				set
 					attempts = greatest(attempts - 1, 0),
 					locked_by = null,
 					locked_at = null
 				where id = any(${this.sql.array(releasedIds)}::uuid[])
+			)`);
+			}
+		}
+
+		if (invokeChild.length > 0) {
+			ctes.push(this.sql`invoke_child_data as (
+				select * from jsonb_to_recordset(${this.sql.json(invokeChild as unknown as JsonValue)}::jsonb)
+				as x(
+					execution_id uuid,
+					task_key text,
+					queue text,
+					step_key text,
+					timeout_ms text,
+					child_task_name text,
+					child_task_queue text,
+					child_payload jsonb
+				)
+			)`);
+
+			// Insert child executions with parent reference
+			ctes.push(this.sql`inserted_children as (
+				insert into pgconductor.executions (
+					id,
+					task_key,
+					queue,
+					payload,
+					run_at,
+					parent_execution_id
+				)
+				select
+					pgconductor.portable_uuidv7(),
+					icd.child_task_name,
+					icd.child_task_queue,
+					icd.child_payload,
+					nt.ts,
+					icd.execution_id
+				from invoke_child_data icd, now_ts nt
+				returning id, parent_execution_id
+			)`);
+
+			// Update parent executions
+			ctes.push(this.sql`updated_invoke_parents as (
+				update pgconductor.executions e
+				set
+					waiting_on_execution_id = ic.id,
+					waiting_step_key = icd.step_key,
+					run_at = case
+						when icd.timeout_ms = 'infinity' then 'infinity'::timestamptz
+						else nt.ts + (icd.timeout_ms::bigint || ' milliseconds')::interval
+					end,
+					locked_by = null,
+					locked_at = null
+				from now_ts nt, inserted_children ic
+				join invoke_child_data icd on icd.execution_id = ic.parent_execution_id
+				where e.id = ic.parent_execution_id
+			)`);
+		}
+
+		if (waitForCustomEvent.length > 0) {
+			ctes.push(this.sql`wait_custom_event_data as (
+				select * from jsonb_to_recordset(${this.sql.json(waitForCustomEvent as unknown as JsonValue)}::jsonb)
+				as x(
+					execution_id uuid,
+					task_key text,
+					queue text,
+					step_key text,
+					timeout_ms text,
+					event_key text
+				)
+			)`);
+
+			// Insert subscriptions
+			ctes.push(this.sql`inserted_custom_event_subscriptions as (
+				insert into pgconductor.subscriptions (source, event_key, execution_id, queue, step_key)
+				select
+					'event',
+					wce.event_key,
+					wce.execution_id,
+					wce.queue,
+					wce.step_key
+				from wait_custom_event_data wce
+				returning id
+			)`);
+
+			// Update executions to wait
+			ctes.push(this.sql`updated_wait_custom_event as (
+				update pgconductor.executions e
+				set
+					waiting_step_key = wce.step_key,
+					run_at = case
+						when wce.timeout_ms = 'infinity' then 'infinity'::timestamptz
+						else nt.ts + (wce.timeout_ms::bigint || ' milliseconds')::interval
+					end,
+					locked_by = null,
+					locked_at = null
+				from now_ts nt, wait_custom_event_data wce
+				where e.id = wce.execution_id
+			)`);
+		}
+
+		if (waitForDbEvent.length > 0) {
+			ctes.push(this.sql`wait_db_event_data as (
+				select * from jsonb_to_recordset(${this.sql.json(waitForDbEvent as unknown as JsonValue)}::jsonb)
+				as x(
+					execution_id uuid,
+					task_key text,
+					queue text,
+					step_key text,
+					timeout_ms text,
+					schema_name text,
+					table_name text,
+					operation text,
+					columns jsonb
+				)
+			)`);
+
+			// Insert subscriptions
+			ctes.push(this.sql`inserted_db_event_subscriptions as (
+				insert into pgconductor.subscriptions (
+					source,
+					schema_name,
+					table_name,
+					operation,
+					execution_id,
+					queue,
+					step_key,
+					columns
+				)
+				select
+					'db',
+					wdb.schema_name,
+					wdb.table_name,
+					wdb.operation,
+					wdb.execution_id,
+					wdb.queue,
+					wdb.step_key,
+					case
+						when wdb.columns is not null then
+							array(select jsonb_array_elements_text(wdb.columns))
+						else null
+					end
+				from wait_db_event_data wdb
+				returning id
+			)`);
+
+			// Insert triggers (on conflict do nothing)
+			ctes.push(this.sql`inserted_db_triggers as (
+				insert into pgconductor.triggers (schema_name, table_name, operation)
+				select distinct
+					wdb.schema_name,
+					wdb.table_name,
+					wdb.operation
+				from wait_db_event_data wdb
+				on conflict (schema_name, table_name, operation) do nothing
+			)`);
+
+			// Update executions to wait
+			ctes.push(this.sql`updated_wait_db_event as (
+				update pgconductor.executions e
+				set
+					waiting_step_key = wdb.step_key,
+					run_at = case
+						when wdb.timeout_ms = 'infinity' then 'infinity'::timestamptz
+						else nt.ts + (wdb.timeout_ms::bigint || ' milliseconds')::interval
+					end,
+					locked_by = null,
+					locked_at = null
+				from now_ts nt, wait_db_event_data wdb
+				where e.id = wdb.execution_id
 			)`);
 		}
 
@@ -450,11 +746,6 @@ export class QueryBuilder {
 		const combined = ctes.reduce((acc, cte, i) =>
 			i === 0 ? cte : this.sql`${acc}, ${cte}`,
 		);
-
-		if (explain) {
-			return this
-				.sql`explain (analyze, costs, verbose, buffers, format json) with ${combined} select 1 as result`;
-		}
 
 		return this.sql<[{ result: number }]>`with ${combined} select 1 as result`;
 	}
@@ -617,23 +908,6 @@ export class QueryBuilder {
 		`;
 	}
 
-	buildInvokeChild(spec: ExecutionSpec): PendingQuery<[{ id: string }]> {
-		return this.sql<[{ id: string }]>`
-			select pgconductor.invoke_child(
-				task_key := ${spec.task_key}::text,
-				queue := ${spec.queue}::text,
-				payload := ${spec.payload ? this.sql.json(spec.payload) : null}::jsonb,
-				run_at := ${spec.run_at ? spec.run_at.toISOString() : null}::timestamptz,
-				dedupe_key := ${spec.dedupe_key || null}::text,
-				cron_expression := ${spec.cron_expression || null}::text,
-				priority := ${spec.priority || null}::integer,
-				parent_execution_id := ${spec.parent_execution_id || null}::uuid,
-				parent_step_key := ${spec.parent_step_key || null}::text,
-				parent_timeout_ms := ${spec.parent_timeout_ms || null}::integer
-			) as id
-		`;
-	}
-
 	buildInvokeBatch(specs: ExecutionSpec[]): PendingQuery<{ id: string }[]> {
 		const specsArray = specs.map((spec) => ({
 			task_key: spec.task_key,
@@ -698,11 +972,48 @@ export class QueryBuilder {
 		executionId,
 	}: ClearWaitingStateArgs): PendingQuery<RowList<Row[]>> {
 		return this.sql`
-			update pgconductor.executions
-			set
-				waiting_on_execution_id = null,
-				waiting_step_key = null
-			where id = ${executionId}::uuid
+			with child_info as (
+				select
+					e.waiting_on_execution_id as child_id,
+					c.locked_by as child_locked_by
+				from pgconductor.executions e
+				left join pgconductor.executions c on c.id = e.waiting_on_execution_id
+				where e.id = ${executionId}::uuid
+			),
+			-- Fail pending (not locked) children immediately
+			failed_pending_child as (
+				update pgconductor.executions e
+				set
+					failed_at = pgconductor.current_time(),
+					last_error = 'Cancelled: parent timed out',
+					locked_by = null,
+					locked_at = null
+				from child_info ci
+				where e.id = ci.child_id
+					and ci.child_locked_by is null   -- not currently executing
+					and e.completed_at is null
+					and e.failed_at is null
+			),
+			-- Signal executing (locked) children to cancel
+			signaled_executing_child as (
+				update pgconductor.executions e
+				set cancelled = true
+				from child_info ci
+				where e.id = ci.child_id
+					and ci.child_locked_by is not null  -- currently executing
+					and e.completed_at is null
+					and e.failed_at is null
+			),
+			-- Always clear parent's waiting state
+			cleared_parent as (
+				update pgconductor.executions
+				set
+					waiting_on_execution_id = null,
+					waiting_step_key = null
+				where id = ${executionId}::uuid
+				returning id
+			)
+			select id from cleared_parent
 		`;
 	}
 

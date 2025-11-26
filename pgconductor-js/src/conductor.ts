@@ -304,4 +304,11 @@ export class Conductor<
 	): Promise<string> {
 		return this.db.emitEvent({ eventKey: event, payload });
 	}
+
+	async cancel(
+		executionId: string,
+		options?: { reason?: string },
+	): Promise<boolean> {
+		return this.db.cancelExecution(executionId, options);
+	}
 }

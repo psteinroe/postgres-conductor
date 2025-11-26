@@ -1,5 +1,10 @@
 import CronExpressionParser from "cron-parser";
-import type { DatabaseClient, JsonValue, Execution } from "./database-client";
+import type {
+	DatabaseClient,
+	JsonValue,
+	Execution,
+	Payload,
+} from "./database-client";
 import type {
 	TaskDefinition,
 	TaskName,
@@ -23,10 +28,86 @@ import type {
 	SharedEventConfig,
 	TableName,
 } from "./event-definition";
+import { TypedAbortController } from "./lib/typed-abort-controller";
+
+export type TaskAbortReasons =
+	// if cancelled by a user
+	| { reason: "cancelled"; __pgconductorTaskAborted: true }
+	// the task is released
+	| {
+			reason: "released";
+			reschedule_in_ms: number | "infinity";
+			step_key?: string;
+			__pgconductorTaskAborted: true;
+	  }
+	// the worker wants to shut down
+	| { reason: "parent-aborted"; __pgconductorTaskAborted: true }
+	// the task invoked a child
+	| {
+			reason: "child-invocation";
+			timeout_ms: number | "infinity";
+			step_key: string;
+			task: TaskIdentifier<string, string>;
+			payload: Payload | null;
+			__pgconductorTaskAborted: true;
+	  }
+	// the task needs to wait for a custom event
+	| {
+			reason: "wait-for-custom-event";
+			timeout_ms: number | "infinity";
+			step_key: string;
+			event_key: string;
+			__pgconductorTaskAborted: true;
+	  }
+	// the task needs to wait for a database event
+	| {
+			reason: "wait-for-database-event";
+			timeout_ms: number | "infinity";
+			step_key: string;
+			schema_name: string;
+			table_name: string;
+			operation: "insert" | "update" | "delete";
+			columns: string[] | undefined;
+			__pgconductorTaskAborted: true;
+	  };
+
+type DistributiveOmit<T, K extends PropertyKey> = T extends any
+	? Omit<T, K>
+	: never;
+
+export function isTaskAbortReason(result: unknown): result is TaskAbortReasons {
+	return (
+		typeof result === "object" &&
+		result !== null &&
+		"__pgconductorTaskAborted" in result &&
+		(result as TaskAbortReasons).__pgconductorTaskAborted === true
+	);
+}
+
+export function createTaskSignal(
+	parentSignal: AbortSignal,
+): TypedAbortController<TaskAbortReasons> {
+	const controller = new TypedAbortController<TaskAbortReasons>();
+
+	if (parentSignal.aborted) {
+		controller.abort({
+			__pgconductorTaskAborted: true,
+			reason: "parent-aborted",
+		});
+	} else {
+		parentSignal.addEventListener("abort", () => {
+			controller.abort({
+				__pgconductorTaskAborted: true,
+				reason: "parent-aborted",
+			});
+		});
+	}
+
+	return controller;
+}
 
 export type TaskContextOptions = {
-	signal: AbortSignal;
-	abortController: AbortController;
+	abortController: TypedAbortController<TaskAbortReasons>;
 	db: DatabaseClient;
 	execution: Execution;
 	logger: Logger;
@@ -99,8 +180,11 @@ export class TaskContext<
 	}
 
 	async checkpoint(): Promise<void> {
-		if (this.opts.signal.aborted) {
-			return this.abortAndHangup();
+		if (this.signal.aborted) {
+			return this.abortAndHangup({
+				reason: "released",
+				reschedule_in_ms: 0,
+			});
 		}
 	}
 
@@ -115,16 +199,11 @@ export class TaskContext<
 			return; // Already slept, continue
 		}
 
-		// Save sleep step with ms - time calculation happens in SQL
-		await this.opts.db.saveStep({
-			executionId: this.opts.execution.id,
-			queue: this.opts.execution.queue,
-			key: id,
-			result: null,
-			runAtMs: ms,
+		return this.abortAndHangup({
+			reason: "released",
+			reschedule_in_ms: ms,
+			step_key: id,
 		});
-
-		return this.abortAndHangup();
 	}
 
 	async invoke<
@@ -136,14 +215,14 @@ export class TaskContext<
 			TQueue
 		> = FindTaskByIdentifier<Tasks, TName, TQueue>,
 	>(
-		id: string,
+		key: string,
 		task: TaskIdentifier<TName, TQueue>,
 		payload: InferPayload<TDef> = {} as InferPayload<TDef>,
 		timeout?: number,
 	): Promise<InferReturns<TDef>> {
 		const cached = await this.opts.db.loadStep({
 			executionId: this.opts.execution.id,
-			key: id,
+			key,
 		});
 
 		if (cached !== undefined) {
@@ -154,6 +233,7 @@ export class TaskContext<
 		if (this.opts.execution.waiting_on_execution_id !== null) {
 			// we resumed but no step exists → timeout occurred
 			// clear waiting state before throwing
+
 			await this.opts.db.clearWaitingState({
 				executionId: this.opts.execution.id,
 			});
@@ -165,19 +245,13 @@ export class TaskContext<
 			);
 		}
 
-		const taskName = task.name;
-		const queue = task.queue || "default";
-
-		await this.opts.db.invokeChild({
-			task_key: taskName,
-			queue,
+		return this.abortAndHangup({
+			reason: "child-invocation",
+			timeout_ms: timeout || "infinity",
+			task,
+			step_key: key,
 			payload,
-			parent_execution_id: this.opts.execution.id,
-			parent_step_key: id,
-			parent_timeout_ms: timeout || null,
 		});
-
-		return this.abortAndHangup();
 	}
 
 	async schedule<
@@ -256,7 +330,7 @@ export class TaskContext<
 			TName
 		>,
 	>(
-		id: string,
+		key: string,
 		config: CustomEventConfig<TName> & SharedEventConfig,
 	): Promise<InferEventPayload<TDef>>;
 
@@ -269,14 +343,14 @@ export class TaskContext<
 		TOp extends "insert" | "update" | "delete",
 		const TSelection extends string | undefined = undefined,
 	>(
-		id: string,
+		key: string,
 		config: DatabaseEventConfig<TDatabase, TSchema, TTable, TOp, TSelection>,
 	): Promise<
 		DatabaseEventPayload<RowType<TDatabase, TSchema, TTable>, TOp, TSelection>
 	>;
 
 	async waitForEvent(
-		id: string,
+		key: string,
 		config: (
 			| CustomEventConfig<string>
 			| DatabaseEventConfig<TDatabase, any, any, any, any>
@@ -286,7 +360,7 @@ export class TaskContext<
 		// Check if we already received the event
 		const cached = await this.opts.db.loadStep({
 			executionId: this.opts.execution.id,
-			key: id,
+			key,
 		});
 
 		if (cached !== undefined) {
@@ -311,12 +385,11 @@ export class TaskContext<
 		// Determine if this is a custom event or database event
 		if ("event" in config) {
 			// Custom event
-			await this.opts.db.subscribeEvent({
-				executionId: this.opts.execution.id,
-				queue: this.opts.execution.queue,
-				stepKey: id,
-				eventKey: config.event,
-				timeoutMs: config.timeout,
+			return this.abortAndHangup({
+				reason: "wait-for-custom-event",
+				timeout_ms: config.timeout || "infinity",
+				step_key: key,
+				event_key: config.event,
 			});
 		} else {
 			// Database event
@@ -326,19 +399,16 @@ export class TaskContext<
 				? columnsStr.split(",").map((c: string) => c.trim().toLowerCase())
 				: undefined;
 
-			await this.opts.db.subscribeDbChange({
-				executionId: this.opts.execution.id,
-				queue: this.opts.execution.queue,
-				stepKey: id,
-				schemaName: config.schema,
-				tableName: config.table,
+			return this.abortAndHangup({
+				reason: "wait-for-database-event",
+				timeout_ms: config.timeout || "infinity",
+				step_key: key,
+				schema_name: config.schema,
+				table_name: config.table,
 				operation: config.operation,
-				timeoutMs: config.timeout,
 				columns,
 			});
 		}
-
-		return this.abortAndHangup();
 	}
 
 	/**
@@ -360,11 +430,30 @@ export class TaskContext<
 	}
 
 	/**
+	 * Cancel an execution by ID.
+	 * @param executionId - The execution ID to cancel
+	 * @param options - Optional cancellation options
+	 * @param options.reason - Cancellation reason (defaults to "Cancelled by user")
+	 * @returns true if the execution was cancelled, false if it was already completed/failed
+	 */
+	async cancel(
+		executionId: string,
+		options?: { reason?: string },
+	): Promise<boolean> {
+		return this.opts.db.cancelExecution(executionId, options);
+	}
+
+	/**
 	 * Abort the current execution and hang up indefinitely
 	 * @return Promise that never resolves
 	 **/
-	private abortAndHangup(): Promise<never> {
-		this.opts.abortController.abort();
+	private abortAndHangup(
+		reason: DistributiveOmit<TaskAbortReasons, "__pgconductorTaskAborted">,
+	): Promise<never> {
+		this.opts.abortController.abort({
+			__pgconductorTaskAborted: true,
+			...reason,
+		} as TaskAbortReasons);
 		return new Promise(() => {});
 	}
 }

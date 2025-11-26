@@ -70,6 +70,7 @@ describe("Invoke Support", () => {
 		);
 
 		const orchestrator = Orchestrator.create({
+			defaultWorker: { pollIntervalMs: 50, flushIntervalMs: 50 },
 			conductor,
 			tasks: [parentTask, childTask],
 		});
@@ -78,7 +79,7 @@ describe("Invoke Support", () => {
 
 		await conductor.invoke({ name: "parent-task" }, { value: 5 });
 
-		await new Promise((r) => setTimeout(r, 1500));
+		await new Promise((r) => setTimeout(r, 300));
 
 		await orchestrator.stop();
 
@@ -148,13 +149,13 @@ describe("Invoke Support", () => {
 
 		await conductor.invoke({ name: "timeout-parent" }, {});
 
-		await new Promise((r) => setTimeout(r, 500));
+		await new Promise((r) => setTimeout(r, 300));
 
 		// Advance time past timeout (1 second) but before sleep completes (5 seconds)
 		const afterTimeout = new Date(startTime.getTime() + 1500);
 		await db.client.setFakeTime({ date: afterTimeout });
 
-		await new Promise((r) => setTimeout(r, 500));
+		await new Promise((r) => setTimeout(r, 300));
 
 		await orchestrator.stop();
 
@@ -225,6 +226,7 @@ describe("Invoke Support", () => {
 		);
 
 		const orchestrator = Orchestrator.create({
+			defaultWorker: { pollIntervalMs: 50, flushIntervalMs: 50 },
 			conductor,
 			tasks: [retryParentTask, onceChildTask],
 		});
@@ -233,7 +235,7 @@ describe("Invoke Support", () => {
 
 		await conductor.invoke({ name: "retry-parent" }, { value: 7 });
 
-		await new Promise((r) => setTimeout(r, 5000));
+		await new Promise((r) => setTimeout(r, 500));
 
 		await orchestrator.stop();
 
@@ -288,6 +290,7 @@ describe("Invoke Support", () => {
 		);
 
 		const orchestrator = Orchestrator.create({
+			defaultWorker: { pollIntervalMs: 50, flushIntervalMs: 50 },
 			conductor,
 			tasks: [patientParentTask, eventualChildTask],
 		});
@@ -296,7 +299,7 @@ describe("Invoke Support", () => {
 
 		await conductor.invoke({ name: "patient-parent" }, {});
 
-		await new Promise((r) => setTimeout(r, 6000));
+		await new Promise((r) => setTimeout(r, 2500));
 
 		await orchestrator.stop();
 
@@ -455,6 +458,7 @@ describe("Invoke Support", () => {
 		});
 
 		const orchestrator = Orchestrator.create({
+			defaultWorker: { pollIntervalMs: 50, flushIntervalMs: 50 },
 			conductor,
 			workers: [parentWorker, childWorker],
 		});
@@ -466,11 +470,98 @@ describe("Invoke Support", () => {
 			{ value: 5 },
 		);
 
-		await new Promise((r) => setTimeout(r, 1500));
+		await new Promise((r) => setTimeout(r, 4000));
 
 		await orchestrator.stop();
 
 		expect(childFn).toHaveBeenCalledTimes(1);
 		expect(childFn).toHaveBeenCalledWith(5);
 	}, 30000);
+
+	test("invoke() timeout fails pending child immediately", async () => {
+		const db = await pool.child();
+
+		const parentDefinition = defineTask({
+			name: "timeout-parent-2",
+			payload: z.object({}),
+			returns: z.object({ success: z.boolean() }),
+		});
+
+		const childDefinition = defineTask({
+			name: "slow-child-2",
+			payload: z.object({}),
+			returns: z.object({ completed: z.boolean() }),
+		});
+
+		const conductor = Conductor.create({
+			sql: db.sql,
+			tasks: TaskSchemas.fromSchema([parentDefinition, childDefinition]),
+			context: {},
+		});
+
+		// Child that takes 5 seconds
+		const slowChildTask = conductor.createTask(
+			{ name: "slow-child-2" },
+			{ invocable: true },
+			async (_event, ctx) => {
+				await ctx.sleep("long-sleep", 5000);
+				return { completed: true };
+			},
+		);
+
+		// Parent with 1 second timeout - let error throw
+		const timeoutParentTask = conductor.createTask(
+			{ name: "timeout-parent-2" },
+			{ invocable: true },
+			async (_event, ctx) => {
+				await ctx.invoke("invoke-slow", { name: "slow-child-2" }, {}, 1000);
+				return { success: true };
+			},
+		);
+
+		const startTime = new Date("2024-01-01T00:00:00Z");
+		await db.client.setFakeTime({ date: startTime });
+
+		const orchestrator = Orchestrator.create({
+			conductor,
+			tasks: [timeoutParentTask, slowChildTask],
+			defaultWorker: {
+				pollIntervalMs: 50,
+				flushIntervalMs: 50,
+			},
+		});
+
+		await orchestrator.start();
+
+		await conductor.invoke({ name: "timeout-parent-2" }, {});
+
+		// Wait for parent to invoke child
+		await new Promise((r) => setTimeout(r, 200));
+
+		// Advance time past timeout (child still pending due to 50ms intervals)
+		const afterTimeout = new Date(startTime.getTime() + 1500);
+		await db.client.setFakeTime({ date: afterTimeout });
+
+		// Wait for timeout to be processed
+		await new Promise((r) => setTimeout(r, 500));
+
+		await orchestrator.stop();
+		await db.client.clearFakeTime();
+
+		// Check that child was failed (not cancelled, since it wasn't locked)
+		const children = await db.sql<{
+			cancelled: boolean;
+			failed_at: Date | null;
+			last_error: string | null;
+		}[]>`
+			select cancelled, failed_at, last_error
+			from pgconductor.executions
+			where task_key = 'slow-child-2'
+		`;
+
+		expect(children.length).toBe(1);
+		expect(children[0]?.cancelled).toBe(false);  // Not cancelled since it was pending
+		expect(children[0]?.failed_at).not.toBeNull();
+		expect(children[0]?.last_error).toContain("parent timed out");
+	}, 10000);
 });

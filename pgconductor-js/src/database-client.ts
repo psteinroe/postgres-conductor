@@ -2,7 +2,6 @@ import postgres, { type PendingQuery, type Sql } from "postgres";
 import * as assert from "./lib/assert";
 import { waitFor } from "./lib/wait-for";
 import type { Migration } from "./migration-store";
-import type { TaskConfiguration } from "./task";
 import {
 	QueryBuilder,
 	type OrchestratorHeartbeatArgs,
@@ -18,8 +17,6 @@ import {
 	type LoadStepArgs,
 	type SaveStepArgs,
 	type ClearWaitingStateArgs,
-	type SubscribeEventArgs,
-	type SubscribeDbChangeArgs,
 	type EmitEventArgs,
 } from "./query-builder";
 
@@ -61,16 +58,99 @@ export interface Execution {
 	payload: Payload;
 	waiting_on_execution_id: string | null;
 	waiting_step_key: string | null;
+	cancelled: boolean;
+	last_error: string | null;
 	dedupe_key?: string | null;
 	cron_expression?: string | null;
 }
 
-export interface ExecutionResult {
+// todo: move all of this to query-builder too or create new types.ts file
+
+export type ExecutionResult =
+	| ExecutionCompleted
+	| ExecutionFailed
+	| ExecutionReleased
+	| ExecutionPermamentlyFailed
+	| ExecutionInvokeChild
+	| ExecutionWaitForCustomEvent
+	| ExecutionWaitForDatabaseEvent;
+
+export type GroupedExecutionResults = {
+	completed: ExecutionCompleted[];
+	failed: (ExecutionFailed | ExecutionPermamentlyFailed)[];
+	released: ExecutionReleased[];
+	invokeChild: ExecutionInvokeChild[];
+	waitForCustomEvent: ExecutionWaitForCustomEvent[];
+	waitForDbEvent: ExecutionWaitForDatabaseEvent[];
+	taskKeys: Set<string>;
+};
+
+export interface ExecutionCompleted {
 	execution_id: string;
+	queue: string;
 	task_key: string;
-	status: "completed" | "failed" | "released";
+	status: "completed";
 	result?: Payload;
-	error?: string;
+}
+
+export interface ExecutionFailed {
+	execution_id: string;
+	queue: string;
+	task_key: string;
+	status: "failed";
+	error: string;
+}
+
+export interface ExecutionReleased {
+	execution_id: string;
+	queue: string;
+	task_key: string;
+	status: "released";
+	reschedule_in_ms?: number | "infinity";
+	step_key?: string;
+}
+
+export interface ExecutionPermamentlyFailed {
+	execution_id: string;
+	queue: string;
+	task_key: string;
+	status: "permanently_failed";
+	error: string;
+}
+
+export interface ExecutionInvokeChild {
+	execution_id: string;
+	queue: string;
+	task_key: string;
+	status: "invoke_child";
+	timeout_ms: number | "infinity";
+	step_key: string;
+	child_task_name: string;
+	child_task_queue: string;
+	child_payload: Payload | null;
+}
+
+export interface ExecutionWaitForDatabaseEvent {
+	execution_id: string;
+	queue: string;
+	task_key: string;
+	status: "wait_for_db_event";
+	timeout_ms: number | "infinity";
+	step_key: string;
+	schema_name: string;
+	table_name: string;
+	operation: "insert" | "update" | "delete";
+	columns: string[] | undefined;
+}
+
+export interface ExecutionWaitForCustomEvent {
+	execution_id: string;
+	queue: string;
+	task_key: string;
+	status: "wait_for_custom_event";
+	timeout_ms: number | "infinity";
+	step_key: string;
+	event_key: string;
 }
 
 export interface EventSubscriptionSpec {
@@ -213,16 +293,32 @@ export class DatabaseClient {
 
 	async orchestratorHeartbeat(
 		args: OrchestratorHeartbeatArgs,
+	): Promise<
+		{
+			signal_type: string | null;
+			signal_execution_id: string | null;
+			signal_payload: Record<string, any> | null;
+		}[]
+	> {
+		return this.query(this.builder.buildOrchestratorHeartbeat(args), {
+			label: "orchestratorHeartbeat",
+		});
+	}
+
+	async cancelExecution(
+		executionId: string,
+		options?: { reason?: string },
 	): Promise<boolean> {
 		const result = await this.query(
-			this.builder.buildOrchestratorHeartbeat(args),
-			{ label: "orchestratorHeartbeat" },
+			this.sql<{ cancel_execution: boolean }[]>`
+				select pgconductor.cancel_execution(
+					${executionId}::uuid,
+					${options?.reason || "Cancelled by user"}::text
+				) as cancel_execution
+			`,
+			{ label: "cancelExecution" },
 		);
-
-		const row = result[0];
-		assert.ok(row, "No result returned from orchestrators_heartbeat");
-
-		return row.shutdown_signal;
+		return result[0]?.cancel_execution || false;
 	}
 
 	async recoverStaleOrchestrators(
@@ -338,10 +434,12 @@ export class DatabaseClient {
 		});
 	}
 
-	async returnExecutions(results: ExecutionResult[]): Promise<void> {
-		const query = this.builder.buildReturnExecutions(results);
+	async returnExecutions(grouped: GroupedExecutionResults): Promise<void> {
+		const query = this.builder.buildReturnExecutions(grouped);
 
-		if (!query) return;
+		if (!query) {
+			return;
+		}
 
 		await this.query(query, { label: "returnExecutions" });
 	}
@@ -386,13 +484,6 @@ export class DatabaseClient {
 	async invoke(spec: ExecutionSpec): Promise<string> {
 		const result = await this.query(this.builder.buildInvoke(spec), {
 			label: "invoke",
-		});
-		return result[0]!.id;
-	}
-
-	async invokeChild(spec: ExecutionSpec): Promise<string> {
-		const result = await this.query(this.builder.buildInvokeChild(spec), {
-			label: "invokeChild",
 		});
 		return result[0]!.id;
 	}
@@ -450,64 +541,6 @@ export class DatabaseClient {
 			},
 			{ label: "clearFakeTime" },
 		);
-	}
-
-	/**
-	 * Subscribe to an event and wait for it.
-	 * Returns the subscription id.
-	 */
-	async subscribeEvent({
-		executionId,
-		queue,
-		stepKey,
-		eventKey,
-		timeoutMs,
-	}: SubscribeEventArgs): Promise<string> {
-		const result = await this.query(
-			this.sql`
-				select pgconductor.subscribe_event(
-					${executionId}::uuid,
-					${queue},
-					${stepKey},
-					${eventKey},
-					${timeoutMs || null}::integer
-				) as id
-			`,
-			{ label: "subscribeEvent" },
-		);
-		return result[0]!.id;
-	}
-
-	/**
-	 * Subscribe to a database change and wait for it.
-	 * Returns the subscription id.
-	 */
-	async subscribeDbChange({
-		executionId,
-		queue,
-		stepKey,
-		schemaName,
-		tableName,
-		operation,
-		timeoutMs,
-		columns,
-	}: SubscribeDbChangeArgs): Promise<string> {
-		const result = await this.query(
-			this.sql`
-				select pgconductor.subscribe_db_change(
-					${executionId}::uuid,
-					${queue},
-					${stepKey},
-					${schemaName},
-					${tableName},
-					${operation},
-					${timeoutMs || null}::integer,
-					${columns || null}::text[]
-				) as id
-			`,
-			{ label: "subscribeDbChange" },
-		);
-		return result[0]!.id;
 	}
 
 	/**

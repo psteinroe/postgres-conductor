@@ -175,13 +175,17 @@ export class Orchestrator {
 					return;
 				}
 
-				const hbShutdown = await this.db.orchestratorHeartbeat({
+				const signals = await this.db.orchestratorHeartbeat({
 					orchestratorId: this.orchestratorId,
 					version: PACKAGE_VERSION,
 					migrationNumber: this.migrationStore.getLatestMigrationNumber(),
 				});
 
-				if (hbShutdown) {
+				// Check for shutdown signal on startup
+				const hasShutdownSignal = signals.some(
+					(s) => s.signal_type === "shutdown",
+				);
+				if (hasShutdownSignal) {
 					this.logger.info(
 						`Orchestrator ${this.orchestratorId} detected newer schema after migrations, shutting down`,
 					);
@@ -283,16 +287,42 @@ export class Orchestrator {
 					});
 				}
 
-				// Send heartbeat and check for shutdown signal
-				const shouldShutdown = await this.db.orchestratorHeartbeat({
+				// Send heartbeat and process signals
+				const signals = await this.db.orchestratorHeartbeat({
 					orchestratorId: this.orchestratorId,
 					version: PACKAGE_VERSION,
 					migrationNumber: this.migrationStore.getLatestMigrationNumber(),
 				});
 
-				if (shouldShutdown && !this.signal.aborted) {
-					this.logger.info(`Received shutdown signal`);
-					this.abortController.abort();
+				// Process signals in order
+				for (const signal of signals) {
+					if (!signal.signal_type) continue;
+
+					switch (signal.signal_type) {
+						case "shutdown":
+							if (!this.signal.aborted) {
+								this.logger.info(
+									`Received shutdown signal: ${signal.signal_payload?.reason || "unknown"}`,
+								);
+								this.abortController.abort();
+							}
+							break;
+
+						case "cancel_execution":
+							if (
+								signal.signal_execution_id &&
+								signal.signal_payload &&
+								signal.signal_payload.queue
+							) {
+								const worker = this.workers.find(
+									(w) => w.queueName === signal.signal_payload?.queue,
+								);
+								if (worker) {
+									worker.cancelExecutions([signal.signal_execution_id]);
+								}
+							}
+							break;
+					}
 				}
 			} catch (err) {
 				this.logger.error("Heartbeat error:", err);

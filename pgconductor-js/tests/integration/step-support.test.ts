@@ -53,13 +53,14 @@ describe("Step Support", () => {
 		const orchestrator = Orchestrator.create({
 			conductor,
 			tasks: [stepTask],
+			defaultWorker: { pollIntervalMs: 50, flushIntervalMs: 50 },
 		});
 
 		await orchestrator.start();
 
 		await conductor.invoke({ name: "step-task" }, { value: 5 });
 
-		await new Promise((r) => setTimeout(r, 2000));
+		await new Promise((r) => setTimeout(r, 200));
 
 		await orchestrator.stop();
 
@@ -103,6 +104,7 @@ describe("Step Support", () => {
 		const orchestrator = Orchestrator.create({
 			conductor,
 			tasks: [sleepTask],
+			defaultWorker: { pollIntervalMs: 50, flushIntervalMs: 50 },
 		});
 
 		await orchestrator.start();
@@ -110,14 +112,14 @@ describe("Step Support", () => {
 		await conductor.invoke({ name: "sleep-task" }, { delay: 2000 });
 
 		// Wait for initial execution (should hit sleep and release)
-		await new Promise((r) => setTimeout(r, 1500));
+		await new Promise((r) => setTimeout(r, 200));
 
 		// At this point, should have seen "before-sleep" but not "after-sleep"
 		expect(executionSteps).toHaveBeenCalledWith("before-sleep");
 		expect(executionSteps).not.toHaveBeenCalledWith("after-sleep");
 
 		// Wait for sleep to complete and task to resume (2s sleep + buffer)
-		await new Promise((r) => setTimeout(r, 3000));
+		await new Promise((r) => setTimeout(r, 2200));
 
 		// Now should see "after-sleep"
 		expect(executionSteps).toHaveBeenCalledWith("after-sleep");
@@ -163,6 +165,7 @@ describe("Step Support", () => {
 		const orchestrator = Orchestrator.create({
 			conductor,
 			tasks: [checkpointTask],
+			defaultWorker: { pollIntervalMs: 50, flushIntervalMs: 50 },
 		});
 
 		await orchestrator.start();
@@ -170,7 +173,7 @@ describe("Step Support", () => {
 		await conductor.invoke({ name: "checkpoint-task" }, { items: 5 });
 
 		// Wait for task to complete
-		await new Promise((r) => setTimeout(r, 2000));
+		await new Promise((r) => setTimeout(r, 300));
 
 		await orchestrator.stop();
 
@@ -215,13 +218,14 @@ describe("Step Support", () => {
 		const orchestrator = Orchestrator.create({
 			conductor,
 			tasks: [multiStepTask],
+			defaultWorker: { pollIntervalMs: 50, flushIntervalMs: 50 },
 		});
 
 		await orchestrator.start();
 
 		await conductor.invoke({ name: "multi-step-task" }, { x: 5 });
 
-		await new Promise((r) => setTimeout(r, 2000));
+		await new Promise((r) => setTimeout(r, 200));
 
 		await orchestrator.stop();
 

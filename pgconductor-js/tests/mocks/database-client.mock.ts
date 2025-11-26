@@ -9,7 +9,7 @@ type IDatabaseClient = PublicMethodsOf<DatabaseClient>;
 
 export class MockDatabaseClient implements IDatabaseClient {
 	close = mock(async () => {});
-	orchestratorHeartbeat = mock(async () => false);
+	orchestratorHeartbeat = mock(async () => []);
 	recoverStaleOrchestrators = mock(async () => {});
 	sweepOrchestrators = mock(async () => {});
 	getInstalledMigrationNumber = mock(async () => -1);
@@ -29,6 +29,7 @@ export class MockDatabaseClient implements IDatabaseClient {
 	loadStep = mock(async () => null);
 	saveStep = mock(async (args) => {});
 	clearWaitingState = mock(async () => {});
+	cancelExecution = mock(async () => true);
 	setFakeTime = mock(async () => {});
 	clearFakeTime = mock(async () => {});
 	subscribeEvent = mock(async () => "mock-subscription-id");

@@ -87,9 +87,29 @@ afterAll(async () => {
 
 test("example", async () => {
   const db = await pool.child();  // Isolated connection
-  // test code
+
+  // Create conductor and task
+  const conductor = Conductor.create({
+    sql: db.sql,
+    tasks: TaskSchemas.fromSchema([taskDefinition]),
+    context: {},
+  });
+
+  conductor.createTask(
+    { name: "example-task" },
+    { invocable: true },
+    async (event, _ctx) => { /* handler */ },
+  );
+
+  // Initialize schema before invoking tasks
+  await conductor.ensureInstalled();
+
+  // Now safe to invoke tasks
+  await conductor.invoke({ name: "example-task" }, {});
 });
 ```
+
+**Important**: Integration tests must call `await conductor.ensureInstalled()` before invoking tasks. This initializes the database schema (tables, functions, etc.). Without this, `conductor.invoke()` will fail with "schema pgconductor does not exist".
 
 ### Modifying Migrations
 

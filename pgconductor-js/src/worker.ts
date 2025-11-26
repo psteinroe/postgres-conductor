@@ -4,6 +4,13 @@ import type {
 	Execution,
 	ExecutionResult,
 	ExecutionSpec,
+	ExecutionCompleted,
+	ExecutionFailed,
+	ExecutionPermamentlyFailed,
+	ExecutionReleased,
+	ExecutionInvokeChild,
+	ExecutionWaitForCustomEvent,
+	ExecutionWaitForDatabaseEvent,
 } from "./database-client";
 import type { AnyTask } from "./task";
 import type { TaskDefinition } from "./task-definition";
@@ -12,14 +19,18 @@ import { mapConcurrent } from "./lib/map-concurrent";
 import { Deferred } from "./lib/deferred";
 import { AsyncQueue } from "./lib/async-queue";
 import CronExpressionParser from "cron-parser";
-import { TaskContext } from "./task-context";
+import {
+	createTaskSignal,
+	isTaskAbortReason,
+	TaskContext,
+	type TaskAbortReasons,
+} from "./task-context";
 import * as assert from "./lib/assert";
 import { createMaintenanceTask } from "./maintenance-task";
 import { makeChildLogger, type Logger } from "./lib/logger";
 import type { EventDefinition } from "./event-definition";
 import { coerceError } from "./lib/coerce-error";
-
-const HANGUP = Symbol("hangup");
+import type { TypedAbortController } from "./lib/typed-abort-controller";
 
 export type WorkerConfig = {
 	concurrency: number;
@@ -36,6 +47,71 @@ export const DEFAULT_WORKER_CONFIG: WorkerConfig = {
 	pollIntervalMs: 1000,
 	flushIntervalMs: 2000,
 };
+
+/**
+ * Encapsulates buffered execution results with internal counting and task key tracking.
+ */
+class BufferState {
+	completed: ExecutionCompleted[] = [];
+	failed: (ExecutionFailed | ExecutionPermamentlyFailed)[] = [];
+	released: ExecutionReleased[] = [];
+	invokeChild: ExecutionInvokeChild[] = [];
+	waitForCustomEvent: ExecutionWaitForCustomEvent[] = [];
+	waitForDbEvent: ExecutionWaitForDatabaseEvent[] = [];
+	taskKeys = new Set<string>();
+	count = 0;
+
+	add(result: ExecutionResult): void {
+		this.taskKeys.add(result.task_key);
+		this.count++;
+
+		switch (result.status) {
+			case "completed":
+				this.completed.push(result);
+				break;
+			case "failed":
+			case "permanently_failed":
+				this.failed.push(result);
+				break;
+			case "released":
+				this.released.push(result);
+				break;
+			case "invoke_child":
+				this.invokeChild.push(result);
+				break;
+			case "wait_for_custom_event":
+				this.waitForCustomEvent.push(result);
+				break;
+			case "wait_for_db_event":
+				this.waitForDbEvent.push(result);
+				break;
+		}
+	}
+
+	clear(): void {
+		this.completed = [];
+		this.failed = [];
+		this.released = [];
+		this.invokeChild = [];
+		this.waitForCustomEvent = [];
+		this.waitForDbEvent = [];
+		this.taskKeys.clear();
+		this.count = 0;
+	}
+
+	restore(other: BufferState): void {
+		this.completed.push(...other.completed);
+		this.failed.push(...other.failed);
+		this.released.push(...other.released);
+		this.invokeChild.push(...other.invokeChild);
+		this.waitForCustomEvent.push(...other.waitForCustomEvent);
+		this.waitForDbEvent.push(...other.waitForDbEvent);
+		this.count += other.count;
+		for (const key of other.taskKeys) {
+			this.taskKeys.add(key);
+		}
+	}
+}
 
 /**
  * Worker implemented as async pipeline: fetch → execute → flush.
@@ -68,6 +144,10 @@ export class Worker<
 	private _startDeferred: Deferred<void> | null = null;
 	private _stopDeferred: Deferred<void> | null = null;
 	private _abortController: AbortController | null = null;
+	private _runningTasks = new Map<
+		string,
+		TypedAbortController<TaskAbortReasons>
+	>();
 
 	constructor(
 		public readonly queueName: string,
@@ -201,6 +281,23 @@ export class Worker<
 		try {
 			await currentStopDeferred.promise;
 		} catch {}
+	}
+
+	/**
+	 * Cancel running executions by aborting their task controllers.
+	 * Called by orchestrator when cancellation signals are received.
+	 */
+	public cancelExecutions(ids: string[]): void {
+		for (const id of ids) {
+			const controller = this._runningTasks.get(id);
+			if (controller) {
+				controller.abort({
+					reason: "cancelled",
+					__pgconductorTaskAborted: true,
+				});
+				this._runningTasks.delete(id);
+			}
+		}
 	}
 
 	private async register(): Promise<void> {
@@ -365,11 +462,12 @@ export class Worker<
 		for await (const result of mapConcurrent(
 			source,
 			this.concurrency,
-			async (exec) => {
+			async (exec): Promise<ExecutionResult> => {
 				// Dispatch to correct task based on task_key
 				const task = this.tasks.get(exec.task_key);
 				if (!task) {
 					return {
+						queue: exec.queue,
 						execution_id: exec.id,
 						task_key: exec.task_key,
 						status: "failed",
@@ -377,11 +475,32 @@ export class Worker<
 					} as const;
 				}
 
-				const taskAbortController = new AbortController();
+				// Safety check: don't execute already-cancelled tasks
+				if (exec.cancelled) {
+					return {
+						execution_id: exec.id,
+						queue: exec.queue,
+						task_key: exec.task_key,
+						status: "permanently_failed",
+						error: exec.last_error || "Execution was cancelled",
+					} as const;
+				}
 
-				const hangupPromise = new Promise<typeof HANGUP>((resolve) => {
+				if (this.signal.aborted) {
+					return {
+						queue: exec.queue,
+						execution_id: exec.id,
+						task_key: exec.task_key,
+						status: "released",
+					} as const;
+				}
+
+				const taskAbortController = createTaskSignal(this.signal);
+				this._runningTasks.set(exec.id, taskAbortController);
+
+				const abortPromise = new Promise<TaskAbortReasons>((resolve) => {
 					taskAbortController.signal.addEventListener("abort", () => {
-						resolve(HANGUP);
+						resolve(taskAbortController.signal.reason);
 					});
 				});
 
@@ -419,7 +538,6 @@ export class Worker<
 							taskEvent,
 							TaskContext.create<Tasks, Events, typeof extraContext>(
 								{
-									signal: this.signal,
 									db: this.db,
 									abortController: taskAbortController,
 									execution: exec,
@@ -432,19 +550,76 @@ export class Worker<
 								extraContext,
 							),
 						),
-						hangupPromise,
+						abortPromise,
 					]);
 
-					if (output === HANGUP) {
-						return {
-							execution_id: exec.id,
-							task_key: exec.task_key,
-							status: "released",
-						} as const;
+					if (isTaskAbortReason(output)) {
+						switch (output.reason) {
+							case "wait-for-custom-event":
+								return {
+									execution_id: exec.id,
+									queue: exec.queue,
+									task_key: exec.task_key,
+									status: "wait_for_custom_event",
+									timeout_ms: output.timeout_ms,
+									step_key: output.step_key,
+									event_key: output.event_key,
+								} as const;
+							case "wait-for-database-event":
+								return {
+									execution_id: exec.id,
+									queue: exec.queue,
+									task_key: exec.task_key,
+									status: "wait_for_db_event",
+									timeout_ms: output.timeout_ms,
+									step_key: output.step_key,
+									schema_name: output.schema_name,
+									table_name: output.table_name,
+									operation: output.operation,
+									columns: output.columns,
+								} as const;
+							case "child-invocation":
+								return {
+									execution_id: exec.id,
+									queue: exec.queue,
+									task_key: exec.task_key,
+									status: "invoke_child",
+									timeout_ms: output.timeout_ms,
+									step_key: output.step_key,
+									child_task_name: output.task.name,
+									child_task_queue: output.task.queue || "default",
+									child_payload: output.payload,
+								} as const;
+							case "cancelled":
+								return {
+									execution_id: exec.id,
+									queue: exec.queue,
+									task_key: exec.task_key,
+									status: "permanently_failed",
+									error: exec.last_error || "Task was cancelled",
+								} as const;
+							case "released":
+							case "parent-aborted":
+								return {
+									execution_id: exec.id,
+									queue: exec.queue,
+									reschedule_in_ms:
+										output.reason === "released"
+											? output.reschedule_in_ms
+											: undefined,
+									step_key:
+										output.reason === "released" ? output.step_key : undefined,
+									task_key: exec.task_key,
+									status: "released",
+								} as const;
+							default:
+								assert.never(output);
+						}
 					}
 
 					return {
 						execution_id: exec.id,
+						queue: exec.queue,
 						task_key: exec.task_key,
 						status: "completed",
 						result: output,
@@ -452,10 +627,14 @@ export class Worker<
 				} catch (err) {
 					return {
 						execution_id: exec.id,
+						queue: exec.queue,
 						task_key: exec.task_key,
 						status: "failed",
 						error: coerceError(err).message,
 					} as const;
+				} finally {
+					// Clean up running task tracking
+					this._runningTasks.delete(exec.id);
 				}
 			},
 		)) {
@@ -490,17 +669,18 @@ export class Worker<
 	}
 
 	// --- Stage 3: Flush results to database ---
+
 	private async *flushResults(
 		source: AsyncIterable<ExecutionResult>,
 	): AsyncGenerator<void> {
-		let buffer: ExecutionResult[] = [];
+		let buffer = new BufferState();
 		let flushTimer: Timer | null = null;
 
 		const flushNow = async (isCleanup = false) => {
-			if (buffer.length === 0) return;
+			if (buffer.count === 0) return;
 
 			const batch = buffer;
-			buffer = [];
+			buffer = new BufferState();
 
 			if (flushTimer) {
 				clearTimeout(flushTimer);
@@ -512,7 +692,7 @@ export class Worker<
 			} catch (err) {
 				this.logger.error("Error flushing results:", err);
 				if (!isCleanup) {
-					buffer.push(...batch);
+					buffer.restore(batch);
 				}
 			}
 		};
@@ -526,12 +706,12 @@ export class Worker<
 
 		try {
 			for await (const result of source) {
-				buffer.push(result);
+				buffer.add(result);
 
 				// Start timer only after first result arrives
 				if (!flushTimer) scheduleFlush();
 
-				if (buffer.length >= this.flushBatchSize) {
+				if (buffer.count >= this.flushBatchSize) {
 					await flushNow();
 					scheduleFlush();
 				}

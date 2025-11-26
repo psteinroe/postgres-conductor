@@ -72,7 +72,7 @@ async function main() {
 
 	// 2. Measure startup time (single worker, empty queue)
 	console.log("Measuring startup overhead...");
-	const startupResult = await spawnWorker("worker.ts", DB_URL, {
+	const startupEnv: Record<string, string> = {
 		WORKER_ID: "startup",
 		MEASURE_STARTUP: "1",
 		TASK_TYPE: scenario.taskType,
@@ -80,7 +80,11 @@ async function main() {
 		FLUSH_INTERVAL_MS: scenario.workerSettings.flushIntervalMs.toString(),
 		CONCURRENCY: scenario.workerSettings.concurrency.toString(),
 		FETCH_BATCH_SIZE: scenario.workerSettings.fetchBatchSize.toString(),
-	});
+	};
+	if ("flushBatchSize" in scenario.workerSettings && scenario.workerSettings.flushBatchSize !== undefined) {
+		startupEnv.FLUSH_BATCH_SIZE = scenario.workerSettings.flushBatchSize.toString();
+	}
+	const startupResult = await spawnWorker("worker.ts", DB_URL, startupEnv);
 	if (startupResult.exitCode !== 0) {
 		console.error("Startup measurement failed:", startupResult.stderr);
 		process.exit(1);
@@ -125,7 +129,7 @@ async function main() {
 			CONCURRENCY: scenario.workerSettings.concurrency.toString(),
 			FETCH_BATCH_SIZE: scenario.workerSettings.fetchBatchSize.toString(),
 		};
-		if (scenario.workerSettings.flushBatchSize !== undefined) {
+		if ("flushBatchSize" in scenario.workerSettings && scenario.workerSettings.flushBatchSize !== undefined) {
 			env.FLUSH_BATCH_SIZE = scenario.workerSettings.flushBatchSize.toString();
 		}
 		workerPromises.push(spawnWorker("worker.ts", DB_URL, env));

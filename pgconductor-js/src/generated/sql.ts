@@ -75,13 +75,30 @@ create table pgconductor.orchestrators (
     id uuid default pgconductor.portable_uuidv7() primary key,
     last_heartbeat_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     version text,
-    migration_number integer,
-    shutdown_signal boolean default false not null,
-    cancellation_signal boolean default false not null
+    migration_number integer
 );
 
 create index idx_orchestrators_heartbeat on pgconductor.orchestrators (last_heartbeat_at);
 create index idx_orchestrators_sweep on pgconductor.orchestrators (migration_number);
+
+create table pgconductor.orchestrator_signals (
+    id uuid primary key default pgconductor.portable_uuidv7(),
+    orchestrator_id uuid not null references pgconductor.orchestrators(id) on delete cascade,
+    type text not null,
+    execution_id uuid,
+    payload jsonb not null default '{}'::jsonb,
+    created_at timestamptz not null default pgconductor.current_time()
+);
+
+create index idx_orchestrator_signals_orchestrator on pgconductor.orchestrator_signals(orchestrator_id, created_at);
+
+create unique index idx_orchestrator_signals_cancel_unique
+    on pgconductor.orchestrator_signals(orchestrator_id, execution_id)
+    where type = 'cancel_execution' and execution_id is not null;
+
+create unique index idx_orchestrator_signals_shutdown_unique
+    on pgconductor.orchestrator_signals(orchestrator_id)
+    where type = 'shutdown';
 
 create table pgconductor.queues (
     name text primary key
@@ -103,9 +120,11 @@ create table pgconductor.executions (
     is_available boolean generated always as (locked_at is null and failed_at is null and completed_at is null) stored not null,
     attempts integer default 0 not null,
     last_error text,
+    cancelled boolean default false not null,
     priority integer default 0 not null,
     waiting_on_execution_id uuid,
     waiting_step_key text,
+    parent_execution_id uuid,
     primary key (id, queue),
     unique (task_key, dedupe_key, queue)
 ) partition by list (queue);
@@ -185,6 +204,13 @@ begin
     execute format(
       'create index if not exists %I on pgconductor.%I (waiting_on_execution_id) where waiting_on_execution_id is not null',
       'idx_' || v_partition_name || '_waiting_on_execution_id',
+      v_partition_name
+    );
+
+    -- index for parent execution lookup (child -> parent)
+    execute format(
+      'create index if not exists %I on pgconductor.%I (parent_execution_id) where parent_execution_id is not null',
+      'idx_' || v_partition_name || '_parent_execution_id',
       v_partition_name
     );
 
@@ -300,7 +326,6 @@ create table if not exists pgconductor.triggers (
     schema_name text not null,
     table_name text not null,
     operation text not null, -- 'insert', 'update', 'delete'
-    columns text[], -- columns to select for db events
     created_at timestamptz default pgconductor.current_time() not null,
     primary key (schema_name, table_name, operation)
 );
@@ -497,12 +522,11 @@ begin
   from unnest(p_event_subscriptions) as spec;
 
  -- step 7: make sure we sync database triggers if required
- insert into pgconductor.triggers (schema_name, table_name, operation, columns)
+ insert into pgconductor.triggers (schema_name, table_name, operation)
   select
     spec.schema_name,
     spec.table_name,
-    spec.operation,
-    spec.columns
+    spec.operation
   from unnest(p_event_subscriptions) as spec
   where spec.schema_name is not null
   on conflict (schema_name, table_name, operation) do nothing;
@@ -560,55 +584,6 @@ end;
 $function$
 ;
 
-create or replace function pgconductor.invoke_child(
-    task_key text,
-    queue text default 'default',
-    payload jsonb default null,
-    run_at timestamptz default null,
-    dedupe_key text default null,
-    cron_expression text default null,
-    priority integer default null,
-    parent_execution_id uuid default null,
-    parent_step_key text default null,
-    parent_timeout_ms integer default null
-)
- returns uuid
- language plpgsql
- volatile
- set search_path to ''
-as $function$
-declare
-    v_execution_id uuid;
-begin
-    select id from pgconductor.invoke(
-        invoke_child.task_key,
-        invoke_child.queue,
-        invoke_child.payload,
-        invoke_child.run_at,
-        invoke_child.dedupe_key,
-        invoke_child.cron_expression,
-        invoke_child.priority
-    ) into v_execution_id;
-
-    update pgconductor.executions
-    set
-        waiting_on_execution_id = v_execution_id,
-        waiting_step_key = invoke_child.parent_step_key,
-        run_at = case
-            when invoke_child.parent_timeout_ms is not null then
-                pgconductor.current_time() + (invoke_child.parent_timeout_ms || ' milliseconds')::interval
-            else
-                'infinity'::timestamptz
-        end
-    where id = invoke_child.parent_execution_id
-      and invoke_child.parent_execution_id is not null;
-
-    return v_execution_id;
-end;
-$function$
-;
-
-
 create or replace function pgconductor.invoke(
     task_key text,
     queue text default 'default',
@@ -662,122 +637,6 @@ end;
 $function$
 ;
 
--- subscribe to an event and wait for it
--- returns the subscription id
-create or replace function pgconductor.subscribe_event(
-    p_execution_id uuid,
-    p_queue text,
-    p_step_key text,
-    p_event_key text,
-    p_timeout_ms integer default null
-)
-returns uuid
-language plpgsql
-volatile
-set search_path to ''
-as $function$
-declare
-    v_subscription_id uuid;
-begin
-    -- create subscription
-    insert into pgconductor.subscriptions (source, event_key, execution_id, queue, step_key)
-    values ('event', p_event_key, p_execution_id, p_queue, p_step_key)
-    returning id into v_subscription_id;
-
-    -- update execution to wait
-    update pgconductor.executions
-    set
-        waiting_step_key = p_step_key,
-        run_at = case
-            when p_timeout_ms is not null then
-                pgconductor.current_time() + (p_timeout_ms || ' milliseconds')::interval
-            else
-                'infinity'::timestamptz
-        end
-    where id = p_execution_id and queue = p_queue;
-
-    return v_subscription_id;
-end;
-$function$;
-
--- subscribe to a database change and wait for it
--- returns the subscription id
-create or replace function pgconductor.subscribe_db_change(
-    p_execution_id uuid,
-    p_queue text,
-    p_step_key text,
-    p_schema_name text,
-    p_table_name text,
-    p_operation text, -- 'insert', 'update', 'delete'
-    p_timeout_ms integer default null,
-    p_columns text[] default null
-)
-returns uuid
-language plpgsql
-volatile
-set search_path to ''
-as $function$
-declare
-    v_subscription_id uuid;
-begin
-    -- create subscription
-    insert into pgconductor.subscriptions (source, schema_name, table_name, operation, execution_id, queue, step_key, columns)
-    values ('db', p_schema_name, p_table_name, p_operation, p_execution_id, p_queue, p_step_key, p_columns)
-    returning id into v_subscription_id;
-
-    -- insert triggers
-    insert into pgconductor.triggers (schema_name, table_name, operation, columns)
-    values (p_schema_name, p_table_name, p_operation, p_columns)
-      on conflict (schema_name, table_name, operation) do nothing;
-
-    -- update execution to wait
-    update pgconductor.executions
-    set
-        waiting_step_key = p_step_key,
-        run_at = case
-            when p_timeout_ms is not null then
-                pgconductor.current_time() + (p_timeout_ms || ' milliseconds')::interval
-            else
-                'infinity'::timestamptz
-        end
-    where id = p_execution_id and queue = p_queue;
-
-    return v_subscription_id;
-end;
-$function$;
-
--- wake up an execution waiting for an event
--- called by event-router when event arrives for step-based subscriptions
-create or replace function pgconductor.wake_execution(
-    p_execution_id uuid,
-    p_queue text,
-    p_step_key text,
-    p_result jsonb
-)
-returns void
-language plpgsql
-volatile
-set search_path to ''
-as $function$
-begin
-    -- save step result
-    insert into pgconductor.steps (key, execution_id, queue, result)
-    values (p_step_key, p_execution_id, p_queue, p_result)
-    on conflict (key, execution_id) do nothing;
-
-    -- wake up execution
-    update pgconductor.executions
-    set
-        waiting_step_key = null,
-        run_at = pgconductor.current_time()
-    where id = p_execution_id and queue = p_queue;
-
-    -- delete subscription (step-based subscriptions are one-time)
-    delete from pgconductor.subscriptions
-    where execution_id = p_execution_id;
-end;
-$function$;
-
 -- invoke a task from an event trigger
 -- called by event-router when event arrives for trigger-based (persistent) subscriptions
 create or replace function pgconductor.invoke_from_event(
@@ -819,6 +678,83 @@ as $function$
     insert into pgconductor.events (event_key, payload)
     values (p_event_key, p_payload)
     returning id;
+$function$;
+
+-- cancel an execution
+create or replace function pgconductor.cancel_execution(
+  p_execution_id uuid,
+  p_reason text default 'Cancelled by user'
+)
+returns boolean
+language plpgsql
+volatile
+set search_path to ''
+as $function$
+declare
+  v_orchestrator_id uuid;
+  v_queue text;
+  v_completed boolean;
+  v_failed boolean;
+  v_rows_affected integer;
+begin
+  select
+    locked_by,
+    queue,
+    completed_at is not null,
+    failed_at is not null
+  into v_orchestrator_id, v_queue, v_completed, v_failed
+  from pgconductor.executions
+  where id = p_execution_id;
+
+  if not found or v_completed or v_failed then
+    return false;
+  end if;
+
+  if v_orchestrator_id is null then
+    -- pending: fail immediately
+    update pgconductor.executions
+    set
+      failed_at = pgconductor.current_time(),
+      last_error = p_reason,
+      locked_by = null,
+      locked_at = null
+    where id = p_execution_id
+      and completed_at is null
+      and failed_at is null;
+
+    get diagnostics v_rows_affected = row_count;
+    return v_rows_affected > 0;
+  else
+    -- running: signal orchestrator + set cancelled flag
+    update pgconductor.executions
+    set
+      cancelled = true,
+      last_error = p_reason
+    where id = p_execution_id
+      and completed_at is null
+      and cancelled = false;
+
+    get diagnostics v_rows_affected = row_count;
+
+    if v_rows_affected > 0 then
+      insert into pgconductor.orchestrator_signals
+        (orchestrator_id, type, execution_id, payload)
+      values (
+        v_orchestrator_id,
+        'cancel_execution',
+        p_execution_id,
+        jsonb_build_object('queue', v_queue, 'reason', p_reason)
+      )
+      on conflict (orchestrator_id, execution_id)
+        where type = 'cancel_execution' and execution_id is not null
+      do nothing;
+
+      return true;
+    else
+      return false;
+    end if;
+  end if;
+end;
 $function$;
 `,
 });

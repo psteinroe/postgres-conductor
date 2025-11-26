@@ -89,7 +89,9 @@ describe("Maintenance Task", () => {
 		// Complete the execution manually
 		await db.sql`
 			UPDATE pgconductor.executions
-			SET completed_at = pgconductor.current_time()
+			SET completed_at = pgconductor.current_time(),
+				locked_by = null,
+				locked_at = null
 			WHERE id = ${oldExecId}
 		`;
 
@@ -103,7 +105,9 @@ describe("Maintenance Task", () => {
 
 		await db.sql`
 			UPDATE pgconductor.executions
-			SET completed_at = pgconductor.current_time()
+			SET completed_at = pgconductor.current_time(),
+				locked_by = null,
+				locked_at = null
 			WHERE id = ${recentExecId}
 		`;
 
@@ -115,7 +119,7 @@ describe("Maintenance Task", () => {
 		await conductor.invoke({ name: "pgconductor.maintenance" }, {});
 
 		// Wait for execution
-		await new Promise((r) => setTimeout(r, 1000));
+		await new Promise((r) => setTimeout(r, 3000));
 
 		await orchestrator.stop();
 		await db.client.clearFakeTime();
@@ -293,7 +297,9 @@ describe("Maintenance Task", () => {
 		// Complete both
 		await db.sql`
 			UPDATE pgconductor.executions
-			SET completed_at = pgconductor.current_time()
+			SET completed_at = pgconductor.current_time(),
+				locked_by = null,
+				locked_at = null
 			WHERE id = ANY(${[shortExecId, longExecId]}::uuid[])
 		`;
 
@@ -305,7 +311,7 @@ describe("Maintenance Task", () => {
 		await conductor.invoke({ name: "pgconductor.maintenance" }, {});
 
 		// Wait for execution
-		await new Promise((r) => setTimeout(r, 1000));
+		await new Promise((r) => setTimeout(r, 3000));
 
 		await orchestrator.stop();
 
@@ -371,7 +377,9 @@ describe("Maintenance Task", () => {
 		// Complete all
 		await db.sql`
 			UPDATE pgconductor.executions
-			SET completed_at = pgconductor.current_time()
+			SET completed_at = pgconductor.current_time(),
+				locked_by = null,
+				locked_at = null
 			WHERE task_key = 'batch-task'
 		`;
 
@@ -437,7 +445,9 @@ describe("Maintenance Task", () => {
 
 		await db.sql`
 			UPDATE pgconductor.executions
-			SET completed_at = pgconductor.current_time()
+			SET completed_at = pgconductor.current_time(),
+				locked_by = null,
+				locked_at = null
 			WHERE id = ${execId}
 		`;
 

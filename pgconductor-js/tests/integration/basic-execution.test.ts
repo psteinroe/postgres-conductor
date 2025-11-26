@@ -52,6 +52,7 @@ describe("Basic Task Execution", () => {
 		const orchestrator = Orchestrator.create({
 			conductor,
 			tasks: [helloTask],
+			defaultWorker: { pollIntervalMs: 50, flushIntervalMs: 50 },
 		});
 
 		await orchestrator.start();

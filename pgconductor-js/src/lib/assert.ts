@@ -11,3 +11,7 @@ export function equal<T>(actual: T, expected: T, message?: string): void {
 		);
 	}
 }
+
+export function never(x: never): never {
+	throw new Error(`Unhandled case: ${x}`);
+}

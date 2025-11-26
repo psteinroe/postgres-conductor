@@ -5,7 +5,7 @@ import type { TestDatabase } from "../../tests/fixtures/test-database";
 import { scenarios, type Scenario } from "./scenarios";
 import { Fixtures } from "./lib/fixtures";
 import { QueryBuilder } from "../../src/query-builder";
-import type { ExecutionResult } from "../../src/database-client";
+import type { ExecutionResult, GroupedExecutionResults } from "../../src/database-client";
 
 // Query definition with variations
 type QueryVariation = {
@@ -37,8 +37,8 @@ async function generateResultsFromDb(
 	const totalNeeded = (config.completed || 0) + (config.failed || 0) + (config.released || 0);
 
 	// Fetch real execution IDs from the database
-	const executions = await db.sql<{ id: string; task_key: string }[]>`
-		select id, task_key from pgconductor.executions
+	const executions = await db.sql<{ id: string; task_key: string; queue: string }[]>`
+		select id, task_key, queue from pgconductor.executions
 		where completed_at is null and failed_at is null
 		limit ${totalNeeded}
 	`;
@@ -50,6 +50,7 @@ async function generateResultsFromDb(
 		results.push({
 			execution_id: executions[idx]!.id,
 			task_key: executions[idx]!.task_key,
+			queue: executions[idx]!.queue,
 			status: "completed",
 			result: { value: i },
 		});
@@ -61,6 +62,7 @@ async function generateResultsFromDb(
 		results.push({
 			execution_id: executions[idx]!.id,
 			task_key: executions[idx]!.task_key,
+			queue: executions[idx]!.queue,
 			status: "failed",
 			error: `Error ${i}`,
 		});
@@ -72,12 +74,38 @@ async function generateResultsFromDb(
 		results.push({
 			execution_id: executions[idx]!.id,
 			task_key: executions[idx]!.task_key,
+			queue: executions[idx]!.queue,
 			status: "released",
 		});
 		idx++;
 	}
 
 	return results;
+}
+
+function groupResults(results: ExecutionResult[]): GroupedExecutionResults {
+	const grouped: GroupedExecutionResults = {
+		completed: [],
+		failed: [],
+		released: [],
+		invokeChild: [],
+		waitForCustomEvent: [],
+		waitForDbEvent: [],
+		taskKeys: new Set<string>(),
+	};
+
+	for (const result of results) {
+		grouped.taskKeys.add(result.task_key);
+		if (result.status === "completed") {
+			grouped.completed.push(result);
+		} else if (result.status === "failed" || result.status === "permanently_failed") {
+			grouped.failed.push(result);
+		} else if (result.status === "released") {
+			grouped.released.push(result);
+		}
+	}
+
+	return grouped;
 }
 
 // Query definitions
@@ -142,7 +170,7 @@ const queries: QueryDefinition[] = [
 				setup: async () => {},
 				execute: async (qb, scenario, db) => {
 					const results = await generateResultsFromDb(db, scenario, { completed: 10 });
-					return qb.buildReturnExecutions(results, true);
+					return qb.buildReturnExecutions(groupResults(results));
 				},
 			},
 			{
@@ -151,7 +179,7 @@ const queries: QueryDefinition[] = [
 				setup: async () => {},
 				execute: async (qb, scenario, db) => {
 					const results = await generateResultsFromDb(db, scenario, { completed: 10 });
-					return qb.buildReturnExecutions(results, true);
+					return qb.buildReturnExecutions(groupResults(results));
 				},
 			},
 			{
@@ -160,7 +188,7 @@ const queries: QueryDefinition[] = [
 				setup: async () => {},
 				execute: async (qb, scenario, db) => {
 					const results = await generateResultsFromDb(db, scenario, { failed: 10 });
-					return qb.buildReturnExecutions(results, true);
+					return qb.buildReturnExecutions(groupResults(results));
 				},
 			},
 			{
@@ -169,7 +197,7 @@ const queries: QueryDefinition[] = [
 				setup: async () => {},
 				execute: async (qb, scenario, db) => {
 					const results = await generateResultsFromDb(db, scenario, { released: 10 });
-					return qb.buildReturnExecutions(results, true);
+					return qb.buildReturnExecutions(groupResults(results));
 				},
 			},
 			{
@@ -178,7 +206,7 @@ const queries: QueryDefinition[] = [
 				setup: async () => {},
 				execute: async (qb, scenario, db) => {
 					const results = await generateResultsFromDb(db, scenario, { completed: 5, failed: 3, released: 2 });
-					return qb.buildReturnExecutions(results, true);
+					return qb.buildReturnExecutions(groupResults(results));
 				},
 			},
 			// Medium batches (100)
@@ -188,7 +216,7 @@ const queries: QueryDefinition[] = [
 				setup: async () => {},
 				execute: async (qb, scenario, db) => {
 					const results = await generateResultsFromDb(db, scenario, { completed: 100 });
-					return qb.buildReturnExecutions(results, true);
+					return qb.buildReturnExecutions(groupResults(results));
 				},
 			},
 			{
@@ -197,7 +225,7 @@ const queries: QueryDefinition[] = [
 				setup: async () => {},
 				execute: async (qb, scenario, db) => {
 					const results = await generateResultsFromDb(db, scenario, { completed: 100 });
-					return qb.buildReturnExecutions(results, true);
+					return qb.buildReturnExecutions(groupResults(results));
 				},
 			},
 			{
@@ -206,7 +234,7 @@ const queries: QueryDefinition[] = [
 				setup: async () => {},
 				execute: async (qb, scenario, db) => {
 					const results = await generateResultsFromDb(db, scenario, { completed: 50, failed: 30, released: 20 });
-					return qb.buildReturnExecutions(results, true);
+					return qb.buildReturnExecutions(groupResults(results));
 				},
 			},
 		],
