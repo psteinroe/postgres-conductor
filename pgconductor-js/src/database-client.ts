@@ -490,7 +490,7 @@ export class DatabaseClient {
 
 	/**
 	 * Set fake time for testing purposes.
-	 * All calls to pgconductor.current_time() will return this value.
+	 * All calls to pgconductor._private_current_time() will return this value.
 	 *
 	 * IMPORTANT: Test database connection pool must have max: 1 for this to work.
 	 */

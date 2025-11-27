@@ -111,7 +111,7 @@ export class QueryBuilder {
 			),
 			-- Insert/update orchestrator record
 			upserted_orchestrator as (
-				insert into pgconductor.orchestrators as o (
+				insert into pgconductor._private_orchestrators as o (
 					id,
 					version,
 					migration_number,
@@ -121,18 +121,18 @@ export class QueryBuilder {
 					${orchestratorId}::uuid,
 					${version}::text,
 					${migrationNumber}::integer,
-					pgconductor.current_time()
+					pgconductor._private_current_time()
 				on conflict (id)
 				do update
 				set
-					last_heartbeat_at = pgconductor.current_time(),
+					last_heartbeat_at = pgconductor._private_current_time(),
 					version = excluded.version,
 					migration_number = excluded.migration_number
 				returning id
 			),
 			-- Signal shutdown if newer migration exists
 			shutdown_signal_inserted as (
-				insert into pgconductor.orchestrator_signals (orchestrator_id, type, payload)
+				insert into pgconductor._private_orchestrator_signals (orchestrator_id, type, payload)
 				select
 					${orchestratorId}::uuid,
 					'shutdown',
@@ -143,7 +143,7 @@ export class QueryBuilder {
 			),
 			-- Read and delete all signals for this orchestrator (ordered by creation)
 			deleted_signals as (
-				delete from pgconductor.orchestrator_signals
+				delete from pgconductor._private_orchestrator_signals
 				where orchestrator_id = ${orchestratorId}::uuid
 				returning type, execution_id, payload, created_at
 			)
@@ -161,15 +161,15 @@ export class QueryBuilder {
 	}: RecoverStaleOrchestratorsArgs): PendingQuery<RowList<Row[]>> {
 		return this.sql`
 			with expired as (
-				delete from pgconductor.orchestrators o
-				where o.last_heartbeat_at < pgconductor.current_time() - ${maxAge}::interval
+				delete from pgconductor._private_orchestrators o
+				where o.last_heartbeat_at < pgconductor._private_current_time() - ${maxAge}::interval
 				returning o.id
 			),
 			-- fail cancelled executions from expired orchestrators
 			failed_cancelled as (
-				update pgconductor.executions e
+				update pgconductor._private_executions e
 				set
-					failed_at = pgconductor.current_time(),
+					failed_at = pgconductor._private_current_time(),
 					locked_by = null,
 					locked_at = null
 				from expired
@@ -179,7 +179,7 @@ export class QueryBuilder {
 					and e.completed_at is null
 			)
 			-- unlock remaining (non-cancelled) executions
-			update pgconductor.executions e
+			update pgconductor._private_executions e
 			set
 				locked_by = null,
 				locked_at = null
@@ -194,7 +194,7 @@ export class QueryBuilder {
             delete from pgconductor.triggers t
             where not exists (
                 select 1
-                from pgconductor.subscriptions s
+                from pgconductor._private_subscriptions s
                 where s.schema_name = t.schema_name
                   and s.table_name = t.table_name
                   and s.operation = t.operation
@@ -206,12 +206,12 @@ export class QueryBuilder {
 		migrationNumber,
 	}: SweepOrchestratorsArgs): PendingQuery<RowList<Row[]>> {
 		return this.sql`
-			insert into pgconductor.orchestrator_signals (orchestrator_id, type, payload)
+			insert into pgconductor._private_orchestrator_signals (orchestrator_id, type, payload)
 			select
 				id,
 				'shutdown',
 				jsonb_build_object('reason', 'breaking_migration')
-			from pgconductor.orchestrators
+			from pgconductor._private_orchestrators
 			where migration_number < ${migrationNumber}::integer
 			on conflict (orchestrator_id) where type = 'shutdown' do nothing
 		`;
@@ -229,15 +229,15 @@ export class QueryBuilder {
 	}: OrchestratorShutdownArgs): PendingQuery<RowList<Row[]>> {
 		return this.sql`
 			with deleted as (
-				delete from pgconductor.orchestrators
+				delete from pgconductor._private_orchestrators
 				where id = ${orchestratorId}::uuid
 				returning id
 			),
 			-- fail cancelled executions from this orchestrator
 			failed_cancelled as (
-				update pgconductor.executions e
+				update pgconductor._private_executions e
 				set
-					failed_at = pgconductor.current_time(),
+					failed_at = pgconductor._private_current_time(),
 					locked_by = null,
 					locked_at = null
 				from deleted
@@ -247,7 +247,7 @@ export class QueryBuilder {
 					and e.completed_at is null
 			)
 			-- unlock remaining (non-cancelled) executions
-			update pgconductor.executions e
+			update pgconductor._private_executions e
 			set
 				locked_by = null,
 				locked_at = null
@@ -268,21 +268,21 @@ export class QueryBuilder {
 				select
 					e.id,
 					e.task_key
-				from pgconductor.executions e
+				from pgconductor._private_executions e
 				where e.queue = ${queueName}::text
                     ${filterTaskKeys && filterTaskKeys.length > 0 ? this.sql`and e.task_key != any(${this.sql.array(filterTaskKeys)}::text[])` : this.sql``}
-					and e.run_at <= pgconductor.current_time()
+					and e.run_at <= pgconductor._private_current_time()
                     and e.is_available = true
 				order by e.priority asc, e.run_at asc
 				limit ${batchSize}::integer
 				for update skip locked
 			)
 
-			update pgconductor.executions
+			update pgconductor._private_executions
 			set
 				attempts = executions.attempts + 1,
 				locked_by = ${orchestratorId}::uuid,
-				locked_at = pgconductor.current_time()
+				locked_at = pgconductor._private_current_time()
 			from e
 			where executions.id = e.id
 				and executions.queue = ${queueName}::text
@@ -322,12 +322,12 @@ export class QueryBuilder {
 		const ctes: PendingQuery<any>[] = [];
 
 		// Precompute timestamp once
-		ctes.push(this.sql`now_ts as (select pgconductor.current_time() as ts)`);
+		ctes.push(this.sql`now_ts as (select pgconductor._private_current_time() as ts)`);
 
 		// Load task configs once for all task_keys we're processing
 		ctes.push(this.sql`task_configs as (
 			select key, max_attempts, remove_on_complete_days, remove_on_fail_days
-			from pgconductor.tasks
+			from pgconductor._private_tasks
 			where key = any(${this.sql.array(Array.from(grouped.taskKeys))}::text[])
 		)`);
 
@@ -346,21 +346,21 @@ export class QueryBuilder {
 
 			// Insert parent steps for all completed
 			ctes.push(this.sql`parent_steps_all as (
-				insert into pgconductor.steps (execution_id, queue, key, result)
+				insert into pgconductor._private_steps (execution_id, queue, key, result)
 				select
 					parent_e.id,
 					parent_e.queue,
 					parent_e.waiting_step_key,
 					r.result
 				from completed_results r
-				join pgconductor.executions parent_e on parent_e.waiting_on_execution_id = r.execution_id
+				join pgconductor._private_executions parent_e on parent_e.waiting_on_execution_id = r.execution_id
 				on conflict (execution_id, key) do nothing
 				returning execution_id
 			)`);
 
 			// Mark orphaned children (completed but no parent waiting) as failed
 			ctes.push(this.sql`orphaned_children as (
-				update pgconductor.executions e
+				update pgconductor._private_executions e
 				set
 					failed_at = nt.ts,
 					completed_at = null,
@@ -371,7 +371,7 @@ export class QueryBuilder {
 				where e.id = r.execution_id
 					-- No parent is waiting for this child
 					and not exists (
-						select 1 from pgconductor.executions parent
+						select 1 from pgconductor._private_executions parent
 						where parent.waiting_on_execution_id = r.execution_id
 					)
 				returning e.id
@@ -379,7 +379,7 @@ export class QueryBuilder {
 
 			// Update parents for all completed
 			ctes.push(this.sql`updated_parents_all as (
-				update pgconductor.executions e
+				update pgconductor._private_executions e
 				set
 					run_at = nt.ts,
 					waiting_on_execution_id = null,
@@ -392,7 +392,7 @@ export class QueryBuilder {
 
 			// Delete completed where remove_on_complete_days = 0 (excluding orphaned)
 			ctes.push(this.sql`deleted_completed as (
-				delete from pgconductor.executions e
+				delete from pgconductor._private_executions e
 				using completed_results r, task_configs tc
 				where e.id = r.execution_id
 					and tc.key = r.task_key
@@ -402,7 +402,7 @@ export class QueryBuilder {
 
 			// Update completed where remove_on_complete_days != 0 (keep)
 			ctes.push(this.sql`updated_completed as (
-				update pgconductor.executions e
+				update pgconductor._private_executions e
 				set
 					completed_at = nt.ts,
 					locked_by = null,
@@ -429,7 +429,7 @@ export class QueryBuilder {
 					r.task_key,
 					r.error as child_error,
 					tc.remove_on_fail_days = 0 as should_remove
-				from failed_results r, pgconductor.executions e, task_configs tc
+				from failed_results r, pgconductor._private_executions e, task_configs tc
 				where e.id = r.execution_id
 					and tc.key = r.task_key
 					and (e.attempts >= tc.max_attempts or r.status = 'permanently_failed')
@@ -437,14 +437,14 @@ export class QueryBuilder {
 
 			// Delete permanently failed children and their parents
 			ctes.push(this.sql`deleted_failed as (
-				delete from pgconductor.executions e
+				delete from pgconductor._private_executions e
 				using permanently_failed_children p
 				where
 					(e.id = p.execution_id and p.should_remove)
 					or (
 						e.waiting_on_execution_id = p.execution_id
 						and exists (
-							select 1 from pgconductor.tasks t
+							select 1 from pgconductor._private_tasks t
 							where t.key = e.task_key and t.remove_on_fail_days = 0
 						)
 					)
@@ -457,7 +457,7 @@ export class QueryBuilder {
 					p.child_error as error,
 					true as is_child
 				from permanently_failed_children p
-				join pgconductor.executions e on e.id = p.execution_id
+				join pgconductor._private_executions e on e.id = p.execution_id
 				where p.should_remove = false
 				union all
 				select
@@ -465,16 +465,16 @@ export class QueryBuilder {
 					p.child_error as error,
 					false as is_child
 				from permanently_failed_children p
-				join pgconductor.executions e on e.waiting_on_execution_id = p.execution_id
+				join pgconductor._private_executions e on e.waiting_on_execution_id = p.execution_id
 				where not exists (
-					select 1 from pgconductor.tasks t
+					select 1 from pgconductor._private_tasks t
 					where t.key = e.task_key and t.remove_on_fail_days = 0
 				)
 			)`);
 
 			// Update all permanently failed
 			ctes.push(this.sql`updated_failed_all as (
-				update pgconductor.executions e
+				update pgconductor._private_executions e
 				set
 					failed_at = nt.ts,
 					last_error = case
@@ -491,7 +491,7 @@ export class QueryBuilder {
 
 			// Retry failed (not permanently failed)
 			ctes.push(this.sql`retried as (
-				update pgconductor.executions e
+				update pgconductor._private_executions e
 				set
 					last_error = coalesce(r.error, 'unknown error'),
 					run_at = greatest(nt.ts, coalesce(e.run_at, nt.ts))
@@ -511,7 +511,7 @@ export class QueryBuilder {
 			const releasedWithSteps = released.filter((r) => r.step_key !== undefined);
 			if (releasedWithSteps.length > 0) {
 				ctes.push(this.sql`released_steps as (
-					insert into pgconductor.steps (execution_id, queue, key, result)
+					insert into pgconductor._private_steps (execution_id, queue, key, result)
 					select
 						r.execution_id,
 						r.queue,
@@ -533,7 +533,7 @@ export class QueryBuilder {
 				}));
 
 				ctes.push(this.sql`updated_released as (
-                update pgconductor.executions e
+                update pgconductor._private_executions e
                 set
                     attempts = greatest(attempts - 1, 0),
                     run_at = case
@@ -554,7 +554,7 @@ export class QueryBuilder {
 				const releasedIds = released.map((r) => r.execution_id);
 
 				ctes.push(this.sql`updated_released as (
-				update pgconductor.executions
+				update pgconductor._private_executions
 				set
 					attempts = greatest(attempts - 1, 0),
 					locked_by = null,
@@ -581,7 +581,7 @@ export class QueryBuilder {
 
 			// Insert child executions with parent reference
 			ctes.push(this.sql`inserted_children as (
-				insert into pgconductor.executions (
+				insert into pgconductor._private_executions (
 					id,
 					task_key,
 					queue,
@@ -590,7 +590,7 @@ export class QueryBuilder {
 					parent_execution_id
 				)
 				select
-					pgconductor.portable_uuidv7(),
+					pgconductor._private_portable_uuidv7(),
 					icd.child_task_name,
 					icd.child_task_queue,
 					icd.child_payload,
@@ -602,7 +602,7 @@ export class QueryBuilder {
 
 			// Update parent executions
 			ctes.push(this.sql`updated_invoke_parents as (
-				update pgconductor.executions e
+				update pgconductor._private_executions e
 				set
 					waiting_on_execution_id = ic.id,
 					waiting_step_key = icd.step_key,
@@ -633,7 +633,7 @@ export class QueryBuilder {
 
 			// Insert subscriptions
 			ctes.push(this.sql`inserted_custom_event_subscriptions as (
-				insert into pgconductor.subscriptions (source, event_key, execution_id, queue, step_key)
+				insert into pgconductor._private_subscriptions (source, event_key, execution_id, queue, step_key)
 				select
 					'event',
 					wce.event_key,
@@ -646,7 +646,7 @@ export class QueryBuilder {
 
 			// Update executions to wait
 			ctes.push(this.sql`updated_wait_custom_event as (
-				update pgconductor.executions e
+				update pgconductor._private_executions e
 				set
 					waiting_step_key = wce.step_key,
 					run_at = case
@@ -678,7 +678,7 @@ export class QueryBuilder {
 
 			// Insert subscriptions
 			ctes.push(this.sql`inserted_db_event_subscriptions as (
-				insert into pgconductor.subscriptions (
+				insert into pgconductor._private_subscriptions (
 					source,
 					schema_name,
 					table_name,
@@ -718,7 +718,7 @@ export class QueryBuilder {
 
 			// Update executions to wait
 			ctes.push(this.sql`updated_wait_db_event as (
-				update pgconductor.executions e
+				update pgconductor._private_executions e
 				set
 					waiting_step_key = wdb.step_key,
 					run_at = case
@@ -746,18 +746,18 @@ export class QueryBuilder {
 		return this.sql<{ deleted_count: number }[]>`
 			with batch as (
 				select e.id
-				from pgconductor.executions e
-				join pgconductor.tasks t on t.key = e.task_key
+				from pgconductor._private_executions e
+				join pgconductor._private_tasks t on t.key = e.task_key
 				where e.queue = ${queueName}
 					and (
-						(e.completed_at is not null and t.remove_on_complete_days > 0 and e.completed_at < pgconductor.current_time() - t.remove_on_complete_days * interval '1 day')
+						(e.completed_at is not null and t.remove_on_complete_days > 0 and e.completed_at < pgconductor._private_current_time() - t.remove_on_complete_days * interval '1 day')
 						or
-						(e.failed_at is not null and t.remove_on_fail_days > 0 and e.failed_at < pgconductor.current_time() - t.remove_on_fail_days * interval '1 day')
+						(e.failed_at is not null and t.remove_on_fail_days > 0 and e.failed_at < pgconductor._private_current_time() - t.remove_on_fail_days * interval '1 day')
 					)
 				limit ${batchSize}
 			),
 			deleted as (
-				delete from pgconductor.executions
+				delete from pgconductor._private_executions
 				using batch
 				where executions.id = batch.id
 				returning 1
@@ -808,7 +808,7 @@ export class QueryBuilder {
 		}));
 
 		return this.sql`
-			select pgconductor.register_worker(
+			select pgconductor._private_register_worker(
 				p_queue_name := ${queueName}::text,
 				p_task_specs := array(
 					select json_populate_recordset(null::pgconductor.task_spec, ${this.sql.json(taskSpecRows)}::json)::pgconductor.task_spec
@@ -851,13 +851,13 @@ export class QueryBuilder {
 
 		return this.sql<[{ id: string }]>`
 			with removed as (
-				delete from pgconductor.executions
+				delete from pgconductor._private_executions
 				where task_key = ${spec.task_key}::text
 					and queue = ${spec.queue}::text
 					and dedupe_key like 'scheduled::%'
 					and split_part(dedupe_key, '::', 2) = ${scheduleName}::text
 					and cron_expression is not null
-					and run_at > pgconductor.current_time()
+					and run_at > pgconductor._private_current_time()
 			)
 			select id from pgconductor.invoke(
 				task_key := ${spec.task_key}::text,
@@ -880,18 +880,18 @@ export class QueryBuilder {
 			with
 			-- Delete future pending executions
 			deleted_future as (
-				delete from pgconductor.executions
+				delete from pgconductor._private_executions
 				where task_key = ${taskKey}::text
 					and queue = ${queue}::text
 					and dedupe_key like 'scheduled::%'
 					and split_part(dedupe_key, '::', 2) = ${scheduleName}::text
 					and cron_expression is not null
-					and run_at > pgconductor.current_time()
+					and run_at > pgconductor._private_current_time()
 				returning 1
 			),
 			-- Mark running executions as cancelled (no signal needed, they'll fail naturally)
 			cancelled_running as (
-				update pgconductor.executions e
+				update pgconductor._private_executions e
 				set cancelled = true
 				where e.task_key = ${taskKey}::text
 					and e.queue = ${queue}::text
@@ -930,7 +930,7 @@ export class QueryBuilder {
 
 	buildLoadStep({ executionId, key }: LoadStepArgs): PendingQuery<[{ result: Payload | null }]> {
 		return this.sql<[{ result: Payload | null }]>`
-			select result from pgconductor.steps
+			select result from pgconductor._private_steps
 			where execution_id = ${executionId}::uuid and key = ${key}::text
 		`;
 	}
@@ -945,13 +945,13 @@ export class QueryBuilder {
 		if (runAtMs) {
 			return this.sql`
 				with inserted as (
-					insert into pgconductor.steps (execution_id, queue, key, result)
+					insert into pgconductor._private_steps (execution_id, queue, key, result)
 					values (${executionId}::uuid, ${queue}::text, ${key}::text, ${this.sql.json(result)}::jsonb)
 					on conflict (execution_id, key) do nothing
 					returning id
 				)
-				update pgconductor.executions
-				set run_at = pgconductor.current_time() + (${runAtMs}::integer || ' milliseconds')::interval
+				update pgconductor._private_executions
+				set run_at = pgconductor._private_current_time() + (${runAtMs}::integer || ' milliseconds')::interval
 				where id = ${executionId}::uuid
                     and queue = ${queue}::text
 					and exists (select 1 from inserted)
@@ -959,7 +959,7 @@ export class QueryBuilder {
 		}
 
 		return this.sql`
-			insert into pgconductor.steps (execution_id, queue, key, result)
+			insert into pgconductor._private_steps (execution_id, queue, key, result)
 			values (${executionId}::uuid, ${queue}::text, ${key}::text, ${this.sql.json(result)}::jsonb)
 			on conflict (execution_id, key) do nothing
 		`;
@@ -971,15 +971,15 @@ export class QueryBuilder {
 				select
 					e.waiting_on_execution_id as child_id,
 					c.locked_by as child_locked_by
-				from pgconductor.executions e
-				left join pgconductor.executions c on c.id = e.waiting_on_execution_id
+				from pgconductor._private_executions e
+				left join pgconductor._private_executions c on c.id = e.waiting_on_execution_id
 				where e.id = ${executionId}::uuid
 			),
 			-- Fail pending (not locked) children immediately
 			failed_pending_child as (
-				update pgconductor.executions e
+				update pgconductor._private_executions e
 				set
-					failed_at = pgconductor.current_time(),
+					failed_at = pgconductor._private_current_time(),
 					last_error = 'Cancelled: parent timed out',
 					locked_by = null,
 					locked_at = null
@@ -991,7 +991,7 @@ export class QueryBuilder {
 			),
 			-- Signal executing (locked) children to cancel
 			signaled_executing_child as (
-				update pgconductor.executions e
+				update pgconductor._private_executions e
 				set cancelled = true
 				from child_info ci
 				where e.id = ci.child_id
@@ -1001,7 +1001,7 @@ export class QueryBuilder {
 			),
 			-- Always clear parent's waiting state
 			cleared_parent as (
-				update pgconductor.executions
+				update pgconductor._private_executions
 				set
 					waiting_on_execution_id = null,
 					waiting_step_key = null
@@ -1017,7 +1017,7 @@ export class QueryBuilder {
 	}: CountActiveOrchestratorsBelowArgs): PendingQuery<{ count: number }[]> {
 		return this.sql<{ count: number }[]>`
 			select count(*) as count
-			from pgconductor.orchestrators
+			from pgconductor._private_orchestrators
 			where migration_number < ${version}::integer
 			  and shutdown_signal = false
 		`;

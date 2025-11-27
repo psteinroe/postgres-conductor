@@ -356,8 +356,16 @@ bun test tests/integration/        # Run integration tests
 - **Tests**: Ensure all tests pass and clean up resources (database connections, fake_now, etc.)
 - **Type checking**: Always run both tests AND typecheck together:
   ```bash
-  bun test && bun run typecheck
+  bun run typecheck && bun test
   ```
+**Format**: Ensure the code follows the formatting guidelines:
+```bash
+just format
+```
+**Linter**: Ensure the code does not emit any lint warnings:
+```bash
+just lint-fix
+```
 
 ### Code Style Guidelines
 

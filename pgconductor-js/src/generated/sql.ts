@@ -23,7 +23,7 @@ create extension if not exists "uuid-ossp";
 
 -- Returns either the actual current timestamp or a fake one for tests.
 -- Uses session variable (current_setting) for test time control.
-create function pgconductor.current_time ()
+create function pgconductor._private_current_time ()
   returns timestamptz
   language plpgsql
   volatile
@@ -41,7 +41,7 @@ end;
 $$;
 
 -- utility function to generate a uuidv7 even for older postgres versions.
-create function pgconductor.portable_uuidv7 ()
+create function pgconductor._private_portable_uuidv7 ()
   returns uuid
   language plpgsql
   volatile
@@ -56,7 +56,7 @@ begin
   if v_server_num >= 180000 then
     return uuidv7 ();
   end if;
-  ts_ms := floor(extract(epoch from pgconductor.current_time()) * 1000)::bigint;
+  ts_ms := floor(extract(epoch from pgconductor._private_current_time()) * 1000)::bigint;
   rnd := uuid_send(public.uuid_generate_v4 ());
   b := repeat(E'\\000', 16)::bytea;
   for i in 0..5 loop
@@ -71,50 +71,50 @@ begin
 end;
 $$;
 
-create table pgconductor.orchestrators (
-    id uuid default pgconductor.portable_uuidv7() primary key,
+create table pgconductor._private_orchestrators (
+    id uuid default pgconductor._private_portable_uuidv7() primary key,
     last_heartbeat_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     version text,
     migration_number integer
 );
 
-create index idx_orchestrators_heartbeat on pgconductor.orchestrators (last_heartbeat_at);
-create index idx_orchestrators_sweep on pgconductor.orchestrators (migration_number);
+create index idx_orchestrators_heartbeat on pgconductor._private_orchestrators (last_heartbeat_at);
+create index idx_orchestrators_sweep on pgconductor._private_orchestrators (migration_number);
 
-create table pgconductor.orchestrator_signals (
-    id uuid primary key default pgconductor.portable_uuidv7(),
-    orchestrator_id uuid not null references pgconductor.orchestrators(id) on delete cascade,
+create table pgconductor._private_orchestrator_signals (
+    id uuid primary key default pgconductor._private_portable_uuidv7(),
+    orchestrator_id uuid not null references pgconductor._private_orchestrators(id) on delete cascade,
     type text not null,
     execution_id uuid,
     payload jsonb not null default '{}'::jsonb,
-    created_at timestamptz not null default pgconductor.current_time()
+    created_at timestamptz not null default pgconductor._private_current_time()
 );
 
-create index idx_orchestrator_signals_orchestrator on pgconductor.orchestrator_signals(orchestrator_id, created_at);
+create index idx_orchestrator_signals_orchestrator on pgconductor._private_orchestrator_signals(orchestrator_id, created_at);
 
 create unique index idx_orchestrator_signals_cancel_unique
-    on pgconductor.orchestrator_signals(orchestrator_id, execution_id)
+    on pgconductor._private_orchestrator_signals(orchestrator_id, execution_id)
     where type = 'cancel_execution' and execution_id is not null;
 
 create unique index idx_orchestrator_signals_shutdown_unique
-    on pgconductor.orchestrator_signals(orchestrator_id)
+    on pgconductor._private_orchestrator_signals(orchestrator_id)
     where type = 'shutdown';
 
-create table pgconductor.queues (
+create table pgconductor._private_queues (
     name text primary key
 );
 
-create table pgconductor.executions (
-    id uuid default pgconductor.portable_uuidv7(),
+create table pgconductor._private_executions (
+    id uuid default pgconductor._private_portable_uuidv7(),
     task_key text not null,
     queue text not null default 'default',
     dedupe_key text,
     cron_expression text,
-    created_at timestamptz default pgconductor.current_time() not null,
+    created_at timestamptz default pgconductor._private_current_time() not null,
     failed_at timestamptz,
     completed_at timestamptz,
     payload jsonb,
-    run_at timestamptz default pgconductor.current_time() not null,
+    run_at timestamptz default pgconductor._private_current_time() not null,
     locked_at timestamptz,
     locked_by uuid,
     is_available boolean generated always as (locked_at is null and failed_at is null and completed_at is null) stored not null,
@@ -129,7 +129,7 @@ create table pgconductor.executions (
     unique (task_key, dedupe_key, queue)
 ) partition by list (queue);
 
-create table pgconductor.tasks (
+create table pgconductor._private_tasks (
     key text primary key,
 
     -- queue that this task belongs to (used for queue-based worker assignment)
@@ -157,22 +157,22 @@ create table pgconductor.tasks (
     )
 );
 
-create table pgconductor.steps (
-    id uuid default pgconductor.portable_uuidv7() primary key,
+create table pgconductor._private_steps (
+    id uuid default pgconductor._private_portable_uuidv7() primary key,
     key text not null,
     execution_id uuid not null,
     queue text not null,
     result jsonb,
-    created_at timestamptz default pgconductor.current_time() not null,
+    created_at timestamptz default pgconductor._private_current_time() not null,
     unique (key, execution_id),
-    constraint fk_execution foreign key (execution_id, queue) references pgconductor.executions(id, queue) on delete cascade
+    constraint fk_execution foreign key (execution_id, queue) references pgconductor._private_executions(id, queue) on delete cascade
 );
 
-create index idx_steps_execution_id on pgconductor.steps (execution_id);
+create index idx_steps_execution_id on pgconductor._private_steps (execution_id);
 
 -- Trigger function to manage executions partitions per queue
 -- Automatically creates partition when queue is inserted
-create or replace function pgconductor.manage_queue_partition()
+create or replace function pgconductor._private_manage_queue_partition()
  returns trigger
  language plpgsql
  volatile
@@ -186,7 +186,7 @@ begin
 
     -- Create partition for this queue: executions_default, executions_reports, etc.
     execute format(
-      'create table if not exists pgconductor.%I partition of pgconductor.executions for values in (%L) with (fillfactor=70)',
+      'create table if not exists pgconductor.%I partition of pgconductor._private_executions for values in (%L) with (fillfactor=70)',
       v_partition_name,
       new.name
     );
@@ -285,15 +285,15 @@ $function$;
 
 -- attach trigger to queues table
 create trigger manage_queue_partition_trigger
-  after insert or update or delete on pgconductor.queues
+  after insert or update or delete on pgconductor._private_queues
   for each row
-  execute function pgconductor.manage_queue_partition();
+  execute function pgconductor._private_manage_queue_partition();
 
 -- create default queue (trigger will create executions_default partition)
-insert into pgconductor.queues (name) values ('default');
+insert into pgconductor._private_queues (name) values ('default');
 
-create table if not exists pgconductor.subscriptions (
-    id uuid primary key default pgconductor.portable_uuidv7(),
+create table if not exists pgconductor._private_subscriptions (
+    id uuid primary key default pgconductor._private_portable_uuidv7(),
     source text not null, -- 'db' or 'event'
     schema_name text,
     table_name text,
@@ -307,36 +307,36 @@ create table if not exists pgconductor.subscriptions (
 );
 
 create index if not exists idx_subscriptions_triggers_lookup
-on pgconductor.subscriptions (schema_name, table_name, operation);
+on pgconductor._private_subscriptions (schema_name, table_name, operation);
 
-create table if not exists pgconductor.events (
-    id uuid primary key default pgconductor.portable_uuidv7(),
+create table if not exists pgconductor._private_events (
+    id uuid primary key default pgconductor._private_portable_uuidv7(),
     event_key text not null,
     schema_name text,
     table_name text,
     operation text,
     source text not null default 'event', -- 'db' or 'event'
     payload jsonb,
-    created_at timestamptz default pgconductor.current_time() not null
+    created_at timestamptz default pgconductor._private_current_time() not null
 );
 -- todo: partition management
 
 -- we would need to extract columns the user filters on to filter event payloads already here
-create table if not exists pgconductor.triggers (
+create table if not exists pgconductor._private_triggers (
     schema_name text not null,
     table_name text not null,
     operation text not null, -- 'insert', 'update', 'delete'
-    created_at timestamptz default pgconductor.current_time() not null,
+    created_at timestamptz default pgconductor._private_current_time() not null,
     primary key (schema_name, table_name, operation)
 );
 
-create or replace function pgconductor.publish_event ()
+create or replace function pgconductor._private_publish_event ()
     returns trigger
     language plpgsql
     security definer
     as $$
 begin
-    insert into pgconductor.events(
+    insert into pgconductor._private_events(
        event_key,
        schema_name,
        table_name,
@@ -360,7 +360,7 @@ begin
 end
 $$;
 
-create or replace function pgconductor.sync_database_trigger() returns "trigger"
+create or replace function pgconductor._private_sync_database_trigger() returns "trigger"
     language "plpgsql" security definer
     as $_$
 declare
@@ -375,7 +375,7 @@ begin
                 after %s on %I.%I
                 deferrable initially deferred
                 for each row
-                execute procedure pgconductor.publish_event()
+                execute procedure pgconductor._private_publish_event()
             $sql$,
             lower(v_op), lower(v_op), v_schema_name, v_table_name
         );
@@ -394,8 +394,8 @@ $_$;
 
 create or replace trigger "sync_database_trigger"
 after insert or delete
-on pgconductor.triggers
-for each row execute function pgconductor.sync_database_trigger();
+on pgconductor._private_triggers
+for each row execute function pgconductor._private_sync_database_trigger();
 
 -- drop a queue (will trigger partition deletion via trigger)
 create or replace function pgconductor.drop_queue(queue_name text)
@@ -404,7 +404,7 @@ create or replace function pgconductor.drop_queue(queue_name text)
  volatile
  set search_path to ''
 as $function$
-  delete from pgconductor.queues where name = drop_queue.queue_name;
+  delete from pgconductor._private_queues where name = drop_queue.queue_name;
 $function$;
 
 create type pgconductor.execution_spec as (
@@ -438,7 +438,7 @@ create type pgconductor.subscription_spec as (
     columns text[]
 );
 
-create or replace function pgconductor.register_worker(
+create or replace function pgconductor._private_register_worker(
     p_queue_name text,
     p_task_specs pgconductor.task_spec[],
     p_cron_schedules pgconductor.execution_spec[],
@@ -451,12 +451,12 @@ set search_path to ''
 as $function$
 begin
   -- step 1: upsert queue (triggers partition creation)
-  insert into pgconductor.queues (name)
+  insert into pgconductor._private_queues (name)
   values (p_queue_name)
   on conflict (name) do nothing;
 
   -- step 2: register/update tasks
-  insert into pgconductor.tasks (key, queue, max_attempts, remove_on_complete_days, remove_on_fail_days, window_start, window_end)
+  insert into pgconductor._private_tasks (key, queue, max_attempts, remove_on_complete_days, remove_on_fail_days, window_start, window_end)
   select
     spec.key,
     coalesce(spec.queue, 'default'),
@@ -468,20 +468,20 @@ begin
   from unnest(p_task_specs) as spec
   on conflict (key)
   do update set
-    queue = coalesce(excluded.queue, pgconductor.tasks.queue),
-    max_attempts = coalesce(excluded.max_attempts, pgconductor.tasks.max_attempts),
+    queue = coalesce(excluded.queue, pgconductor._private_tasks.queue),
+    max_attempts = coalesce(excluded.max_attempts, pgconductor._private_tasks.max_attempts),
     remove_on_complete_days = excluded.remove_on_complete_days,
     remove_on_fail_days = excluded.remove_on_fail_days,
     window_start = excluded.window_start,
     window_end = excluded.window_end;
 
   -- step 3: insert scheduled cron executions (on conflict do nothing)
-  insert into pgconductor.executions (task_key, queue, payload, run_at, dedupe_key, cron_expression)
+  insert into pgconductor._private_executions (task_key, queue, payload, run_at, dedupe_key, cron_expression)
   select
     spec.task_key,
     coalesce(spec.queue, 'default'),
     coalesce(spec.payload, '{}'::jsonb),
-    coalesce(spec.run_at, pgconductor.current_time()),
+    coalesce(spec.run_at, pgconductor._private_current_time()),
     spec.dedupe_key,
     spec.cron_expression
   from unnest(p_cron_schedules) as spec
@@ -490,10 +490,10 @@ begin
 
   -- step 4: clean up stale schedules for this queue
   -- delete future executions for schedules that no longer exist
-  delete from pgconductor.executions
+  delete from pgconductor._private_executions
   where queue = p_queue_name
     and cron_expression is not null
-    and run_at > pgconductor.current_time()
+    and run_at > pgconductor._private_current_time()
     and dedupe_key like 'scheduled::%'
     and split_part(dedupe_key, '::', 2) not in (
       select split_part(spec.dedupe_key, '::', 2)
@@ -502,7 +502,7 @@ begin
     );
 
   -- mark running executions as cancelled for schedules that no longer exist
-  update pgconductor.executions
+  update pgconductor._private_executions
   set cancelled = true
   where queue = p_queue_name
     and cron_expression is not null
@@ -518,13 +518,13 @@ begin
     );
 
   -- step 5: delete old trigger-based subscriptions for this queue
-  delete from pgconductor.subscriptions
+  delete from pgconductor._private_subscriptions
   where queue = p_queue_name
     and step_key is null  -- only persistent/trigger subscriptions
     and task_key is not null;
 
   -- step 6: insert new trigger-based subscriptions
-  insert into pgconductor.subscriptions (
+  insert into pgconductor._private_subscriptions (
     task_key, queue, source, event_key, schema_name, table_name, operation, columns
   )
   select
@@ -539,7 +539,7 @@ begin
   from unnest(p_event_subscriptions) as spec;
 
  -- step 7: make sure we sync database triggers if required
- insert into pgconductor.triggers (schema_name, table_name, operation)
+ insert into pgconductor._private_triggers (schema_name, table_name, operation)
   select
     spec.schema_name,
     spec.table_name,
@@ -560,12 +560,12 @@ create or replace function pgconductor.invoke_batch(
 as $function$
 begin
     -- clear locked dedupe keys before batch insert
-    update pgconductor.executions as e
+    update pgconductor._private_executions as e
     set
         dedupe_key = null,
         locked_by = null,
         locked_at = null,
-        failed_at = pgconductor.current_time(),
+        failed_at = pgconductor._private_current_time(),
         last_error = 'superseded by reinvoke'
     from unnest(specs) as spec
     where e.dedupe_key = spec.dedupe_key
@@ -576,7 +576,7 @@ begin
 
     -- batch insert all executions
     return query
-    insert into pgconductor.executions (
+    insert into pgconductor._private_executions (
         id,
         task_key,
         queue,
@@ -587,11 +587,11 @@ begin
         priority
     )
     select
-        pgconductor.portable_uuidv7(),
+        pgconductor._private_portable_uuidv7(),
         spec.task_key,
         coalesce(spec.queue, 'default'),
         spec.payload,
-        coalesce(spec.run_at, pgconductor.current_time()),
+        coalesce(spec.run_at, pgconductor._private_current_time()),
         spec.dedupe_key,
         spec.cron_expression,
         coalesce(spec.priority, 0)
@@ -618,12 +618,12 @@ as $function$
 begin
   if invoke.dedupe_key is not null then
       -- clear keys that are currently locked so a subsequent insert can succeed.
-      update pgconductor.executions as e
+      update pgconductor._private_executions as e
       set
         dedupe_key = null,
         locked_by = null,
         locked_at = null,
-        failed_at = pgconductor.current_time(),
+        failed_at = pgconductor._private_current_time(),
         last_error = 'superseded by reinvoke'
       where e.dedupe_key = invoke.dedupe_key
         and e.task_key = invoke.task_key
@@ -631,7 +631,7 @@ begin
         and e.locked_at is not null;
   end if;
 
-  return query insert into pgconductor.executions as e (
+  return query insert into pgconductor._private_executions as e (
     id,
     task_key,
     queue,
@@ -641,11 +641,11 @@ begin
     cron_expression,
     priority
   ) values (
-    pgconductor.portable_uuidv7(),
+    pgconductor._private_portable_uuidv7(),
     invoke.task_key,
     invoke.queue,
     invoke.payload,
-    coalesce(invoke.run_at, pgconductor.current_time()),
+    coalesce(invoke.run_at, pgconductor._private_current_time()),
     invoke.dedupe_key,
     invoke.cron_expression,
     coalesce(invoke.priority, 0)
@@ -656,7 +656,7 @@ $function$
 
 -- invoke a task from an event trigger
 -- called by event-router when event arrives for trigger-based (persistent) subscriptions
-create or replace function pgconductor.invoke_from_event(
+create or replace function pgconductor._private_invoke_from_event(
     p_task_key text,
     p_queue text,
     p_event_name text,
@@ -667,7 +667,7 @@ language sql
 volatile
 set search_path to ''
 as $function$
-    insert into pgconductor.executions (
+    insert into pgconductor._private_executions (
         task_key,
         queue,
         payload,
@@ -677,7 +677,7 @@ as $function$
         p_task_key,
         p_queue,
         jsonb_build_object('event', p_event_name, 'payload', p_payload),
-        pgconductor.current_time()
+        pgconductor._private_current_time()
     )
     returning id;
 $function$;
@@ -692,7 +692,7 @@ language sql
 volatile
 set search_path to ''
 as $function$
-    insert into pgconductor.events (event_key, payload)
+    insert into pgconductor._private_events (event_key, payload)
     values (p_event_key, p_payload)
     returning id;
 $function$;
@@ -720,7 +720,7 @@ begin
     completed_at is not null,
     failed_at is not null
   into v_orchestrator_id, v_queue, v_completed, v_failed
-  from pgconductor.executions
+  from pgconductor._private_executions
   where id = p_execution_id;
 
   if not found or v_completed or v_failed then
@@ -729,9 +729,9 @@ begin
 
   if v_orchestrator_id is null then
     -- pending: fail immediately
-    update pgconductor.executions
+    update pgconductor._private_executions
     set
-      failed_at = pgconductor.current_time(),
+      failed_at = pgconductor._private_current_time(),
       last_error = p_reason,
       locked_by = null,
       locked_at = null
@@ -743,7 +743,7 @@ begin
     return v_rows_affected > 0;
   else
     -- running: signal orchestrator + set cancelled flag
-    update pgconductor.executions
+    update pgconductor._private_executions
     set
       cancelled = true,
       last_error = p_reason
@@ -754,7 +754,7 @@ begin
     get diagnostics v_rows_affected = row_count;
 
     if v_rows_affected > 0 then
-      insert into pgconductor.orchestrator_signals
+      insert into pgconductor._private_orchestrator_signals
         (orchestrator_id, type, execution_id, payload)
       values (
         v_orchestrator_id,

@@ -19,7 +19,7 @@ const PGCONDUCTOR_SCHEMA: &str = "pgconductor";
 
 /// Event router destination that:
 /// 1. Maintains in-memory index of subscriptions via CDC
-/// 2. Routes events from pgconductor.events to waiting executions or triggers
+/// 2. Routes events from pgconductor._private_events to waiting executions or triggers
 #[derive(Clone)]
 pub struct EventRouterDestination {
   /// Database pool for querying subscriptions on startup
@@ -51,7 +51,7 @@ impl EventRouterDestination {
     let rows = sqlx::query(
             r#"
             SELECT id, source, schema_name, table_name, operation, event_key, execution_id, queue, step_key, task_key, columns
-            FROM pgconductor.subscriptions
+            FROM pgconductor._private_subscriptions
             "#,
         )
         .fetch_all(&self.pool)
@@ -266,7 +266,7 @@ impl EventRouterDestination {
     }
   }
 
-  /// Handle an event from the pgconductor.events table
+  /// Handle an event from the pgconductor._private_events table
   fn handle_event(&self, row: &TableRow) {
     // Expected columns: id, event_key, schema_name, table_name, operation, source, payload, created_at
     if row.values.len() < 7 {
@@ -479,7 +479,7 @@ impl EventRouterDestination {
     let event_name = event_name.to_string();
 
     tokio::spawn(async move {
-      let result = sqlx::query("SELECT pgconductor.invoke_from_event($1, $2, $3, $4)")
+      let result = sqlx::query("SELECT pgconductor._private_invoke_from_event($1, $2, $3, $4)")
         .bind(&task_key)
         .bind(&queue)
         .bind(&event_name)
