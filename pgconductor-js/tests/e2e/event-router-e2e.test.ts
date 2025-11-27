@@ -647,4 +647,91 @@ describe("Event Router E2E", () => {
 		expect(executions.length).toBe(1);
 		expect(executions[0]?.completed_at).not.toBeNull();
 	}, 30000);
+
+	test("event-router invokes task from database event trigger with column selection", async () => {
+		const taskDefinition = defineTask({
+			name: "on-contact-columns-trigger",
+		});
+
+		let receivedPayload: any = null;
+
+		const conductor = Conductor.create({
+			sql,
+			tasks: TaskSchemas.fromSchema([taskDefinition]),
+			context: {},
+		});
+
+		// Create task with database event trigger and column selection
+		const onContactColumnsTask = conductor.createTask(
+			{ name: "on-contact-columns-trigger" },
+			{ schema: "public", table: "contact", operation: "insert", columns: "id, email" },
+			async (event, _ctx) => {
+				receivedPayload = event.payload;
+			},
+		);
+
+		const orchestrator = Orchestrator.create({
+			conductor,
+			tasks: [onContactColumnsTask],
+			defaultWorker: {
+				pollIntervalMs: 100,
+				flushIntervalMs: 100,
+			},
+		});
+
+		await orchestrator.start();
+
+		// Give time for worker to register subscriptions
+		await new Promise((r) => setTimeout(r, 1000));
+
+		// Verify subscription was created with columns
+		const subscriptions = await sql`
+			SELECT * FROM pgconductor.subscriptions
+			WHERE task_key = 'on-contact-columns-trigger' AND source = 'db'
+		`;
+		expect(subscriptions.length).toBe(1);
+		expect(subscriptions[0]?.columns).toEqual(["id", "email"]);
+
+		// Create an address book first
+		const [addressBook] = await sql`
+			INSERT INTO address_book (name, description)
+			VALUES ('Column Filter Trigger Test', 'For column filtering trigger E2E testing')
+			RETURNING id
+		`;
+
+		// Insert a contact with many fields
+		const [contact] = await sql`
+			INSERT INTO contact (address_book_id, first_name, last_name, email, phone)
+			VALUES (${addressBook!.id}, 'Column', 'Trigger', 'column-trigger@example.com', '555-9999')
+			RETURNING id
+		`;
+
+		// Wait for event-router to process and task to execute
+		await new Promise((r) => setTimeout(r, 3000));
+
+		await orchestrator.stop();
+
+		// Verify the task received only the selected columns
+		expect(receivedPayload).toBeDefined();
+		expect(receivedPayload.tg_op).toBe("INSERT");
+		expect(receivedPayload.old).toBeNull();
+
+		// The new object should only have id and email
+		const newData = receivedPayload.new;
+		expect(newData.id).toBe(contact!.id);
+		expect(newData.email).toBe("column-trigger@example.com");
+
+		// These should NOT be present due to column filtering
+		expect(newData.first_name).toBeUndefined();
+		expect(newData.last_name).toBeUndefined();
+		expect(newData.phone).toBeUndefined();
+
+		// Verify execution was created and completed
+		const executions = await sql`
+			SELECT * FROM pgconductor.executions
+			WHERE task_key = 'on-contact-columns-trigger'
+		`;
+		expect(executions.length).toBe(1);
+		expect(executions[0]?.completed_at).not.toBeNull();
+	}, 30000);
 });

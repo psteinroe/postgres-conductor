@@ -276,6 +276,39 @@ describe("task event types", () => {
 		expect(task.name).toBe("on-contact-insert");
 	});
 
+	test("createTask with database event trigger and column selection", () => {
+		const taskDef = defineTask({
+			name: "on-contact-columns",
+		});
+
+		const conductor = Conductor.create({
+			connectionString: "postgres://test",
+			tasks: TaskSchemas.fromSchema([taskDef]),
+			database: DatabaseSchema.fromGeneratedTypes<Database>(),
+			context: {},
+		});
+
+		conductor.createTask(
+			{ name: "on-contact-columns" },
+			{ schema: "public", table: "contact", operation: "insert", columns: "id, email" },
+			async (event, _ctx) => {
+				// Event should be the database event with column selection
+				expectTypeOf(event.event).toEqualTypeOf<"public.contact.insert">();
+				expectTypeOf(event.payload.tg_op).toEqualTypeOf<"INSERT">();
+				expectTypeOf(event.payload.old).toEqualTypeOf<null>();
+
+				// new should only have selected columns
+				if (event.payload.new) {
+					expectTypeOf(event.payload.new.id).toEqualTypeOf<string>();
+					expectTypeOf(event.payload.new.email).toEqualTypeOf<string | null>();
+
+					// @ts-expect-error - first_name not in column selection
+					const _invalid = event.payload.new.first_name;
+				}
+			},
+		);
+	});
+
 	test("createTask with custom event and invocable triggers", () => {
 		const orderPlaced = defineEvent({
 			name: "order.placed",

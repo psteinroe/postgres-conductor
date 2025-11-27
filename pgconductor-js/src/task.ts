@@ -60,8 +60,12 @@ type ExtractCustomEventTriggers<TTriggers> = TTriggers extends readonly any[]
 
 // Extract database event triggers from array
 type ExtractDatabaseEventTriggers<TTriggers> = TTriggers extends readonly any[]
-	? Extract<TTriggers[number], DatabaseEventTrigger>
-	: TTriggers extends DatabaseEventTrigger
+	? TTriggers[number] extends infer T
+		? T extends { schema: string; table: string; operation: "insert" | "update" | "delete" }
+			? T
+			: never
+		: never
+	: TTriggers extends { schema: string; table: string; operation: "insert" | "update" | "delete" }
 		? TTriggers
 		: never;
 
@@ -91,24 +95,41 @@ type DatabaseEventUnion<
 	TTriggers,
 	Database extends GenericDatabase,
 > = ExtractDatabaseEventTriggers<TTriggers> extends infer T
-	? T extends {
-			schema: infer TSchema extends string;
-			table: infer TTable extends string;
-			operation: infer TOp extends "insert" | "update" | "delete";
-			columns?: infer TColumns;
-		}
-		? TSchema extends SchemaName<Database>
-			? TTable extends TableName<Database, TSchema>
-				? {
-						event: `${TSchema}.${TTable}.${TOp}`;
-						payload: DatabaseEventPayload<
-							RowType<Database, TSchema, TTable>,
-							TOp,
-							TColumns extends string ? TColumns : undefined
-						>;
-					}
-				: { event: `${TSchema}.${TTable}.${TOp}`; payload: { old: any; new: any; tg_table: string; tg_op: string } }
-			: { event: `${TSchema}.${TTable}.${TOp}`; payload: { old: any; new: any; tg_table: string; tg_op: string } }
+	? T extends { schema: infer TSchema extends string }
+		? T extends { table: infer TTable extends string }
+			? T extends { operation: infer TOp extends "insert" | "update" | "delete" }
+				? TSchema extends SchemaName<Database>
+					? TTable extends TableName<Database, TSchema>
+						? {
+								event: `${TSchema}.${TTable}.${TOp}`;
+								payload: DatabaseEventPayload<
+									RowType<Database, TSchema, TTable>,
+									TOp,
+									T extends { columns: infer TColumns extends string }
+										? TColumns
+										: undefined
+								>;
+							}
+						: {
+								event: `${TSchema}.${TTable}.${TOp}`;
+								payload: {
+									old: any;
+									new: any;
+									tg_table: string;
+									tg_op: string;
+								};
+							}
+					: {
+							event: `${TSchema}.${TTable}.${TOp}`;
+							payload: {
+								old: any;
+								new: any;
+								tg_table: string;
+								tg_op: string;
+							};
+						}
+				: never
+			: never
 		: never
 	: never;
 

@@ -170,10 +170,15 @@ export type HasCustomEvent<TTriggers> = TTriggers extends readonly any[]
 
 // Check if triggers include database event
 export type HasDatabaseEvent<TTriggers> = TTriggers extends readonly any[]
-	? Extract<TTriggers[number], DatabaseEventTrigger> extends never
+	? { schema: string; table: string; operation: "insert" | "update" | "delete" } extends TTriggers[number]
 		? false
-		: true
-	: TTriggers extends DatabaseEventTrigger
+		: Extract<
+					TTriggers[number],
+					{ schema: string; table: string; operation: "insert" | "update" | "delete" }
+			  > extends never
+			? false
+			: true
+	: TTriggers extends { schema: string; table: string; operation: "insert" | "update" | "delete" }
 		? true
 		: false;
 
