@@ -22,15 +22,15 @@ describe("task event types", () => {
 
 		const task = conductor.createTask(
 			{ name: "test-task" },
-			[{ invocable: true }, { cron: "0 0 * * *" }],
+			[{ invocable: true }, { cron: "0 0 * * *", name: "hourly" }],
 			async (event, _ctx) => {
 				expectTypeOf(event).toExtend<
-					| { event: "pgconductor.cron" }
+					| { event: "hourly" }
 					| { event: "pgconductor.invoke"; payload: { value: number } }
 				>();
 
-				if (event.event === "pgconductor.cron") {
-					expectTypeOf(event).toEqualTypeOf<{ event: "pgconductor.cron" }>();
+				if (event.event === "hourly") {
+					expectTypeOf(event).toEqualTypeOf<{ event: "hourly" }>();
 
 					// @ts-expect-error - cron events don't have payload
 					const _invalid = event.payload;
@@ -62,10 +62,10 @@ describe("task event types", () => {
 
 		const task = conductor.createTask(
 			{ name: "empty-task" },
-			[{ invocable: true }, { cron: "*/5 * * * *" }],
+			[{ invocable: true }, { cron: "*/5 * * * *", name: "every-5min" }],
 			async (event, _ctx) => {
-				if (event.event === "pgconductor.cron") {
-					expectTypeOf(event).toEqualTypeOf<{ event: "pgconductor.cron" }>();
+				if (event.event === "every-5min") {
+					expectTypeOf(event).toEqualTypeOf<{ event: "every-5min" }>();
 				} else {
 					expectTypeOf(event).toExtend<{
 						event: "pgconductor.invoke";
@@ -91,13 +91,13 @@ describe("task event types", () => {
 
 		const task = conductor.createTask(
 			{ name: "my-cron" },
-			[{ cron: "*/5 * * * *" }],
+			[{ cron: "*/5 * * * *", name: "every-5min" }],
 			async (event, _ctx) => {
 				// Event should only be cron, no invoke event possible
-				expectTypeOf(event).toEqualTypeOf<{ event: "pgconductor.cron" }>();
+				expectTypeOf(event).toEqualTypeOf<{ event: "every-5min" }>();
 
 				// Verify it's cron
-				expectTypeOf(event.event).toEqualTypeOf<"pgconductor.cron">();
+				expectTypeOf(event.event).toEqualTypeOf<"every-5min">();
 			},
 		);
 
@@ -150,16 +150,16 @@ describe("task event types", () => {
 
 		const task = conductor.createTask(
 			{ name: "both-task" },
-			[{ invocable: true }, { cron: "0 0 * * *" }],
+			[{ invocable: true }, { cron: "0 0 * * *", name: "hourly" }],
 			async (event, _ctx) => {
 				// Event can be either cron or invoke
 				expectTypeOf(event).toExtend<
-					| { event: "pgconductor.cron" }
+					| { event: "hourly" }
 					| { event: "pgconductor.invoke"; payload: { value: number } }
 				>();
 
-				if (event.event === "pgconductor.cron") {
-					expectTypeOf(event).toEqualTypeOf<{ event: "pgconductor.cron" }>();
+				if (event.event === "hourly") {
+					expectTypeOf(event).toEqualTypeOf<{ event: "hourly" }>();
 				} else {
 					expectTypeOf(event).toEqualTypeOf<{
 						event: "pgconductor.invoke";
@@ -202,7 +202,7 @@ describe("task event types", () => {
 		// Tasks in catalog can have any trigger type (invocable not required)
 		conductor.createTask(
 			{ name: "defined-task" },
-			{ cron: "0 0 * * *" },
+			{ cron: "0 0 * * *", name: "hourly" },
 			async (_event, _ctx) => {},
 		);
 	});
@@ -330,13 +330,13 @@ describe("task event types", () => {
 		const task = conductor.createTask(
 			{ name: "sync-contacts" },
 			[
-				{ cron: "0 * * * *" },
+				{ cron: "0 * * * *", name: "hourly" },
 				{ schema: "public", table: "contact", operation: "update" },
 			],
 			async (event, _ctx) => {
 				// Event can be either cron or database event
-				if (event.event === "pgconductor.cron") {
-					expectTypeOf(event).toEqualTypeOf<{ event: "pgconductor.cron" }>();
+				if (event.event === "hourly") {
+					expectTypeOf(event).toEqualTypeOf<{ event: "hourly" }>();
 				} else if (event.event === "public.contact.update") {
 					expectTypeOf(event.payload.tg_op).toEqualTypeOf<"UPDATE">();
 					// Both old and new should have values for update
@@ -372,7 +372,7 @@ describe("task event types", () => {
 			{ name: "audit-task" },
 			[
 				{ invocable: true },
-				{ cron: "0 0 * * *" },
+				{ cron: "0 0 * * *", name: "daily" },
 				{ event: "payment.received" },
 				{ schema: "public", table: "contact", operation: "delete" },
 			],
@@ -380,8 +380,8 @@ describe("task event types", () => {
 				// Event can be any of the four types
 				if (event.event === "pgconductor.invoke") {
 					expectTypeOf(event.payload).toEqualTypeOf<{ reason: string }>();
-				} else if (event.event === "pgconductor.cron") {
-					expectTypeOf(event).toEqualTypeOf<{ event: "pgconductor.cron" }>();
+				} else if (event.event === "daily") {
+					expectTypeOf(event).toEqualTypeOf<{ event: "daily" }>();
 				} else if (event.event === "payment.received") {
 					expectTypeOf(event.payload.paymentId).toEqualTypeOf<string>();
 					expectTypeOf(event.payload.amount).toEqualTypeOf<number>();

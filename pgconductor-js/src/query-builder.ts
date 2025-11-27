@@ -864,14 +864,14 @@ export class QueryBuilder {
 		const runAt = spec.run_at as Date;
 		const cronExpression = spec.cron_expression as string;
 		const timestampSeconds = Math.floor(runAt.getTime() / 1000);
-		const dedupeKey = `dynamic::${scheduleName}::${timestampSeconds}`;
+		const dedupeKey = `scheduled::${scheduleName}::${timestampSeconds}`;
 
 		return this.sql<[{ id: string }]>`
 			with removed as (
 				delete from pgconductor.executions
 				where task_key = ${spec.task_key}::text
 					and queue = ${spec.queue}::text
-					and dedupe_key like 'dynamic::%'
+					and dedupe_key like 'scheduled::%'
 					and split_part(dedupe_key, '::', 2) = ${scheduleName}::text
 					and cron_expression is not null
 					and run_at > pgconductor.current_time()
@@ -892,19 +892,36 @@ export class QueryBuilder {
 		taskKey,
 		queue,
 		scheduleName,
-	}: UnscheduleCronExecutionArgs): PendingQuery<[{ deleted_count: number }]> {
-		return this.sql<[{ deleted_count: number }]>`
-			with deleted as (
+	}: UnscheduleCronExecutionArgs): PendingQuery<[]> {
+		return this.sql<[]>`
+			with
+			-- Delete future pending executions
+			deleted_future as (
 				delete from pgconductor.executions
 				where task_key = ${taskKey}::text
 					and queue = ${queue}::text
-					and dedupe_key like 'dynamic::%'
+					and dedupe_key like 'scheduled::%'
 					and split_part(dedupe_key, '::', 2) = ${scheduleName}::text
 					and cron_expression is not null
 					and run_at > pgconductor.current_time()
 				returning 1
+			),
+			-- Mark running executions as cancelled (no signal needed, they'll fail naturally)
+			cancelled_running as (
+				update pgconductor.executions e
+				set cancelled = true
+				where e.task_key = ${taskKey}::text
+					and e.queue = ${queue}::text
+					and e.dedupe_key like 'scheduled::%'
+					and split_part(e.dedupe_key, '::', 2) = ${scheduleName}::text
+					and e.cron_expression is not null
+					and e.locked_by is not null
+					and e.completed_at is null
+					and e.failed_at is null
+					and e.cancelled = false
+				returning 1
 			)
-			select count(*)::int as deleted_count from deleted
+			select where false
 		`;
 	}
 

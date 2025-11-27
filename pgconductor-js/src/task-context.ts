@@ -303,7 +303,7 @@ export class TaskContext<
 	>(
 		task: TaskIdentifier<TName, TQueue>,
 		scheduleName: string,
-	): Promise<boolean> {
+	): Promise<void> {
 		if (!scheduleName) {
 			throw new Error("scheduleName is required");
 		}
@@ -313,7 +313,7 @@ export class TaskContext<
 		}
 
 		const queue = task.queue || "default";
-		return this.opts.db.unscheduleCronExecution({
+		await this.opts.db.unscheduleCronExecution({
 			taskKey: task.name,
 			queue,
 			scheduleName,

@@ -473,12 +473,10 @@ export class DatabaseClient {
 
 	async unscheduleCronExecution(
 		args: UnscheduleCronExecutionArgs,
-	): Promise<boolean> {
-		const result = await this.query(
-			this.builder.buildUnscheduleCronExecution(args),
-			{ label: "unscheduleCronExecution" },
-		);
-		return result[0]?.deleted_count > 0;
+	): Promise<void> {
+		await this.query(this.builder.buildUnscheduleCronExecution(args), {
+			label: "unscheduleCronExecution",
+		});
 	}
 
 	async invoke(spec: ExecutionSpec): Promise<string> {

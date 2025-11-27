@@ -788,14 +788,14 @@ describe("event types", () => {
 			conductor.createTask(
 				{ name: "cron-and-event" },
 				[
-					{ cron: "0 * * * *" },
+					{ cron: "0 * * * *", name: "hourly" },
 					{ schema: "public", table: "contact", operation: "update" },
 				],
 				async (event) => {
 					// Event should be union of cron and database event
-					if (event.event === "pgconductor.cron") {
+					if (event.event === "hourly") {
 						// Cron event has no payload
-						expectTypeOf(event).toEqualTypeOf<{ event: "pgconductor.cron" }>();
+						expectTypeOf(event).toEqualTypeOf<{ event: "hourly" }>();
 					} else if (event.event === "public.contact.update") {
 						// Database update event
 						expectTypeOf(event.payload.tg_op).toEqualTypeOf<"UPDATE">();

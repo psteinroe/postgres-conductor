@@ -25,7 +25,7 @@ export const createMaintenanceTask = <Queue extends string = "default">(
 		object,
 		void,
 		{ db: DatabaseClient; tasks: Map<string, AnyTask> },
-		{ event: "pgconductor.cron" }
+		{ event: "pgconductor.maintenance" }
 	>(
 		{
 			name: "pgconductor.maintenance",
@@ -34,6 +34,7 @@ export const createMaintenanceTask = <Queue extends string = "default">(
 		{
 			// Run daily between 00:00 and 01:00, with consistent jitter per queue
 			cron: `${jitterMinutes} 0 * * *`,
+			name: "pgconductor.maintenance",
 		},
 		async (_, { db, tasks }) => {
 			// Skip if no tasks have retention settings (check in-memory config)

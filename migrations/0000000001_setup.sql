@@ -469,15 +469,32 @@ begin
   on conflict (task_key, dedupe_key, queue) do nothing;
 
   -- step 4: clean up stale schedules for this queue
+  -- delete future executions for schedules that no longer exist
   delete from pgconductor.executions
   where queue = p_queue_name
     and cron_expression is not null
     and run_at > pgconductor.current_time()
-    and dedupe_key like 'repeated::%'
-    and (task_key, cron_expression) not in (
-      select spec.task_key, spec.cron_expression
+    and dedupe_key like 'scheduled::%'
+    and split_part(dedupe_key, '::', 2) not in (
+      select split_part(spec.dedupe_key, '::', 2)
       from unnest(p_cron_schedules) as spec
-      where spec.cron_expression is not null
+      where spec.dedupe_key is not null and spec.dedupe_key like 'scheduled::%'
+    );
+
+  -- mark running executions as cancelled for schedules that no longer exist
+  update pgconductor.executions
+  set cancelled = true
+  where queue = p_queue_name
+    and cron_expression is not null
+    and dedupe_key like 'scheduled::%'
+    and locked_by is not null
+    and completed_at is null
+    and failed_at is null
+    and cancelled = false
+    and split_part(dedupe_key, '::', 2) not in (
+      select split_part(spec.dedupe_key, '::', 2)
+      from unnest(p_cron_schedules) as spec
+      where spec.dedupe_key is not null and spec.dedupe_key like 'scheduled::%'
     );
 
   -- step 5: delete old trigger-based subscriptions for this queue

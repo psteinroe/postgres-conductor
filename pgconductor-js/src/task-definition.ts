@@ -115,7 +115,7 @@ export type FindTaskByIdentifier<
 
 // Trigger types
 export type InvocableTrigger = { invocable: true };
-export type CronTrigger = { cron: string };
+export type CronTrigger = { cron: string; name: string };
 
 // Event trigger - triggers when a custom event is emitted
 export type CustomEventTrigger<TName extends string = string> = {

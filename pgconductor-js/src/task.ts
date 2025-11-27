@@ -5,6 +5,7 @@ import type {
 	HasCron,
 	HasCustomEvent,
 	HasDatabaseEvent,
+	CronTrigger,
 	CustomEventTrigger,
 	DatabaseEventTrigger,
 } from "./task-definition";
@@ -43,6 +44,13 @@ export type TaskEvent<P extends object = object> =
 	| { event: "pgconductor.cron" }
 	| { event: "pgconductor.invoke"; payload: P };
 
+// Extract cron triggers from array
+type ExtractCronTriggers<TTriggers> = TTriggers extends readonly any[]
+	? Extract<TTriggers[number], CronTrigger>
+	: TTriggers extends CronTrigger
+		? TTriggers
+		: never;
+
 // Extract custom event triggers from array
 type ExtractCustomEventTriggers<TTriggers> = TTriggers extends readonly any[]
 	? Extract<TTriggers[number], CustomEventTrigger>
@@ -56,6 +64,13 @@ type ExtractDatabaseEventTriggers<TTriggers> = TTriggers extends readonly any[]
 	: TTriggers extends DatabaseEventTrigger
 		? TTriggers
 		: never;
+
+// Build cron event union from triggers (extracts schedule names)
+type CronEventUnion<TTriggers> = ExtractCronTriggers<TTriggers> extends infer T
+	? T extends { name: infer TName extends string }
+		? { event: TName }
+		: never
+	: never;
 
 // Build custom event union from triggers
 type CustomEventUnion<
@@ -107,7 +122,7 @@ export type TaskEventFromTriggers<
 	| (HasInvocable<TTriggers> extends true
 			? { event: "pgconductor.invoke"; payload: TPayload }
 			: never)
-	| (HasCron<TTriggers> extends true ? { event: "pgconductor.cron" } : never)
+	| (HasCron<TTriggers> extends true ? CronEventUnion<TTriggers> : never)
 	| (HasCustomEvent<TTriggers> extends true
 			? CustomEventUnion<TTriggers, Events>
 			: never)

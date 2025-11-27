@@ -323,7 +323,7 @@ export class Worker<
 
 		const cronSchedules: ExecutionSpec[] = allTasks.flatMap((task) =>
 			task.triggers
-				.filter((t): t is { cron: string } => "cron" in t)
+				.filter((t): t is { cron: string; name: string } => "cron" in t)
 				.map((trigger) => {
 					const interval = CronExpressionParser.parse(trigger.cron);
 					const nextTimestamp = interval.next().toDate();
@@ -332,7 +332,7 @@ export class Worker<
 						task_key: task.name,
 						queue: this.queueName,
 						run_at: nextTimestamp,
-						dedupe_key: `repeated::${trigger.cron}::${timestampSeconds}`,
+						dedupe_key: `scheduled::${trigger.name}::${timestampSeconds}`,
 						cron_expression: trigger.cron,
 					};
 				}),
@@ -504,13 +504,26 @@ export class Worker<
 					});
 				});
 
+				// If execution was cancelled, fail it immediately without executing
+				if (exec.cancelled) {
+					return {
+						execution_id: exec.id,
+						queue: exec.queue,
+						task_key: exec.task_key,
+						status: "failed",
+						error: exec.last_error || "Execution was cancelled",
+					} as const;
+				}
+
 				try {
 					await this.scheduleNextExecution(exec);
 
 					// Determine event type based on execution data
 					let taskEvent: any;
 					if (exec.cron_expression) {
-						taskEvent = { event: "pgconductor.cron" };
+						// Extract schedule name from dedupe_key (format: scheduled::{name}::{timestamp})
+						const scheduleName = exec.dedupe_key?.split("::")[1] || "unknown";
+						taskEvent = { event: scheduleName };
 					} else if (
 						exec.payload &&
 						typeof exec.payload === "object" &&
@@ -647,17 +660,21 @@ export class Worker<
 			return;
 		}
 
+		// Extract schedule name from dedupe_key (format: scheduled::{name}::{timestamp})
+		if (!execution.dedupe_key || !execution.dedupe_key.startsWith("scheduled::")) {
+			return;
+		}
+
+		const parts = execution.dedupe_key.split("::");
+		if (parts.length < 2) {
+			return;
+		}
+
+		const scheduleName = parts[1];
 		const interval = CronExpressionParser.parse(execution.cron_expression);
 		const nextTimestamp = interval.next().toDate();
 		const timestampSeconds = Math.floor(nextTimestamp.getTime() / 1000);
-		let dedupePrefix = `repeated::${execution.cron_expression}`;
-		if (execution.dedupe_key && execution.dedupe_key.startsWith("dynamic::")) {
-			const parts = execution.dedupe_key.split("::");
-			if (parts.length >= 2) {
-				dedupePrefix = `${parts[0]}::${parts[1]}`;
-			}
-		}
-		const nextDedupeKey = `${dedupePrefix}::${timestampSeconds}`;
+		const nextDedupeKey = `scheduled::${scheduleName}::${timestampSeconds}`;
 
 		await this.db.invoke({
 			task_key: execution.task_key,
