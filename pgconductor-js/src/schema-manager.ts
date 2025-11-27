@@ -19,9 +19,7 @@ export class SchemaManager {
 		private readonly db: DatabaseClient,
 		options: { schemaName?: string } = {},
 	) {
-		this.migrationStore = new MigrationStore(
-			options.schemaName || "pgconductor",
-		);
+		this.migrationStore = new MigrationStore(options.schemaName || "pgconductor");
 	}
 
 	/**
@@ -47,9 +45,7 @@ export class SchemaManager {
 		let migrated = false;
 
 		while (true) {
-			const nextMigration = this.migrationStore.getMigration(
-				installedVersion + 1,
-			);
+			const nextMigration = this.migrationStore.getMigration(installedVersion + 1);
 			if (!nextMigration) {
 				if (!migrated) {
 					console.log("Schema is up to date");
@@ -61,10 +57,7 @@ export class SchemaManager {
 				await this.db.sweepOrchestrators({
 					migrationNumber: nextMigration.version,
 				});
-				await this.waitForOlderOrchestratorsToExit(
-					nextMigration.version,
-					signal,
-				);
+				await this.waitForOlderOrchestratorsToExit(nextMigration.version, signal);
 			}
 
 			const status = await this.db.applyMigration(nextMigration);

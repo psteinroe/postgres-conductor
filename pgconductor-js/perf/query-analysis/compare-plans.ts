@@ -205,7 +205,11 @@ const queries: QueryDefinition[] = [
 				description: "5 completed, 3 failed, 2 released",
 				setup: async () => {},
 				execute: async (qb, scenario, db) => {
-					const results = await generateResultsFromDb(db, scenario, { completed: 5, failed: 3, released: 2 });
+					const results = await generateResultsFromDb(db, scenario, {
+						completed: 5,
+						failed: 3,
+						released: 2,
+					});
 					return qb.buildReturnExecutions(groupResults(results));
 				},
 			},
@@ -233,7 +237,11 @@ const queries: QueryDefinition[] = [
 				description: "50 completed, 30 failed, 20 released",
 				setup: async () => {},
 				execute: async (qb, scenario, db) => {
-					const results = await generateResultsFromDb(db, scenario, { completed: 50, failed: 30, released: 20 });
+					const results = await generateResultsFromDb(db, scenario, {
+						completed: 50,
+						failed: 30,
+						released: 20,
+					});
 					return qb.buildReturnExecutions(groupResults(results));
 				},
 			},
@@ -256,11 +264,7 @@ function extractMetrics(plan: any): {
 	};
 }
 
-async function runComparison(
-	scenarioName: string,
-	queryNames: string[],
-	outputDir?: string,
-) {
+async function runComparison(scenarioName: string, queryNames: string[], outputDir?: string) {
 	const scenario = scenarios[scenarioName];
 	if (!scenario) {
 		console.error(`Unknown scenario: ${scenarioName}`);
@@ -303,9 +307,8 @@ async function runComparison(
 		};
 
 		// Filter queries if specified
-		const queriesToRun = queryNames.length > 0
-			? queries.filter((q) => queryNames.includes(q.name))
-			: queries;
+		const queriesToRun =
+			queryNames.length > 0 ? queries.filter((q) => queryNames.includes(q.name)) : queries;
 
 		for (const queryDef of queriesToRun) {
 			console.log(`\nQuery: ${queryDef.name}`);
@@ -342,10 +345,7 @@ async function runComparison(
 		if (outputDir) {
 			mkdirSync(outputDir, { recursive: true });
 			const filename = `${scenarioName}-${Date.now()}.json`;
-			writeFileSync(
-				join(outputDir, filename),
-				JSON.stringify(results, null, 2),
-			);
+			writeFileSync(join(outputDir, filename), JSON.stringify(results, null, 2));
 			console.log(`\nResults saved to: ${join(outputDir, filename)}`);
 		}
 

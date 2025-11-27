@@ -134,9 +134,7 @@ describe("event types", () => {
 				payload: { value: number };
 			}>;
 
-			const events = EventSchemas.fromSchema([
-				schemaEvent,
-			]).fromUnion<TypeOnlyEvent>();
+			const events = EventSchemas.fromSchema([schemaEvent]).fromUnion<TypeOnlyEvent>();
 
 			expect(events.definitions.length).toBe(1); // Only schema events have runtime definitions
 		});
@@ -439,11 +437,7 @@ describe("event types", () => {
 				{ name: "db-columns-invalid" },
 				{ invocable: true },
 				async (_event, ctx) => {
-					let result: DatabaseEventPayload<
-						ContactRow,
-						"insert",
-						"id, email, u"
-					>;
+					let result: DatabaseEventPayload<ContactRow, "insert", "id, email, u">;
 
 					// @ts-expect-error invalid column selection should error at config level
 					result = await ctx.waitForEvent("columns-step", {
@@ -512,14 +506,10 @@ describe("event types", () => {
 				context: {},
 			});
 
-			conductor.createTask(
-				{ name: "error-waiter" },
-				{ invocable: true },
-				async (_event, ctx) => {
-					// @ts-expect-error - invalid event name
-					await ctx.waitForEvent("step", { event: "nonexistent.event" });
-				},
-			);
+			conductor.createTask({ name: "error-waiter" }, { invocable: true }, async (_event, ctx) => {
+				// @ts-expect-error - invalid event name
+				await ctx.waitForEvent("step", { event: "nonexistent.event" });
+			});
 		});
 
 		test("waitForEvent type error for invalid table name", () => {
@@ -730,9 +720,7 @@ describe("event types", () => {
 					// new should have all contact columns
 					if (event.payload.new) {
 						expectTypeOf(event.payload.new.id).toEqualTypeOf<string>();
-						expectTypeOf(event.payload.new.email).toEqualTypeOf<
-							string | null
-						>();
+						expectTypeOf(event.payload.new.email).toEqualTypeOf<string | null>();
 					}
 				},
 			);

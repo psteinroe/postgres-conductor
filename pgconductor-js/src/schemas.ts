@@ -19,9 +19,9 @@ export class TaskSchemas<
 	/**
 	 * Create TaskSchemas from standard-schema based task definitions.
 	 */
-	static fromSchema<
-		const T extends readonly TaskDefinition<string, any, any, string>[],
-	>(tasks: T): TaskSchemas<T, never> {
+	static fromSchema<const T extends readonly TaskDefinition<string, any, any, string>[]>(
+		tasks: T,
+	): TaskSchemas<T, never> {
 		return new TaskSchemas(tasks);
 	}
 
@@ -113,28 +113,26 @@ export class EventSchemas<
  * Adapter for database type definitions.
  * Wraps database types to allow different sources in the future (e.g., Supabase).
  */
-export class DatabaseSchema<TDatabase extends GenericDatabase> {
+export class DatabaseSchema<_TDatabase extends GenericDatabase> {
 	private constructor() {}
 
 	/**
 	 * Create DatabaseSchema from generated types (e.g., from pgtyped, kysely, etc.).
 	 */
-	static fromGeneratedTypes<
-		T extends GenericDatabase,
-	>(): DatabaseSchema<T> {
+	static fromGeneratedTypes<T extends GenericDatabase>(): DatabaseSchema<T> {
 		return new DatabaseSchema();
 	}
 }
 
 // Type helpers to extract inner types from schema adapters
-export type InferTasksFromSchema<T> = T extends TaskSchemas<infer TSchema, infer TUnion>
-	? readonly [...TSchema, TUnion]
-	: readonly TaskDefinition<string, any, any, string>[];
+export type InferTasksFromSchema<T> =
+	T extends TaskSchemas<infer TSchema, infer TUnion>
+		? readonly [...TSchema, TUnion]
+		: readonly TaskDefinition<string, any, any, string>[];
 
-export type InferEventsFromSchema<T> = T extends EventSchemas<infer TSchema, infer TUnion>
-	? readonly [...TSchema, TUnion]
-	: readonly EventDefinition<string, any>[];
+export type InferEventsFromSchema<T> =
+	T extends EventSchemas<infer TSchema, infer TUnion>
+		? readonly [...TSchema, TUnion]
+		: readonly EventDefinition<string, any>[];
 
-export type InferDatabaseFromSchema<T> = T extends DatabaseSchema<infer U>
-	? U
-	: GenericDatabase;
+export type InferDatabaseFromSchema<T> = T extends DatabaseSchema<infer U> ? U : GenericDatabase;

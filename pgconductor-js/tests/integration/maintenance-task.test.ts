@@ -53,7 +53,6 @@ describe("Maintenance Task", () => {
 			payload: z.object({}),
 		});
 
-
 		const conductor = Conductor.create({
 			sql: db.sql,
 			tasks: TaskSchemas.fromSchema([taskDefinition]),
@@ -146,7 +145,6 @@ describe("Maintenance Task", () => {
 			name: "failing-task",
 			payload: z.object({}),
 		});
-
 
 		const conductor = Conductor.create({
 			sql: db.sql,
@@ -338,7 +336,6 @@ describe("Maintenance Task", () => {
 			payload: z.object({}),
 		});
 
-
 		const conductor = Conductor.create({
 			sql: db.sql,
 			tasks: TaskSchemas.fromSchema([taskDefinition]),
@@ -410,7 +407,6 @@ describe("Maintenance Task", () => {
 			name: "keep-forever",
 			payload: z.object({}),
 		});
-
 
 		const conductor = Conductor.create({
 			sql: db.sql,

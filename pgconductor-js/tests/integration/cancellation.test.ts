@@ -32,17 +32,13 @@ describe("Cancellation Support", () => {
 			context: {},
 		});
 
-		conductor.createTask(
-			{ name: "slow-task" },
-			{ invocable: true },
-			async (event, _ctx) => {
-				if (event.event === "pgconductor.invoke") {
-					await new Promise((r) => setTimeout(r, 10000));
-					return { result: "done" };
-				}
-				throw new Error("Unexpected event type");
-			},
-		);
+		conductor.createTask({ name: "slow-task" }, { invocable: true }, async (event, _ctx) => {
+			if (event.event === "pgconductor.invoke") {
+				await new Promise((r) => setTimeout(r, 10000));
+				return { result: "done" };
+			}
+			throw new Error("Unexpected event type");
+		});
 
 		// Initialize schema
 		await conductor.ensureInstalled();
@@ -65,11 +61,13 @@ describe("Cancellation Support", () => {
 		expect(cancelled).toBe(true);
 
 		// Verify execution is failed
-		const failedExecution = await db.sql<{
-			failed_at: Date | null;
-			last_error: string | null;
-			cancelled: boolean;
-		}[]>`
+		const failedExecution = await db.sql<
+			{
+				failed_at: Date | null;
+				last_error: string | null;
+				cancelled: boolean;
+			}[]
+		>`
 			select failed_at, last_error, cancelled
 			from pgconductor.executions
 			where id = ${executionId}::uuid
@@ -137,10 +135,12 @@ describe("Cancellation Support", () => {
 		expect(cancelled).toBe(true);
 
 		// Verify execution has cancelled flag set
-		const cancelledExecution = await db.sql<{
-			cancelled: boolean;
-			failed_at: Date | null;
-		}[]>`
+		const cancelledExecution = await db.sql<
+			{
+				cancelled: boolean;
+				failed_at: Date | null;
+			}[]
+		>`
 			select cancelled, failed_at
 			from pgconductor.executions
 			where id = ${executionId}::uuid
@@ -150,10 +150,12 @@ describe("Cancellation Support", () => {
 		expect(cancelledExecution[0]?.failed_at).toBeNull(); // Not failed yet
 
 		// Verify signal was created
-		const signals = await db.sql<{
-			type: string;
-			execution_id: string;
-		}[]>`
+		const signals = await db.sql<
+			{
+				type: string;
+				execution_id: string;
+			}[]
+		>`
 			select type, execution_id
 			from pgconductor.orchestrator_signals
 		`;
@@ -230,10 +232,12 @@ describe("Cancellation Support", () => {
 		expect(taskFn).toHaveBeenCalledTimes(0);
 
 		// Execution should be permanently failed
-		const finalExecution = await db.sql<{
-			failed_at: Date | null;
-			last_error: string | null;
-		}[]>`
+		const finalExecution = await db.sql<
+			{
+				failed_at: Date | null;
+				last_error: string | null;
+			}[]
+		>`
 			select failed_at, last_error
 			from pgconductor.executions
 			where id = ${executionId}::uuid
@@ -257,11 +261,7 @@ describe("Cancellation Support", () => {
 			context: {},
 		});
 
-		conductor.createTask(
-			{ name: "dummy-task" },
-			{ invocable: true },
-			async () => {},
-		);
+		conductor.createTask({ name: "dummy-task" }, { invocable: true }, async () => {});
 
 		// Initialize schema
 		await conductor.ensureInstalled();
@@ -494,12 +494,14 @@ describe("Cancellation Support", () => {
 		// Verify it failed once and is scheduled to retry
 		expect(attemptCount).toBe(1);
 
-		const executions = await db.sql<{
-			id: string;
-			attempts: number;
-			failed_at: Date | null;
-			run_at: Date;
-		}[]>`
+		const executions = await db.sql<
+			{
+				id: string;
+				attempts: number;
+				failed_at: Date | null;
+				run_at: Date;
+			}[]
+		>`
 			select id, attempts, failed_at, run_at
 			from pgconductor.executions
 			where task_key = 'failing-task'
@@ -540,15 +542,11 @@ describe("Cancellation Support", () => {
 			context: {},
 		});
 
-		conductor.createTask(
-			{ name: "idempotent-task" },
-			{ invocable: true },
-			async (event, _ctx) => {
-				if (event.event === "pgconductor.invoke") {
-					await new Promise((r) => setTimeout(r, 10000));
-				}
-			},
-		);
+		conductor.createTask({ name: "idempotent-task" }, { invocable: true }, async (event, _ctx) => {
+			if (event.event === "pgconductor.invoke") {
+				await new Promise((r) => setTimeout(r, 10000));
+			}
+		});
 
 		// Initialize schema
 		await conductor.ensureInstalled();
@@ -574,10 +572,12 @@ describe("Cancellation Support", () => {
 		expect(cancelled3).toBe(false);
 
 		// Verify execution failed only once
-		const finalExec = await db.sql<{
-			failed_at: Date | null;
-			last_error: string | null;
-		}[]>`
+		const finalExec = await db.sql<
+			{
+				failed_at: Date | null;
+				last_error: string | null;
+			}[]
+		>`
 			select failed_at, last_error
 			from pgconductor.executions
 			where id = ${execId}::uuid
@@ -626,10 +626,12 @@ describe("Cancellation Support", () => {
 
 		await new Promise((r) => setTimeout(r, 300));
 
-		const executions = await db.sql<{
-			id: string;
-			locked_by: string | null;
-		}[]>`
+		const executions = await db.sql<
+			{
+				id: string;
+				locked_by: string | null;
+			}[]
+		>`
 			select id, locked_by
 			from pgconductor.executions
 			where task_key = 'long-task'
@@ -644,10 +646,12 @@ describe("Cancellation Support", () => {
 		const cancelled = await db.client.cancelExecution(execId);
 		expect(cancelled).toBe(true);
 
-		const cancelledExec = await db.sql<{
-			cancelled: boolean;
-			failed_at: Date | null;
-		}[]>`
+		const cancelledExec = await db.sql<
+			{
+				cancelled: boolean;
+				failed_at: Date | null;
+			}[]
+		>`
 			select cancelled, failed_at
 			from pgconductor.executions
 			where id = ${execId}::uuid
@@ -658,11 +662,13 @@ describe("Cancellation Support", () => {
 
 		await db.client.orchestratorShutdown({ orchestratorId });
 
-		const failedExec = await db.sql<{
-			failed_at: Date | null;
-			last_error: string | null;
-			locked_by: string | null;
-		}[]>`
+		const failedExec = await db.sql<
+			{
+				failed_at: Date | null;
+				last_error: string | null;
+				locked_by: string | null;
+			}[]
+		>`
 			select failed_at, last_error, locked_by
 			from pgconductor.executions
 			where id = ${execId}::uuid
@@ -729,9 +735,11 @@ describe("Cancellation Support", () => {
 
 		await new Promise((r) => setTimeout(r, 200));
 
-		const failedExec = await db.sql<{
-			last_error: string | null;
-		}[]>`
+		const failedExec = await db.sql<
+			{
+				last_error: string | null;
+			}[]
+		>`
 			select last_error
 			from pgconductor.executions
 			where id = ${execId}::uuid
@@ -786,9 +794,11 @@ describe("Cancellation Support", () => {
 
 		await new Promise((r) => setTimeout(r, 200));
 
-		const failedExec = await db.sql<{
-			last_error: string | null;
-		}[]>`
+		const failedExec = await db.sql<
+			{
+				last_error: string | null;
+			}[]
+		>`
 			select last_error
 			from pgconductor.executions
 			where id = ${execId}::uuid
@@ -821,10 +831,9 @@ describe("Cancellation Support", () => {
 			{ invocable: true },
 			async (event, ctx) => {
 				if (event.event === "pgconductor.invoke") {
-					capturedResult = await ctx.cancel(
-						event.payload.execIdToCancel,
-						{ reason: "Cancelled from task context" },
-					);
+					capturedResult = await ctx.cancel(event.payload.execIdToCancel, {
+						reason: "Cancelled from task context",
+					});
 					return { result: `cancelled: ${capturedResult}` };
 				}
 				throw new Error("Unexpected event");
@@ -853,9 +862,11 @@ describe("Cancellation Support", () => {
 			throw new Error(`Expected capturedResult to be true, got ${capturedResult}`);
 		}
 
-		const failedExec = await db.sql<{
-			last_error: string | null;
-		}[]>`
+		const failedExec = await db.sql<
+			{
+				last_error: string | null;
+			}[]
+		>`
 			select last_error
 			from pgconductor.executions
 			where id = ${pendingExecId}::uuid

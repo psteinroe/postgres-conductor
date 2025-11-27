@@ -8,9 +8,7 @@ import { type AnyTask, type ValidateTasksQueue, Task } from "./task";
 import { PACKAGE_VERSION } from "./versions";
 import { makeChildLogger, type Logger } from "./lib/logger";
 
-export type OrchestratorOptions<
-	TTasks extends readonly AnyTask[] = readonly AnyTask[],
-> = {
+export type OrchestratorOptions<TTasks extends readonly AnyTask[] = readonly AnyTask[]> = {
 	conductor: Conductor<any, any, any, any, any, any, any>;
 	tasks?: ValidateTasksQueue<"default", TTasks>;
 	defaultWorker?: Partial<WorkerConfig>;
@@ -78,9 +76,9 @@ export class Orchestrator {
 		}
 	}
 
-	static create<
-		const TTasks extends readonly Task<any, "default", any, any, any, any>[],
-	>(options: OrchestratorOptions<TTasks>): Orchestrator {
+	static create<const TTasks extends readonly Task<any, "default", any, any, any, any>[]>(
+		options: OrchestratorOptions<TTasks>,
+	): Orchestrator {
 		return new Orchestrator(options);
 	}
 
@@ -129,9 +127,7 @@ export class Orchestrator {
 		return this.stopped;
 	}
 
-	private async _internalStart({
-		runOnce = false,
-	}: { runOnce?: boolean } = {}): Promise<void> {
+	private async _internalStart({ runOnce = false }: { runOnce?: boolean } = {}): Promise<void> {
 		if (this._stopDeferred) {
 			throw new Error("Orchestrator is already running");
 		}
@@ -162,9 +158,7 @@ export class Orchestrator {
 				// - Signal others to shut down (if schema exists)
 				// - Wait for them to exit
 				// - Apply migrations
-				const { shouldShutdown } = await this.schemaManager.ensureLatest(
-					this.signal,
-				);
+				const { shouldShutdown } = await this.schemaManager.ensureLatest(this.signal);
 
 				if (shouldShutdown) {
 					this.logger.info(
@@ -182,9 +176,7 @@ export class Orchestrator {
 				});
 
 				// Check for shutdown signal on startup
-				const hasShutdownSignal = signals.some(
-					(s) => s.signal_type === "shutdown",
-				);
+				const hasShutdownSignal = signals.some((s) => s.signal_type === "shutdown");
 				if (hasShutdownSignal) {
 					this.logger.info(
 						`Orchestrator ${this.orchestratorId} detected newer schema after migrations, shutting down`,

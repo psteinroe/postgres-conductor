@@ -25,8 +25,7 @@ describe("task event types", () => {
 			[{ invocable: true }, { cron: "0 0 * * *", name: "hourly" }],
 			async (event, _ctx) => {
 				expectTypeOf(event).toExtend<
-					| { event: "hourly" }
-					| { event: "pgconductor.invoke"; payload: { value: number } }
+					{ event: "hourly" } | { event: "pgconductor.invoke"; payload: { value: number } }
 				>();
 
 				if (event.event === "hourly") {
@@ -154,8 +153,7 @@ describe("task event types", () => {
 			async (event, _ctx) => {
 				// Event can be either cron or invoke
 				expectTypeOf(event).toExtend<
-					| { event: "hourly" }
-					| { event: "pgconductor.invoke"; payload: { value: number } }
+					{ event: "hourly" } | { event: "pgconductor.invoke"; payload: { value: number } }
 				>();
 
 				if (event.event === "hourly") {

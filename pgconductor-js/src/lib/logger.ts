@@ -38,10 +38,7 @@ export class DefaultLogger implements Logger {
 	}
 }
 
-export function makeChildLogger(
-	parent: Logger,
-	metadata: Record<string, unknown>,
-): Logger {
+export function makeChildLogger(parent: Logger, metadata: Record<string, unknown>): Logger {
 	let child = parent;
 	try {
 		if ("child" in parent && typeof parent.child === "function") {

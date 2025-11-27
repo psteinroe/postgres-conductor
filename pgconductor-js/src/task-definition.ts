@@ -25,12 +25,14 @@ export type TaskDefinition<
  *   returns: { sent: boolean };
  * }>;
  */
-export type DefineTask<T extends {
-	name: string;
-	queue?: string;
-	payload?: unknown;
-	returns?: unknown;
-}> = TaskDefinition<
+export type DefineTask<
+	T extends {
+		name: string;
+		queue?: string;
+		payload?: unknown;
+		returns?: unknown;
+	},
+> = TaskDefinition<
 	T["name"],
 	T extends { payload: infer P } ? P : undefined,
 	T extends { returns: infer R } ? R : undefined,
@@ -87,25 +89,26 @@ export function defineTask(def: any) {
 
 type EnsureObject<T> = T extends object ? T : {};
 
-export type InferPayload<T> = T extends TaskDefinition<string, infer P, any, string>
-	? P extends undefined
-		? {}
-		: P extends StandardSchemaV1<any, infer O>
-			? EnsureObject<O>
-			: EnsureObject<P> // Plain type (type-only definition)
-	: never;
+export type InferPayload<T> =
+	T extends TaskDefinition<string, infer P, any, string>
+		? P extends undefined
+			? {}
+			: P extends StandardSchemaV1<any, infer O>
+				? EnsureObject<O>
+				: EnsureObject<P> // Plain type (type-only definition)
+		: never;
 
-export type InferReturns<T> = T extends TaskDefinition<string, any, infer R, string>
-	? R extends undefined
-		? void
-		: R extends StandardSchemaV1<any, infer O>
-			? EnsureObject<O>
-			: EnsureObject<R> // Plain type (type-only definition)
-	: never;
+export type InferReturns<T> =
+	T extends TaskDefinition<string, any, infer R, string>
+		? R extends undefined
+			? void
+			: R extends StandardSchemaV1<any, infer O>
+				? EnsureObject<O>
+				: EnsureObject<R> // Plain type (type-only definition)
+		: never;
 
-export type TaskName<
-	TTasks extends readonly TaskDefinition<string, any, any, string>[],
-> = TTasks[number]["name"];
+export type TaskName<TTasks extends readonly TaskDefinition<string, any, any, string>[]> =
+	TTasks[number]["name"];
 
 export type FindTaskByIdentifier<
 	TTasks extends readonly TaskDefinition<string, any, any, string>[],
@@ -135,11 +138,7 @@ export type DatabaseEventTrigger<
 	columns?: TColumns;
 };
 
-export type Trigger =
-	| InvocableTrigger
-	| CronTrigger
-	| CustomEventTrigger
-	| DatabaseEventTrigger;
+export type Trigger = InvocableTrigger | CronTrigger | CustomEventTrigger | DatabaseEventTrigger;
 
 // Check if triggers include invocable
 export type HasInvocable<TTriggers> = TTriggers extends readonly any[]
@@ -170,7 +169,11 @@ export type HasCustomEvent<TTriggers> = TTriggers extends readonly any[]
 
 // Check if triggers include database event
 export type HasDatabaseEvent<TTriggers> = TTriggers extends readonly any[]
-	? { schema: string; table: string; operation: "insert" | "update" | "delete" } extends TTriggers[number]
+	? {
+			schema: string;
+			table: string;
+			operation: "insert" | "update" | "delete";
+		} extends TTriggers[number]
 		? false
 		: Extract<
 					TTriggers[number],
@@ -186,24 +189,6 @@ export type HasDatabaseEvent<TTriggers> = TTriggers extends readonly any[]
 export type NonEmptyArray<T> = [T, ...T[]];
 export type NonEmptyReadonlyArray<T> = readonly [T, ...T[]];
 
-// Helper: Require at least one element in array matches the required type
-// Uses Extract to handle readonly/mutable variants
-type RequireAtLeastOneWith<TArray extends readonly any[], TRequired> = Extract<
-	TArray[number],
-	TRequired
-> extends never
-	? never
-	: TArray;
-
-// Helper: Check if all elements are NOT of a certain type
-// Uses Extract to handle readonly/mutable variants
-type NoneOf<TArray extends readonly any[], TForbidden> = Extract<
-	TArray[number],
-	TForbidden
-> extends never
-	? TArray
-	: never;
-
 // Check if task identifier exists in the conductor's task catalog
 type TaskIdentifierIsDefined<
 	Tasks extends readonly TaskDefinition<string, any, any, string>[],
@@ -213,20 +198,22 @@ type TaskIdentifierIsDefined<
 
 // Extract event names from triggers
 type ExtractEventNames<TTriggers> = TTriggers extends readonly any[]
-	? TTriggers[number] extends { event: infer E extends string } ? E : never
-	: TTriggers extends { event: infer E extends string } ? E : never;
+	? TTriggers[number] extends { event: infer E extends string }
+		? E
+		: never
+	: TTriggers extends { event: infer E extends string }
+		? E
+		: never;
 
 // Check if all event names in triggers exist in the Events schema
-type AllEventsExist<
-	Events extends readonly { name: string }[],
-	TTriggers,
-> = ExtractEventNames<TTriggers> extends infer EventNames
-	? EventNames extends string
-		? EventNames extends Events[number]["name"]
-			? true
-			: EventNames
-		: true // No event triggers
-	: true;
+type AllEventsExist<Events extends readonly { name: string }[], TTriggers> =
+	ExtractEventNames<TTriggers> extends infer EventNames
+		? EventNames extends string
+			? EventNames extends Events[number]["name"]
+				? true
+				: EventNames
+			: true // No event triggers
+		: true;
 
 // Validate triggers based on whether task is defined
 // Rules:

@@ -81,7 +81,10 @@ async function main() {
 		CONCURRENCY: scenario.workerSettings.concurrency.toString(),
 		FETCH_BATCH_SIZE: scenario.workerSettings.fetchBatchSize.toString(),
 	};
-	if ("flushBatchSize" in scenario.workerSettings && scenario.workerSettings.flushBatchSize !== undefined) {
+	if (
+		"flushBatchSize" in scenario.workerSettings &&
+		scenario.workerSettings.flushBatchSize !== undefined
+	) {
 		startupEnv.FLUSH_BATCH_SIZE = scenario.workerSettings.flushBatchSize.toString();
 	}
 	const startupResult = await spawnWorker("worker.ts", DB_URL, startupEnv);
@@ -108,15 +111,11 @@ async function main() {
 	}
 	const queueDuration = Date.now() - queueStart;
 	console.log(`✓ Queued in ${queueDuration}ms`);
-	console.log(
-		`  Rate: ${((scenario.tasks / queueDuration) * 1000).toFixed(2)} tasks/sec`,
-	);
+	console.log(`  Rate: ${((scenario.tasks / queueDuration) * 1000).toFixed(2)} tasks/sec`);
 	console.log();
 
 	// 4. Run N workers in parallel
-	console.log(
-		`Processing ${scenario.tasks} tasks with ${scenario.workers} workers...`,
-	);
+	console.log(`Processing ${scenario.tasks} tasks with ${scenario.workers} workers...`);
 	const execStart = Date.now();
 
 	const workerPromises = [];
@@ -129,7 +128,10 @@ async function main() {
 			CONCURRENCY: scenario.workerSettings.concurrency.toString(),
 			FETCH_BATCH_SIZE: scenario.workerSettings.fetchBatchSize.toString(),
 		};
-		if ("flushBatchSize" in scenario.workerSettings && scenario.workerSettings.flushBatchSize !== undefined) {
+		if (
+			"flushBatchSize" in scenario.workerSettings &&
+			scenario.workerSettings.flushBatchSize !== undefined
+		) {
 			env.FLUSH_BATCH_SIZE = scenario.workerSettings.flushBatchSize.toString();
 		}
 		workerPromises.push(spawnWorker("worker.ts", DB_URL, env));
@@ -168,8 +170,7 @@ async function main() {
 	const totalProcessed = Number(result[0]?.count || 0);
 	await sql.end();
 
-	const avgStartup =
-		workerTimings.reduce((sum, w) => sum + w.startup, 0) / scenario.workers;
+	const avgStartup = workerTimings.reduce((sum, w) => sum + w.startup, 0) / scenario.workers;
 	const maxExecTime = Math.max(...workerTimings.map((w) => w.execution));
 
 	// 5. Report results
@@ -183,18 +184,14 @@ async function main() {
 	console.log(`  Max execution time: ${maxExecTime}ms`);
 	console.log();
 	console.log("Throughput:");
-	console.log(
-		`  Overall: ${((totalProcessed / totalDuration) * 1000).toFixed(2)} tasks/sec`,
-	);
+	console.log(`  Overall: ${((totalProcessed / totalDuration) * 1000).toFixed(2)} tasks/sec`);
 	console.log(
 		`  Per worker: ${((totalProcessed / scenario.workers / totalDuration) * 1000).toFixed(2)} tasks/sec`,
 	);
 	console.log();
 	console.log("Per-worker timing:");
 	workerTimings.forEach((timing, i) => {
-		console.log(
-			`  Worker ${i}: startup ${timing.startup}ms, execution ${timing.execution}ms`,
-		);
+		console.log(`  Worker ${i}: startup ${timing.startup}ms, execution ${timing.execution}ms`);
 	});
 
 	process.exit(0);

@@ -26,7 +26,6 @@ describe("Step Support", () => {
 			returns: z.object({ result: z.number() }),
 		});
 
-
 		const expensiveFn = mock((n: number) => n * 2);
 
 		const conductor = Conductor.create({
@@ -77,7 +76,6 @@ describe("Step Support", () => {
 			payload: z.object({ delay: z.number() }),
 			returns: z.object({ completed: z.boolean() }),
 		});
-
 
 		const executionSteps = mock((step: string) => step);
 
@@ -136,7 +134,6 @@ describe("Step Support", () => {
 			returns: z.object({ processed: z.number() }),
 		});
 
-
 		const processedItems = mock((item: number) => item);
 
 		const conductor = Conductor.create({
@@ -189,7 +186,6 @@ describe("Step Support", () => {
 			payload: z.object({ x: z.number() }),
 			returns: z.object({ result: z.number() }),
 		});
-
 
 		const step1Fn = mock((n: number) => n + 1);
 		const step2Fn = mock((n: number) => n * 2);

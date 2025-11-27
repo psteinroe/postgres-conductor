@@ -6,11 +6,7 @@ import { defineTask } from "../../src/task-definition";
 import { defineEvent } from "../../src/event-definition";
 import { TaskSchemas, EventSchemas } from "../../src/schemas";
 import postgres from "postgres";
-import {
-	GenericContainer,
-	type StartedTestContainer,
-	Wait,
-} from "testcontainers";
+import { GenericContainer, type StartedTestContainer, Wait } from "testcontainers";
 import { Network } from "testcontainers";
 import * as path from "path";
 
@@ -44,19 +40,14 @@ describe("Event Router E2E", () => {
 				"max_wal_senders=10",
 			])
 			.withExposedPorts(5432)
-			.withWaitStrategy(
-				Wait.forLogMessage(/database system is ready to accept connections/, 2),
-			)
+			.withWaitStrategy(Wait.forLogMessage(/database system is ready to accept connections/, 2))
 			.start();
 
 		const host = pgContainer.getHost();
 		const port = pgContainer.getMappedPort(5432);
 
 		// Connect to default database to create test database
-		const adminSql = postgres(
-			`postgres://postgres:postgres@${host}:${port}/postgres`,
-			{ max: 1 },
-		);
+		const adminSql = postgres(`postgres://postgres:postgres@${host}:${port}/postgres`, { max: 1 });
 		await adminSql.unsafe(`CREATE DATABASE pgconductor_test`);
 		await adminSql.end();
 
@@ -82,11 +73,7 @@ describe("Event Router E2E", () => {
 		const setupOrchestrator = Orchestrator.create({
 			conductor: setupConductor,
 			tasks: [
-				setupConductor.createTask(
-					{ name: "setup-task" },
-					{ invocable: true },
-					async () => {},
-				),
+				setupConductor.createTask({ name: "setup-task" }, { invocable: true }, async () => {}),
 			],
 		});
 
@@ -161,9 +148,7 @@ describe("Event Router E2E", () => {
 				PUBLICATION_NAME: "pgconductor_events",
 				RUST_LOG: "debug,event_router=debug",
 			})
-			.withWaitStrategy(
-				Wait.forLogMessage(/Subscriptions loaded, starting pipeline/),
-			)
+			.withWaitStrategy(Wait.forLogMessage(/Subscriptions loaded, starting pipeline/))
 			.start();
 
 		// Give the event-router time to establish CDC connection
@@ -295,14 +280,8 @@ describe("Event Router E2E", () => {
 		await orchestrator.start();
 
 		// Invoke multiple tasks waiting for different events
-		await conductor.invoke(
-			{ name: "multi-waiter" },
-			{ eventKey: "order.created" },
-		);
-		await conductor.invoke(
-			{ name: "multi-waiter" },
-			{ eventKey: "payment.completed" },
-		);
+		await conductor.invoke({ name: "multi-waiter" }, { eventKey: "order.created" });
+		await conductor.invoke({ name: "multi-waiter" }, { eventKey: "payment.completed" });
 
 		// Wait for subscriptions to be created
 		await new Promise((r) => setTimeout(r, 1000));
@@ -625,7 +604,7 @@ describe("Event Router E2E", () => {
 		`;
 
 		// Insert a contact - this should trigger the task
-		const [contact] = await sql`
+		await sql`
 			INSERT INTO contact (address_book_id, first_name, last_name, email)
 			VALUES (${addressBook!.id}, 'Trigger', 'Test', 'trigger@example.com')
 			RETURNING id

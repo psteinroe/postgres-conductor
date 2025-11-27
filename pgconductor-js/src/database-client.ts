@@ -1,5 +1,4 @@
 import postgres, { type PendingQuery, type Sql } from "postgres";
-import * as assert from "./lib/assert";
 import { waitFor } from "./lib/wait-for";
 import type { Migration } from "./migration-store";
 import {
@@ -20,13 +19,7 @@ import {
 	type EmitEventArgs,
 } from "./query-builder";
 
-export type JsonValue =
-	| string
-	| number
-	| boolean
-	| null
-	| Payload
-	| JsonValue[];
+export type JsonValue = string | number | boolean | null | Payload | JsonValue[];
 export type Payload = { [key: string]: JsonValue };
 
 export interface ExecutionSpec {
@@ -285,15 +278,10 @@ export class DatabaseClient {
 		if (!code) {
 			return false;
 		}
-		return (
-			RETRYABLE_SQLSTATE_CODES.has(code) ||
-			RETRYABLE_SYSTEM_ERROR_CODES.has(code)
-		);
+		return RETRYABLE_SQLSTATE_CODES.has(code) || RETRYABLE_SYSTEM_ERROR_CODES.has(code);
 	}
 
-	async orchestratorHeartbeat(
-		args: OrchestratorHeartbeatArgs,
-	): Promise<
+	async orchestratorHeartbeat(args: OrchestratorHeartbeatArgs): Promise<
 		{
 			signal_type: string | null;
 			signal_execution_id: string | null;
@@ -305,10 +293,7 @@ export class DatabaseClient {
 		});
 	}
 
-	async cancelExecution(
-		executionId: string,
-		options?: { reason?: string },
-	): Promise<boolean> {
+	async cancelExecution(executionId: string, options?: { reason?: string }): Promise<boolean> {
 		const result = await this.query(
 			this.sql<{ cancel_execution: boolean }[]>`
 				select pgconductor.cancel_execution(
@@ -321,9 +306,7 @@ export class DatabaseClient {
 		return result[0]?.cancel_execution || false;
 	}
 
-	async recoverStaleOrchestrators(
-		args: RecoverStaleOrchestratorsArgs,
-	): Promise<void> {
+	async recoverStaleOrchestrators(args: RecoverStaleOrchestratorsArgs): Promise<void> {
 		await this.query(this.builder.buildRecoverStaleOrchestrators(args), {
 			label: "recoverStaleOrchestrators",
 		});
@@ -342,10 +325,9 @@ export class DatabaseClient {
 	 */
 	async getInstalledMigrationNumber(): Promise<number> {
 		try {
-			const result = await this.query(
-				this.builder.buildGetInstalledMigrationNumber(),
-				{ label: "getInstalledVersion" },
-			);
+			const result = await this.query(this.builder.buildGetInstalledMigrationNumber(), {
+				label: "getInstalledVersion",
+			});
 			return result[0]?.version || -1;
 		} catch (err) {
 			const pgErr = err as { code?: string };
@@ -398,14 +380,11 @@ export class DatabaseClient {
 		);
 	}
 
-	async countActiveOrchestratorsBelow(
-		args: CountActiveOrchestratorsBelowArgs,
-	): Promise<number> {
+	async countActiveOrchestratorsBelow(args: CountActiveOrchestratorsBelowArgs): Promise<number> {
 		try {
-			const result = await this.query(
-				this.builder.buildCountActiveOrchestratorsBelow(args),
-				{ label: "countActiveOrchestratorsBelow" },
-			);
+			const result = await this.query(this.builder.buildCountActiveOrchestratorsBelow(args), {
+				label: "countActiveOrchestratorsBelow",
+			});
 			return Number(result[0]?.count || 0);
 		} catch (err) {
 			const pgErr = err as { code?: string };
@@ -461,19 +440,14 @@ export class DatabaseClient {
 		});
 	}
 
-	async scheduleCronExecution(
-		args: ScheduleCronExecutionArgs,
-	): Promise<string> {
-		const result = await this.query(
-			this.builder.buildScheduleCronExecution(args),
-			{ label: "scheduleCronExecution" },
-		);
+	async scheduleCronExecution(args: ScheduleCronExecutionArgs): Promise<string> {
+		const result = await this.query(this.builder.buildScheduleCronExecution(args), {
+			label: "scheduleCronExecution",
+		});
 		return result[0]!.id;
 	}
 
-	async unscheduleCronExecution(
-		args: UnscheduleCronExecutionArgs,
-	): Promise<void> {
+	async unscheduleCronExecution(args: UnscheduleCronExecutionArgs): Promise<void> {
 		await this.query(this.builder.buildUnscheduleCronExecution(args), {
 			label: "unscheduleCronExecution",
 		});

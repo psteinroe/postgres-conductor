@@ -1,0 +1,24 @@
+{
+	"rules": {
+		"typescript/no-floating-promises": "off",
+		"typescript/restrict-template-expressions": "off"
+	},
+	"env": {
+		"browser": false,
+		"node": true
+	},
+	"globals": {},
+	"settings": {},
+	"ignorePatterns": [
+		"node_modules",
+		"target",
+		"dist",
+		"build",
+		"migrations",
+		"event-router",
+		"**/generated/**",
+		"**/*.d.ts",
+		"**/tests/**",
+		"**/perf/**"
+	]
+}

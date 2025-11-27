@@ -13,9 +13,7 @@ function hashToJitter(str: string): number {
 // should be lower for very high steps per task
 const BATCH_SIZE = 1000;
 
-export const createMaintenanceTask = <Queue extends string = "default">(
-	queue: Queue,
-) => {
+export const createMaintenanceTask = <Queue extends string = "default">(queue: Queue) => {
 	// Add consistent jitter based on queue name to spread load between midnight and 1am
 	const jitterMinutes = hashToJitter(queue);
 

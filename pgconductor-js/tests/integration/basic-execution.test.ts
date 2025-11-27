@@ -59,9 +59,12 @@ describe("Basic Task Execution", () => {
 
 		const stoppedPromise = orchestrator.stopped;
 
-		await conductor.invoke({ name: "hello-task" }, {
-			name: "World",
-		});
+		await conductor.invoke(
+			{ name: "hello-task" },
+			{
+				name: "World",
+			},
+		);
 
 		await new Promise((r) => setTimeout(r, 2000));
 

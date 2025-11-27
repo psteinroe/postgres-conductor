@@ -25,7 +25,6 @@ describe("Cron Scheduling", () => {
 			name: "daily-report",
 		});
 
-
 		const conductor = Conductor.create({
 			sql: db.sql,
 			tasks: TaskSchemas.fromSchema([taskDefinition]),
@@ -55,9 +54,7 @@ describe("Cron Scheduling", () => {
 		`;
 
 		expect(schedules.length).toBe(1);
-		expect(schedules[0]?.dedupe_key).toMatch(
-			/^scheduled::daily-9am::\d+$/,
-		);
+		expect(schedules[0]?.dedupe_key).toMatch(/^scheduled::daily-9am::\d+$/);
 
 		// Verify run_at is in the future and at 9 AM UTC
 		const runAt = new Date(schedules[0]!.run_at);
@@ -76,7 +73,6 @@ describe("Cron Scheduling", () => {
 		const taskDefinition = defineTask({
 			name: "frequent-sync",
 		});
-
 
 		const conductor = Conductor.create({
 			sql: db.sql,
@@ -137,7 +133,6 @@ describe("Cron Scheduling", () => {
 			name: "multi-schedule",
 		});
 
-
 		const conductor = Conductor.create({
 			sql: db.sql,
 			tasks: TaskSchemas.fromSchema([taskDefinition]),
@@ -171,9 +166,7 @@ describe("Cron Scheduling", () => {
 		await orchestrator.start();
 		await waitFor(200);
 
-		const schedules = await db.sql<
-			Array<{ dedupe_key: string; run_at: Date }>
-		>`
+		const schedules = await db.sql<Array<{ dedupe_key: string; run_at: Date }>>`
 			SELECT dedupe_key, run_at
 			FROM pgconductor.executions
 			WHERE task_key = 'multi-schedule'
@@ -185,12 +178,8 @@ describe("Cron Scheduling", () => {
 
 		// Check both cron expressions are present (order may vary)
 		const dedupeKeys = schedules.map((s) => s.dedupe_key);
-		const has9am = dedupeKeys.some((key) =>
-			key.startsWith("scheduled::daily-9am::"),
-		);
-		const has5pm = dedupeKeys.some((key) =>
-			key.startsWith("scheduled::daily-5pm::"),
-		);
+		const has9am = dedupeKeys.some((key) => key.startsWith("scheduled::daily-9am::"));
+		const has5pm = dedupeKeys.some((key) => key.startsWith("scheduled::daily-5pm::"));
 
 		expect(has9am).toBe(true);
 		expect(has5pm).toBe(true);
@@ -205,7 +194,6 @@ describe("Cron Scheduling", () => {
 		const taskDefinition = defineTask({
 			name: "cleanup-test",
 		});
-
 
 		const conductor = Conductor.create({
 			sql: db.sql,
@@ -239,7 +227,7 @@ describe("Cron Scheduling", () => {
 			FROM pgconductor.executions
 			WHERE task_key = 'cleanup-test'
 		`;
-		const withCronExpression = schedules.filter(s => s.cron_expression !== null);
+		const withCronExpression = schedules.filter((s) => s.cron_expression !== null);
 		expect(withCronExpression.length).toBe(2);
 
 		// Second worker with only one cron schedule
@@ -278,7 +266,6 @@ describe("Cron Scheduling", () => {
 			name: "hybrid-task",
 			payload: z.object({ value: z.number() }),
 		});
-
 
 		const conductor = Conductor.create({
 			sql: db.sql,
@@ -336,10 +323,7 @@ describe("Cron Scheduling", () => {
 
 		const conductor = Conductor.create({
 			sql: db.sql,
-			tasks: TaskSchemas.fromSchema([
-				schedulerDefinition,
-				dynamicTargetDefinition,
-			]),
+			tasks: TaskSchemas.fromSchema([schedulerDefinition, dynamicTargetDefinition]),
 			context: {},
 		});
 
@@ -436,12 +420,7 @@ describe("Cron Scheduling", () => {
 			{ name: "dynamic-scheduler" },
 			{ invocable: true },
 			async (_event, ctx) => {
-				await ctx.schedule(
-					{ name: "dynamic-target" },
-					"reporting",
-					{ cron: "*/2 * * * * *" },
-					{},
-				);
+				await ctx.schedule({ name: "dynamic-target" }, "reporting", { cron: "*/2 * * * * *" }, {});
 			},
 		);
 
@@ -602,7 +581,6 @@ describe("Cron Scheduling", () => {
 			name: "frequent-task",
 		});
 
-
 		const conductor = Conductor.create({
 			sql: db.sql,
 			tasks: TaskSchemas.fromSchema([taskDefinition]),
@@ -645,7 +623,6 @@ describe("Cron Scheduling", () => {
 		const taskDefinition = defineTask({
 			name: "flaky-cron",
 		});
-
 
 		const conductor = Conductor.create({
 			sql: db.sql,
@@ -711,7 +688,6 @@ describe("Cron Scheduling", () => {
 		const taskDefinition = defineTask({
 			name: "dedupe-cron",
 		});
-
 
 		const conductor = Conductor.create({
 			sql: db.sql,

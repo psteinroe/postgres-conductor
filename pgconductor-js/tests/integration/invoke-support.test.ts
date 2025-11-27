@@ -4,7 +4,6 @@ import { Conductor } from "../../src/conductor";
 import { Orchestrator } from "../../src/orchestrator";
 import { defineTask } from "../../src/task-definition";
 import { TestDatabasePool } from "../fixtures/test-database";
-import { Worker } from "../../src";
 import { TaskSchemas } from "../../src/schemas";
 
 describe("Invoke Support", () => {
@@ -280,11 +279,7 @@ describe("Invoke Support", () => {
 			{ name: "patient-parent" },
 			{ invocable: true },
 			async (_event, ctx) => {
-				const childResult = await ctx.invoke(
-					"invoke-eventual",
-					{ name: "eventual-child" },
-					{},
-				);
+				const childResult = await ctx.invoke("invoke-eventual", { name: "eventual-child" }, {});
 				return { childResult: childResult.result };
 			},
 		);
@@ -382,9 +377,7 @@ describe("Invoke Support", () => {
 
 		expect(childFn).toHaveBeenCalledTimes(2);
 
-		const failedParents = await db.sql<
-			Array<{ last_error: string; task_key: string }>
-		>`
+		const failedParents = await db.sql<Array<{ last_error: string; task_key: string }>>`
 			SELECT last_error, task_key
 			FROM pgconductor.executions
 			WHERE task_key = 'cascade-parent' AND failed_at IS NOT NULL
@@ -465,10 +458,7 @@ describe("Invoke Support", () => {
 
 		await orchestrator.start();
 
-		await conductor.invoke(
-			{ queue: "parent-queue", name: "parent-task" },
-			{ value: 5 },
-		);
+		await conductor.invoke({ queue: "parent-queue", name: "parent-task" }, { value: 5 });
 
 		await new Promise((r) => setTimeout(r, 4000));
 
@@ -549,18 +539,20 @@ describe("Invoke Support", () => {
 		await db.client.clearFakeTime();
 
 		// Check that child was failed (not cancelled, since it wasn't locked)
-		const children = await db.sql<{
-			cancelled: boolean;
-			failed_at: Date | null;
-			last_error: string | null;
-		}[]>`
+		const children = await db.sql<
+			{
+				cancelled: boolean;
+				failed_at: Date | null;
+				last_error: string | null;
+			}[]
+		>`
 			select cancelled, failed_at, last_error
 			from pgconductor.executions
 			where task_key = 'slow-child-2'
 		`;
 
 		expect(children.length).toBe(1);
-		expect(children[0]?.cancelled).toBe(false);  // Not cancelled since it was pending
+		expect(children[0]?.cancelled).toBe(false); // Not cancelled since it was pending
 		expect(children[0]?.failed_at).not.toBeNull();
 		expect(children[0]?.last_error).toContain("parent timed out");
 	}, 10000);

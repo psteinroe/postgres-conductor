@@ -43,9 +43,7 @@ export class MigrationStore {
 	}
 
 	getAllMigrations(): Migration[] {
-		return Array.from(this.migrations.values()).sort(
-			(a, b) => a.version - b.version,
-		);
+		return Array.from(this.migrations.values()).sort((a, b) => a.version - b.version);
 	}
 
 	getMigrationsToApply(currentVersion: number): Migration[] {

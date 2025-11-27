@@ -3,7 +3,6 @@
  */
 import { defineTask } from "../../src/task-definition";
 import type { Conductor } from "../../src";
-import type { TaskSchemas } from "../../src/schemas";
 import { z } from "zod";
 
 // Define all task schemas
@@ -33,7 +32,7 @@ export function createNoopTask<C extends Conductor<any, any, any, any, any, any,
 	return (conductor as any).createTask(
 		{ name: "noop" } as const,
 		{ invocable: true } as const,
-		async (event: any) => {
+		async () => {
 			// Minimal work - just return
 			return { processed: true };
 		},
@@ -46,7 +45,7 @@ export function createCpuTask<C extends Conductor<any, any, any, any, any, any, 
 	return (conductor as any).createTask(
 		{ name: "cpu" } as const,
 		{ invocable: true } as const,
-		async (event: any) => {
+		async () => {
 			// Compute fibonacci(20) to simulate CPU work
 			function fib(n: number): number {
 				if (n <= 1) return n;
@@ -59,13 +58,11 @@ export function createCpuTask<C extends Conductor<any, any, any, any, any, any, 
 	);
 }
 
-export function createIoTask<C extends Conductor<any, any, any, any, any, any, any>>(
-	conductor: C,
-) {
+export function createIoTask<C extends Conductor<any, any, any, any, any, any, any>>(conductor: C) {
 	return (conductor as any).createTask(
 		{ name: "io" } as const,
 		{ invocable: true } as const,
-		async (event: any) => {
+		async () => {
 			// Simulate I/O delay
 			await new Promise((resolve) => setTimeout(resolve, 10));
 			return { processed: true };

@@ -43,8 +43,9 @@ type ConnectionOptions =
 	| { sql: Sql; connectionString?: never };
 
 // Helper types to avoid repetition in createTask
-type ResolvedQueue<TDef extends { readonly queue?: string }> =
-	TDef["queue"] extends string ? TDef["queue"] : "default";
+type ResolvedQueue<TDef extends { readonly queue?: string }> = TDef["queue"] extends string
+	? TDef["queue"]
+	: "default";
 
 type ResolvedTaskDef<
 	Tasks extends readonly TaskDefinition<string, any, any, string>[],
@@ -54,16 +55,12 @@ type ResolvedTaskDef<
 type ResolvedPayload<
 	Tasks extends readonly TaskDefinition<string, any, any, string>[],
 	TDef extends { readonly name: string; readonly queue?: string },
-> = TDef["name"] extends TaskName<Tasks>
-	? InferPayload<ResolvedTaskDef<Tasks, TDef>>
-	: {};
+> = TDef["name"] extends TaskName<Tasks> ? InferPayload<ResolvedTaskDef<Tasks, TDef>> : {};
 
 type ResolvedReturns<
 	Tasks extends readonly TaskDefinition<string, any, any, string>[],
 	TDef extends { readonly name: string; readonly queue?: string },
-> = TDef["name"] extends TaskName<Tasks>
-	? InferReturns<ResolvedTaskDef<Tasks, TDef>>
-	: void;
+> = TDef["name"] extends TaskName<Tasks> ? InferReturns<ResolvedTaskDef<Tasks, TDef>> : void;
 
 type ResolvedEvent<
 	Tasks extends readonly TaskDefinition<string, any, any, string>[],
@@ -98,16 +95,9 @@ export class Conductor<
 	TDatabaseSchema extends DatabaseSchema<any> | undefined = undefined,
 	ExtraContext extends object = {},
 	// Inferred types from schemas
-	Tasks extends readonly TaskDefinition<
-		string,
-		any,
-		any,
-		string
-	>[] = InferTasksFromSchema<TTaskSchemas>,
-	Events extends readonly EventDefinition<
-		string,
-		any
-	>[] = InferEventsFromSchema<TEventSchemas>,
+	Tasks extends readonly TaskDefinition<string, any, any, string>[] =
+		InferTasksFromSchema<TTaskSchemas>,
+	Events extends readonly EventDefinition<string, any>[] = InferEventsFromSchema<TEventSchemas>,
 	Database extends GenericDatabase = InferDatabaseFromSchema<TDatabaseSchema>,
 > {
 	/**
@@ -137,9 +127,7 @@ export class Conductor<
 				connectionString: options.connectionString,
 			});
 		} else {
-			throw new Error(
-				"Conductor requires either a connectionString or sql instance",
-			);
+			throw new Error("Conductor requires either a connectionString or sql instance");
 		}
 
 		this.logger = options.logger || new DefaultLogger();
@@ -159,12 +147,7 @@ export class Conductor<
 			logger?: Logger;
 		},
 	): Conductor<TTaskSchemas, TEventSchemas, TDatabaseSchema, TExtraContext> {
-		return new Conductor<
-			TTaskSchemas,
-			TEventSchemas,
-			TDatabaseSchema,
-			TExtraContext
-		>(options);
+		return new Conductor<TTaskSchemas, TEventSchemas, TDatabaseSchema, TExtraContext>(options);
 	}
 
 	/**
@@ -182,13 +165,8 @@ export class Conductor<
 		const TTriggers extends object | readonly object[],
 	>(
 		definition: TDef,
-		triggers: TTriggers & ValidateTriggers<
-			Tasks,
-			Events,
-			TDef["name"],
-			TTriggers,
-			ResolvedQueue<TDef>
-		>,
+		triggers: TTriggers &
+			ValidateTriggers<Tasks, Events, TDef["name"], TTriggers, ResolvedQueue<TDef>>,
 		fn: (
 			event: ResolvedEvent<Tasks, Events, Database, TDef, TTriggers>,
 			ctx: TaskContext<Tasks, Events, Database> & ExtraContext,
@@ -233,9 +211,7 @@ export class Conductor<
 		);
 	}
 
-	async invoke<
-		const TTask extends { readonly name: string; readonly queue?: string },
-	>(
+	async invoke<const TTask extends { readonly name: string; readonly queue?: string }>(
 		task: TTask,
 		payload: InferPayload<
 			FindTaskByIdentifier<
@@ -246,9 +222,7 @@ export class Conductor<
 		>,
 		opts?: Omit<ExecutionSpec, "task_key" | "payload" | "queue">,
 	): Promise<string>;
-	async invoke<
-		const TTask extends { readonly name: string; readonly queue?: string },
-	>(
+	async invoke<const TTask extends { readonly name: string; readonly queue?: string }>(
 		task: TTask,
 		items: Array<
 			{
@@ -262,9 +236,7 @@ export class Conductor<
 			} & Omit<ExecutionSpec, "task_key" | "payload" | "queue">
 		>,
 	): Promise<string[]>;
-	async invoke<
-		const TTask extends { readonly name: string; readonly queue?: string },
-	>(
+	async invoke<const TTask extends { readonly name: string; readonly queue?: string }>(
 		task: TTask,
 		payloadOrItems: any,
 		opts?: Omit<ExecutionSpec, "task_key" | "payload" | "queue">,
@@ -294,21 +266,12 @@ export class Conductor<
 
 	async emit<
 		TName extends EventName<Events>,
-		TDef extends FindEventByIdentifier<Events, TName> = FindEventByIdentifier<
-			Events,
-			TName
-		>,
-	>(
-		{ event }: CustomEventConfig<TName>,
-		payload: InferEventPayload<TDef>,
-	): Promise<string> {
+		TDef extends FindEventByIdentifier<Events, TName> = FindEventByIdentifier<Events, TName>,
+	>({ event }: CustomEventConfig<TName>, payload: InferEventPayload<TDef>): Promise<string> {
 		return this.db.emitEvent({ eventKey: event, payload });
 	}
 
-	async cancel(
-		executionId: string,
-		options?: { reason?: string },
-	): Promise<boolean> {
+	async cancel(executionId: string, options?: { reason?: string }): Promise<boolean> {
 		return this.db.cancelExecution(executionId, options);
 	}
 }

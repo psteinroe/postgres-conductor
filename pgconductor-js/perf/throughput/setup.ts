@@ -1,9 +1,5 @@
 import postgres from "postgres";
-import {
-	GenericContainer,
-	type StartedTestContainer,
-	Wait,
-} from "testcontainers";
+import { GenericContainer, type StartedTestContainer, Wait } from "testcontainers";
 
 let container: StartedTestContainer | null = null;
 let connectionUri: string | null = null;
@@ -32,9 +28,7 @@ export async function getDatabase(): Promise<string> {
 			POSTGRES_DB: "postgres",
 		})
 		.withExposedPorts(5432)
-		.withWaitStrategy(
-			Wait.forLogMessage(/database system is ready to accept connections/, 2),
-		);
+		.withWaitStrategy(Wait.forLogMessage(/database system is ready to accept connections/, 2));
 
 	container = await containerConfig.start();
 

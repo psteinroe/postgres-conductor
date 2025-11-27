@@ -1,3 +1,4 @@
+- setup oxlint and oxfmt
 - make sure database api makes it clear what is public api and what is private api (e.g. add `_private_` prefix)
 - only use custom current_time if running tests
 - add management ui

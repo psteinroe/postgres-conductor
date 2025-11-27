@@ -1,9 +1,5 @@
 import postgres, { type Sql } from "postgres";
-import {
-	GenericContainer,
-	type StartedTestContainer,
-	Wait,
-} from "testcontainers";
+import { GenericContainer, type StartedTestContainer, Wait } from "testcontainers";
 import { DatabaseClient } from "../../src/database-client";
 
 export class TestDatabase {
@@ -73,9 +69,7 @@ export class TestDatabasePool {
 				POSTGRES_DB: "postgres",
 			})
 			.withExposedPorts(5432)
-			.withWaitStrategy(
-				Wait.forLogMessage(/database system is ready to accept connections/, 2),
-			);
+			.withWaitStrategy(Wait.forLogMessage(/database system is ready to accept connections/, 2));
 
 		const container = await containerConfig.start();
 
@@ -107,9 +101,7 @@ export class TestDatabasePool {
 		const master = postgres(this.masterUrl, { max: 1 });
 		try {
 			await Promise.all(
-				this.children.map((child) =>
-					master.unsafe(`DROP DATABASE IF EXISTS ${child.name}`),
-				),
+				this.children.map((child) => master.unsafe(`DROP DATABASE IF EXISTS ${child.name}`)),
 			);
 		} finally {
 			await master.end();

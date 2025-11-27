@@ -1,6 +1,5 @@
 {
 	"name": "pgconductor",
-	"module": "index.ts",
 	"type": "module",
 	"workspaces": ["pgconductor-js", "cli"],
 	"catalog": {
@@ -12,6 +11,14 @@
 		"expect-type": "1.2.2",
 		"zod": "4.1.12",
 		"@standard-schema/spec": "1.0.0",
-		"cron-parser": "5.4.0"
+		"cron-parser": "5.4.0",
+		"oxfmt": "latest",
+		"oxlint": "latest",
+		"oxlint-tsgolint": "latest"
+	},
+	"devDependencies": {
+		"oxfmt": "catalog:",
+		"oxlint": "catalog:",
+		"oxlint-tsgolint": "catalog:"
 	}
 }

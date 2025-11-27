@@ -149,17 +149,14 @@ describe("drain() Mode", () => {
 		const chainedTask = conductor.createTask(
 			{ name: "chained-task" },
 			{ invocable: true },
-			async (event, ctx) => {
+			async (event) => {
 				if (event.event === "pgconductor.invoke") {
 					const depth = event.payload.depth;
 					executionOrder.push(depth);
 
 					// Chain another task if depth < 3
 					if (depth < 3) {
-						await conductor.invoke(
-							{ name: "chained-task" },
-							{ depth: depth + 1 },
-						);
+						await conductor.invoke({ name: "chained-task" }, { depth: depth + 1 });
 					}
 				}
 			},
@@ -280,9 +277,7 @@ describe("drain() Mode", () => {
 
 		// All 50 tasks should be processed
 		expect(executedIds).toHaveLength(50);
-		expect(executedIds.sort((a, b) => a - b)).toEqual(
-			Array.from({ length: 50 }, (_, i) => i + 1),
-		);
+		expect(executedIds.sort((a, b) => a - b)).toEqual(Array.from({ length: 50 }, (_, i) => i + 1));
 	}, 30000);
 
 	test("normal orchestrator start continues running until stopped", async () => {

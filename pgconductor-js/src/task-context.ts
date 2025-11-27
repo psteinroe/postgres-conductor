@@ -1,10 +1,5 @@
 import CronExpressionParser from "cron-parser";
-import type {
-	DatabaseClient,
-	JsonValue,
-	Execution,
-	Payload,
-} from "./database-client";
+import type { DatabaseClient, JsonValue, Execution, Payload } from "./database-client";
 import type {
 	TaskDefinition,
 	TaskName,
@@ -71,9 +66,7 @@ export type TaskAbortReasons =
 			__pgconductorTaskAborted: true;
 	  };
 
-type DistributiveOmit<T, K extends PropertyKey> = T extends any
-	? Omit<T, K>
-	: never;
+type DistributiveOmit<T, K extends PropertyKey> = T extends any ? Omit<T, K> : never;
 
 export function isTaskAbortReason(result: unknown): result is TaskAbortReasons {
 	return (
@@ -120,16 +113,13 @@ type ScheduleOptions = {
 
 // second argument for tasks
 export class TaskContext<
-	Tasks extends readonly TaskDefinition<
+	Tasks extends readonly TaskDefinition<string, any, any, string>[] = readonly TaskDefinition<
 		string,
 		any,
 		any,
 		string
-	>[] = readonly TaskDefinition<string, any, any, string>[],
-	Events extends readonly EventDefinition<
-		string,
-		any
-	>[] = readonly EventDefinition<string, any>[],
+	>[],
+	Events extends readonly EventDefinition<string, any>[] = readonly EventDefinition<string, any>[],
 	TDatabase extends GenericDatabase = GenericDatabase,
 > {
 	constructor(private readonly opts: TaskContextOptions) {}
@@ -151,10 +141,7 @@ export class TaskContext<
 		return this.opts.abortController.signal;
 	}
 
-	async step<T extends JsonValue | void>(
-		name: string,
-		fn: () => Promise<T> | T,
-	): Promise<T> {
+	async step<T extends JsonValue | void>(name: string, fn: () => Promise<T> | T): Promise<T> {
 		// Check if step already completed
 		const cached = await this.opts.db.loadStep({
 			executionId: this.opts.execution.id,
@@ -209,11 +196,11 @@ export class TaskContext<
 	async invoke<
 		TName extends TaskName<Tasks>,
 		TQueue extends string = "default",
-		TDef extends FindTaskByIdentifier<
+		TDef extends FindTaskByIdentifier<Tasks, TName, TQueue> = FindTaskByIdentifier<
 			Tasks,
 			TName,
 			TQueue
-		> = FindTaskByIdentifier<Tasks, TName, TQueue>,
+		>,
 	>(
 		key: string,
 		task: TaskIdentifier<TName, TQueue>,
@@ -239,9 +226,7 @@ export class TaskContext<
 			});
 
 			throw new Error(
-				timeout
-					? `Child execution timed out after ${timeout}ms`
-					: "Child execution timeout",
+				timeout ? `Child execution timed out after ${timeout}ms` : "Child execution timeout",
 			);
 		}
 
@@ -257,11 +242,11 @@ export class TaskContext<
 	async schedule<
 		TName extends TaskName<Tasks>,
 		TQueue extends string = "default",
-		TDef extends FindTaskByIdentifier<
+		TDef extends FindTaskByIdentifier<Tasks, TName, TQueue> = FindTaskByIdentifier<
 			Tasks,
 			TName,
 			TQueue
-		> = FindTaskByIdentifier<Tasks, TName, TQueue>,
+		>,
 	>(
 		task: TaskIdentifier<TName, TQueue>,
 		scheduleName: string,
@@ -297,10 +282,7 @@ export class TaskContext<
 		});
 	}
 
-	async unschedule<
-		TName extends TaskName<Tasks>,
-		TQueue extends string = "default",
-	>(
+	async unschedule<TName extends TaskName<Tasks>, TQueue extends string = "default">(
 		task: TaskIdentifier<TName, TQueue>,
 		scheduleName: string,
 	): Promise<void> {
@@ -325,10 +307,7 @@ export class TaskContext<
 	 */
 	async waitForEvent<
 		TName extends EventName<Events>,
-		TDef extends FindEventByIdentifier<Events, TName> = FindEventByIdentifier<
-			Events,
-			TName
-		>,
+		TDef extends FindEventByIdentifier<Events, TName> = FindEventByIdentifier<Events, TName>,
 	>(
 		key: string,
 		config: CustomEventConfig<TName> & SharedEventConfig,
@@ -345,16 +324,11 @@ export class TaskContext<
 	>(
 		key: string,
 		config: DatabaseEventConfig<TDatabase, TSchema, TTable, TOp, TSelection>,
-	): Promise<
-		DatabaseEventPayload<RowType<TDatabase, TSchema, TTable>, TOp, TSelection>
-	>;
+	): Promise<DatabaseEventPayload<RowType<TDatabase, TSchema, TTable>, TOp, TSelection>>;
 
 	async waitForEvent(
 		key: string,
-		config: (
-			| CustomEventConfig<string>
-			| DatabaseEventConfig<TDatabase, any, any, any, any>
-		) &
+		config: (CustomEventConfig<string> | DatabaseEventConfig<TDatabase, any, any, any, any>) &
 			SharedEventConfig,
 	): Promise<unknown> {
 		// Check if we already received the event
@@ -376,9 +350,7 @@ export class TaskContext<
 			});
 
 			throw new Error(
-				config.timeout
-					? `Event wait timed out after ${config.timeout}ms`
-					: "Event wait timeout",
+				config.timeout ? `Event wait timed out after ${config.timeout}ms` : "Event wait timeout",
 			);
 		}
 
@@ -418,14 +390,8 @@ export class TaskContext<
 	 */
 	async emit<
 		TName extends EventName<Events>,
-		TDef extends FindEventByIdentifier<Events, TName> = FindEventByIdentifier<
-			Events,
-			TName
-		>,
-	>(
-		{ event }: CustomEventConfig<TName>,
-		payload: InferEventPayload<TDef>,
-	): Promise<string> {
+		TDef extends FindEventByIdentifier<Events, TName> = FindEventByIdentifier<Events, TName>,
+	>({ event }: CustomEventConfig<TName>, payload: InferEventPayload<TDef>): Promise<string> {
 		return this.opts.db.emitEvent({ eventKey: event, payload });
 	}
 
@@ -436,10 +402,7 @@ export class TaskContext<
 	 * @param options.reason - Cancellation reason (defaults to "Cancelled by user")
 	 * @returns true if the execution was cancelled, false if it was already completed/failed
 	 */
-	async cancel(
-		executionId: string,
-		options?: { reason?: string },
-	): Promise<boolean> {
+	async cancel(executionId: string, options?: { reason?: string }): Promise<boolean> {
 		return this.opts.db.cancelExecution(executionId, options);
 	}
 

@@ -120,16 +120,13 @@ class BufferState {
  * Queue-aware: Processes multiple tasks from a single queue.
  */
 export class Worker<
-	Tasks extends readonly TaskDefinition<
+	Tasks extends readonly TaskDefinition<string, any, any, string>[] = readonly TaskDefinition<
 		string,
 		any,
 		any,
 		string
-	>[] = readonly TaskDefinition<string, any, any, string>[],
-	Events extends readonly EventDefinition<
-		string,
-		any
-	>[] = readonly EventDefinition<string, any>[],
+	>[],
+	Events extends readonly EventDefinition<string, any>[] = readonly EventDefinition<string, any>[],
 > {
 	private orchestratorId: string | null = null;
 
@@ -144,10 +141,7 @@ export class Worker<
 	private _startDeferred: Deferred<void> | null = null;
 	private _stopDeferred: Deferred<void> | null = null;
 	private _abortController: AbortController | null = null;
-	private _runningTasks = new Map<
-		string,
-		TypedAbortController<TaskAbortReasons>
-	>();
+	private _runningTasks = new Map<string, TypedAbortController<TaskAbortReasons>>();
 
 	constructor(
 		public readonly queueName: string,
@@ -246,14 +240,11 @@ export class Worker<
 		(async () => {
 			try {
 				// Consume from queue → execute → flush
-				for await (const _ of this.flushResults(this.executeTasks(queue))) {
-					if (this.signal.aborted) break;
-				}
+				await this.flushResults(this.executeTasks(queue));
 			} catch (err) {
 				this.logger.error("Worker pipeline error:", err);
 			} finally {
 				queue.close();
-				// Cleanup
 				this._stopDeferred?.resolve();
 				this._startDeferred = null;
 				this._stopDeferred = null;
@@ -302,9 +293,7 @@ export class Worker<
 
 	private async register(): Promise<void> {
 		// Convert RetentionSettings to integer: null=keep, 0=delete now, N=delete after N days
-		const retentionToDays = (
-			setting: boolean | { days: number } | undefined,
-		): number | null => {
+		const retentionToDays = (setting: boolean | { days: number } | undefined): number | null => {
 			if (setting === undefined || setting === false) return null;
 			if (setting === true) return 0;
 			return setting.days;
@@ -338,47 +327,40 @@ export class Worker<
 				}),
 		);
 
-		const eventSubscriptions: EventSubscriptionSpec[] = allTasks.flatMap(
-			(task) => {
-				const customEvents = task.triggers
-					.filter(
-						(t): t is { event: string } =>
-							"event" in t && typeof (t as any).event === "string",
-					)
-					.map(
-						(trigger): EventSubscriptionSpec => ({
-							task_key: task.name,
-							queue: this.queueName,
-							source: "event",
-							event_key: trigger.event,
-						}),
-					);
+		const eventSubscriptions: EventSubscriptionSpec[] = allTasks.flatMap((task) => {
+			const customEvents = task.triggers
+				.filter((t): t is { event: string } => "event" in t && typeof (t as any).event === "string")
+				.map(
+					(trigger): EventSubscriptionSpec => ({
+						task_key: task.name,
+						queue: this.queueName,
+						source: "event",
+						event_key: trigger.event,
+					}),
+				);
 
-				const dbEvents = task.triggers
-					.filter((t) => "schema" in t && "table" in t && "operation" in t)
-					.map((trigger): EventSubscriptionSpec => {
-						const dbTrigger = trigger as {
-							schema: string;
-							table: string;
-							operation: string;
-							columns?: string;
-						};
-						return {
-							task_key: task.name,
-							queue: this.queueName,
-							source: "db",
-							schema_name: dbTrigger.schema,
-							table_name: dbTrigger.table,
-							operation: dbTrigger.operation,
-							columns: dbTrigger.columns
-								?.split(",")
-								.map((c: string) => c.trim().toLowerCase()),
-						};
-					});
+			const dbEvents = task.triggers
+				.filter((t) => "schema" in t && "table" in t && "operation" in t)
+				.map((trigger): EventSubscriptionSpec => {
+					const dbTrigger = trigger as {
+						schema: string;
+						table: string;
+						operation: string;
+						columns?: string;
+					};
+					return {
+						task_key: task.name,
+						queue: this.queueName,
+						source: "db",
+						schema_name: dbTrigger.schema,
+						table_name: dbTrigger.table,
+						operation: dbTrigger.operation,
+						columns: dbTrigger.columns?.split(",").map((c: string) => c.trim().toLowerCase()),
+					};
+				});
 
-				return [...customEvents, ...dbEvents];
-			},
-		);
+			return [...customEvents, ...dbEvents];
+		});
 
 		await this.db.registerWorker({
 			queueName: this.queueName,
@@ -393,10 +375,7 @@ export class Worker<
 		queue: AsyncQueue<Execution>,
 		{ runOnce = false }: { runOnce?: boolean },
 	) {
-		assert.ok(
-			this.orchestratorId,
-			"orchestratorId must be set when starting the pipeline",
-		);
+		assert.ok(this.orchestratorId, "orchestratorId must be set when starting the pipeline");
 
 		// Pre-compute task metadata once
 		const allTasks = Array.from(this.tasks.values());
@@ -447,7 +426,7 @@ export class Worker<
 					await queue.push(exec); // waits if full
 					if (this.signal.aborted) break;
 				}
-			} catch (err) {
+			} catch {
 				await waitFor(2000, { signal: this.signal });
 			}
 		}
@@ -456,9 +435,7 @@ export class Worker<
 	}
 
 	// --- Stage 2: Execute tasks concurrently ---
-	private async *executeTasks(
-		source: AsyncIterable<Execution>,
-	): AsyncGenerator<ExecutionResult> {
+	private async *executeTasks(source: AsyncIterable<Execution>): AsyncGenerator<ExecutionResult> {
 		for await (const result of mapConcurrent(
 			source,
 			this.concurrency,
@@ -617,11 +594,8 @@ export class Worker<
 									execution_id: exec.id,
 									queue: exec.queue,
 									reschedule_in_ms:
-										output.reason === "released"
-											? output.reschedule_in_ms
-											: undefined,
-									step_key:
-										output.reason === "released" ? output.step_key : undefined,
+										output.reason === "released" ? output.reschedule_in_ms : undefined,
+									step_key: output.reason === "released" ? output.step_key : undefined,
 									task_key: exec.task_key,
 									status: "released",
 								} as const;
@@ -687,9 +661,7 @@ export class Worker<
 
 	// --- Stage 3: Flush results to database ---
 
-	private async *flushResults(
-		source: AsyncIterable<ExecutionResult>,
-	): AsyncGenerator<void> {
+	private async flushResults(source: AsyncIterable<ExecutionResult>): Promise<void> {
 		let buffer = new BufferState();
 		let flushTimer: Timer | null = null;
 
