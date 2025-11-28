@@ -156,6 +156,125 @@ describe("event types", () => {
 			expectTypeOf(dbSchema).toExtend<DatabaseSchema<Database>>();
 		});
 
+		test("DatabaseSchema.fromSupabaseTypes creates database schema from supabase types", () => {
+			type SupabaseDatabase = {
+				public: {
+					Tables: {
+						contact: {
+							Row: {
+								id: string;
+								first_name: string;
+								email: string | null;
+								is_favorite: boolean;
+							};
+							Insert: {
+								id?: string;
+								first_name: string;
+								email?: string | null;
+							};
+							Update: {
+								id?: string;
+								first_name?: string;
+								email?: string | null;
+							};
+						};
+						address_book: {
+							Row: {
+								id: string;
+								name: string;
+							};
+							Insert: {
+								id?: string;
+								name: string;
+							};
+							Update: {
+								id?: string;
+								name?: string;
+							};
+						};
+					};
+					Views: {};
+					Functions: {};
+					Enums: {};
+					CompositeTypes: {};
+				};
+			};
+
+			const dbSchema = DatabaseSchema.fromSupabaseTypes<SupabaseDatabase>();
+
+			expectTypeOf(dbSchema).toExtend<
+				DatabaseSchema<{
+					public: {
+						contact: {
+							id: string;
+							first_name: string;
+							email: string | null;
+							is_favorite: boolean;
+						};
+						address_book: {
+							id: string;
+							name: string;
+						};
+					};
+				}>
+			>();
+		});
+
+		test("conductor with supabase database schema has correct types", () => {
+			type SupabaseDatabase = {
+				public: {
+					Tables: {
+						contact: {
+							Row: {
+								id: string;
+								first_name: string;
+								email: string | null;
+							};
+							Insert: {
+								id?: string;
+								first_name: string;
+							};
+							Update: {
+								first_name?: string;
+							};
+						};
+					};
+					Views: {};
+					Functions: {};
+					Enums: {};
+					CompositeTypes: {};
+				};
+			};
+
+			const taskDef = defineTask({
+				name: "supabase-handler",
+				payload: z.object({}),
+			});
+
+			const conductor = Conductor.create({
+				connectionString: "postgres://test",
+				tasks: TaskSchemas.fromSchema([taskDef]),
+				database: DatabaseSchema.fromSupabaseTypes<SupabaseDatabase>(),
+				context: {},
+			});
+
+			conductor.createTask(
+				{ name: "supabase-handler" },
+				{ schema: "public", table: "contact", operation: "insert" },
+				async (event) => {
+					expectTypeOf(event.event).toEqualTypeOf<"public.contact.insert">();
+					expectTypeOf(event.payload.tg_op).toEqualTypeOf<"INSERT">();
+					if (event.payload.new) {
+						expectTypeOf(event.payload.new.id).toEqualTypeOf<string>();
+						expectTypeOf(event.payload.new.first_name).toEqualTypeOf<string>();
+						expectTypeOf(event.payload.new.email).toEqualTypeOf<string | null>();
+					}
+				},
+			);
+
+			expect(conductor).toBeDefined();
+		});
+
 		test("conductor with database schema has correct types", () => {
 			const taskDef = defineTask({
 				name: "db-event-handler",

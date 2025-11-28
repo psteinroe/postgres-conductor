@@ -109,6 +109,26 @@ export class EventSchemas<
 	}
 }
 
+type SupabaseDatabase = {
+	[schema_name: string]: {
+		Tables: {
+			[table_name: string]: {
+				Row: unknown;
+				Insert?: unknown;
+				Update?: unknown;
+			};
+		};
+	};
+};
+
+type ConvertSupabaseTables<T> = {
+	[Schema in keyof T]: T[Schema] extends { Tables: infer Tables }
+		? {
+				[Table in keyof Tables]: Tables[Table] extends { Row: infer Row } ? Row : unknown;
+			}
+		: {};
+};
+
 /**
  * Adapter for database type definitions.
  * Wraps database types to allow different sources in the future (e.g., Supabase).
@@ -120,6 +140,13 @@ export class DatabaseSchema<_TDatabase extends GenericDatabase> {
 	 * Create DatabaseSchema from generated types (e.g., from pgtyped, kysely, etc.).
 	 */
 	static fromGeneratedTypes<T extends GenericDatabase>(): DatabaseSchema<T> {
+		return new DatabaseSchema();
+	}
+
+	/**
+	 * Create DatabaseSchema from Supabase generated types.
+	 */
+	static fromSupabaseTypes<T extends SupabaseDatabase>(): DatabaseSchema<ConvertSupabaseTables<T>> {
 		return new DatabaseSchema();
 	}
 }
