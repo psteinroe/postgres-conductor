@@ -23,9 +23,7 @@ const BATCH_SIZE = 1000;
 const PARTITION_RETENTION_DAYS = 7;
 const PARTITION_AHEAD_DAYS = 3;
 
-export const createMaintenanceTask = <Queue extends string = "default">(
-	queue: Queue,
-) => {
+export const createMaintenanceTask = <Queue extends string = "default">(queue: Queue) => {
 	// Add consistent jitter based on queue name to spread load between midnight and 1am
 	const jitterMinutes = hashToJitter(queue);
 
@@ -74,11 +72,7 @@ export const createMaintenanceTask = <Queue extends string = "default">(
 
 				const partitions = await db.listEventPartitions();
 				const now = new Date();
-				for (
-					let dayOffset = 0;
-					dayOffset <= PARTITION_AHEAD_DAYS;
-					dayOffset++
-				) {
+				for (let dayOffset = 0; dayOffset <= PARTITION_AHEAD_DAYS; dayOffset++) {
 					const partitionDate = new Date(now);
 					partitionDate.setUTCDate(now.getUTCDate() + dayOffset);
 					const partitionName = createPartitionName(partitionDate);
@@ -89,9 +83,7 @@ export const createMaintenanceTask = <Queue extends string = "default">(
 				}
 
 				const cutoffDate = new Date();
-				cutoffDate.setUTCDate(
-					cutoffDate.getUTCDate() - PARTITION_RETENTION_DAYS,
-				);
+				cutoffDate.setUTCDate(cutoffDate.getUTCDate() - PARTITION_RETENTION_DAYS);
 				const cutoffPartitionName = createPartitionName(cutoffDate);
 
 				for (const partitionName of partitions) {

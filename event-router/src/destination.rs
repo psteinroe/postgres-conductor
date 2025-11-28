@@ -461,14 +461,14 @@ impl EventRouterDestination {
           waiting_on_execution_id = NULL,
           waiting_step_key = NULL,
           run_at = pgconductor._private_current_time()
-        WHERE id = $1 AND queue = $2"
+        WHERE id = $1 AND queue = $2",
       )
-        .bind(execution_id)
-        .bind(&queue)
-        .bind(&step_key)
-        .bind(&payload)
-        .execute(&pool)
-        .await;
+      .bind(execution_id)
+      .bind(&queue)
+      .bind(&step_key)
+      .bind(&payload)
+      .execute(&pool)
+      .await;
 
       match result {
         Ok(_) => {
