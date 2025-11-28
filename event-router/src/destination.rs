@@ -13,8 +13,8 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 /// Table names we care about
-const SUBSCRIPTIONS_TABLE: &str = "subscriptions";
-const EVENTS_TABLE: &str = "events";
+const SUBSCRIPTIONS_TABLE: &str = "_private_subscriptions";
+const EVENTS_TABLE: &str = "_private_events";
 const PGCONDUCTOR_SCHEMA: &str = "pgconductor";
 
 /// Event router destination that:
@@ -448,7 +448,21 @@ impl EventRouterDestination {
     let step_key = step_key.to_string();
 
     tokio::spawn(async move {
-      let result = sqlx::query("SELECT pgconductor.wake_execution($1, $2, $3, $4)")
+      // Wake execution: insert step and clear waiting state
+      // Note: data-modifying CTEs execute regardless of whether the main query uses them
+      let result = sqlx::query(
+        "WITH step_insert AS (
+          INSERT INTO pgconductor._private_steps (execution_id, queue, key, result)
+          VALUES ($1, $2, $3, $4)
+          ON CONFLICT (execution_id, key) DO NOTHING
+        )
+        UPDATE pgconductor._private_executions
+        SET
+          waiting_on_execution_id = NULL,
+          waiting_step_key = NULL,
+          run_at = pgconductor._private_current_time()
+        WHERE id = $1 AND queue = $2"
+      )
         .bind(execution_id)
         .bind(&queue)
         .bind(&step_key)

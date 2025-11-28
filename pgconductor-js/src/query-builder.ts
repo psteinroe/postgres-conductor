@@ -189,9 +189,51 @@ export class QueryBuilder {
 		`;
 	}
 
+	buildListEventsPartitions(): PendingQuery<{ table_name: string }[]> {
+		return this.sql<{ table_name: string }[]>`
+            select
+                child.relname as table_name
+            from pg_inherits
+            join pg_class parent
+                on pg_inherits.inhparent = parent.oid
+            join pg_namespace parent_ns
+                on parent.relnamespace = parent_ns.oid
+            join pg_class child
+                on pg_inherits.inhrelid = child.oid
+            where parent.relname = '_private_events'
+              and parent_ns.nspname = 'pgconductor'
+              and child.relkind = 'r'
+            order by child.relname;
+       `;
+	}
+
+	buildCreateEventPartition(date: Date): PendingQuery<RowList<Row[]>> {
+		const year = date.getUTCFullYear();
+		const month = String(date.getUTCMonth() + 1).padStart(2, "0");
+		const day = String(date.getUTCDate()).padStart(2, "0");
+		const partitionName = `_private_events_${year}${month}${day}`;
+
+		const startDate = new Date(Date.UTC(year, date.getUTCMonth(), date.getUTCDate()));
+		const endDate = new Date(startDate);
+		endDate.setUTCDate(endDate.getUTCDate() + 1);
+
+		return this.sql`
+            create table if not exists pgconductor.${this.sql(partitionName)}
+            partition of pgconductor._private_events
+            for values from (${startDate.toISOString()}::timestamptz)
+            to (${endDate.toISOString()}::timestamptz);
+        `;
+	}
+
+	buildDropEventPartition(partition: { table_name: string }): PendingQuery<RowList<Row[]>> {
+		return this.sql`
+            drop table if exists pgconductor.${this.sql(partition.table_name)};
+        `;
+	}
+
 	buildCleanupTriggers(): PendingQuery<RowList<Row[]>> {
 		return this.sql`
-            delete from pgconductor.triggers t
+            delete from pgconductor._private_triggers t
             where not exists (
                 select 1
                 from pgconductor._private_subscriptions s
@@ -217,7 +259,9 @@ export class QueryBuilder {
 		`;
 	}
 
-	buildGetInstalledMigrationNumber(): PendingQuery<{ version: number | null }[]> {
+	buildGetInstalledMigrationNumber(): PendingQuery<
+		{ version: number | null }[]
+	> {
 		return this.sql<{ version: number | null }[]>`
 			select max(version) as version
 			from pgconductor.schema_migrations
@@ -300,7 +344,9 @@ export class QueryBuilder {
 		`;
 	}
 
-	buildReturnExecutions(grouped: GroupedExecutionResults): PendingQuery<any> | null {
+	buildReturnExecutions(
+		grouped: GroupedExecutionResults,
+	): PendingQuery<any> | null {
 		const completed = grouped.completed;
 		const failed = grouped.failed;
 		const released = grouped.released;
@@ -315,7 +361,9 @@ export class QueryBuilder {
 		const ctes: PendingQuery<any>[] = [];
 
 		// Precompute timestamp once
-		ctes.push(this.sql`now_ts as (select pgconductor._private_current_time() as ts)`);
+		ctes.push(
+			this.sql`now_ts as (select pgconductor._private_current_time() as ts)`,
+		);
 
 		// Load task configs once for all task_keys we're processing
 		ctes.push(this.sql`task_configs as (
@@ -362,6 +410,8 @@ export class QueryBuilder {
 					locked_at = null
 				from now_ts nt, completed_results r
 				where e.id = r.execution_id
+					-- Only apply to child executions (has a parent)
+					and e.parent_execution_id is not null
 					-- No parent is waiting for this child
 					and not exists (
 						select 1 from pgconductor._private_executions parent
@@ -501,7 +551,9 @@ export class QueryBuilder {
 		// Released
 		if (released.length > 0) {
 			// Save steps for released executions with step_key (e.g., sleep)
-			const releasedWithSteps = released.filter((r) => r.step_key !== undefined);
+			const releasedWithSteps = released.filter(
+				(r) => r.step_key !== undefined,
+			);
 			if (releasedWithSteps.length > 0) {
 				ctes.push(this.sql`released_steps as (
 					insert into pgconductor._private_steps (execution_id, queue, key, result)
@@ -517,12 +569,15 @@ export class QueryBuilder {
 				)`);
 			}
 
-			const shouldRescheduleSome = released.some((r) => r.reschedule_in_ms !== undefined);
+			const shouldRescheduleSome = released.some(
+				(r) => r.reschedule_in_ms !== undefined,
+			);
 
 			if (shouldRescheduleSome) {
 				const releasedData = released.map((r) => ({
 					execution_id: r.execution_id,
-					reschedule_in_ms: r.reschedule_in_ms === "infinity" ? -1 : r.reschedule_in_ms,
+					reschedule_in_ms:
+						r.reschedule_in_ms === "infinity" ? -1 : r.reschedule_in_ms,
 				}));
 
 				ctes.push(this.sql`updated_released as (
@@ -700,7 +755,7 @@ export class QueryBuilder {
 
 			// Insert triggers (on conflict do nothing)
 			ctes.push(this.sql`inserted_db_triggers as (
-				insert into pgconductor.triggers (schema_name, table_name, operation)
+				insert into pgconductor._private_triggers (schema_name, table_name, operation)
 				select distinct
 					wdb.schema_name,
 					wdb.table_name,
@@ -727,7 +782,9 @@ export class QueryBuilder {
 
 		if (ctes.length <= 1) return null; // Only now_ts
 
-		const combined = ctes.reduce((acc, cte, i) => (i === 0 ? cte : this.sql`${acc}, ${cte}`));
+		const combined = ctes.reduce((acc, cte, i) =>
+			i === 0 ? cte : this.sql`${acc}, ${cte}`,
+		);
 
 		return this.sql<[{ result: number }]>`with ${combined} select 1 as result`;
 	}
@@ -776,7 +833,10 @@ export class QueryBuilder {
 		}));
 
 		const cronScheduleRows = cronSchedules.map((spec) => {
-			assert.ok(spec.cron_expression, "cron_expression is required for cron schedules");
+			assert.ok(
+				spec.cron_expression,
+				"cron_expression is required for cron schedules",
+			);
 
 			return {
 				task_key: spec.task_key,
@@ -835,7 +895,10 @@ export class QueryBuilder {
 		scheduleName,
 	}: ScheduleCronExecutionArgs): PendingQuery<[{ id: string }]> {
 		assert.ok(spec.run_at, "scheduleCronExecution requires run_at");
-		assert.ok(spec.cron_expression, "scheduleCronExecution requires cron_expression");
+		assert.ok(
+			spec.cron_expression,
+			"scheduleCronExecution requires cron_expression",
+		);
 
 		const runAt = spec.run_at as Date;
 		const cronExpression = spec.cron_expression as string;
@@ -921,7 +984,10 @@ export class QueryBuilder {
 		`;
 	}
 
-	buildLoadStep({ executionId, key }: LoadStepArgs): PendingQuery<[{ result: Payload | null }]> {
+	buildLoadStep({
+		executionId,
+		key,
+	}: LoadStepArgs): PendingQuery<[{ result: Payload | null }]> {
 		return this.sql<[{ result: Payload | null }]>`
 			select result from pgconductor._private_steps
 			where execution_id = ${executionId}::uuid and key = ${key}::text
@@ -958,7 +1024,9 @@ export class QueryBuilder {
 		`;
 	}
 
-	buildClearWaitingState({ executionId }: ClearWaitingStateArgs): PendingQuery<RowList<Row[]>> {
+	buildClearWaitingState({
+		executionId,
+	}: ClearWaitingStateArgs): PendingQuery<RowList<Row[]>> {
 		return this.sql`
 			with child_info as (
 				select

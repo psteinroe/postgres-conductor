@@ -5,9 +5,9 @@ WORKDIR /app
 
 # Copy workspace files
 COPY Cargo.toml Cargo.lock ./
-COPY crates ./crates
+COPY event-router ./event-router
 
-# Build the event-router in debug mode (faster compilation)
+# Build in debug mode (faster compilation)
 RUN cargo build -p event-router
 
 # Runtime stage

@@ -298,8 +298,28 @@ create table if not exists pgconductor._private_events (
     source text not null default 'event', -- 'db' or 'event'
     payload jsonb,
     created_at timestamptz default pgconductor._private_current_time() not null
+    partition by range (created_at, id)
 );
--- todo: partition management
+
+-- pre-insert the first 3 daily partitions
+do $$
+declare
+    d date := current_date;
+    i int := 0;
+begin
+    while i < 3 loop
+        execute format('
+            create table if not exists pgconductor._private_events_%s
+            partition of pgconductor.events
+            for values from (%L) to (%L);
+        ',
+            to_char(d + i, 'YYYYMMDD'),
+            (d + i)::timestamptz,
+            (d + i + 1)::timestamptz
+        );
+        i := i + 1;
+    end loop;
+end $$;
 
 -- we would need to extract columns the user filters on to filter event payloads already here
 create table if not exists pgconductor._private_triggers (

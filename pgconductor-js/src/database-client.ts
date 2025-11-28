@@ -20,7 +20,13 @@ import {
 } from "./query-builder";
 import { makeChildLogger, type Logger } from "./lib/logger";
 
-export type JsonValue = string | number | boolean | null | Payload | JsonValue[];
+export type JsonValue =
+	| string
+	| number
+	| boolean
+	| null
+	| Payload
+	| JsonValue[];
 export type Payload = { [key: string]: JsonValue };
 
 export interface ExecutionSpec {
@@ -263,7 +269,9 @@ export class DatabaseClient {
 				const err = error as ErrorWithOptionalCode;
 				if (!this.isRetryableError(err)) {
 					if (!options?.expectError) {
-						this.logger.error(`Non-retryable database error${label}: ${err.message}`);
+						this.logger.error(
+							`Non-retryable database error${label}: ${err.message}`,
+						);
 					}
 					throw err;
 				}
@@ -286,7 +294,10 @@ export class DatabaseClient {
 		if (!code) {
 			return false;
 		}
-		return RETRYABLE_SQLSTATE_CODES.has(code) || RETRYABLE_SYSTEM_ERROR_CODES.has(code);
+		return (
+			RETRYABLE_SQLSTATE_CODES.has(code) ||
+			RETRYABLE_SYSTEM_ERROR_CODES.has(code)
+		);
 	}
 
 	async orchestratorHeartbeat(args: OrchestratorHeartbeatArgs): Promise<
@@ -301,7 +312,10 @@ export class DatabaseClient {
 		});
 	}
 
-	async cancelExecution(executionId: string, options?: { reason?: string }): Promise<boolean> {
+	async cancelExecution(
+		executionId: string,
+		options?: { reason?: string },
+	): Promise<boolean> {
 		const result = await this.query(
 			this.sql<{ cancel_execution: boolean }[]>`
 				select pgconductor.cancel_execution(
@@ -314,7 +328,9 @@ export class DatabaseClient {
 		return result[0]?.cancel_execution || false;
 	}
 
-	async recoverStaleOrchestrators(args: RecoverStaleOrchestratorsArgs): Promise<void> {
+	async recoverStaleOrchestrators(
+		args: RecoverStaleOrchestratorsArgs,
+	): Promise<void> {
 		await this.query(this.builder.buildRecoverStaleOrchestrators(args), {
 			label: "recoverStaleOrchestrators",
 		});
@@ -333,10 +349,13 @@ export class DatabaseClient {
 	 */
 	async getInstalledMigrationNumber(): Promise<number> {
 		try {
-			const result = await this.query(this.builder.buildGetInstalledMigrationNumber(), {
-				label: "buildGetInstalledMigrationNumber",
-				expectError: true,
-			});
+			const result = await this.query(
+				this.builder.buildGetInstalledMigrationNumber(),
+				{
+					label: "buildGetInstalledMigrationNumber",
+					expectError: true,
+				},
+			);
 			return result[0]?.version || -1;
 		} catch (err) {
 			const pgErr = err as { code?: string };
@@ -389,11 +408,16 @@ export class DatabaseClient {
 		);
 	}
 
-	async countActiveOrchestratorsBelow(args: CountActiveOrchestratorsBelowArgs): Promise<number> {
+	async countActiveOrchestratorsBelow(
+		args: CountActiveOrchestratorsBelowArgs,
+	): Promise<number> {
 		try {
-			const result = await this.query(this.builder.buildCountActiveOrchestratorsBelow(args), {
-				label: "countActiveOrchestratorsBelow",
-			});
+			const result = await this.query(
+				this.builder.buildCountActiveOrchestratorsBelow(args),
+				{
+					label: "countActiveOrchestratorsBelow",
+				},
+			);
 			return Number(result[0]?.count || 0);
 		} catch (err) {
 			const pgErr = err as { code?: string };
@@ -407,6 +431,24 @@ export class DatabaseClient {
 	async orchestratorShutdown(args: OrchestratorShutdownArgs): Promise<void> {
 		await this.query(this.builder.buildOrchestratorShutdown(args), {
 			label: "orchestratorShutdown",
+		});
+	}
+
+	async listEventPartitions(): Promise<{ table_name: string }[]> {
+		return this.query(this.builder.buildListEventsPartitions(), {
+			label: "listEventPartitions",
+		});
+	}
+
+	async createEventPartition(date: Date): Promise<void> {
+		await this.query(this.builder.buildCreateEventPartition(date), {
+			label: "createEventPartition",
+		});
+	}
+
+	async dropEventPartition(partition: { table_name: string }): Promise<void> {
+		await this.query(this.builder.buildDropEventPartition(partition), {
+			label: "dropEventPartition",
 		});
 	}
 
@@ -449,14 +491,21 @@ export class DatabaseClient {
 		});
 	}
 
-	async scheduleCronExecution(args: ScheduleCronExecutionArgs): Promise<string> {
-		const result = await this.query(this.builder.buildScheduleCronExecution(args), {
-			label: "scheduleCronExecution",
-		});
+	async scheduleCronExecution(
+		args: ScheduleCronExecutionArgs,
+	): Promise<string> {
+		const result = await this.query(
+			this.builder.buildScheduleCronExecution(args),
+			{
+				label: "scheduleCronExecution",
+			},
+		);
 		return result[0]!.id;
 	}
 
-	async unscheduleCronExecution(args: UnscheduleCronExecutionArgs): Promise<void> {
+	async unscheduleCronExecution(
+		args: UnscheduleCronExecutionArgs,
+	): Promise<void> {
 		await this.query(this.builder.buildUnscheduleCronExecution(args), {
 			label: "unscheduleCronExecution",
 		});
