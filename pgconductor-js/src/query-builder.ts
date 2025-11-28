@@ -280,23 +280,23 @@ export class QueryBuilder {
 
 			update pgconductor._private_executions
 			set
-				attempts = executions.attempts + 1,
+				attempts = _private_executions.attempts + 1,
 				locked_by = ${orchestratorId}::uuid,
 				locked_at = pgconductor._private_current_time()
 			from e
-			where executions.id = e.id
-				and executions.queue = ${queueName}::text
+			where _private_executions.id = e.id
+				and _private_executions.queue = ${queueName}::text
 			returning
-				executions.id,
-				executions.task_key,
-				executions.queue,
-				executions.payload,
-				executions.waiting_on_execution_id,
-				executions.waiting_step_key,
-				executions.cancelled,
-				executions.last_error,
-				executions.dedupe_key,
-				executions.cron_expression
+				_private_executions.id,
+				_private_executions.task_key,
+				_private_executions.queue,
+				_private_executions.payload,
+				_private_executions.waiting_on_execution_id,
+				_private_executions.waiting_step_key,
+				_private_executions.cancelled,
+				_private_executions.last_error,
+				_private_executions.dedupe_key,
+				_private_executions.cron_expression
 		`;
 	}
 
@@ -308,14 +308,7 @@ export class QueryBuilder {
 		const waitForCustomEvent = grouped.waitForCustomEvent;
 		const waitForDbEvent = grouped.waitForDbEvent;
 
-		if (
-			completed.length === 0 &&
-			failed.length === 0 &&
-			released.length === 0 &&
-			invokeChild.length === 0 &&
-			waitForCustomEvent.length === 0 &&
-			waitForDbEvent.length === 0
-		) {
+		if (grouped.count === 0) {
 			return null;
 		}
 

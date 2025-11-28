@@ -16,4 +16,8 @@ format:
     bun run oxfmt
     cargo fmt
 
+ready:
+    just lint
+    just format
+
 

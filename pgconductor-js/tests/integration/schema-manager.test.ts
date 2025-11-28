@@ -2,6 +2,7 @@ import { test, expect, describe, beforeAll, afterAll } from "bun:test";
 import { TestDatabasePool } from "../fixtures/test-database";
 import { DatabaseClient } from "../../src/database-client";
 import { SchemaManager } from "../../src/schema-manager";
+import { DefaultLogger } from "../../src/lib/logger";
 
 describe("SchemaManager", () => {
 	let pool: TestDatabasePool;
@@ -16,7 +17,7 @@ describe("SchemaManager", () => {
 
 	test("ensureLatest works on clean database", async () => {
 		const db = await pool.child();
-		const client = new DatabaseClient({ sql: db.sql });
+		const client = new DatabaseClient({ sql: db.sql, logger: new DefaultLogger() });
 		const schemaManager = new SchemaManager(client);
 
 		const controller = new AbortController();

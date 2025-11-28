@@ -1,18 +1,21 @@
 import postgres, { type Sql } from "postgres";
 import { GenericContainer, type StartedTestContainer, Wait } from "testcontainers";
 import { DatabaseClient } from "../../src/database-client";
+import { DefaultLogger } from "../../src/lib/logger";
 
 export class TestDatabase {
 	public readonly sql: Sql;
 	public readonly client: DatabaseClient;
 	public readonly name: string;
+	public readonly url: string;
 	private readonly masterUrl: string;
 
-	private constructor(sql: Sql, name: string, masterUrl: string) {
+	private constructor(sql: Sql, name: string, masterUrl: string, url: string) {
 		this.sql = sql;
-		this.client = new DatabaseClient({ sql });
+		this.client = new DatabaseClient({ sql, logger: new DefaultLogger() });
 		this.name = name;
 		this.masterUrl = masterUrl;
+		this.url = url;
 	}
 
 	static async create(masterUrl: string): Promise<TestDatabase> {
@@ -32,7 +35,7 @@ export class TestDatabase {
 
 		await sql`CREATE EXTENSION IF NOT EXISTS "uuid-ossp"`;
 
-		return new TestDatabase(sql, name, masterUrl);
+		return new TestDatabase(sql, name, masterUrl, testDbUrl);
 	}
 
 	async close(): Promise<void> {

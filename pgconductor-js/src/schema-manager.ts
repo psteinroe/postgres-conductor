@@ -47,9 +47,6 @@ export class SchemaManager {
 		while (true) {
 			const nextMigration = this.migrationStore.getMigration(installedVersion + 1);
 			if (!nextMigration) {
-				if (!migrated) {
-					console.log("Schema is up to date");
-				}
 				return { migrated, shouldShutdown: false };
 			}
 
@@ -91,9 +88,6 @@ export class SchemaManager {
 				return;
 			}
 
-			console.log(
-				`Waiting for ${remaining} older orchestrator(s) to exit before migrating... (${Math.floor((Date.now() - start) / 1000)}s)`,
-			);
 			await waitFor(POLL_INTERVAL_MS, {
 				jitter: POLL_JITTER_MS,
 				signal,

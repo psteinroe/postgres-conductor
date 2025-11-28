@@ -85,6 +85,7 @@ async function generateResultsFromDb(
 
 function groupResults(results: ExecutionResult[]): GroupedExecutionResults {
 	const grouped: GroupedExecutionResults = {
+		count: 0,
 		completed: [],
 		failed: [],
 		released: [],
@@ -95,6 +96,7 @@ function groupResults(results: ExecutionResult[]): GroupedExecutionResults {
 	};
 
 	for (const result of results) {
+		grouped.count++;
 		grouped.taskKeys.add(result.task_key);
 		if (result.status === "completed") {
 			grouped.completed.push(result);

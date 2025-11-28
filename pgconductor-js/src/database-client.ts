@@ -18,6 +18,7 @@ import {
 	type ClearWaitingStateArgs,
 	type EmitEventArgs,
 } from "./query-builder";
+import { makeChildLogger, type Logger } from "./lib/logger";
 
 export type JsonValue = string | number | boolean | null | Payload | JsonValue[];
 export type Payload = { [key: string]: JsonValue };
@@ -69,6 +70,7 @@ export type ExecutionResult =
 	| ExecutionWaitForDatabaseEvent;
 
 export type GroupedExecutionResults = {
+	count: number;
 	completed: ExecutionCompleted[];
 	failed: (ExecutionFailed | ExecutionPermamentlyFailed)[];
 	released: ExecutionReleased[];
@@ -199,11 +201,12 @@ const MAX_RETRY_DELAY_MS = 60_000;
 const BACKOFF_MULTIPLIER = 2;
 
 type DatabaseClientOptions =
-	| { connectionString: string; sql?: never }
-	| { sql: Sql; connectionString?: never };
+	| { connectionString: string; sql?: never; logger: Logger }
+	| { sql: Sql; connectionString?: never; logger: Logger };
 
 type QueryOptions = {
 	label?: string;
+	expectError?: boolean;
 };
 
 type ErrorWithOptionalCode = Error & { code?: string };
@@ -216,6 +219,7 @@ export class DatabaseClient {
 	private readonly sql: Sql;
 	private readonly builder: QueryBuilder;
 	private readonly ownsSql: boolean;
+	private readonly logger: Logger;
 
 	constructor(options: DatabaseClientOptions) {
 		if ("sql" in options && options.sql) {
@@ -230,6 +234,9 @@ export class DatabaseClient {
 			);
 		}
 
+		this.logger = makeChildLogger(options.logger, {
+			component: "DatabaseClient",
+		});
 		this.builder = new QueryBuilder(this.sql);
 	}
 
@@ -244,6 +251,7 @@ export class DatabaseClient {
 			| ((sql: Sql) => Promise<T>),
 		options?: QueryOptions,
 	): Promise<T> {
+		const label = options?.label ? ` (${options.label})` : "";
 		let attempt = 0;
 		while (true) {
 			try {
@@ -254,17 +262,17 @@ export class DatabaseClient {
 			} catch (error) {
 				const err = error as ErrorWithOptionalCode;
 				if (!this.isRetryableError(err)) {
+					if (!options?.expectError) {
+						this.logger.error(`Non-retryable database error${label}: ${err.message}`);
+					}
 					throw err;
 				}
+				this.logger.warn(`Retryable database error${label}: ${err.message}`);
 
 				attempt += 1;
 				const delay = Math.min(
 					MAX_RETRY_DELAY_MS,
 					MIN_RETRY_DELAY_MS * Math.pow(BACKOFF_MULTIPLIER, attempt - 1),
-				);
-				const label = options?.label ? ` (${options.label})` : "";
-				console.warn(
-					`Database transient error${label}: ${err.message}. Retrying in ${delay}ms (attempt ${attempt}).`,
 				);
 				await waitFor(delay, {
 					jitter: delay / 2,
@@ -326,7 +334,8 @@ export class DatabaseClient {
 	async getInstalledMigrationNumber(): Promise<number> {
 		try {
 			const result = await this.query(this.builder.buildGetInstalledMigrationNumber(), {
-				label: "getInstalledVersion",
+				label: "buildGetInstalledMigrationNumber",
+				expectError: true,
 			});
 			return result[0]?.version || -1;
 		} catch (err) {

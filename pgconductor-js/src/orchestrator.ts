@@ -7,6 +7,10 @@ import type { Conductor } from "./conductor";
 import { type AnyTask, type ValidateTasksQueue, Task } from "./task";
 import { PACKAGE_VERSION } from "./versions";
 import { makeChildLogger, type Logger } from "./lib/logger";
+import * as assert from "./lib/assert";
+import { SIGNALS, type Signal } from "./lib/signals";
+import { noop } from "./lib/noop";
+import { coerceError } from "./lib/coerce-error";
 
 export type OrchestratorOptions<TTasks extends readonly AnyTask[] = readonly AnyTask[]> = {
 	conductor: Conductor<any, any, any, any, any, any, any>;
@@ -44,6 +48,8 @@ export class Orchestrator {
 	private _stopDeferred: Deferred<void> | null = null;
 	private _startDeferred: Deferred<void> | null = null;
 	private _abortController: AbortController | null = null;
+
+	private releaseSignalHandlers: (() => void) | null = null;
 
 	private constructor(options: InternalOrchestratorOptions) {
 		this.orchestratorId = crypto.randomUUID();
@@ -135,20 +141,20 @@ export class Orchestrator {
 		this._stopDeferred = new Deferred<void>();
 		this._startDeferred = new Deferred<void>();
 		this._abortController = new AbortController();
+		this.registerSignalHandlers();
 
 		(async () => {
+			let error: Error | undefined;
+
 			try {
 				const ourVersion = this.migrationStore.getLatestMigrationNumber();
 				const installedVersion = await this.db.getInstalledMigrationNumber();
 
 				// Step 1: Check if we're too old (should never happen, but safety check)
 				if (installedVersion > ourVersion) {
-					this.logger.info(
-						`Orchestrator version ${ourVersion} is older than installed version ${installedVersion}, shutting down`,
+					throw new Error(
+						`Orchestrator version ${ourVersion} is older than installed version ${installedVersion}`,
 					);
-					this.stopDeferred.resolve();
-					this.startDeferred.resolve();
-					return;
 				}
 
 				// Step 2: Ensure schema is at latest version
@@ -161,12 +167,7 @@ export class Orchestrator {
 				const { shouldShutdown } = await this.schemaManager.ensureLatest(this.signal);
 
 				if (shouldShutdown) {
-					this.logger.info(
-						`Orchestrator ${this.orchestratorId} could not acquire migration lock, shutting down`,
-					);
-					this.stopDeferred.resolve();
-					this.startDeferred.resolve();
-					return;
+					throw new Error("Could not acquire migration lock");
 				}
 
 				const signals = await this.db.orchestratorHeartbeat({
@@ -176,14 +177,8 @@ export class Orchestrator {
 				});
 
 				// Check for shutdown signal on startup
-				const hasShutdownSignal = signals.some((s) => s.signal_type === "shutdown");
-				if (hasShutdownSignal) {
-					this.logger.info(
-						`Orchestrator ${this.orchestratorId} detected newer schema after migrations, shutting down`,
-					);
-					this.stopDeferred.resolve();
-					this.startDeferred.resolve();
-					return;
+				if (signals.some((s) => s.signal_type === "shutdown")) {
+					throw new Error("Received shutdown signal during startup");
 				}
 
 				// Start heartbeat loop
@@ -212,14 +207,31 @@ export class Orchestrator {
 
 				// Stop gracefully
 				await this.stopWorkers();
-
-				this.stopDeferred.resolve();
 			} catch (err) {
+				error = coerceError(err);
 				this.logger.error(err);
-				this.stopDeferred.reject(err);
-				this.startDeferred.reject(err);
+
+				// Only reject startDeferred if startup hasn't completed yet
+				if (!this.startDeferred.isSettled) {
+					this.startDeferred.reject(error);
+				}
 			} finally {
-				await this.cleanup();
+				// capture before cleanup nulls it
+				const stopDeferred = this._stopDeferred;
+
+				try {
+					await this.cleanup();
+				} catch (cleanupErr) {
+					this.logger.error("Cleanup failed:", cleanupErr);
+					error = coerceError(cleanupErr);
+				}
+
+				// resolve/reject AFTER cleanup, based on ANY error
+				if (error) {
+					stopDeferred?.reject(error);
+				} else {
+					stopDeferred?.resolve();
+				}
 			}
 		})();
 
@@ -354,6 +366,65 @@ export class Orchestrator {
 	}
 
 	/**
+	 * This will register the signal handlers to make sure the worker shuts down
+	 * gracefully if it can. It will only register signal handlers once.
+	 */
+	private registerSignalHandlers() {
+		assert.ok(!this.isStopped, "Why are we registering signal handlers when stopped?");
+		assert.ok(!this.isShuttingDown, "Why are we registering signal handlers when shutting down?");
+
+		const shutdownHandler = (signal: Signal) => {
+			if (this.isShuttingDown) {
+				this.logger.debug(`Ignoring duplicate signal: ${signal}, already shutting down`);
+				return;
+			}
+
+			this.stop().catch(noop);
+		};
+
+		const stdioErrorHandler = () => {
+			// when the pipe is broken, we need to noop stdout errors to prevent recursive crashes
+			// otherwise, any logging during shutdown will cause a loop of errors
+			// thanks graphile-worker for this tip!
+			process.stdout.on("error", noop);
+			process.stdout.off("error", stdioErrorHandler);
+			process.stderr.on("error", noop);
+			process.stderr.off("error", stdioErrorHandler);
+
+			// trigger graceful handler
+			shutdownHandler("SIGPIPE");
+		};
+
+		for (const signal of SIGNALS) {
+			/*
+			 * Though SIGPIPE is a terminal signal _normally_, this isn't the case for
+			 * Node.js since libuv handles it. From the Node docs:
+			 *
+			 * > 'SIGPIPE' is ignored by default. It can have a listener installed.
+			 * > -- https://nodejs.org/api/process.html
+			 *
+			 * We don't want the process to exit on SIGPIPE, so we ignore it (and rely on
+			 * Node.js to handle it through the normal error channels).
+			 */
+			if (signal === "SIGPIPE") {
+				continue;
+			}
+			process.on(signal, shutdownHandler);
+		}
+		process.stdout.on("error", stdioErrorHandler);
+		process.stderr.on("error", stdioErrorHandler);
+
+		this.releaseSignalHandlers = () => {
+			for (const signal of SIGNALS) {
+				process.off(signal, shutdownHandler);
+			}
+			process.stdout.off("error", stdioErrorHandler);
+			process.stderr.off("error", stdioErrorHandler);
+			this.releaseSignalHandlers = null;
+		};
+	}
+
+	/**
 	 * Clean up resources:
 	 * - Stop heartbeat
 	 * - Remove orchestrator from database and release locked executions
@@ -376,6 +447,7 @@ export class Orchestrator {
 		this._stopDeferred = null;
 		this._startDeferred = null;
 		this._abortController = null;
+		this.releaseSignalHandlers?.();
 	}
 
 	get info() {
@@ -412,5 +484,17 @@ export class Orchestrator {
 
 	private get signal(): AbortSignal {
 		return this.abortController.signal;
+	}
+
+	get isStarted(): boolean {
+		return this._startDeferred !== null;
+	}
+
+	get isStopped(): boolean {
+		return this._stopDeferred === null;
+	}
+
+	get isShuttingDown(): boolean {
+		return this._abortController?.signal.aborted || false;
 	}
 }
