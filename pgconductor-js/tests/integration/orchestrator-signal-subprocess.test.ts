@@ -308,3 +308,159 @@ process.exit(0);
 	// Cleanup
 	unlinkSync(scriptPath);
 }, 30000);
+
+test("long-running task with checkpoint exits quickly on signal", async () => {
+	const db = await pool.child();
+
+	const scriptPath = join(__dirname, "../../tmp/signal-test-checkpoint.ts");
+	writeFileSync(
+		scriptPath,
+		`
+import { Conductor } from "../src/conductor";
+import { Orchestrator } from "../src/orchestrator";
+import { defineTask } from "../src/task-definition";
+import { TaskSchemas } from "../src/schemas";
+import { z } from "zod";
+import postgres from "postgres";
+
+const sql = postgres("${db.url}", { max: 5 });
+
+const taskDefinition = defineTask({
+	name: "infinite-loop-task",
+	payload: z.object({}),
+});
+
+const conductor = Conductor.create({
+	sql,
+	tasks: TaskSchemas.fromSchema([taskDefinition]),
+	context: {},
+});
+await conductor.ensureInstalled();
+
+let iterationCount = 0;
+
+const task = conductor.createTask(
+	taskDefinition,
+	{ invocable: true },
+	async (event, ctx) => {
+		if (event.event === "pgconductor.invoke") {
+			console.log("TASK_STARTED");
+
+			// Infinite loop that checks abort via checkpoint
+			while (true) {
+				iterationCount++;
+				console.log("ITERATION_" + iterationCount);
+
+				// This will throw if aborted
+				await ctx.checkpoint();
+
+				// Simulate work
+				await new Promise((r) => setTimeout(r, 1000));
+			}
+		}
+	},
+);
+
+const orch = Orchestrator.create({ conductor, tasks: [task] });
+
+console.log("ORCHESTRATOR_STARTED");
+
+// Start orchestrator and invoke task
+await orch.start();
+
+// Invoke the infinite loop task
+await conductor.invoke(taskDefinition, {});
+
+// Let orchestrator run (will be stopped by signal)
+await orch.stopped;
+
+console.log("ORCHESTRATOR_STOPPED");
+
+await sql.end();
+
+// Give event loop time to drain
+await new Promise((r) => setTimeout(r, 100));
+process.exit(0);
+`,
+	);
+
+	const child = spawn("bun", ["run", scriptPath], {
+		stdio: ["ignore", "pipe", "pipe"],
+		env: process.env,
+	});
+
+	let stdout = "";
+	child.stdout?.on("data", (data) => {
+		stdout += data.toString();
+	});
+
+	// Wait for task to start running
+	await new Promise<void>((resolve, reject) => {
+		const timeout = setTimeout(() => {
+			child.kill("SIGKILL");
+			reject(new Error("Timeout waiting for task to start"));
+		}, 10000);
+
+		const checkInterval = setInterval(() => {
+			if (stdout.includes("TASK_STARTED")) {
+				clearTimeout(timeout);
+				clearInterval(checkInterval);
+				resolve();
+			}
+		}, 100);
+	});
+
+	// Wait for at least one iteration to complete
+	await new Promise<void>((resolve) => {
+		const checkInterval = setInterval(() => {
+			if (stdout.includes("ITERATION_1")) {
+				clearInterval(checkInterval);
+				resolve();
+			}
+		}, 100);
+	});
+
+	// Record when we send the signal
+	const signalTime = Date.now();
+
+	// Send SIGTERM - task should abort at next checkpoint
+	child.kill("SIGTERM");
+
+	// Wait for process to exit
+	await new Promise<void>((resolve, reject) => {
+		const timeout = setTimeout(() => {
+			child.kill("SIGKILL");
+			reject(new Error(`Process did not exit within 3s after SIGTERM.\nStdout: ${stdout}`));
+		}, 3000);
+
+		child.on("exit", () => {
+			clearTimeout(timeout);
+			resolve();
+		});
+	});
+
+	const exitTime = Date.now();
+	const shutdownDuration = exitTime - signalTime;
+
+	// Verify shutdown happened quickly (within ~2s - 1 iteration + overhead)
+	expect(shutdownDuration).toBeLessThan(2500);
+
+	// Verify the task started and ran at least one iteration
+	expect(stdout).toContain("TASK_STARTED");
+	expect(stdout).toContain("ITERATION_1");
+	expect(stdout).toContain("ORCHESTRATOR_STOPPED");
+
+	// Verify execution was released in database
+	const executions = await db.sql`
+		SELECT * FROM pgconductor._private_executions
+		WHERE task_key = 'infinite-loop-task'
+	`;
+
+	// Execution should exist but not be locked
+	expect(executions.length).toBeGreaterThan(0);
+	const execution = executions[0];
+	expect(execution?.locked_by).toBe(null);
+
+	// Cleanup
+	unlinkSync(scriptPath);
+}, 30000);

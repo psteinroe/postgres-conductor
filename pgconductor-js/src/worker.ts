@@ -481,17 +481,6 @@ export class Worker<
 					});
 				});
 
-				// If execution was cancelled, fail it immediately without executing
-				if (exec.cancelled) {
-					return {
-						execution_id: exec.id,
-						queue: exec.queue,
-						task_key: exec.task_key,
-						status: "failed",
-						error: exec.last_error || "Execution was cancelled",
-					} as const;
-				}
-
 				try {
 					await this.scheduleNextExecution(exec);
 
