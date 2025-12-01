@@ -1,6 +1,13 @@
 _default:
   just --list -u
 
+alias f := format
+alias l := lint
+alias lf := lint-fix
+alias r := ready
+
+mod demo "pgconductor-js/demo/demo.just"
+
 build-migrations:
     sh ./scripts/build-migrations.sh
 
@@ -19,5 +26,8 @@ format:
 ready:
     just lint
     just format
+
+docs:
+    uv run zensical serve
 
 

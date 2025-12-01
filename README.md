@@ -1,6 +1,6 @@
 <div align="center">
-  <img src="/docs/media/logo.png" alt="Postgres Conductor" width="300">
+  <img src="docs/images/logo.png" alt="Postgres Conductor" width="300">
 
   # Postgres Conductor
-  Postgres-native Durable Execution</div>
+  A durable execution engine using only Postgres</div>
 
