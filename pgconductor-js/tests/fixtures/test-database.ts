@@ -71,6 +71,7 @@ export class TestDatabasePool {
 				POSTGRES_USER: "postgres",
 				POSTGRES_DB: "postgres",
 			})
+			.withCommand(["postgres", "-c", "wal_level=logical"])
 			.withExposedPorts(5432)
 			.withWaitStrategy(Wait.forLogMessage(/database system is ready to accept connections/, 2));
 

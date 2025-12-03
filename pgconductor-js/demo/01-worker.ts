@@ -5,7 +5,9 @@ import { TaskSchemas } from "../src/schemas";
 import { greetTask } from "./schemas";
 import context from "./context";
 
-const sql = postgres(process.env.DATABASE_URL || "postgres://localhost:5432/pgconductor");
+const sql = postgres(
+	process.env.DATABASE_URL || "postgres://postgres:postgres@localhost:5432/postgres",
+);
 
 const conductor = Conductor.create({
 	sql,

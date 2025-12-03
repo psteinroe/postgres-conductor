@@ -50,6 +50,7 @@ describe("WaitForEvent Support", () => {
 			},
 		});
 
+		await conductor.ensureInstalled();
 		await orchestrator.start();
 
 		await conductor.invoke({ name: "waiter-task" }, {});
@@ -59,7 +60,7 @@ describe("WaitForEvent Support", () => {
 
 		// Verify subscription was created
 		const subscriptions = await db.sql`
-			SELECT * FROM pgconductor.subscriptions
+			SELECT * FROM pgconductor._private_subscriptions
 			WHERE event_key = 'user.created'
 		`;
 
@@ -69,7 +70,7 @@ describe("WaitForEvent Support", () => {
 
 		// Verify execution is waiting (run_at = infinity)
 		const executions = await db.sql`
-			SELECT * FROM pgconductor.executions
+			SELECT * FROM pgconductor._private_executions
 			WHERE task_key = 'waiter-task'
 		`;
 
@@ -118,6 +119,7 @@ describe("WaitForEvent Support", () => {
 			},
 		});
 
+		await conductor.ensureInstalled();
 		await orchestrator.start();
 
 		await conductor.invoke({ name: "emitter-task" }, { userId: 123 });
@@ -130,7 +132,7 @@ describe("WaitForEvent Support", () => {
 
 		// Verify event was created
 		const events = await db.sql`
-			SELECT * FROM pgconductor.events
+			SELECT * FROM pgconductor._private_events
 			WHERE event_key = 'user.created'
 		`;
 
@@ -184,6 +186,7 @@ describe("WaitForEvent Support", () => {
 			},
 		});
 
+		await conductor.ensureInstalled();
 		await orchestrator.start();
 
 		await conductor.invoke({ name: "timeout-waiter" }, {});
@@ -244,6 +247,7 @@ describe("WaitForEvent Support", () => {
 			},
 		});
 
+		await conductor.ensureInstalled();
 		await orchestrator.start();
 
 		await conductor.invoke({ name: "wake-test" }, {});
@@ -253,20 +257,25 @@ describe("WaitForEvent Support", () => {
 
 		// Get the execution ID
 		const executions = await db.sql<Array<{ id: string }>>`
-			SELECT id FROM pgconductor.executions
+			SELECT id FROM pgconductor._private_executions
 			WHERE task_key = 'wake-test'
 		`;
 		const executionId = executions[0]?.id;
 		expect(executionId).toBeDefined();
 
-		// Manually call wake_execution (simulating what event-router does)
+		// Manually wake execution (simulating what event-router does)
 		await db.sql`
-			SELECT pgconductor.wake_execution(
-				${executionId!}::uuid,
-                'default',
-				'wait-for-wake',
-				${db.sql.json({ message: "hello from event" })}
+			WITH step_insert AS (
+				INSERT INTO pgconductor._private_steps (execution_id, queue, key, result)
+				VALUES (${executionId!}::uuid, 'default', 'wait-for-wake', ${db.sql.json({ message: "hello from event" })})
+				ON CONFLICT (execution_id, key) DO NOTHING
 			)
+			UPDATE pgconductor._private_executions
+			SET
+				waiting_on_execution_id = NULL,
+				waiting_step_key = NULL,
+				run_at = pgconductor._private_current_time()
+			WHERE id = ${executionId!}::uuid AND queue = 'default'
 		`;
 
 		// Wait for execution to be woken and complete
@@ -328,6 +337,7 @@ describe("WaitForEvent Support", () => {
 			},
 		});
 
+		await conductor.ensureInstalled();
 		await orchestrator.start();
 
 		await conductor.invoke({ name: "retry-waiter" }, {});
@@ -337,19 +347,24 @@ describe("WaitForEvent Support", () => {
 
 		// Get execution ID and wake it
 		const executions = await db.sql<Array<{ id: string }>>`
-			SELECT id FROM pgconductor.executions
+			SELECT id FROM pgconductor._private_executions
 			WHERE task_key = 'retry-waiter'
 		`;
 		const executionId = executions[0]?.id;
 		expect(executionId).toBeDefined();
 
 		await db.sql`
-			SELECT pgconductor.wake_execution(
-				${executionId!}::uuid,
-                'default',
-				'cached-wait',
-				${db.sql.json({ value: 42 })}
+			WITH step_insert AS (
+				INSERT INTO pgconductor._private_steps (execution_id, queue, key, result)
+				VALUES (${executionId!}::uuid, 'default', 'cached-wait', ${db.sql.json({ value: 42 })})
+				ON CONFLICT (execution_id, key) DO NOTHING
 			)
+			UPDATE pgconductor._private_executions
+			SET
+				waiting_on_execution_id = NULL,
+				waiting_step_key = NULL,
+				run_at = pgconductor._private_current_time()
+			WHERE id = ${executionId!}::uuid AND queue = 'default'
 		`;
 
 		// Wait for first attempt to fail
@@ -370,7 +385,7 @@ describe("WaitForEvent Support", () => {
 
 		// Verify execution completed successfully
 		const completed = await db.sql`
-			SELECT completed_at FROM pgconductor.executions
+			SELECT completed_at FROM pgconductor._private_executions
 			WHERE task_key = 'retry-waiter'
 		`;
 		expect(completed[0]?.completed_at).not.toBeNull();

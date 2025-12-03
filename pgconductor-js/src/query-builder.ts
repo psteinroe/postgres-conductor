@@ -217,18 +217,18 @@ export class QueryBuilder {
 		const endDate = new Date(startDate);
 		endDate.setUTCDate(endDate.getUTCDate() + 1);
 
-		return this.sql`
-            create table if not exists pgconductor.${this.sql(partitionName)}
+		return this.sql.unsafe(`
+            create table if not exists pgconductor.${partitionName}
             partition of pgconductor._private_events
-            for values from (${startDate.toISOString()}::timestamptz)
-            to (${endDate.toISOString()}::timestamptz);
-        `;
+            for values from ('${startDate.toISOString()}'::timestamptz)
+            to ('${endDate.toISOString()}'::timestamptz);
+        `);
 	}
 
 	buildDropEventPartition(partition: { table_name: string }): PendingQuery<RowList<Row[]>> {
-		return this.sql`
-            drop table if exists pgconductor.${this.sql(partition.table_name)};
-        `;
+		return this.sql.unsafe(`
+            drop table if exists pgconductor.${partition.table_name};
+        `);
 	}
 
 	buildCleanupTriggers(): PendingQuery<RowList<Row[]>> {
@@ -796,7 +796,7 @@ export class QueryBuilder {
 			deleted as (
 				delete from pgconductor._private_executions
 				using batch
-				where executions.id = batch.id
+				where pgconductor._private_executions.id = batch.id
 				returning 1
 			)
 			select count(*)::int as deleted_count from deleted

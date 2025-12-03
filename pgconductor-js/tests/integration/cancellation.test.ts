@@ -51,7 +51,7 @@ describe("Cancellation Support", () => {
 
 		// Get execution ID
 		const executions = await db.sql<{ id: string }[]>`
-			select id from pgconductor.executions where task_key = 'slow-task'
+			select id from pgconductor._private_executions where task_key = 'slow-task'
 		`;
 		expect(executions.length).toBe(1);
 		const executionId = executions[0]!.id;
@@ -69,7 +69,7 @@ describe("Cancellation Support", () => {
 			}[]
 		>`
 			select failed_at, last_error, cancelled
-			from pgconductor.executions
+			from pgconductor._private_executions
 			where id = ${executionId}::uuid
 		`;
 
@@ -122,7 +122,7 @@ describe("Cancellation Support", () => {
 		// Get execution ID
 		const executions = await db.sql<{ id: string; locked_by: string | null }[]>`
 			select id, locked_by
-			from pgconductor.executions
+			from pgconductor._private_executions
 			where task_key = 'long-running-task'
 		`;
 		expect(executions.length).toBe(1);
@@ -142,7 +142,7 @@ describe("Cancellation Support", () => {
 			}[]
 		>`
 			select cancelled, failed_at
-			from pgconductor.executions
+			from pgconductor._private_executions
 			where id = ${executionId}::uuid
 		`;
 
@@ -157,7 +157,7 @@ describe("Cancellation Support", () => {
 			}[]
 		>`
 			select type, execution_id
-			from pgconductor.orchestrator_signals
+			from pgconductor._private_orchestrator_signals
 		`;
 
 		expect(signals.length).toBe(1);
@@ -207,7 +207,7 @@ describe("Cancellation Support", () => {
 
 		// Get execution ID
 		const executions = await db.sql<{ id: string }[]>`
-			select id from pgconductor.executions where task_key = 'retry-task'
+			select id from pgconductor._private_executions where task_key = 'retry-task'
 		`;
 		const executionId = executions[0]!.id;
 
@@ -239,7 +239,7 @@ describe("Cancellation Support", () => {
 			}[]
 		>`
 			select failed_at, last_error
-			from pgconductor.executions
+			from pgconductor._private_executions
 			where id = ${executionId}::uuid
 		`;
 
@@ -334,7 +334,7 @@ describe("Cancellation Support", () => {
 		// Get parent execution
 		const parentExecs = await db.sql<{ id: string; waiting_on_execution_id: string | null }[]>`
 			select id, waiting_on_execution_id
-			from pgconductor.executions
+			from pgconductor._private_executions
 			where task_key = 'parent-task'
 		`;
 
@@ -350,7 +350,7 @@ describe("Cancellation Support", () => {
 		// Verify parent is failed
 		const failedParent = await db.sql<{ failed_at: Date | null; last_error: string | null }[]>`
 			select failed_at, last_error
-			from pgconductor.executions
+			from pgconductor._private_executions
 			where id = ${parentId}::uuid
 		`;
 
@@ -422,7 +422,7 @@ describe("Cancellation Support", () => {
 		// Get child execution
 		const childExecs = await db.sql<{ id: string; locked_by: string | null }[]>`
 			select id, locked_by
-			from pgconductor.executions
+			from pgconductor._private_executions
 			where task_key = 'child-task-2'
 		`;
 
@@ -438,7 +438,7 @@ describe("Cancellation Support", () => {
 		// Verify child has cancelled flag
 		const cancelledChild = await db.sql<{ cancelled: boolean }[]>`
 			select cancelled
-			from pgconductor.executions
+			from pgconductor._private_executions
 			where id = ${childId}::uuid
 		`;
 
@@ -503,7 +503,7 @@ describe("Cancellation Support", () => {
 			}[]
 		>`
 			select id, attempts, failed_at, run_at
-			from pgconductor.executions
+			from pgconductor._private_executions
 			where task_key = 'failing-task'
 		`;
 
@@ -520,7 +520,7 @@ describe("Cancellation Support", () => {
 		// Verify it's now failed
 		const failedExec = await db.sql<{ failed_at: Date | null; last_error: string | null }[]>`
 			select failed_at, last_error
-			from pgconductor.executions
+			from pgconductor._private_executions
 			where id = ${execId}::uuid
 		`;
 
@@ -557,7 +557,7 @@ describe("Cancellation Support", () => {
 		await new Promise((r) => setTimeout(r, 100));
 
 		const executions = await db.sql<{ id: string }[]>`
-			select id from pgconductor.executions where task_key = 'idempotent-task'
+			select id from pgconductor._private_executions where task_key = 'idempotent-task'
 		`;
 
 		const execId = executions[0]!.id;
@@ -579,7 +579,7 @@ describe("Cancellation Support", () => {
 			}[]
 		>`
 			select failed_at, last_error
-			from pgconductor.executions
+			from pgconductor._private_executions
 			where id = ${execId}::uuid
 		`;
 
@@ -633,7 +633,7 @@ describe("Cancellation Support", () => {
 			}[]
 		>`
 			select id, locked_by
-			from pgconductor.executions
+			from pgconductor._private_executions
 			where task_key = 'long-task'
 		`;
 
@@ -653,7 +653,7 @@ describe("Cancellation Support", () => {
 			}[]
 		>`
 			select cancelled, failed_at
-			from pgconductor.executions
+			from pgconductor._private_executions
 			where id = ${execId}::uuid
 		`;
 
@@ -670,7 +670,7 @@ describe("Cancellation Support", () => {
 			}[]
 		>`
 			select failed_at, last_error, locked_by
-			from pgconductor.executions
+			from pgconductor._private_executions
 			where id = ${execId}::uuid
 		`;
 
@@ -722,7 +722,7 @@ describe("Cancellation Support", () => {
 
 		const executions = await db.sql<{ id: string }[]>`
 			select id
-			from pgconductor.executions
+			from pgconductor._private_executions
 			where task_key = 'custom-reason-task'
 		`;
 
@@ -741,7 +741,7 @@ describe("Cancellation Support", () => {
 			}[]
 		>`
 			select last_error
-			from pgconductor.executions
+			from pgconductor._private_executions
 			where id = ${execId}::uuid
 		`;
 
@@ -800,7 +800,7 @@ describe("Cancellation Support", () => {
 			}[]
 		>`
 			select last_error
-			from pgconductor.executions
+			from pgconductor._private_executions
 			where id = ${execId}::uuid
 		`;
 
@@ -868,7 +868,7 @@ describe("Cancellation Support", () => {
 			}[]
 		>`
 			select last_error
-			from pgconductor.executions
+			from pgconductor._private_executions
 			where id = ${pendingExecId}::uuid
 		`;
 

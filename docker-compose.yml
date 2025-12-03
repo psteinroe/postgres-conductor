@@ -5,7 +5,29 @@ services:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: postgres
+    command: postgres -c wal_level=logical
     ports:
-      - "5433:5432"
+      - "5432:5432"
     volumes:
       - ./test/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  event-router:
+    build:
+      context: .
+      dockerfile: event-router/Dockerfile
+    environment:
+      RUST_LOG: info
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGDATABASE: postgres
+      PGUSER: postgres
+      PGPASSWORD: postgres
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped

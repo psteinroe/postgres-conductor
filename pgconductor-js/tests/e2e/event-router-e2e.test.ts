@@ -89,10 +89,9 @@ describe("Event Router E2E", () => {
 			);
 		`);
 
-		// Create publication for CDC - need pgconductor tables + application tables for testing
+		// Add application tables to the publication (migration already created it with pgconductor tables)
 		await sql.unsafe(`
-			CREATE PUBLICATION pgconductor_events
-			FOR TABLE pgconductor._private_events, pgconductor._private_subscriptions, address_book, contact
+			ALTER PUBLICATION pgconductor_events ADD TABLE address_book, contact
 		`);
 
 		// Build and start event-router container from Dockerfile

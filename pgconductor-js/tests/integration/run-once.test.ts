@@ -77,7 +77,7 @@ describe("drain() Mode", () => {
 
 		// Verify all executions are completed in database
 		const completedExecutions = await db.sql`
-			SELECT * FROM pgconductor.executions
+			SELECT * FROM pgconductor._private_executions
 			WHERE task_key = 'test-task' AND completed_at IS NOT NULL
 		`;
 		expect(completedExecutions.length).toBe(5);

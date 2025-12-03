@@ -5,7 +5,7 @@ WORKDIR /app
 
 # Copy workspace files
 COPY Cargo.toml Cargo.lock ./
-COPY crates ./crates
+COPY event-router ./event-router
 
 # Build the event-router
 RUN cargo build --release -p event-router

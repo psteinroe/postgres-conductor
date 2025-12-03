@@ -1,6 +1,4 @@
 
-create extension if not exists "uuid-ossp";
-
 -- Returns either the actual current timestamp or a fake one for tests.
 -- Uses session variable (current_setting) for test time control.
 create function pgconductor._private_current_time ()
@@ -290,16 +288,16 @@ create index if not exists idx_subscriptions_triggers_lookup
 on pgconductor._private_subscriptions (schema_name, table_name, operation);
 
 create table if not exists pgconductor._private_events (
-    id uuid primary key default pgconductor._private_portable_uuidv7(),
+    id uuid default pgconductor._private_portable_uuidv7() not null,
     event_key text not null,
     schema_name text,
     table_name text,
     operation text,
     source text not null default 'event', -- 'db' or 'event'
     payload jsonb,
-    created_at timestamptz default pgconductor._private_current_time() not null
-    partition by range (created_at, id)
-);
+    created_at timestamptz default pgconductor._private_current_time() not null,
+    primary key (created_at, id)
+) partition by range (created_at);
 
 -- pre-insert the first 3 daily partitions
 do $$
@@ -310,7 +308,7 @@ begin
     while i < 3 loop
         execute format('
             create table if not exists pgconductor._private_events_%s
-            partition of pgconductor.events
+            partition of pgconductor._private_events
             for values from (%L) to (%L);
         ',
             to_char(d + i, 'YYYYMMDD'),
@@ -773,3 +771,11 @@ begin
   end if;
 end;
 $function$;
+
+-- Create publication for event-router to stream events and subscriptions
+do $$
+begin
+  if not exists (select 1 from pg_publication where pubname = 'pgconductor_events') then
+    create publication pgconductor_events for table pgconductor._private_events, pgconductor._private_subscriptions with (publish_via_partition_root = true);
+  end if;
+end $$;

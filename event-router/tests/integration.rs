@@ -16,11 +16,14 @@ use event_router::destination::EventRouterDestination;
 use event_router::models::Operation;
 use event_router::subscriptions::{match_db_subs, match_event_subs, SUBSCRIPTIONS};
 
-const MIGRATIONS_PATH: &str = "../../migrations";
+const MIGRATIONS_PATH: &str = "../migrations";
 
 /// Apply pgconductor migrations and setup CDC
 async fn setup_database(pool: &sqlx::PgPool) -> Result<(), sqlx::Error> {
-  // Create schema first
+  // Create extensions first
+  pool.execute("CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\";").await?;
+
+  // Create schema
   pool.execute("CREATE SCHEMA IF NOT EXISTS pgconductor;").await?;
 
   // Read and apply base migrations (includes subscriptions and events tables)
@@ -29,14 +32,7 @@ async fn setup_database(pool: &sqlx::PgPool) -> Result<(), sqlx::Error> {
 
   pool.execute(migrations_sql.as_str()).await?;
 
-  // Setup CDC for subscriptions and events tables
-  pool.execute(
-        r#"
-        -- Create publication for CDC
-        CREATE PUBLICATION pgconductor_events FOR TABLE pgconductor.events, pgconductor.subscriptions;
-        "#,
-    )
-    .await?;
+  // Migration now creates the publication, no need to create it here
 
   Ok(())
 }
@@ -61,7 +57,7 @@ async fn test_load_subscriptions_on_startup() {
 
   sqlx::query(
         r#"
-        INSERT INTO pgconductor.subscriptions (source, schema_name, table_name, operation, execution_id)
+        INSERT INTO pgconductor._private_subscriptions (source, schema_name, table_name, operation, execution_id)
         VALUES ('db', 'public', 'users', 'insert', $1);
         "#,
     )
@@ -72,7 +68,7 @@ async fn test_load_subscriptions_on_startup() {
 
   sqlx::query(
     r#"
-        INSERT INTO pgconductor.subscriptions (source, event_key, execution_id)
+        INSERT INTO pgconductor._private_subscriptions (source, event_key, execution_id)
         VALUES ('event', 'user.verified', $1);
         "#,
   )
@@ -83,7 +79,7 @@ async fn test_load_subscriptions_on_startup() {
 
   sqlx::query(
         r#"
-        INSERT INTO pgconductor.subscriptions (source, schema_name, table_name, operation, execution_id)
+        INSERT INTO pgconductor._private_subscriptions (source, schema_name, table_name, operation, execution_id)
         VALUES ('db', 'public', 'users', 'insert', $1);
         "#,
     )
@@ -142,7 +138,7 @@ async fn test_multiple_operations_same_table() {
 
   sqlx::query(
         r#"
-        INSERT INTO pgconductor.subscriptions (source, schema_name, table_name, operation, execution_id)
+        INSERT INTO pgconductor._private_subscriptions (source, schema_name, table_name, operation, execution_id)
         VALUES
             ('db', 'public', 'orders', 'insert', $1),
             ('db', 'public', 'orders', 'update', $2),
@@ -188,7 +184,7 @@ async fn test_subscription_index_structure() {
 
   sqlx::query(
         r#"
-        INSERT INTO pgconductor.subscriptions (source, schema_name, table_name, operation, execution_id)
+        INSERT INTO pgconductor._private_subscriptions (source, schema_name, table_name, operation, execution_id)
         VALUES ('db', 'myschema', 'mytable', 'insert', $1);
         "#,
     )
@@ -199,7 +195,7 @@ async fn test_subscription_index_structure() {
 
   sqlx::query(
     r#"
-        INSERT INTO pgconductor.subscriptions (source, event_key, execution_id)
+        INSERT INTO pgconductor._private_subscriptions (source, event_key, execution_id)
         VALUES ('event', 'order.created', $1);
         "#,
   )
@@ -253,7 +249,7 @@ async fn test_full_pipeline_with_cdc() {
   let exec_initial = Uuid::new_v4();
   sqlx::query(
         r#"
-        INSERT INTO pgconductor.subscriptions (source, schema_name, table_name, operation, execution_id)
+        INSERT INTO pgconductor._private_subscriptions (source, schema_name, table_name, operation, execution_id)
         VALUES ('db', 'public', 'orders', 'insert', $1);
         "#,
     )
@@ -304,7 +300,7 @@ async fn test_full_pipeline_with_cdc() {
   let exec_cdc_1 = Uuid::new_v4();
   sqlx::query(
     r#"
-        INSERT INTO pgconductor.subscriptions (source, event_key, execution_id)
+        INSERT INTO pgconductor._private_subscriptions (source, event_key, execution_id)
         VALUES ('event', 'payment.completed', $1);
         "#,
   )
@@ -325,7 +321,7 @@ async fn test_full_pipeline_with_cdc() {
   let exec_cdc_2 = Uuid::new_v4();
   sqlx::query(
         r#"
-        INSERT INTO pgconductor.subscriptions (source, schema_name, table_name, operation, execution_id)
+        INSERT INTO pgconductor._private_subscriptions (source, schema_name, table_name, operation, execution_id)
         VALUES ('db', 'public', 'users', 'update', $1);
         "#,
     )
@@ -344,7 +340,7 @@ async fn test_full_pipeline_with_cdc() {
   // Delete a subscription
   sqlx::query(
     r#"
-        DELETE FROM pgconductor.subscriptions WHERE execution_id = $1;
+        DELETE FROM pgconductor._private_subscriptions WHERE execution_id = $1;
         "#,
   )
   .bind(exec_initial)
@@ -392,7 +388,7 @@ async fn test_cdc_subscription_update() {
   let exec_original = Uuid::new_v4();
   sqlx::query(
     r#"
-        INSERT INTO pgconductor.subscriptions (id, source, event_key, execution_id)
+        INSERT INTO pgconductor._private_subscriptions (id, source, event_key, execution_id)
         VALUES ($1, 'event', 'order.placed', $2);
         "#,
   )
@@ -438,7 +434,7 @@ async fn test_cdc_subscription_update() {
   let exec_updated = Uuid::new_v4();
   sqlx::query(
     r#"
-        UPDATE pgconductor.subscriptions
+        UPDATE pgconductor._private_subscriptions
         SET execution_id = $1
         WHERE id = $2;
         "#,

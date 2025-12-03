@@ -149,7 +149,7 @@ export class TaskContext<
 		});
 
 		if (cached !== undefined) {
-			return cached as T;
+			return (cached as { result: T }).result;
 		}
 
 		// Execute and save

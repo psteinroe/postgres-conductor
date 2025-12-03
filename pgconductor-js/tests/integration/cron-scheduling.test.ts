@@ -48,7 +48,7 @@ describe("Cron Scheduling", () => {
 		// Check that cron schedule was created
 		const schedules = await db.sql<Array<{ dedupe_key: string; run_at: Date }>>`
 			SELECT dedupe_key, run_at
-			FROM pgconductor.executions
+			FROM pgconductor._private_executions
 			WHERE task_key = 'daily-report'
 				AND dedupe_key LIKE 'scheduled::%'
 		`;
@@ -108,10 +108,10 @@ describe("Cron Scheduling", () => {
 		// Check that next execution is scheduled
 		const schedules = await db.sql<Array<{ dedupe_key: string; run_at: Date }>>`
 			SELECT dedupe_key, run_at
-			FROM pgconductor.executions
+			FROM pgconductor._private_executions
 			WHERE task_key = 'frequent-sync'
 				AND dedupe_key LIKE 'scheduled::%'
-				AND run_at > pgconductor.current_time()
+				AND run_at > pgconductor._private_current_time()
 			ORDER BY run_at
 			LIMIT 1
 		`;
@@ -168,7 +168,7 @@ describe("Cron Scheduling", () => {
 
 		const schedules = await db.sql<Array<{ dedupe_key: string; run_at: Date }>>`
 			SELECT dedupe_key, run_at
-			FROM pgconductor.executions
+			FROM pgconductor._private_executions
 			WHERE task_key = 'multi-schedule'
 				AND dedupe_key LIKE 'scheduled::%'
 			ORDER BY run_at
@@ -224,7 +224,7 @@ describe("Cron Scheduling", () => {
 		// Verify 2 schedules exist (only check new format with cron_expression)
 		let schedules = await db.sql<Array<{ dedupe_key: string; cron_expression: string | null }>>`
 			SELECT dedupe_key, cron_expression
-			FROM pgconductor.executions
+			FROM pgconductor._private_executions
 			WHERE task_key = 'cleanup-test'
 		`;
 		const withCronExpression = schedules.filter((s) => s.cron_expression !== null);
@@ -249,7 +249,7 @@ describe("Cron Scheduling", () => {
 		// Verify only 1 schedule remains (5 PM should be cleaned up)
 		const remainingSchedules = await db.sql<Array<{ dedupe_key: string }>>`
 			SELECT dedupe_key
-			FROM pgconductor.executions
+			FROM pgconductor._private_executions
 			WHERE task_key = 'cleanup-test'
 				AND cron_expression IS NOT NULL
 		`;
@@ -366,10 +366,10 @@ describe("Cron Scheduling", () => {
 
 		const nextSchedules = await db.sql<Array<{ dedupe_key: string }>>`
 			SELECT dedupe_key
-			FROM pgconductor.executions
+			FROM pgconductor._private_executions
 			WHERE task_key = 'dynamic-target'
 				AND cron_expression IS NOT NULL
-				AND run_at > pgconductor.current_time()
+				AND run_at > pgconductor._private_current_time()
 			ORDER BY run_at
 			LIMIT 1
 		`;
@@ -452,10 +452,10 @@ describe("Cron Scheduling", () => {
 
 		const futureSchedules = await db.sql<Array<{ id: string }>>`
 			SELECT id
-			FROM pgconductor.executions
+			FROM pgconductor._private_executions
 			WHERE task_key = 'dynamic-target'
 				AND cron_expression IS NOT NULL
-				AND run_at > pgconductor.current_time()
+				AND run_at > pgconductor._private_current_time()
 		`;
 
 		expect(futureSchedules.length).toBe(0);
@@ -562,10 +562,10 @@ describe("Cron Scheduling", () => {
 		// 4. Check that no future executions exist (even after retry)
 		const futureSchedules = await db.sql<Array<{ id: string }>>`
 			SELECT id
-			FROM pgconductor.executions
+			FROM pgconductor._private_executions
 			WHERE task_key = 'slow-task'
 				AND cron_expression IS NOT NULL
-				AND run_at > pgconductor.current_time()
+				AND run_at > pgconductor._private_current_time()
 		`;
 
 		expect(futureSchedules.length).toBe(0);
@@ -667,10 +667,10 @@ describe("Cron Scheduling", () => {
 		// Verify next cron execution is scheduled
 		const nextExecution = await db.sql<Array<{ run_at: Date; dedupe_key: string }>>`
 			SELECT run_at, dedupe_key
-			FROM pgconductor.executions
+			FROM pgconductor._private_executions
 			WHERE task_key = 'flaky-cron'
 				AND dedupe_key LIKE 'scheduled::%'
-				AND run_at > pgconductor.current_time()
+				AND run_at > pgconductor._private_current_time()
 			ORDER BY run_at
 			LIMIT 1
 		`;
@@ -724,7 +724,7 @@ describe("Cron Scheduling", () => {
 		// Check database - should only have one scheduled execution
 		const schedules = await db.sql<Array<{ dedupe_key: string }>>`
 			SELECT dedupe_key
-			FROM pgconductor.executions
+			FROM pgconductor._private_executions
 			WHERE task_key = 'dedupe-cron'
 				AND dedupe_key LIKE 'scheduled::%'
 		`;

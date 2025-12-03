@@ -1,3 +1,6 @@
+-- Install required extensions
+create extension if not exists "uuid-ossp";
+
 create table address_book (
   id uuid primary key default gen_random_uuid(),
   name text not null,

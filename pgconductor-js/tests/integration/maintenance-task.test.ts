@@ -87,8 +87,8 @@ describe("Maintenance Task", () => {
 
 		// Complete the execution manually
 		await db.sql`
-			UPDATE pgconductor.executions
-			SET completed_at = pgconductor.current_time(),
+			UPDATE pgconductor._private_executions
+			SET completed_at = pgconductor._private_current_time(),
 				locked_by = null,
 				locked_at = null
 			WHERE id = ${oldExecId}
@@ -103,8 +103,8 @@ describe("Maintenance Task", () => {
 		const recentExecId = await conductor.invoke({ name: "report-task" }, {});
 
 		await db.sql`
-			UPDATE pgconductor.executions
-			SET completed_at = pgconductor.current_time(),
+			UPDATE pgconductor._private_executions
+			SET completed_at = pgconductor._private_current_time(),
 				locked_by = null,
 				locked_at = null
 			WHERE id = ${recentExecId}
@@ -125,14 +125,14 @@ describe("Maintenance Task", () => {
 
 		// Check that old execution was deleted
 		const oldExec = await db.sql`
-			SELECT id FROM pgconductor.executions
+			SELECT id FROM pgconductor._private_executions
 			WHERE id = ${oldExecId}
 		`;
 		expect(oldExec.length).toBe(0);
 
 		// Check that recent execution still exists
 		const recentExec = await db.sql`
-			SELECT id FROM pgconductor.executions
+			SELECT id FROM pgconductor._private_executions
 			WHERE id = ${recentExecId}
 		`;
 		expect(recentExec.length).toBe(1);
@@ -205,7 +205,7 @@ describe("Maintenance Task", () => {
 		// Verify both executions failed
 		const failedExecs = await db.sql`
 			SELECT id, failed_at
-			FROM pgconductor.executions
+			FROM pgconductor._private_executions
 			WHERE task_key = 'failing-task' AND failed_at IS NOT NULL
 			ORDER BY failed_at ASC
 		`;
@@ -222,14 +222,14 @@ describe("Maintenance Task", () => {
 
 		// Check that old execution was deleted
 		const oldExec = await db.sql`
-			SELECT id FROM pgconductor.executions
+			SELECT id FROM pgconductor._private_executions
 			WHERE id = ${oldExecId}
 		`;
 		expect(oldExec.length).toBe(0);
 
 		// Check that recent execution still exists
 		const recentExec = await db.sql`
-			SELECT id FROM pgconductor.executions
+			SELECT id FROM pgconductor._private_executions
 			WHERE id = ${recentExecId}
 		`;
 		expect(recentExec.length).toBe(1);
@@ -294,8 +294,8 @@ describe("Maintenance Task", () => {
 
 		// Complete both
 		await db.sql`
-			UPDATE pgconductor.executions
-			SET completed_at = pgconductor.current_time(),
+			UPDATE pgconductor._private_executions
+			SET completed_at = pgconductor._private_current_time(),
 				locked_by = null,
 				locked_at = null
 			WHERE id = ANY(${[shortExecId, longExecId]}::uuid[])
@@ -315,14 +315,14 @@ describe("Maintenance Task", () => {
 
 		// Short retention task should be deleted (10 days > 3 days)
 		const shortExec = await db.sql`
-			SELECT id FROM pgconductor.executions
+			SELECT id FROM pgconductor._private_executions
 			WHERE id = ${shortExecId}
 		`;
 		expect(shortExec.length).toBe(0);
 
 		// Long retention task should still exist (10 days < 30 days)
 		const longExec = await db.sql`
-			SELECT id FROM pgconductor.executions
+			SELECT id FROM pgconductor._private_executions
 			WHERE id = ${longExecId}
 		`;
 		expect(longExec.length).toBe(1);
@@ -373,8 +373,8 @@ describe("Maintenance Task", () => {
 
 		// Complete all
 		await db.sql`
-			UPDATE pgconductor.executions
-			SET completed_at = pgconductor.current_time(),
+			UPDATE pgconductor._private_executions
+			SET completed_at = pgconductor._private_current_time(),
 				locked_by = null,
 				locked_at = null
 			WHERE task_key = 'batch-task'
@@ -394,7 +394,7 @@ describe("Maintenance Task", () => {
 
 		// All old executions should be deleted
 		const remaining = await db.sql`
-			SELECT id FROM pgconductor.executions
+			SELECT id FROM pgconductor._private_executions
 			WHERE task_key = 'batch-task' AND completed_at IS NOT NULL
 		`;
 		expect(remaining.length).toBe(0);
@@ -440,8 +440,8 @@ describe("Maintenance Task", () => {
 		const execId = await conductor.invoke({ name: "keep-forever" }, {});
 
 		await db.sql`
-			UPDATE pgconductor.executions
-			SET completed_at = pgconductor.current_time(),
+			UPDATE pgconductor._private_executions
+			SET completed_at = pgconductor._private_current_time(),
 				locked_by = null,
 				locked_at = null
 			WHERE id = ${execId}
@@ -461,7 +461,7 @@ describe("Maintenance Task", () => {
 
 		// Execution should still exist (not removed)
 		const exec = await db.sql`
-			SELECT id FROM pgconductor.executions
+			SELECT id FROM pgconductor._private_executions
 			WHERE id = ${execId}
 		`;
 		expect(exec.length).toBe(1);

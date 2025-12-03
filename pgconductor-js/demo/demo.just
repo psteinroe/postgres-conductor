@@ -4,113 +4,159 @@
 _default:
     @just --list --justfile {{justfile()}}
 
+# Start demo infrastructure (postgres + event-router)
+up:
+    docker compose up -d
+
+# Stop demo infrastructure
+down:
+    docker compose down
+
+# Rebuild and restart demo infrastructure
+restart:
+    docker compose down
+    docker compose up -d --build
+
+# View logs for demo infrastructure
+logs service="":
+    #!/usr/bin/env bash
+    if [ -z "{{service}}" ]; then
+        docker compose logs -f
+    else
+        docker compose logs -f {{service}}
+    fi
+
+# Check status of demo infrastructure
+status:
+    docker compose ps
+
 # Run worker for demo 01 (basic task execution)
 worker-01:
-    bun run pgconductor-js/demo/01-worker.ts
+    cd {{invocation_directory()}} && bun run pgconductor-js/demo/01-worker.ts
 
 # Invoke demo 01 task (optionally pass name)
 invoke-01 name="World":
-    bun run pgconductor-js/demo/01-invoke.ts {{name}}
+    cd {{invocation_directory()}} && bun run pgconductor-js/demo/01-invoke.ts {{name}}
 
 # Run worker for demo 02 (steps & sleep)
 worker-02:
-    bun run pgconductor-js/demo/02-worker.ts
+    cd {{invocation_directory()}} && bun run pgconductor-js/demo/02-worker.ts
 
 # Invoke demo 02 task (optionally pass items)
 invoke-02 *items="apple banana cherry":
-    bun run pgconductor-js/demo/02-invoke.ts {{items}}
+    cd {{invocation_directory()}} && bun run pgconductor-js/demo/02-invoke.ts {{items}}
 
 # Run worker for demo 03 (child task invocation)
 worker-03:
-    bun run pgconductor-js/demo/03-worker.ts
+    cd {{invocation_directory()}} && bun run pgconductor-js/demo/03-worker.ts
 
 # Invoke demo 03 task (optionally pass value)
 invoke-03 value="5":
-    bun run pgconductor-js/demo/03-invoke.ts {{value}}
+    cd {{invocation_directory()}} && bun run pgconductor-js/demo/03-invoke.ts {{value}}
 
 # Run worker for demo 04 (cron scheduling)
 worker-04:
-    bun run pgconductor-js/demo/04-worker.ts
+    cd {{invocation_directory()}} && bun run pgconductor-js/demo/04-worker.ts
 
 # Invoke demo 04 task (manual trigger)
 invoke-04:
-    bun run pgconductor-js/demo/04-invoke.ts
+    cd {{invocation_directory()}} && bun run pgconductor-js/demo/04-invoke.ts
 
 # Run worker for demo 05 (dynamic cron scheduling)
 worker-05:
-    bun run pgconductor-js/demo/05-worker.ts
+    cd {{invocation_directory()}} && bun run pgconductor-js/demo/05-worker.ts
 
 # Invoke demo 05 scheduler (schedule or unschedule)
 invoke-05 action="schedule":
-    bun run pgconductor-js/demo/05-invoke.ts {{action}}
+    cd {{invocation_directory()}} && bun run pgconductor-js/demo/05-invoke.ts {{action}}
 
 # Run worker for demo 06 (multi-worker scaling)
 worker-06:
-    bun run pgconductor-js/demo/06-worker.ts
+    cd {{invocation_directory()}} && bun run pgconductor-js/demo/06-worker.ts
 
 # Invoke demo 06 tasks (optionally pass count)
 invoke-06 count="10":
-    bun run pgconductor-js/demo/06-invoke.ts {{count}}
+    cd {{invocation_directory()}} && bun run pgconductor-js/demo/06-invoke.ts {{count}}
 
 # Run worker for demo 07 (events)
 worker-07:
-    bun run pgconductor-js/demo/07-worker.ts
+    cd {{invocation_directory()}} && bun run pgconductor-js/demo/07-worker.ts
 
 # Invoke listener task for demo 07
 listener-07:
-    bun run pgconductor-js/demo/07-invoke-listener.ts
+    cd {{invocation_directory()}} && bun run pgconductor-js/demo/07-invoke-listener.ts
 
 # Invoke emitter task for demo 07 (optionally pass message)
 emitter-07 message="Hello Events":
-    bun run pgconductor-js/demo/07-invoke-emitter.ts "{{message}}"
+    cd {{invocation_directory()}} && bun run pgconductor-js/demo/07-invoke-emitter.ts "{{message}}"
 
 # Run all workers in sequence (useful for quick testing)
 all-workers:
-    @echo "Note: Run each worker in a separate terminal for real usage"
-    @echo "This is just for testing that they start correctly"
-    @echo ""
-    @echo "Testing demo 01..."
-    @timeout 2 bun run pgconductor-js/demo/01-worker.ts || true
-    @echo "✓ Demo 01 worker starts"
-    @echo ""
-    @echo "Testing demo 02..."
-    @timeout 2 bun run pgconductor-js/demo/02-worker.ts || true
-    @echo "✓ Demo 02 worker starts"
-    @echo ""
-    @echo "Testing demo 03..."
-    @timeout 2 bun run pgconductor-js/demo/03-worker.ts || true
-    @echo "✓ Demo 03 worker starts"
-    @echo ""
-    @echo "Testing demo 04..."
-    @timeout 2 bun run pgconductor-js/demo/04-worker.ts || true
-    @echo "✓ Demo 04 worker starts"
-    @echo ""
-    @echo "Testing demo 05..."
-    @timeout 2 bun run pgconductor-js/demo/05-worker.ts || true
-    @echo "✓ Demo 05 worker starts"
-    @echo ""
-    @echo "Testing demo 06..."
-    @timeout 2 bun run pgconductor-js/demo/06-worker.ts || true
-    @echo "✓ Demo 06 worker starts"
-    @echo ""
-    @echo "Testing demo 07..."
-    @timeout 2 bun run pgconductor-js/demo/07-worker.ts || true
-    @echo "✓ Demo 07 worker starts"
+    #!/usr/bin/env bash
+    cd {{invocation_directory()}}
+    echo "Note: Run each worker in a separate terminal for real usage"
+    echo "This is just for testing that they start correctly"
+    echo ""
+    echo "Testing demo 01..."
+    timeout 2 bun run pgconductor-js/demo/01-worker.ts || true
+    echo "✓ Demo 01 worker starts"
+    echo ""
+    echo "Testing demo 02..."
+    timeout 2 bun run pgconductor-js/demo/02-worker.ts || true
+    echo "✓ Demo 02 worker starts"
+    echo ""
+    echo "Testing demo 03..."
+    timeout 2 bun run pgconductor-js/demo/03-worker.ts || true
+    echo "✓ Demo 03 worker starts"
+    echo ""
+    echo "Testing demo 04..."
+    timeout 2 bun run pgconductor-js/demo/04-worker.ts || true
+    echo "✓ Demo 04 worker starts"
+    echo ""
+    echo "Testing demo 05..."
+    timeout 2 bun run pgconductor-js/demo/05-worker.ts || true
+    echo "✓ Demo 05 worker starts"
+    echo ""
+    echo "Testing demo 06..."
+    timeout 2 bun run pgconductor-js/demo/06-worker.ts || true
+    echo "✓ Demo 06 worker starts"
+    echo ""
+    echo "Testing demo 07..."
+    timeout 2 bun run pgconductor-js/demo/07-worker.ts || true
+    echo "✓ Demo 07 worker starts"
 
 # Quick demo flow: start worker in background and invoke tasks
 quick:
-    @echo "Starting demo 01 worker in background..."
-    @bun run pgconductor-js/demo/01-worker.ts & echo $$! > /tmp/pgconductor-demo-01.pid
-    @sleep 2
-    @echo "Invoking tasks..."
-    @bun run pgconductor-js/demo/01-invoke.ts World
-    @bun run pgconductor-js/demo/01-invoke.ts Alice
-    @bun run pgconductor-js/demo/01-invoke.ts Bob
-    @sleep 2
-    @echo "Stopping worker..."
-    @kill `cat /tmp/pgconductor-demo-01.pid` 2>/dev/null || true
-    @rm -f /tmp/pgconductor-demo-01.pid
-    @echo "✓ Demo 01 complete"
+    #!/usr/bin/env bash
+    cd {{invocation_directory()}}
+    echo "Starting demo 01 worker in background..."
+    bun run pgconductor-js/demo/01-worker.ts & echo $$! > /tmp/pgconductor-demo-01.pid
+    sleep 2
+    echo "Invoking tasks..."
+    bun run pgconductor-js/demo/01-invoke.ts World
+    bun run pgconductor-js/demo/01-invoke.ts Alice
+    bun run pgconductor-js/demo/01-invoke.ts Bob
+    sleep 2
+    echo "Stopping worker..."
+    kill `cat /tmp/pgconductor-demo-01.pid` 2>/dev/null || true
+    rm -f /tmp/pgconductor-demo-01.pid
+    echo "✓ Demo 01 complete"
+
+# Setup demo infrastructure and environment
+setup:
+    @echo "Setting up demo infrastructure..."
+    @just demo up
+    @echo ""
+    @echo "✓ Infrastructure started (postgres on port 5432)"
+    @echo ""
+    @echo "Export environment variable:"
+    @echo "  export AGENT=1"
+    @echo ""
+    @echo "Note: DATABASE_URL defaults to postgres://postgres:postgres@localhost:5432/postgres"
+
+# Print environment variables for sourcing
+env:
+    @echo "export AGENT=1"
 
 # Interactive demo guide
 guide:
@@ -118,10 +164,18 @@ guide:
     @echo "║         pgconductor Demo Guide                              ║"
     @echo "╚══════════════════════════════════════════════════════════════╝"
     @echo ""
-    @echo "Prerequisites:"
-    @echo "  export DATABASE_URL='postgres://localhost:5432/pgconductor'"
-    @echo "  export AGENT=1"
-    @echo "  docker compose up -d"
+    @echo "Setup:"
+    @echo "  just demo setup                    # Start infrastructure"
+    @echo "  export AGENT=1                     # Required environment variable"
+    @echo ""
+    @echo "Infrastructure commands:"
+    @echo "  just demo up                       # Start postgres + event-router"
+    @echo "  just demo down                     # Stop infrastructure"
+    @echo "  just demo restart                  # Rebuild and restart"
+    @echo "  just demo logs [service]           # View logs"
+    @echo "  just demo status                   # Check status"
+    @echo ""
+    @echo "Note: DATABASE_URL defaults to postgres://postgres:postgres@localhost:5432/postgres"
     @echo ""
     @echo "Usage: just demo <command>"
     @echo ""

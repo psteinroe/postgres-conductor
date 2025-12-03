@@ -1,15 +1,11 @@
-DO $$
-BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'uuid-ossp') THEN
-    RAISE EXCEPTION 'Extension uuid-ossp is not installed. Run: CREATE EXTENSION "uuid-ossp";';
-  END IF;
-END $$;
 
-CREATE SCHEMA IF NOT EXISTS pgconductor;
+create extension if not exists "uuid-ossp";
 
-CREATE TABLE pgconductor.schema_migrations (
-  version INT PRIMARY KEY,
-  name TEXT NOT NULL,
-  applied_at TIMESTAMP DEFAULT NOW(),
+create schema if not exists pgconductor;
+
+create table if not exists pgconductor.schema_migrations (
+  version int primary key,
+  name text not null,
+  applied_at timestamp default now(),
   breaking boolean default false
 );

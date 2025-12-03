@@ -8,8 +8,7 @@ Progressive walkthrough of pgconductor features, from basic task execution to ad
 # Start PostgreSQL
 docker compose up -d
 
-# Set database URL
-export DATABASE_URL="postgres://localhost:5432/pgconductor"
+# Set environment variable (DATABASE_URL defaults to postgres://postgres:postgres@localhost:5432/postgres)
 export AGENT=1
 ```
 

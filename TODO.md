@@ -2,7 +2,7 @@
 - write README.md
 - write docs/
 
-- separate events part, maybe even handle migrations individually
+- separate events part, handle migrations and maintenance individually
 - only use custom current_time if running tests
 - otel integration
 - add management ui

@@ -235,4 +235,64 @@ describe("Step Support", () => {
 		expect(step3Fn).toHaveBeenCalledTimes(1);
 		expect(step3Fn).toHaveBeenCalledWith(12);
 	}, 30000);
+
+	test("step() results are properly unwrapped after hangup", async () => {
+		const db = await pool.child();
+
+		const taskDefinitions = defineTask({
+			name: "step-unwrap-task",
+			payload: z.object({ items: z.array(z.string()) }),
+			returns: z.object({ count: z.number() }),
+		});
+
+		let transformedValue: string[] | undefined;
+		let countValue: number | undefined;
+
+		const conductor = Conductor.create({
+			sql: db.sql,
+			tasks: TaskSchemas.fromSchema([taskDefinitions]),
+			context: {},
+		});
+
+		const stepUnwrapTask = conductor.createTask(
+			{ name: "step-unwrap-task" },
+			{ invocable: true },
+			async (event, ctx) => {
+				if (event.event === "pgconductor.invoke") {
+					const transformed = await ctx.step("transform", () => {
+						return event.payload.items.map((item) => item.toUpperCase());
+					});
+
+					transformedValue = transformed;
+
+					await ctx.sleep("pause", 100);
+
+					const count = await ctx.step("count", () => {
+						countValue = transformed.length;
+						return transformed.length;
+					});
+
+					return { count };
+				}
+				throw new Error("Unexpected event type");
+			},
+		);
+
+		const orchestrator = Orchestrator.create({
+			conductor,
+			tasks: [stepUnwrapTask],
+			defaultWorker: { pollIntervalMs: 50, flushIntervalMs: 50 },
+		});
+
+		await orchestrator.start();
+
+		await conductor.invoke({ name: "step-unwrap-task" }, { items: ["apple", "banana", "cherry"] });
+
+		await new Promise((r) => setTimeout(r, 300));
+
+		await orchestrator.stop();
+
+		expect(transformedValue).toEqual(["APPLE", "BANANA", "CHERRY"]);
+		expect(countValue).toBe(3);
+	}, 30000);
 });

@@ -379,7 +379,7 @@ describe("Invoke Support", () => {
 
 		const failedParents = await db.sql<Array<{ last_error: string; task_key: string }>>`
 			SELECT last_error, task_key
-			FROM pgconductor.executions
+			FROM pgconductor._private_executions
 			WHERE task_key = 'cascade-parent' AND failed_at IS NOT NULL
 		`;
 
@@ -547,7 +547,7 @@ describe("Invoke Support", () => {
 			}[]
 		>`
 			select cancelled, failed_at, last_error
-			from pgconductor.executions
+			from pgconductor._private_executions
 			where task_key = 'slow-child-2'
 		`;
 
