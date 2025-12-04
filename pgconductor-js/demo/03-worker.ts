@@ -18,16 +18,13 @@ const childProcessor = conductor.createTask(
 	{ name: "child-processor" },
 	{ invocable: true },
 	async (event, ctx) => {
-		if (event.event === "pgconductor.invoke") {
-			const { input } = event.payload;
-			ctx.logger.info(`  Child: Processing ${input}...`);
+		const { input } = event.payload;
+		ctx.logger.info(`  Child: Processing ${input}...`);
 
-			const result = input * 2;
-			ctx.logger.info(`  Child: Computed ${result}`);
+		const result = input * 2;
+		ctx.logger.info(`  Child: Computed ${result}`);
 
-			return { output: result };
-		}
-		throw new Error("Unexpected event");
+		return { output: result };
 	},
 );
 
@@ -35,24 +32,21 @@ const parentWorkflow = conductor.createTask(
 	{ name: "parent-workflow" },
 	{ invocable: true },
 	async (event, ctx) => {
-		if (event.event === "pgconductor.invoke") {
-			const { value } = event.payload;
-			ctx.logger.info(`Parent: Starting workflow with ${value}`);
+		const { value } = event.payload;
+		ctx.logger.info(`Parent: Starting workflow with ${value}`);
 
-			const childResult = await ctx.invoke(
-				"invoke-child-processor",
-				{ name: "child-processor" },
-				{ input: value },
-			);
+		const childResult = await ctx.invoke(
+			"invoke-child-processor",
+			{ name: "child-processor" },
+			{ input: value },
+		);
 
-			ctx.logger.info(`Parent: Child returned ${childResult.output}`);
+		ctx.logger.info(`Parent: Child returned ${childResult.output}`);
 
-			const finalResult = childResult.output + 10;
-			ctx.logger.info(`Parent: Final result is ${finalResult}`);
+		const finalResult = childResult.output + 10;
+		ctx.logger.info(`Parent: Final result is ${finalResult}`);
 
-			return { result: finalResult };
-		}
-		throw new Error("Unexpected event");
+		return { result: finalResult };
 	},
 );
 

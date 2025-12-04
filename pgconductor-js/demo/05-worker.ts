@@ -30,16 +30,16 @@ const scheduler = conductor.createTask(
 	{ name: "scheduler" },
 	{ invocable: true },
 	async (event, ctx) => {
-		if (event.event === "pgconductor.invoke") {
-			const { action } = event.payload;
+		const { action } = event.payload;
 
-			if (action === "schedule") {
-				await ctx.schedule({ name: "dynamic-task" }, "every-3-seconds", { cron: "*/3 * * * * *" });
-				ctx.logger.info("✓ Scheduled dynamic-task to run every 3 seconds");
-			} else if (action === "unschedule") {
-				await ctx.unschedule({ name: "dynamic-task" }, "every-3-seconds");
-				ctx.logger.info("✓ Unscheduled dynamic-task");
-			}
+		if (action === "schedule") {
+			await ctx.schedule({ name: "dynamic-task" }, "every-3-seconds", {
+				cron: "*/3 * * * * *",
+			});
+			ctx.logger.info("✓ Scheduled dynamic-task to run every 3 seconds");
+		} else if (action === "unschedule") {
+			await ctx.unschedule({ name: "dynamic-task" }, "every-3-seconds");
+			ctx.logger.info("✓ Unscheduled dynamic-task");
 		}
 	},
 );

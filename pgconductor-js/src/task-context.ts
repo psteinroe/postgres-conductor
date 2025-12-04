@@ -143,10 +143,13 @@ export class TaskContext<
 
 	async step<T extends JsonValue | void>(name: string, fn: () => Promise<T> | T): Promise<T> {
 		// Check if step already completed
-		const cached = await this.opts.db.loadStep({
-			executionId: this.opts.execution.id,
-			key: name,
-		});
+		const cached = await this.opts.db.loadStep(
+			{
+				executionId: this.opts.execution.id,
+				key: name,
+			},
+			{ signal: this.signal },
+		);
 
 		if (cached !== undefined) {
 			return (cached as { result: T }).result;
@@ -155,13 +158,16 @@ export class TaskContext<
 		// Execute and save
 		const result = await fn();
 
-		await this.opts.db.saveStep({
-			executionId: this.opts.execution.id,
-			queue: this.opts.execution.queue,
-			key: name,
-			result: { result: result as JsonValue },
-			runAtMs: undefined,
-		});
+		await this.opts.db.saveStep(
+			{
+				executionId: this.opts.execution.id,
+				queue: this.opts.execution.queue,
+				key: name,
+				result: { result: result as JsonValue },
+				runAtMs: undefined,
+			},
+			{ signal: this.signal },
+		);
 
 		return result;
 	}
@@ -177,10 +183,13 @@ export class TaskContext<
 
 	async sleep(id: string, ms: number): Promise<void> {
 		// Check if we already slept
-		const cached = await this.opts.db.loadStep({
-			executionId: this.opts.execution.id,
-			key: id,
-		});
+		const cached = await this.opts.db.loadStep(
+			{
+				executionId: this.opts.execution.id,
+				key: id,
+			},
+			{ signal: this.signal },
+		);
 
 		if (cached !== undefined) {
 			return; // Already slept, continue
@@ -207,10 +216,13 @@ export class TaskContext<
 		payload: InferPayload<TDef> = {} as InferPayload<TDef>,
 		timeout?: number,
 	): Promise<InferReturns<TDef>> {
-		const cached = await this.opts.db.loadStep({
-			executionId: this.opts.execution.id,
-			key,
-		});
+		const cached = await this.opts.db.loadStep(
+			{
+				executionId: this.opts.execution.id,
+				key,
+			},
+			{ signal: this.signal },
+		);
 
 		if (cached !== undefined) {
 			return cached as InferReturns<TDef>;
@@ -221,9 +233,12 @@ export class TaskContext<
 			// we resumed but no step exists → timeout occurred
 			// clear waiting state before throwing
 
-			await this.opts.db.clearWaitingState({
-				executionId: this.opts.execution.id,
-			});
+			await this.opts.db.clearWaitingState(
+				{
+					executionId: this.opts.execution.id,
+				},
+				{ signal: this.signal },
+			);
 
 			throw new Error(
 				timeout ? `Child execution timed out after ${timeout}ms` : "Child execution timeout",
@@ -269,17 +284,20 @@ export class TaskContext<
 		const nextTimestamp = interval.next().toDate();
 		const queue = task.queue || "default";
 
-		await this.opts.db.scheduleCronExecution({
-			spec: {
-				task_key: task.name,
-				queue,
-				payload,
-				run_at: nextTimestamp,
-				cron_expression: options.cron,
-				priority: options.priority || null,
+		await this.opts.db.scheduleCronExecution(
+			{
+				spec: {
+					task_key: task.name,
+					queue,
+					payload,
+					run_at: nextTimestamp,
+					cron_expression: options.cron,
+					priority: options.priority || null,
+				},
+				scheduleName,
 			},
-			scheduleName,
-		});
+			{ signal: this.signal },
+		);
 	}
 
 	async unschedule<TName extends TaskName<Tasks>, TQueue extends string = "default">(
@@ -295,11 +313,14 @@ export class TaskContext<
 		}
 
 		const queue = task.queue || "default";
-		await this.opts.db.unscheduleCronExecution({
-			taskKey: task.name,
-			queue,
-			scheduleName,
-		});
+		await this.opts.db.unscheduleCronExecution(
+			{
+				taskKey: task.name,
+				queue,
+				scheduleName,
+			},
+			{ signal: this.signal },
+		);
 	}
 
 	/**
@@ -332,10 +353,13 @@ export class TaskContext<
 			SharedEventConfig,
 	): Promise<unknown> {
 		// Check if we already received the event
-		const cached = await this.opts.db.loadStep({
-			executionId: this.opts.execution.id,
-			key,
-		});
+		const cached = await this.opts.db.loadStep(
+			{
+				executionId: this.opts.execution.id,
+				key,
+			},
+			{ signal: this.signal },
+		);
 
 		if (cached !== undefined) {
 			return cached;
@@ -345,9 +369,12 @@ export class TaskContext<
 		if (this.opts.execution.waiting_step_key !== null) {
 			// We resumed but no step exists → timeout occurred
 			// Clear waiting state before throwing
-			await this.opts.db.clearWaitingState({
-				executionId: this.opts.execution.id,
-			});
+			await this.opts.db.clearWaitingState(
+				{
+					executionId: this.opts.execution.id,
+				},
+				{ signal: this.signal },
+			);
 
 			throw new Error(
 				config.timeout ? `Event wait timed out after ${config.timeout}ms` : "Event wait timeout",
@@ -392,7 +419,7 @@ export class TaskContext<
 		TName extends EventName<Events>,
 		TDef extends FindEventByIdentifier<Events, TName> = FindEventByIdentifier<Events, TName>,
 	>({ event }: CustomEventConfig<TName>, payload: InferEventPayload<TDef>): Promise<string> {
-		return this.opts.db.emitEvent({ eventKey: event, payload });
+		return this.opts.db.emitEvent({ eventKey: event, payload }, { signal: this.signal });
 	}
 
 	/**
@@ -403,7 +430,7 @@ export class TaskContext<
 	 * @returns true if the execution was cancelled, false if it was already completed/failed
 	 */
 	async cancel(executionId: string, options?: { reason?: string }): Promise<boolean> {
-		return this.opts.db.cancelExecution(executionId, options);
+		return this.opts.db.cancelExecution(executionId, { ...options, signal: this.signal });
 	}
 
 	/**

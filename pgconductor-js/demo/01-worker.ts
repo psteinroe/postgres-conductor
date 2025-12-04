@@ -16,11 +16,9 @@ const conductor = Conductor.create({
 });
 
 const greet = conductor.createTask({ name: "greet" }, { invocable: true }, async (event, ctx) => {
-	if (event.event === "pgconductor.invoke") {
-		const { name } = event.payload;
-		ctx.sayHi(name);
-		ctx.logger.info("Task completed successfully");
-	}
+	const { name } = event.payload;
+	ctx.sayHi(name);
+	ctx.logger.info("Task completed successfully");
 });
 
 const orchestrator = Orchestrator.create({

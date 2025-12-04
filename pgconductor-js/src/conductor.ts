@@ -273,6 +273,6 @@ export class Conductor<
 	}
 
 	async cancel(executionId: string, options?: { reason?: string }): Promise<boolean> {
-		return this.db.cancelExecution(executionId, options);
+		return this.db.cancelExecution(executionId, options || {});
 	}
 }

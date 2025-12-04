@@ -32,7 +32,7 @@ export class SchemaManager {
 		migrated: boolean;
 		shouldShutdown: boolean;
 	}> {
-		let installedVersion = await this.db.getInstalledMigrationNumber();
+		let installedVersion = await this.db.getInstalledMigrationNumber({ signal });
 		const ourLatest = this.migrationStore.getLatestMigrationNumber();
 
 		if (installedVersion > ourLatest) {
@@ -51,13 +51,16 @@ export class SchemaManager {
 			}
 
 			if (nextMigration.breaking) {
-				await this.db.sweepOrchestrators({
-					migrationNumber: nextMigration.version,
-				});
+				await this.db.sweepOrchestrators(
+					{
+						migrationNumber: nextMigration.version,
+					},
+					{ signal },
+				);
 				await this.waitForOlderOrchestratorsToExit(nextMigration.version, signal);
 			}
 
-			const status = await this.db.applyMigration(nextMigration);
+			const status = await this.db.applyMigration(nextMigration, { signal });
 
 			if (status === "applied") {
 				migrated = true;
@@ -80,9 +83,12 @@ export class SchemaManager {
 		const start = Date.now();
 
 		while (Date.now() - start < maxWaitMs) {
-			const remaining = await this.db.countActiveOrchestratorsBelow({
-				version: targetVersion,
-			});
+			const remaining = await this.db.countActiveOrchestratorsBelow(
+				{
+					version: targetVersion,
+				},
+				{ signal },
+			);
 
 			if (remaining === 0) {
 				return;

@@ -19,7 +19,9 @@ const listener = conductor.createTask(
 	{ name: "event-listener" },
 	{ invocable: true },
 	async (_event, ctx) => {
-		ctx.logger.info("Listener: Waiting for user.created event...");
+		ctx.step("log-waiting", () => {
+			ctx.logger.info("Listener: Waiting for user.created event...");
+		});
 
 		const eventData = await ctx.waitForEvent("wait-for-user-created", {
 			event: "user.created",

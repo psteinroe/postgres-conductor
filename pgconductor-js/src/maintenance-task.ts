@@ -1,6 +1,7 @@
 import { Task, type AnyTask } from "./task";
 import type { DatabaseClient } from "./database-client";
 import crypto from "crypto";
+import type { TaskContext } from "./task-context";
 
 function hashToJitter(str: string): number {
 	const hash = crypto.createHash("sha256").update(str).digest();
@@ -32,7 +33,7 @@ export const createMaintenanceTask = <Queue extends string = "default">(queue: Q
 		Queue,
 		object,
 		void,
-		{ db: DatabaseClient; tasks: Map<string, AnyTask> },
+		{ db: DatabaseClient; tasks: Map<string, AnyTask> } & TaskContext,
 		{ event: "pgconductor.maintenance" }
 	>(
 		{
@@ -44,7 +45,8 @@ export const createMaintenanceTask = <Queue extends string = "default">(queue: Q
 			cron: `${jitterMinutes} 0 * * *`,
 			name: "pgconductor.maintenance",
 		},
-		async (_, { db, tasks }) => {
+		async (_, ctx) => {
+			const { db, tasks, signal } = ctx;
 			// Skip if no tasks have retention settings (check in-memory config)
 			const hasRetention = Array.from(tasks.values()).some(
 				(t) => t.removeOnComplete || t.removeOnFail,
@@ -57,10 +59,13 @@ export const createMaintenanceTask = <Queue extends string = "default">(queue: Q
 			// Steps are automatically deleted via CASCADE foreign key
 			let hasMore = true;
 			while (hasMore) {
-				hasMore = await db.removeExecutions({
-					queueName: queue,
-					batchSize: BATCH_SIZE,
-				});
+				hasMore = await db.removeExecutions(
+					{
+						queueName: queue,
+						batchSize: BATCH_SIZE,
+					},
+					{ signal },
+				);
 			}
 
 			// If we are running within the default queue, also
@@ -68,9 +73,9 @@ export const createMaintenanceTask = <Queue extends string = "default">(queue: Q
 			// - pre-create events partitions
 			// - remove old event partitions
 			if (queue === "default") {
-				await db.cleanupTriggers();
+				await db.cleanupTriggers({ signal });
 
-				const partitions = await db.listEventPartitions();
+				const partitions = await db.listEventPartitions({ signal });
 				const now = new Date();
 				for (let dayOffset = 0; dayOffset <= PARTITION_AHEAD_DAYS; dayOffset++) {
 					const partitionDate = new Date(now);
@@ -78,7 +83,9 @@ export const createMaintenanceTask = <Queue extends string = "default">(queue: Q
 					const partitionName = createPartitionName(partitionDate);
 
 					if (!partitions.some((p) => p.table_name === partitionName)) {
-						await db.createEventPartition(partitionDate);
+						await db.createEventPartition(partitionDate, {
+							signal,
+						});
 					}
 				}
 
@@ -88,7 +95,7 @@ export const createMaintenanceTask = <Queue extends string = "default">(queue: Q
 
 				for (const partitionName of partitions) {
 					if (partitionName.table_name < cutoffPartitionName) {
-						await db.dropEventPartition(partitionName);
+						await db.dropEventPartition(partitionName, { signal });
 					}
 				}
 			}

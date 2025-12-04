@@ -1,4 +1,4 @@
-import postgres, { type PendingQuery, type Sql } from "postgres";
+import postgres, { type Sql } from "postgres";
 import { waitFor } from "./lib/wait-for";
 import type { Migration } from "./migration-store";
 import {
@@ -207,7 +207,10 @@ type DatabaseClientOptions =
 type QueryOptions = {
 	label?: string;
 	expectError?: boolean;
+	signal?: AbortSignal;
 };
+
+type QueryMethodOptions = Pick<QueryOptions, "signal">;
 
 type ErrorWithOptionalCode = Error & { code?: string };
 
@@ -245,29 +248,35 @@ export class DatabaseClient {
 		await this.sql.end({ timeout: 0 });
 	}
 
-	private async query<T>(
-		queryOrCallback:
-			| PendingQuery<T extends readonly postgres.MaybeRow[] ? T : never>
-			| ((sql: Sql) => Promise<T>),
-		options?: QueryOptions,
-	): Promise<T> {
+	private async query<T>(callback: (sql: Sql) => Promise<T>, options?: QueryOptions): Promise<T> {
+		const logger = makeChildLogger(this.logger, { label: options?.label });
+
 		const label = options?.label ? ` (${options.label})` : "";
 		let attempt = 0;
 		while (true) {
 			try {
-				if (typeof queryOrCallback === "function") {
-					return await queryOrCallback(this.sql);
-				}
-				return await queryOrCallback;
+				return await callback(this.sql);
 			} catch (error) {
 				const err = error as ErrorWithOptionalCode;
 				if (!this.isRetryableError(err)) {
 					if (!options?.expectError) {
-						this.logger.error(`Non-retryable database error${label}: ${err.message}`);
+						logger.error(`Non-retryable database error${label}: ${err.message}`);
 					}
 					throw err;
 				}
-				this.logger.warn(`Retryable database error${label}: ${err.message}`);
+				if (!options?.signal) {
+					logger.warn(
+						`Retryable database error, but no signal provided. Not retrying: ${err.message}`,
+					);
+					throw err;
+				}
+
+				if (options?.signal?.aborted) {
+					logger.warn(`Aborting retries due to signal${label}`);
+					throw err;
+				}
+
+				logger.warn(`Retryable database error${label}: ${err.message}`);
 
 				attempt += 1;
 				const delay = Math.min(
@@ -289,40 +298,53 @@ export class DatabaseClient {
 		return RETRYABLE_SQLSTATE_CODES.has(code) || RETRYABLE_SYSTEM_ERROR_CODES.has(code);
 	}
 
-	async orchestratorHeartbeat(args: OrchestratorHeartbeatArgs): Promise<
+	async orchestratorHeartbeat(
+		args: OrchestratorHeartbeatArgs,
+		opts?: QueryMethodOptions,
+	): Promise<
 		{
 			signal_type: string | null;
 			signal_execution_id: string | null;
 			signal_payload: Record<string, any> | null;
 		}[]
 	> {
-		return this.query(this.builder.buildOrchestratorHeartbeat(args), {
+		return this.query(() => this.builder.buildOrchestratorHeartbeat(args), {
 			label: "orchestratorHeartbeat",
+			...opts,
 		});
 	}
 
-	async cancelExecution(executionId: string, options?: { reason?: string }): Promise<boolean> {
+	async cancelExecution(
+		executionId: string,
+		options?: { reason?: string } & QueryMethodOptions,
+	): Promise<boolean> {
 		const result = await this.query(
-			this.sql<{ cancel_execution: boolean }[]>`
+			(sql) =>
+				sql<{ cancel_execution: boolean }[]>`
 				select pgconductor.cancel_execution(
 					${executionId}::uuid,
 					${options?.reason || "Cancelled by user"}::text
 				) as cancel_execution
 			`,
-			{ label: "cancelExecution" },
+			{ label: "cancelExecution", ...options },
 		);
 		return result[0]?.cancel_execution || false;
 	}
 
-	async recoverStaleOrchestrators(args: RecoverStaleOrchestratorsArgs): Promise<void> {
-		await this.query(this.builder.buildRecoverStaleOrchestrators(args), {
+	async recoverStaleOrchestrators(
+		args: RecoverStaleOrchestratorsArgs,
+		opts?: QueryMethodOptions,
+	): Promise<void> {
+		await this.query(() => this.builder.buildRecoverStaleOrchestrators(args), {
 			label: "recoverStaleOrchestrators",
+			...opts,
 		});
 	}
 
-	async sweepOrchestrators(args: SweepOrchestratorsArgs): Promise<void> {
-		await this.query(this.builder.buildSweepOrchestrators(args), {
+	async sweepOrchestrators(args: SweepOrchestratorsArgs, opts?: QueryMethodOptions): Promise<void> {
+		await this.query(() => this.builder.buildSweepOrchestrators(args), {
 			label: "sweepOrchestrators",
+			...opts,
 		});
 	}
 
@@ -331,11 +353,12 @@ export class DatabaseClient {
 	 * Returns -1 if schema doesn't exist (not installed)
 	 * Returns the highest migration version from schema_migrations table
 	 */
-	async getInstalledMigrationNumber(): Promise<number> {
+	async getInstalledMigrationNumber(opts?: QueryMethodOptions): Promise<number> {
 		try {
-			const result = await this.query(this.builder.buildGetInstalledMigrationNumber(), {
+			const result = await this.query(() => this.builder.buildGetInstalledMigrationNumber(), {
 				label: "buildGetInstalledMigrationNumber",
 				expectError: true,
+				...opts,
 			});
 			return result[0]?.version || -1;
 		} catch (err) {
@@ -347,7 +370,10 @@ export class DatabaseClient {
 		}
 	}
 
-	async applyMigration(migration: Migration): Promise<"applied" | "busy"> {
+	async applyMigration(
+		migration: Migration,
+		opts?: QueryMethodOptions,
+	): Promise<"applied" | "busy"> {
 		return this.query(
 			async (sql) => {
 				return sql.begin(async (tx) => {
@@ -385,14 +411,18 @@ export class DatabaseClient {
 					return "applied" as const;
 				});
 			},
-			{ label: "applyMigration" },
+			{ label: "applyMigration", ...opts },
 		);
 	}
 
-	async countActiveOrchestratorsBelow(args: CountActiveOrchestratorsBelowArgs): Promise<number> {
+	async countActiveOrchestratorsBelow(
+		args: CountActiveOrchestratorsBelowArgs,
+		opts?: QueryMethodOptions,
+	): Promise<number> {
 		try {
-			const result = await this.query(this.builder.buildCountActiveOrchestratorsBelow(args), {
+			const result = await this.query(() => this.builder.buildCountActiveOrchestratorsBelow(args), {
 				label: "countActiveOrchestratorsBelow",
+				...opts,
 			});
 			return Number(result[0]?.count || 0);
 		} catch (err) {
@@ -404,99 +434,128 @@ export class DatabaseClient {
 		}
 	}
 
-	async orchestratorShutdown(args: OrchestratorShutdownArgs): Promise<void> {
-		await this.query(this.builder.buildOrchestratorShutdown(args), {
+	async orchestratorShutdown(
+		args: OrchestratorShutdownArgs,
+		opts?: QueryMethodOptions,
+	): Promise<void> {
+		await this.query(() => this.builder.buildOrchestratorShutdown(args), {
 			label: "orchestratorShutdown",
+			...opts,
 		});
 	}
 
-	async listEventPartitions(): Promise<{ table_name: string }[]> {
-		return this.query(this.builder.buildListEventsPartitions(), {
+	async listEventPartitions(opts?: QueryMethodOptions): Promise<{ table_name: string }[]> {
+		return this.query(() => this.builder.buildListEventsPartitions(), {
 			label: "listEventPartitions",
+			...opts,
 		});
 	}
 
-	async createEventPartition(date: Date): Promise<void> {
-		await this.query(this.builder.buildCreateEventPartition(date), {
+	async createEventPartition(date: Date, opts?: QueryMethodOptions): Promise<void> {
+		await this.query(() => this.builder.buildCreateEventPartition(date), {
 			label: "createEventPartition",
+			...opts,
 		});
 	}
 
-	async dropEventPartition(partition: { table_name: string }): Promise<void> {
-		await this.query(this.builder.buildDropEventPartition(partition), {
+	async dropEventPartition(
+		partition: { table_name: string },
+		opts?: QueryMethodOptions,
+	): Promise<void> {
+		await this.query(() => this.builder.buildDropEventPartition(partition), {
 			label: "dropEventPartition",
+			...opts,
 		});
 	}
 
-	async cleanupTriggers(): Promise<void> {
-		await this.query(this.builder.buildCleanupTriggers(), {
+	async cleanupTriggers(opts?: QueryMethodOptions): Promise<void> {
+		await this.query(() => this.builder.buildCleanupTriggers(), {
 			label: "getExecutions",
+			...opts,
 		});
 	}
 
-	async getExecutions(args: GetExecutionsArgs): Promise<Execution[]> {
-		return this.query(this.builder.buildGetExecutions(args), {
+	async getExecutions(args: GetExecutionsArgs, opts?: QueryMethodOptions): Promise<Execution[]> {
+		return this.query(() => this.builder.buildGetExecutions(args), {
 			label: "getExecutions",
+			...opts,
 		});
 	}
 
-	async returnExecutions(grouped: GroupedExecutionResults): Promise<void> {
+	async returnExecutions(
+		grouped: GroupedExecutionResults,
+		opts?: QueryMethodOptions,
+	): Promise<void> {
 		const query = this.builder.buildReturnExecutions(grouped);
 
 		if (!query) {
 			return;
 		}
 
-		await this.query(query, { label: "returnExecutions" });
+		await this.query(() => query, { label: "returnExecutions", ...opts });
 	}
 
-	async removeExecutions(args: RemoveExecutionsArgs): Promise<boolean> {
-		const query = this.builder.buildRemoveExecutions(args);
-
-		const result = await this.query(query, {
+	async removeExecutions(args: RemoveExecutionsArgs, opts?: QueryMethodOptions): Promise<boolean> {
+		const result = await this.query(() => this.builder.buildRemoveExecutions(args), {
 			label: "removeExecutions",
+			...opts,
 		});
 
 		const deletedCount = result[0]?.deleted_count ?? 0;
 		return deletedCount >= args.batchSize;
 	}
 
-	async registerWorker(args: RegisterWorkerArgs): Promise<void> {
-		await this.query(this.builder.buildRegisterWorker(args), {
+	async registerWorker(args: RegisterWorkerArgs, opts?: QueryMethodOptions): Promise<void> {
+		await this.query(() => this.builder.buildRegisterWorker(args), {
 			label: "registerWorker",
+			...opts,
 		});
 	}
 
-	async scheduleCronExecution(args: ScheduleCronExecutionArgs): Promise<string> {
-		const result = await this.query(this.builder.buildScheduleCronExecution(args), {
+	async scheduleCronExecution(
+		args: ScheduleCronExecutionArgs,
+		opts?: QueryMethodOptions,
+	): Promise<string> {
+		const result = await this.query(() => this.builder.buildScheduleCronExecution(args), {
 			label: "scheduleCronExecution",
+			...opts,
 		});
 		return result[0]!.id;
 	}
 
-	async unscheduleCronExecution(args: UnscheduleCronExecutionArgs): Promise<void> {
-		await this.query(this.builder.buildUnscheduleCronExecution(args), {
+	async unscheduleCronExecution(
+		args: UnscheduleCronExecutionArgs,
+		opts?: QueryMethodOptions,
+	): Promise<void> {
+		await this.query(() => this.builder.buildUnscheduleCronExecution(args), {
 			label: "unscheduleCronExecution",
+			...opts,
 		});
 	}
 
-	async invoke(spec: ExecutionSpec): Promise<string> {
-		const result = await this.query(this.builder.buildInvoke(spec), {
+	async invoke(spec: ExecutionSpec, opts?: QueryMethodOptions): Promise<string> {
+		const result = await this.query(() => this.builder.buildInvoke(spec), {
 			label: "invoke",
+			...opts,
 		});
 		return result[0]!.id;
 	}
 
-	async invokeBatch(specs: ExecutionSpec[]): Promise<string[]> {
-		const result = await this.query(this.builder.buildInvokeBatch(specs), {
+	async invokeBatch(specs: ExecutionSpec[], opts?: QueryMethodOptions): Promise<string[]> {
+		const result = await this.query(() => this.builder.buildInvokeBatch(specs), {
 			label: "invokeBatch",
+			...opts,
 		});
 		return result.map((r) => r.id);
 	}
 
-	async loadStep(args: LoadStepArgs): Promise<Payload | null | undefined> {
-		const rows = await this.query(this.builder.buildLoadStep(args), {
+	async loadStep(
+		args: LoadStepArgs,
+		opts?: QueryMethodOptions,
+	): Promise<Payload | null | undefined> {
+		const rows = await this.query(() => this.builder.buildLoadStep(args), {
 			label: "loadStep",
+			...opts,
 		});
 
 		if (!rows[0]) {
@@ -505,13 +564,17 @@ export class DatabaseClient {
 		return rows[0].result;
 	}
 
-	async saveStep(args: SaveStepArgs): Promise<void> {
-		await this.query(this.builder.buildSaveStep(args), { label: "saveStep" });
+	async saveStep(args: SaveStepArgs, opts?: QueryMethodOptions): Promise<void> {
+		await this.query(() => this.builder.buildSaveStep(args), {
+			label: "saveStep",
+			...opts,
+		});
 	}
 
-	async clearWaitingState(args: ClearWaitingStateArgs): Promise<void> {
-		await this.query(this.builder.buildClearWaitingState(args), {
+	async clearWaitingState(args: ClearWaitingStateArgs, opts?: QueryMethodOptions): Promise<void> {
+		await this.query(() => this.builder.buildClearWaitingState(args), {
 			label: "clearWaitingState",
+			...opts,
 		});
 	}
 
@@ -521,40 +584,40 @@ export class DatabaseClient {
 	 *
 	 * IMPORTANT: Test database connection pool must have max: 1 for this to work.
 	 */
-	async setFakeTime({ date }: SetFakeTimeArgs): Promise<void> {
-		await this.query(
-			async (sql) => {
-				await sql.unsafe(`set pgconductor.fake_now = '${date.toISOString()}'`);
-			},
-			{ label: "setFakeTime" },
-		);
+	async setFakeTime({ date }: SetFakeTimeArgs, opts?: QueryMethodOptions): Promise<void> {
+		await this.query((sql) => sql.unsafe(`set pgconductor.fake_now = '${date.toISOString()}'`), {
+			label: "setFakeTime",
+			...opts,
+		});
 	}
 
 	/**
 	 * Clear fake time, returning to real clock_timestamp().
 	 */
-	async clearFakeTime(): Promise<void> {
-		await this.query(
-			async (sql) => {
-				await sql.unsafe(`set pgconductor.fake_now = ''`);
-			},
-			{ label: "clearFakeTime" },
-		);
+	async clearFakeTime(opts?: QueryMethodOptions): Promise<void> {
+		await this.query((sql) => sql.unsafe(`set pgconductor.fake_now = ''`), {
+			label: "clearFakeTime",
+			...opts,
+		});
 	}
 
 	/**
 	 * Emit a custom event.
 	 * Returns the event id.
 	 */
-	async emitEvent({ eventKey, payload }: EmitEventArgs): Promise<string> {
+	async emitEvent(
+		{ eventKey, payload }: EmitEventArgs,
+		opts?: QueryMethodOptions,
+	): Promise<string> {
 		const result = await this.query(
-			this.sql`
+			(sql) =>
+				sql`
 				select pgconductor.emit_event(
 					${eventKey},
-					${this.sql.json(payload || null)}
+					${sql.json(payload || null)}
 				) as id
 			`,
-			{ label: "emitEvent" },
+			{ label: "emitEvent", ...opts },
 		);
 		return result[0]!.id;
 	}

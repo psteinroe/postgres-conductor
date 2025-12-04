@@ -362,12 +362,15 @@ export class Worker<
 			return [...customEvents, ...dbEvents];
 		});
 
-		await this.db.registerWorker({
-			queueName: this.queueName,
-			taskSpecs,
-			cronSchedules,
-			eventSubscriptions,
-		});
+		await this.db.registerWorker(
+			{
+				queueName: this.queueName,
+				taskSpecs,
+				cronSchedules,
+				eventSubscriptions,
+			},
+			{ signal: this.signal },
+		);
 	}
 
 	// --- Stage 1: Fetch executions from database ---
@@ -406,12 +409,15 @@ export class Worker<
 					continue;
 				}
 
-				const executions = await this.db.getExecutions({
-					orchestratorId: this.orchestratorId,
-					queueName: this.queueName,
-					batchSize: this.fetchBatchSize,
-					filterTaskKeys: disallowedTaskKeys,
-				});
+				const executions = await this.db.getExecutions(
+					{
+						orchestratorId: this.orchestratorId,
+						queueName: this.queueName,
+						batchSize: this.fetchBatchSize,
+						filterTaskKeys: disallowedTaskKeys,
+					},
+					{ signal: this.signal },
+				);
 
 				if (executions.length === 0) {
 					if (runOnce) {
@@ -639,13 +645,16 @@ export class Worker<
 		const timestampSeconds = Math.floor(nextTimestamp.getTime() / 1000);
 		const nextDedupeKey = `scheduled::${scheduleName}::${timestampSeconds}`;
 
-		await this.db.invoke({
-			task_key: execution.task_key,
-			queue: execution.queue,
-			run_at: nextTimestamp,
-			dedupe_key: nextDedupeKey,
-			cron_expression: execution.cron_expression,
-		});
+		await this.db.invoke(
+			{
+				task_key: execution.task_key,
+				queue: execution.queue,
+				run_at: nextTimestamp,
+				dedupe_key: nextDedupeKey,
+				cron_expression: execution.cron_expression,
+			},
+			{ signal: this.signal },
+		);
 	}
 
 	// --- Stage 3: Flush results to database ---
@@ -666,7 +675,7 @@ export class Worker<
 			}
 
 			try {
-				await this.db.returnExecutions(batch);
+				await this.db.returnExecutions(batch, { signal: this.signal });
 			} catch (err) {
 				this.logger.error("Error flushing results:", err);
 				if (!isCleanup) {

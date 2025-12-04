@@ -148,7 +148,9 @@ export class Orchestrator {
 
 			try {
 				const ourVersion = this.migrationStore.getLatestMigrationNumber();
-				const installedVersion = await this.db.getInstalledMigrationNumber();
+				const installedVersion = await this.db.getInstalledMigrationNumber({
+					signal: this.signal,
+				});
 
 				// Step 1: Check if we're too old (should never happen, but safety check)
 				if (installedVersion > ourVersion) {
@@ -170,11 +172,14 @@ export class Orchestrator {
 					throw new Error("Could not acquire migration lock");
 				}
 
-				const signals = await this.db.orchestratorHeartbeat({
-					orchestratorId: this.orchestratorId,
-					version: PACKAGE_VERSION,
-					migrationNumber: this.migrationStore.getLatestMigrationNumber(),
-				});
+				const signals = await this.db.orchestratorHeartbeat(
+					{
+						orchestratorId: this.orchestratorId,
+						version: PACKAGE_VERSION,
+						migrationNumber: this.migrationStore.getLatestMigrationNumber(),
+					},
+					{ signal: this.signal },
+				);
 
 				// Check for shutdown signal on startup
 				if (signals.some((s) => s.signal_type === "shutdown")) {
@@ -286,17 +291,23 @@ export class Orchestrator {
 
 				// Every 8th heartbeat, recover stale orchestrators
 				if (heartbeatCount === 8) {
-					await this.db.recoverStaleOrchestrators({
-						maxAge: `${STALE_ORCHESTRATOR_MAX_AGE_MS} milliseconds`,
-					});
+					await this.db.recoverStaleOrchestrators(
+						{
+							maxAge: `${STALE_ORCHESTRATOR_MAX_AGE_MS} milliseconds`,
+						},
+						{ signal: this.abortController.signal },
+					);
 				}
 
 				// Send heartbeat and process signals
-				const signals = await this.db.orchestratorHeartbeat({
-					orchestratorId: this.orchestratorId,
-					version: PACKAGE_VERSION,
-					migrationNumber: this.migrationStore.getLatestMigrationNumber(),
-				});
+				const signals = await this.db.orchestratorHeartbeat(
+					{
+						orchestratorId: this.orchestratorId,
+						version: PACKAGE_VERSION,
+						migrationNumber: this.migrationStore.getLatestMigrationNumber(),
+					},
+					{ signal: this.abortController.signal },
+				);
 
 				// Process signals in order
 				for (const signal of signals) {
@@ -438,9 +449,13 @@ export class Orchestrator {
 		}
 
 		// Remove ourselves from orchestrators table and release locked executions
-		await this.db.orchestratorShutdown({
-			orchestratorId: this.orchestratorId,
-		});
+		const cleanupSignal = new AbortController().signal;
+		await this.db.orchestratorShutdown(
+			{
+				orchestratorId: this.orchestratorId,
+			},
+			{ signal: cleanupSignal },
+		);
 
 		// Close database client (no-op if user supplied their own instance)
 		await this.db.close();
