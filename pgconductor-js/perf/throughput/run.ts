@@ -54,6 +54,9 @@ async function main() {
 	console.log(`Workers: ${scenario.workers}`);
 	console.log(`Tasks: ${scenario.tasks}`);
 	console.log(`Task Type: ${scenario.taskType}`);
+	if (scenario.taskConcurrency !== undefined) {
+		console.log(`Task Concurrency: ${scenario.taskConcurrency}`);
+	}
 	console.log(`Worker Settings:`, scenario.workerSettings);
 	console.log();
 
@@ -86,6 +89,9 @@ async function main() {
 		scenario.workerSettings.flushBatchSize !== undefined
 	) {
 		startupEnv.FLUSH_BATCH_SIZE = scenario.workerSettings.flushBatchSize.toString();
+	}
+	if (scenario.taskConcurrency !== undefined) {
+		startupEnv.TASK_CONCURRENCY = scenario.taskConcurrency.toString();
 	}
 	const startupResult = await spawnWorker("worker.ts", DB_URL, startupEnv);
 	if (startupResult.exitCode !== 0) {
@@ -134,6 +140,9 @@ async function main() {
 		) {
 			env.FLUSH_BATCH_SIZE = scenario.workerSettings.flushBatchSize.toString();
 		}
+		if (scenario.taskConcurrency !== undefined) {
+			env.TASK_CONCURRENCY = scenario.taskConcurrency.toString();
+		}
 		workerPromises.push(spawnWorker("worker.ts", DB_URL, env));
 	}
 
@@ -164,7 +173,7 @@ async function main() {
 	const sql = postgres(DB_URL);
 	const result = await sql<{ count: string }[]>`
 		SELECT COUNT(*) as count
-		FROM pgconductor.executions
+		FROM pgconductor._private_executions
 		WHERE completed_at IS NOT NULL
 	`;
 	const totalProcessed = Number(result[0]?.count || 0);

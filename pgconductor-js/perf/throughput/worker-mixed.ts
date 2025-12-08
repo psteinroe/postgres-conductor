@@ -1,11 +1,15 @@
 import { Conductor, Orchestrator } from "../../src";
 import { TaskSchemas } from "../../src/schemas";
-import { perfTaskDefinitions, createTaskByType } from "./tasks";
+import { perfTaskDefinitions, createTaskA, createTaskB } from "./tasks";
 
 const WORKER_ID = process.env.WORKER_ID || "0";
 const DB_URL = process.env.DATABASE_URL!;
-const TASK_TYPE = process.env.TASK_TYPE || "noop";
-const MEASURE_STARTUP = process.env.MEASURE_STARTUP === "1";
+const TASK_A_CONCURRENCY = process.env.TASK_A_CONCURRENCY
+	? Number(process.env.TASK_A_CONCURRENCY)
+	: undefined;
+const TASK_B_CONCURRENCY = process.env.TASK_B_CONCURRENCY
+	? Number(process.env.TASK_B_CONCURRENCY)
+	: undefined;
 
 // Worker settings from environment
 const POLL_INTERVAL_MS = Number(process.env.POLL_INTERVAL_MS || 100);
@@ -16,11 +20,6 @@ const FLUSH_BATCH_SIZE = process.env.FLUSH_BATCH_SIZE
 	? Number(process.env.FLUSH_BATCH_SIZE)
 	: undefined;
 
-// Task-level concurrency (optional)
-const TASK_CONCURRENCY = process.env.TASK_CONCURRENCY
-	? Number(process.env.TASK_CONCURRENCY)
-	: undefined;
-
 async function main() {
 	const conductor = Conductor.create({
 		connectionString: DB_URL,
@@ -28,11 +27,12 @@ async function main() {
 		context: {},
 	});
 
-	const task = createTaskByType(conductor, TASK_TYPE, TASK_CONCURRENCY);
+	const taskA = createTaskA(conductor, TASK_A_CONCURRENCY);
+	const taskB = createTaskB(conductor, TASK_B_CONCURRENCY);
 
 	const orchestrator = Orchestrator.create({
 		conductor,
-		tasks: [task] as any,
+		tasks: [taskA, taskB] as any,
 		defaultWorker: {
 			pollIntervalMs: POLL_INTERVAL_MS,
 			flushIntervalMs: FLUSH_INTERVAL_MS,
@@ -42,27 +42,12 @@ async function main() {
 		},
 	});
 
-	if (MEASURE_STARTUP) {
-		// Just measure startup time (no tasks to process)
-		const startupStart = Date.now();
-		await orchestrator.start(); // Returns when workers are started
-		const startupTime = Date.now() - startupStart;
-
-		console.log(`STARTUP_TIME:${startupTime}`);
-
-		await orchestrator.stop();
-		process.exit(0);
-	}
-
-	// Regular execution: measure startup and execution separately
-	const startupStart = Date.now();
-
 	// Start orchestrator and wait for it to be fully started
 	void orchestrator.drain(); // Kick off drain (doesn't wait)
 
 	// Wait for orchestrator to be started (workers registered)
 	await orchestrator.started;
-	const startupTime = Date.now() - startupStart;
+	const startupTime = Date.now();
 
 	// Now measure actual execution time
 	const execStart = Date.now();
@@ -72,8 +57,6 @@ async function main() {
 	const execTime = Date.now() - execStart;
 
 	// Output timing data for coordinator to parse
-	// Note: We don't track per-worker task counts as all workers share the DB
-	// The coordinator will query total tasks processed at the end
 	console.log(`WORKER_STARTUP:${startupTime}`);
 	console.log(`WORKER_EXEC:${execTime}`);
 	console.log(`WORKER_TASKS:0`); // Placeholder, coordinator will count total

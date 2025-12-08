@@ -1,8 +1,10 @@
+import type { PollableAsyncIterable } from "./async-queue";
+
 /**
  * Concurrently maps over an async iterable with a concurrency limit.
  */
 export async function* mapConcurrent<T, R>(
-	source: AsyncIterable<T>,
+	source: PollableAsyncIterable<T>,
 	limit: number,
 	mapper: (item: T) => Promise<R>,
 ): AsyncGenerator<R> {
@@ -26,16 +28,25 @@ export async function* mapConcurrent<T, R>(
 
 	const fillSlots = async () => {
 		while (!sourceDone && active.size < limit) {
-			const item = await nextItem();
+			let item: T | null;
+
+			if (active.size === 0) {
+				// No active tasks - MUST block to get at least one
+				item = await nextItem();
+			} else {
+				// Try non-blocking poll
+				const polled = source.tryNext();
+				if (polled === undefined) {
+					// Queue empty, stop filling
+					break;
+				}
+				item = polled;
+			}
+
 			if (item === null) break;
 
 			const id = nextId++;
-			const task: Task = {
-				id,
-				promise: mapper(item),
-			};
-
-			active.set(id, task);
+			active.set(id, { id, promise: mapper(item) });
 		}
 	};
 

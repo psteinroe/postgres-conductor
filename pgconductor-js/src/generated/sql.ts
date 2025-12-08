@@ -148,8 +148,23 @@ create table pgconductor._private_tasks (
             window_end is not null and
             window_start != window_end
         )
-    )
+    ),
+
+    -- concurrency control: maximum number of concurrent executions across all workers
+    -- NULL means no limit (unlimited concurrency)
+    concurrency_limit integer
 );
+
+create table pgconductor._private_concurrency_slots (
+    task_key text not null,
+    slot_group_number integer not null,
+    capacity integer not null,
+    used integer default 0 not null,
+    primary key (task_key, slot_group_number)
+);
+
+create index idx_slots_claim
+    on pgconductor._private_concurrency_slots (task_key, capacity, used);
 
 create table pgconductor._private_steps (
     id uuid default pgconductor._private_portable_uuidv7() primary key,
@@ -438,7 +453,8 @@ create type pgconductor.task_spec as (
     remove_on_complete_days integer,
     remove_on_fail_days integer,
     window_start timetz,
-    window_end timetz
+    window_end timetz,
+    concurrency_limit integer
 );
 
 create type pgconductor.subscription_spec as (
@@ -470,7 +486,7 @@ begin
   on conflict (name) do nothing;
 
   -- step 2: register/update tasks
-  insert into pgconductor._private_tasks (key, queue, max_attempts, remove_on_complete_days, remove_on_fail_days, window_start, window_end)
+  insert into pgconductor._private_tasks (key, queue, max_attempts, remove_on_complete_days, remove_on_fail_days, window_start, window_end, concurrency_limit)
   select
     spec.key,
     coalesce(spec.queue, 'default'),
@@ -478,7 +494,8 @@ begin
     spec.remove_on_complete_days,
     spec.remove_on_fail_days,
     spec.window_start,
-    spec.window_end
+    spec.window_end,
+    spec.concurrency_limit
   from unnest(p_task_specs) as spec
   on conflict (key)
   do update set
@@ -487,7 +504,39 @@ begin
     remove_on_complete_days = excluded.remove_on_complete_days,
     remove_on_fail_days = excluded.remove_on_fail_days,
     window_start = excluded.window_start,
-    window_end = excluded.window_end;
+    window_end = excluded.window_end,
+    concurrency_limit = excluded.concurrency_limit;
+
+  -- step 2a: manage concurrency slots
+  -- create one row per slot (capacity=1 each)
+  insert into pgconductor._private_concurrency_slots (task_key, slot_group_number, capacity, used)
+  select
+    spec.key,
+    slot_num,
+    1 as capacity,
+    0 as used
+  from unnest(p_task_specs) as spec
+  cross join lateral generate_series(1, spec.concurrency_limit) as slot_num
+  where spec.concurrency_limit is not null
+  on conflict (task_key, slot_group_number)
+  do update set
+    capacity = excluded.capacity,
+    used = least(pgconductor._private_concurrency_slots.used, excluded.capacity);
+
+  -- clean up orphaned slots (tasks removed or concurrency_limit set to null)
+  delete from pgconductor._private_concurrency_slots
+  where task_key not in (
+    select key from pgconductor._private_tasks
+    where concurrency_limit is not null
+  );
+
+  -- clean up excess slots when concurrency decreased
+  delete from pgconductor._private_concurrency_slots cs
+  where cs.slot_group_number > (
+    select concurrency_limit
+    from pgconductor._private_tasks t
+    where t.key = cs.task_key
+  );
 
   -- step 3: insert scheduled cron executions (on conflict do nothing)
   insert into pgconductor._private_executions (task_key, queue, payload, run_at, dedupe_key, cron_expression)

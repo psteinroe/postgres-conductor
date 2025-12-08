@@ -6,6 +6,7 @@ export type Scenario = {
 	workers: number;
 	tasks: number;
 	taskType: "noop" | "cpu" | "io" | "steps";
+	taskConcurrency?: number; // Task-level concurrency limit
 	workerSettings: {
 		pollIntervalMs: number;
 		flushIntervalMs: number;
@@ -170,6 +171,90 @@ export const scenarios = {
 			pollIntervalMs: 100,
 			flushIntervalMs: 100,
 			concurrency: 10,
+			fetchBatchSize: 100,
+		},
+	},
+
+	// Task-level concurrency impact - unlimited (baseline)
+	"task-concurrency-unlimited": {
+		workers: 4,
+		tasks: 10000,
+		taskType: "io",
+		// No taskConcurrency = unlimited
+		workerSettings: {
+			pollIntervalMs: 50,
+			flushIntervalMs: 50,
+			concurrency: 50,
+			fetchBatchSize: 100,
+		},
+	},
+
+	// Task-level concurrency - serial (1)
+	"task-concurrency-1": {
+		workers: 4,
+		tasks: 10000,
+		taskType: "io",
+		taskConcurrency: 1,
+		workerSettings: {
+			pollIntervalMs: 50,
+			flushIntervalMs: 50,
+			concurrency: 50,
+			fetchBatchSize: 100,
+		},
+	},
+
+	// Task-level concurrency - low (5)
+	"task-concurrency-5": {
+		workers: 4,
+		tasks: 10000,
+		taskType: "io",
+		taskConcurrency: 5,
+		workerSettings: {
+			pollIntervalMs: 50,
+			flushIntervalMs: 50,
+			concurrency: 50,
+			fetchBatchSize: 100,
+		},
+	},
+
+	// Task-level concurrency - medium (10)
+	"task-concurrency-10": {
+		workers: 4,
+		tasks: 10000,
+		taskType: "io",
+		taskConcurrency: 10,
+		workerSettings: {
+			pollIntervalMs: 50,
+			flushIntervalMs: 50,
+			concurrency: 50,
+			fetchBatchSize: 100,
+		},
+	},
+
+	// Task-level concurrency - high (25)
+	"task-concurrency-25": {
+		workers: 4,
+		tasks: 10000,
+		taskType: "io",
+		taskConcurrency: 25,
+		workerSettings: {
+			pollIntervalMs: 50,
+			flushIntervalMs: 50,
+			concurrency: 50,
+			fetchBatchSize: 100,
+		},
+	},
+
+	// Task-level concurrency - very high (50)
+	"task-concurrency-50": {
+		workers: 4,
+		tasks: 10000,
+		taskType: "io",
+		taskConcurrency: 50,
+		workerSettings: {
+			pollIntervalMs: 50,
+			flushIntervalMs: 50,
+			concurrency: 50,
 			fetchBatchSize: 100,
 		},
 	},

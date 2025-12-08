@@ -23,14 +23,23 @@ export const perfTaskDefinitions = [
 		name: "steps",
 		payload: z.object({ id: z.number() }),
 	}),
+	defineTask({
+		name: "task-a",
+		payload: z.object({ id: z.number() }),
+	}),
+	defineTask({
+		name: "task-b",
+		payload: z.object({ id: z.number() }),
+	}),
 ] as const;
 
 // Task implementations
 export function createNoopTask<C extends Conductor<any, any, any, any, any, any, any>>(
 	conductor: C,
+	concurrency?: number,
 ) {
 	return (conductor as any).createTask(
-		{ name: "noop" } as const,
+		{ name: "noop", ...(concurrency != null && { concurrency }) } as const,
 		{ invocable: true } as const,
 		async () => {
 			// Minimal work - just return
@@ -41,9 +50,10 @@ export function createNoopTask<C extends Conductor<any, any, any, any, any, any,
 
 export function createCpuTask<C extends Conductor<any, any, any, any, any, any, any>>(
 	conductor: C,
+	concurrency?: number,
 ) {
 	return (conductor as any).createTask(
-		{ name: "cpu" } as const,
+		{ name: "cpu", ...(concurrency != null && { concurrency }) } as const,
 		{ invocable: true } as const,
 		async () => {
 			// Compute fibonacci(20) to simulate CPU work
@@ -58,9 +68,12 @@ export function createCpuTask<C extends Conductor<any, any, any, any, any, any, 
 	);
 }
 
-export function createIoTask<C extends Conductor<any, any, any, any, any, any, any>>(conductor: C) {
+export function createIoTask<C extends Conductor<any, any, any, any, any, any, any>>(
+	conductor: C,
+	concurrency?: number,
+) {
 	return (conductor as any).createTask(
-		{ name: "io" } as const,
+		{ name: "io", ...(concurrency != null && { concurrency }) } as const,
 		{ invocable: true } as const,
 		async () => {
 			// Simulate I/O delay
@@ -72,9 +85,10 @@ export function createIoTask<C extends Conductor<any, any, any, any, any, any, a
 
 export function createStepsTask<C extends Conductor<any, any, any, any, any, any, any>>(
 	conductor: C,
+	concurrency?: number,
 ) {
 	return (conductor as any).createTask(
-		{ name: "steps" } as const,
+		{ name: "steps", ...(concurrency != null && { concurrency }) } as const,
 		{ invocable: true } as const,
 		async (event: any, ctx: any) => {
 			// Execute 10 steps
@@ -90,20 +104,53 @@ export function createStepsTask<C extends Conductor<any, any, any, any, any, any
 	);
 }
 
+export function createTaskA<C extends Conductor<any, any, any, any, any, any, any>>(
+	conductor: C,
+	concurrency?: number,
+) {
+	return (conductor as any).createTask(
+		{ name: "task-a", ...(concurrency != null && { concurrency }) } as const,
+		{ invocable: true } as const,
+		async () => {
+			// Minimal work - same as noop
+			return { processed: true };
+		},
+	);
+}
+
+export function createTaskB<C extends Conductor<any, any, any, any, any, any, any>>(
+	conductor: C,
+	concurrency?: number,
+) {
+	return (conductor as any).createTask(
+		{ name: "task-b", ...(concurrency != null && { concurrency }) } as const,
+		{ invocable: true } as const,
+		async () => {
+			// Minimal work - same as noop
+			return { processed: true };
+		},
+	);
+}
+
 // Factory function to create task based on type
 export function createTaskByType<C extends Conductor<any, any, any, any, any, any, any>>(
 	conductor: C,
 	type: string,
+	concurrency?: number,
 ) {
 	switch (type) {
 		case "noop":
-			return createNoopTask(conductor);
+			return createNoopTask(conductor, concurrency);
 		case "cpu":
-			return createCpuTask(conductor);
+			return createCpuTask(conductor, concurrency);
 		case "io":
-			return createIoTask(conductor);
+			return createIoTask(conductor, concurrency);
 		case "steps":
-			return createStepsTask(conductor);
+			return createStepsTask(conductor, concurrency);
+		case "task-a":
+			return createTaskA(conductor, concurrency);
+		case "task-b":
+			return createTaskB(conductor, concurrency);
 		default:
 			throw new Error(`Unknown task type: ${type}`);
 	}

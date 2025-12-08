@@ -127,6 +127,7 @@ const queries: QueryDefinition[] = [
 						queueName: scenario.queues[0] || "default",
 						batchSize: 10,
 						filterTaskKeys: [],
+						taskKeysWithConcurrency: [],
 					});
 				},
 			},
@@ -141,6 +142,7 @@ const queries: QueryDefinition[] = [
 						queueName: scenario.queues[0] || "default",
 						batchSize: 100,
 						filterTaskKeys: [],
+						taskKeysWithConcurrency: [],
 					});
 				},
 			},
@@ -156,6 +158,7 @@ const queries: QueryDefinition[] = [
 						queueName: scenario.queues[0] || "default",
 						batchSize: 10,
 						filterTaskKeys: filterKeys,
+						taskKeysWithConcurrency: [],
 					});
 				},
 			},

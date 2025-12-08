@@ -17,7 +17,7 @@ import type { TaskDefinition } from "./task-definition";
 import { waitFor } from "./lib/wait-for";
 import { mapConcurrent } from "./lib/map-concurrent";
 import { Deferred } from "./lib/deferred";
-import { AsyncQueue } from "./lib/async-queue";
+import { AsyncQueue, type PollableAsyncIterable } from "./lib/async-queue";
 import CronExpressionParser from "cron-parser";
 import {
 	createTaskSignal,
@@ -306,6 +306,7 @@ export class Worker<
 			removeOnCompleteDays: retentionToDays(task.removeOnComplete),
 			removeOnFailDays: retentionToDays(task.removeOnFail),
 			window: task.window,
+			concurrency: task.concurrency,
 		}));
 
 		const allTasks = Array.from(this.tasks.values());
@@ -386,6 +387,9 @@ export class Worker<
 		for (const task of allTasks) {
 			taskMaxAttempts[task.name] = task.maxAttempts || 3;
 		}
+		const taskKeysWithConcurrency = allTasks
+			.filter((task) => task.concurrency != null)
+			.map((task) => task.name);
 
 		while (!this.signal?.aborted) {
 			try {
@@ -415,6 +419,7 @@ export class Worker<
 						queueName: this.queueName,
 						batchSize: this.fetchBatchSize,
 						filterTaskKeys: disallowedTaskKeys,
+						taskKeysWithConcurrency,
 					},
 					{ signal: this.signal },
 				);
@@ -441,7 +446,9 @@ export class Worker<
 	}
 
 	// --- Stage 2: Execute tasks concurrently ---
-	private async *executeTasks(source: AsyncIterable<Execution>): AsyncGenerator<ExecutionResult> {
+	private async *executeTasks(
+		source: PollableAsyncIterable<Execution>,
+	): AsyncGenerator<ExecutionResult> {
 		for await (const result of mapConcurrent(
 			source,
 			this.concurrency,
@@ -455,6 +462,7 @@ export class Worker<
 						task_key: exec.task_key,
 						status: "failed",
 						error: `Task not found: ${exec.task_key}`,
+						slot_group_number: exec.slot_group_number,
 					} as const;
 				}
 
@@ -466,6 +474,7 @@ export class Worker<
 						task_key: exec.task_key,
 						status: "permanently_failed",
 						error: exec.last_error || "Execution was cancelled",
+						slot_group_number: exec.slot_group_number,
 					} as const;
 				}
 
@@ -475,6 +484,7 @@ export class Worker<
 						execution_id: exec.id,
 						task_key: exec.task_key,
 						status: "released",
+						slot_group_number: exec.slot_group_number,
 					} as const;
 				}
 
@@ -549,6 +559,7 @@ export class Worker<
 									timeout_ms: output.timeout_ms,
 									step_key: output.step_key,
 									event_key: output.event_key,
+									slot_group_number: exec.slot_group_number,
 								} as const;
 							case "wait-for-database-event":
 								return {
@@ -562,6 +573,7 @@ export class Worker<
 									table_name: output.table_name,
 									operation: output.operation,
 									columns: output.columns,
+									slot_group_number: exec.slot_group_number,
 								} as const;
 							case "child-invocation":
 								return {
@@ -574,6 +586,7 @@ export class Worker<
 									child_task_name: output.task.name,
 									child_task_queue: output.task.queue || "default",
 									child_payload: output.payload,
+									slot_group_number: exec.slot_group_number,
 								} as const;
 							case "cancelled":
 								return {
@@ -582,6 +595,7 @@ export class Worker<
 									task_key: exec.task_key,
 									status: "permanently_failed",
 									error: exec.last_error || "Task was cancelled",
+									slot_group_number: exec.slot_group_number,
 								} as const;
 							case "released":
 							case "parent-aborted":
@@ -593,6 +607,7 @@ export class Worker<
 									step_key: output.reason === "released" ? output.step_key : undefined,
 									task_key: exec.task_key,
 									status: "released",
+									slot_group_number: exec.slot_group_number,
 								} as const;
 							default:
 								assert.never(output);
@@ -605,6 +620,7 @@ export class Worker<
 						task_key: exec.task_key,
 						status: "completed",
 						result: output,
+						slot_group_number: exec.slot_group_number,
 					} as const;
 				} catch (err) {
 					return {
@@ -613,6 +629,7 @@ export class Worker<
 						task_key: exec.task_key,
 						status: "failed",
 						error: coerceError(err).message,
+						slot_group_number: exec.slot_group_number,
 					} as const;
 				} finally {
 					// Clean up running task tracking

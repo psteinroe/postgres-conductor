@@ -1,4 +1,3 @@
-- prepare demo/
 - write README.md
 - write docs/
 
@@ -11,7 +10,10 @@
 - add concurrency (limit, key)
 - add rateLimit (limit, period, key)
 - add debounce (period, key)
+- "trigger" vs "call" when invoking within a task
 
 Links:
 - https://planetscale.com/blog/the-slotted-counter-pattern
+
+
 

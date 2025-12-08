@@ -32,6 +32,7 @@ export type TaskConfiguration<
 	window?: [string, string];
 	removeOnComplete?: RetentionSettings;
 	removeOnFail?: RetentionSettings;
+	concurrency?: number;
 };
 
 export type RetentionSettings = boolean | { days: number };
@@ -158,6 +159,7 @@ export class Task<
 	public readonly window?: [string, string];
 	public readonly removeOnComplete: RetentionSettings;
 	public readonly removeOnFail: RetentionSettings;
+	public readonly concurrency?: number;
 
 	public readonly triggers: NonEmptyArray<Trigger>;
 
@@ -174,6 +176,7 @@ export class Task<
 		this.window = config.window;
 		this.removeOnComplete = config.removeOnComplete ?? false;
 		this.removeOnFail = config.removeOnFail ?? false;
+		this.concurrency = config.concurrency;
 
 		this.triggers = Array.isArray(triggers) ? triggers : [triggers];
 	}

@@ -37,6 +37,7 @@ export type GetExecutionsArgs = {
 	queueName: string;
 	batchSize: number;
 	filterTaskKeys: string[];
+	taskKeysWithConcurrency: string[];
 };
 
 export type RemoveExecutionsArgs = {
@@ -304,41 +305,219 @@ export class QueryBuilder {
 		queueName,
 		batchSize,
 		filterTaskKeys,
+		taskKeysWithConcurrency,
 	}: GetExecutionsArgs): PendingQuery<Execution[]> {
-		return this.sql<Execution[]>`
-			with e as (
-				select
-					e.id,
-					e.task_key
-				from pgconductor._private_executions e
-				where e.queue = ${queueName}::text
-                    ${filterTaskKeys && filterTaskKeys.length > 0 ? this.sql`and e.task_key != any(${this.sql.array(filterTaskKeys)}::text[])` : this.sql``}
-					and e.run_at <= pgconductor._private_current_time()
-                    and e.is_available = true
-				order by e.priority asc, e.run_at asc
-				limit ${batchSize}::integer
-				for update skip locked
-			)
+		// fast path: no tasks have concurrency limits
+		if (!taskKeysWithConcurrency.length) {
+			return this.sql<Execution[]>`
+				with e as (
+					select
+						e.id,
+						e.task_key
+					from pgconductor._private_executions e
+					where e.queue = ${queueName}::text
+						${filterTaskKeys?.length ? this.sql`and e.task_key != any(${this.sql.array(filterTaskKeys)}::text[])` : this.sql``}
+						and e.run_at <= pgconductor._private_current_time()
+						and e.is_available = true
+					order by e.priority asc, e.run_at asc
+					limit ${batchSize}::integer
+					for update skip locked
+				)
 
-			update pgconductor._private_executions
+				update pgconductor._private_executions
+				set
+					attempts = _private_executions.attempts + 1,
+					locked_by = ${orchestratorId}::uuid,
+					locked_at = pgconductor._private_current_time()
+				from e
+				where _private_executions.id = e.id
+					and _private_executions.queue = ${queueName}::text
+				returning
+					_private_executions.id,
+					_private_executions.task_key,
+					_private_executions.queue,
+					_private_executions.payload,
+					_private_executions.waiting_on_execution_id,
+					_private_executions.waiting_step_key,
+					_private_executions.cancelled,
+					_private_executions.last_error,
+					_private_executions.dedupe_key,
+					_private_executions.cron_expression,
+					null as slot_group_number
+			`;
+		}
+
+		// slow path: some tasks have concurrency limits (OPTIMIZED)
+		return this.sql<Execution[]>`
+			with
+				-- lock up to batchSize slots per concurrency task
+				locked_slots_raw as (
+					select t.task_key, ls.slot_group_number
+					from unnest(${this.sql.array(taskKeysWithConcurrency)}::text[]) as t(task_key)
+					cross join lateral (
+						select s.slot_group_number
+						from pgconductor._private_concurrency_slots s
+						where s.task_key = t.task_key
+							and s.used = 0
+						order by s.slot_group_number
+						limit ${batchSize}::integer
+						for update skip locked
+					) as ls
+				),
+
+				-- count slots per task
+				slots_per_task as (
+					select task_key, count(*) as slot_count
+					from locked_slots_raw
+					group by task_key
+				),
+
+				-- lock jobs for concurrency tasks (limit by slot count)
+				concurrency_execs as (
+					select t.task_key, le.*
+					from slots_per_task t
+					cross join lateral (
+						select
+							e.id,
+							e.task_key as exec_task_key,
+							e.queue,
+							e.payload,
+							e.waiting_on_execution_id,
+							e.waiting_step_key,
+							e.cancelled,
+							e.last_error,
+							e.dedupe_key,
+							e.cron_expression,
+							e.priority,
+							e.run_at
+						from pgconductor._private_executions e
+						where e.is_available = true
+							and e.run_at <= pgconductor._private_current_time()
+							and e.queue = ${queueName}::text
+							and e.task_key = t.task_key
+							${filterTaskKeys.length ? this.sql`and not (e.task_key = any(${this.sql.array(filterTaskKeys)}::text[]))` : this.sql``}
+						order by e.priority asc, e.run_at asc, e.id asc
+						limit t.slot_count
+						for update skip locked
+					) as le
+				),
+
+				-- lock jobs from non-concurrency tasks
+				unlimited_execs as (
+					select
+						e.id,
+						e.task_key,
+						e.queue,
+						e.payload,
+						e.waiting_on_execution_id,
+						e.waiting_step_key,
+						e.cancelled,
+						e.last_error,
+						e.dedupe_key,
+						e.cron_expression,
+						e.priority,
+						e.run_at
+					from pgconductor._private_executions e
+					where e.is_available = true
+						and e.run_at <= pgconductor._private_current_time()
+						and e.queue = ${queueName}::text
+						and not (e.task_key = any(${this.sql.array(taskKeysWithConcurrency)}::text[]))
+						${filterTaskKeys.length > 0 ? this.sql`and not (e.task_key = any(${this.sql.array(filterTaskKeys)}::text[]))` : this.sql``}
+					order by e.priority asc, e.run_at asc, e.id asc
+					limit ${batchSize}::integer
+					for update skip locked
+				),
+
+				-- row number concurrency executions by task
+				concurrency_execs_rn as (
+					select
+						ce.*,
+						row_number() over (partition by ce.task_key order by ce.priority asc, ce.run_at asc, ce.id asc) as exec_rn
+					from concurrency_execs ce
+				),
+
+				-- row number slots by task
+				slots_rn as (
+					select
+						ls.*,
+						row_number() over (partition by ls.task_key order by ls.slot_group_number) as slot_rn
+					from locked_slots_raw ls
+				),
+
+				-- pair concurrency executions with slots
+				concurrency_paired as (
+					select
+						e.id,
+						e.exec_task_key as task_key,
+						e.queue,
+						e.payload,
+						e.waiting_on_execution_id,
+						e.waiting_step_key,
+						e.cancelled,
+						e.last_error,
+						e.dedupe_key,
+						e.cron_expression,
+						s.slot_group_number
+					from concurrency_execs_rn e
+					join slots_rn s
+						on e.task_key = s.task_key
+						and e.exec_rn = s.slot_rn
+				),
+
+				-- unlimited executions don't need slots
+				unlimited_paired as (
+					select
+						id,
+						task_key,
+						queue,
+						payload,
+						waiting_on_execution_id,
+						waiting_step_key,
+						cancelled,
+						last_error,
+						dedupe_key,
+						cron_expression,
+						null::integer as slot_group_number
+					from unlimited_execs
+				),
+
+				-- merge all paired executions
+				paired as (
+					select * from concurrency_paired
+					union all
+					select * from unlimited_paired
+				),
+
+				-- mark slots as used
+				mark_used as (
+					update pgconductor._private_concurrency_slots cs
+					set used = 1
+					from paired p
+					where cs.task_key = p.task_key
+						and cs.slot_group_number = p.slot_group_number
+						and p.slot_group_number is not null
+				)
+
+			-- update and return executions
+			update pgconductor._private_executions e
 			set
-				attempts = _private_executions.attempts + 1,
+				attempts = e.attempts + 1,
 				locked_by = ${orchestratorId}::uuid,
 				locked_at = pgconductor._private_current_time()
-			from e
-			where _private_executions.id = e.id
-				and _private_executions.queue = ${queueName}::text
+			from paired p
+			where e.id = p.id
 			returning
-				_private_executions.id,
-				_private_executions.task_key,
-				_private_executions.queue,
-				_private_executions.payload,
-				_private_executions.waiting_on_execution_id,
-				_private_executions.waiting_step_key,
-				_private_executions.cancelled,
-				_private_executions.last_error,
-				_private_executions.dedupe_key,
-				_private_executions.cron_expression
+				e.id,
+				e.task_key,
+				e.queue,
+				e.payload,
+				e.waiting_on_execution_id,
+				e.waiting_step_key,
+				e.cancelled,
+				e.last_error,
+				e.dedupe_key,
+				e.cron_expression,
+				p.slot_group_number
 		`;
 	}
 
@@ -365,6 +544,33 @@ export class QueryBuilder {
 			from pgconductor._private_tasks
 			where key = any(${this.sql.array(Array.from(grouped.taskKeys))}::text[])
 		)`);
+
+		// Release concurrency slots for all results with slot_group_number
+		const allResults = [
+			...completed,
+			...failed,
+			...released,
+			...invokeChild,
+			...waitForCustomEvent,
+			...waitForDbEvent,
+		];
+		const slotsToRelease = allResults
+			.filter((r) => r.slot_group_number != null)
+			.map((r) => ({
+				task_key: r.task_key,
+				slot_group_number: r.slot_group_number,
+			}));
+
+		if (slotsToRelease.length > 0) {
+			ctes.push(this.sql`released_slots as (
+				update pgconductor._private_concurrency_slots cs
+				set used = 0
+				from jsonb_to_recordset(${this.sql.json(slotsToRelease)}::jsonb)
+					as r(task_key text, slot_group_number integer)
+				where cs.task_key = r.task_key
+					and cs.slot_group_number = r.slot_group_number
+			)`);
+		}
 
 		// Completed results
 		if (completed.length > 0) {
@@ -817,6 +1023,7 @@ export class QueryBuilder {
 			remove_on_fail_days: spec.removeOnFailDays ?? null,
 			window_start: spec.window?.[0] || null,
 			window_end: spec.window?.[1] || null,
+			concurrency_limit: spec.concurrency || null,
 		}));
 
 		const cronScheduleRows = cronSchedules.map((spec) => {
