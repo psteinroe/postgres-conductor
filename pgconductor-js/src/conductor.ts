@@ -6,8 +6,10 @@ import {
 	type AnyTask,
 	type TaskEventFromTriggers,
 	type ValidateTasksQueue,
+	type BatchConfig,
+	type ExecuteFunction,
 } from "./task";
-import type { TaskContext } from "./task-context";
+import type { TaskContext, BatchTaskContext } from "./task-context";
 import {
 	type FindTaskByIdentifier,
 	type InferPayload,
@@ -162,16 +164,30 @@ export class Conductor<
 	}
 
 	createTask<
-		const TDef extends { readonly name: string; readonly queue?: string },
+		const TDef extends {
+			readonly name: string;
+			readonly queue?: string;
+			readonly batch?: BatchConfig;
+		},
 		const TTriggers extends object | readonly object[],
 	>(
 		definition: TDef,
 		triggers: TTriggers &
 			ValidateTriggers<Tasks, Events, TDef["name"], TTriggers, ResolvedQueue<TDef>>,
-		fn: (
-			event: ResolvedEvent<Tasks, Events, Database, TDef, TTriggers>,
-			ctx: TaskContext<Tasks, Events, Database> & ExtraContext,
-		) => Promise<ResolvedReturns<Tasks, TDef>>,
+		fn: TDef extends { readonly batch: BatchConfig }
+			? ResolvedReturns<Tasks, TDef> extends void
+				? (
+						events: Array<ResolvedEvent<Tasks, Events, Database, TDef, TTriggers>>,
+						ctx: BatchTaskContext,
+					) => Promise<void>
+				: (
+						events: Array<ResolvedEvent<Tasks, Events, Database, TDef, TTriggers>>,
+						ctx: BatchTaskContext,
+					) => Promise<Array<ResolvedReturns<Tasks, TDef>>>
+			: (
+					event: ResolvedEvent<Tasks, Events, Database, TDef, TTriggers>,
+					ctx: TaskContext<Tasks, Events, Database> & ExtraContext,
+				) => Promise<ResolvedReturns<Tasks, TDef>>,
 	): Task<
 		TDef["name"],
 		ResolvedQueue<TDef>,
@@ -190,7 +206,11 @@ export class Conductor<
 		>(
 			definition as TaskConfiguration<TDef["name"], ResolvedQueue<TDef>>,
 			triggers as NonEmptyArray<Trigger> | Trigger,
-			fn,
+			fn as ExecuteFunction<
+				ResolvedEvent<Tasks, Events, Database, TDef, TTriggers>,
+				ResolvedReturns<Tasks, TDef>,
+				TaskContext<Tasks, Events, Database> & ExtraContext
+			>,
 		);
 	}
 

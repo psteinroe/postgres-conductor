@@ -12,17 +12,19 @@ import type {
 	ExecutionWaitForCustomEvent,
 	ExecutionWaitForDatabaseEvent,
 } from "./database-client";
-import type { AnyTask } from "./task";
+import type { AnyTask, BatchConfig } from "./task";
 import type { TaskDefinition } from "./task-definition";
 import { waitFor } from "./lib/wait-for";
 import { mapConcurrent } from "./lib/map-concurrent";
 import { Deferred } from "./lib/deferred";
-import { AsyncQueue, type PollableAsyncIterable } from "./lib/async-queue";
+import { type PollableAsyncIterable } from "./lib/async-queue";
+import { BatchingAsyncQueue, type BatchGroup } from "./lib/batching-async-queue";
 import CronExpressionParser from "cron-parser";
 import {
 	createTaskSignal,
 	isTaskAbortReason,
 	TaskContext,
+	BatchTaskContext,
 	type TaskAbortReasons,
 } from "./task-context";
 import * as assert from "./lib/assert";
@@ -234,7 +236,15 @@ export class Worker<
 		this._startDeferred.resolve();
 
 		// Run pipeline in background
-		const queue = new AsyncQueue<Execution>(this.fetchBatchSize * 2);
+		// Build batch configs map
+		const batchConfigs = new Map<string, BatchConfig>();
+		for (const [taskKey, task] of this.tasks.entries()) {
+			if (task.batch) {
+				batchConfigs.set(taskKey, task.batch);
+			}
+		}
+
+		const queue = new BatchingAsyncQueue<Execution>(this.fetchBatchSize * 2, batchConfigs);
 		void this.fetchExecutions(queue, { runOnce });
 
 		(async () => {
@@ -376,7 +386,7 @@ export class Worker<
 
 	// --- Stage 1: Fetch executions from database ---
 	private async fetchExecutions(
-		queue: AsyncQueue<Execution>,
+		queue: BatchingAsyncQueue<Execution>,
 		{ runOnce = false }: { runOnce?: boolean },
 	) {
 		assert.ok(this.orchestratorId, "orchestratorId must be set when starting the pipeline");
@@ -447,197 +457,341 @@ export class Worker<
 
 	// --- Stage 2: Execute tasks concurrently ---
 	private async *executeTasks(
-		source: PollableAsyncIterable<Execution>,
+		source: PollableAsyncIterable<BatchGroup<Execution>>,
 	): AsyncGenerator<ExecutionResult> {
 		for await (const result of mapConcurrent(
 			source,
 			this.concurrency,
-			async (exec): Promise<ExecutionResult> => {
+			async ({ taskKey, items: executions }): Promise<ExecutionResult | ExecutionResult[]> => {
 				// Dispatch to correct task based on task_key
-				const task = this.tasks.get(exec.task_key);
+				const task = this.tasks.get(taskKey);
 				if (!task) {
-					return {
+					return executions.map((exec) => ({
 						queue: exec.queue,
 						execution_id: exec.id,
-						task_key: exec.task_key,
+						task_key: taskKey,
 						status: "failed",
-						error: `Task not found: ${exec.task_key}`,
+						error: `Task not found: ${taskKey}`,
 						slot_group_number: exec.slot_group_number,
-					} as const;
+					})) as ExecutionResult[];
 				}
 
 				// Safety check: don't execute already-cancelled tasks
-				if (exec.cancelled) {
-					return {
+				const cancelledExecs = executions.filter((e) => e.cancelled);
+				if (cancelledExecs.length === executions.length) {
+					// All cancelled - return failures for all
+					return executions.map((exec) => ({
 						execution_id: exec.id,
 						queue: exec.queue,
-						task_key: exec.task_key,
+						task_key: taskKey,
 						status: "permanently_failed",
 						error: exec.last_error || "Execution was cancelled",
 						slot_group_number: exec.slot_group_number,
-					} as const;
+					})) as ExecutionResult[];
 				}
 
-				if (this.signal.aborted) {
-					return {
-						queue: exec.queue,
-						execution_id: exec.id,
-						task_key: exec.task_key,
-						status: "released",
-						slot_group_number: exec.slot_group_number,
-					} as const;
+				// Note: We intentionally do NOT check this.signal.aborted here.
+				// When shutdown occurs, fetchExecutions closes the queue which flushes
+				// pending batches. We want to process those flushed items during shutdown.
+				// The abort signal tells fetchExecutions to stop fetching NEW items,
+				// but executeTasks should process what's already queued.
+
+				// Filter out cancelled executions
+				const activeExecs = executions.filter((e) => !e.cancelled);
+
+				// If all cancelled, we already returned cancelled results above
+				if (activeExecs.length === 0) {
+					// This shouldn't happen due to check above, but be safe
+					return [];
 				}
 
-				const taskAbortController = createTaskSignal(this.signal);
-				this._runningTasks.set(exec.id, taskAbortController);
-
-				const abortPromise = new Promise<TaskAbortReasons>((resolve) => {
-					taskAbortController.signal.addEventListener("abort", () => {
-						resolve(taskAbortController.signal.reason);
-					});
-				});
-
-				try {
-					await this.scheduleNextExecution(exec);
-
-					// Determine event type based on execution data
-					let taskEvent: any;
-					if (exec.cron_expression) {
-						// Extract schedule name from dedupe_key (format: scheduled::{name}::{timestamp})
-						const scheduleName = exec.dedupe_key?.split("::")[1] || "unknown";
-						taskEvent = { event: scheduleName };
-					} else if (
-						exec.payload &&
-						typeof exec.payload === "object" &&
-						"event" in exec.payload &&
-						exec.payload.event !== "pgconductor.invoke"
-					) {
-						// Event-triggered execution (custom event or db event)
-						taskEvent = {
-							event: exec.payload.event,
-							payload: exec.payload.payload,
-						};
-					} else {
-						// Direct invoke
-						taskEvent = { event: "pgconductor.invoke", payload: exec.payload };
-					}
-
-					// Pass db and tasks as extra context to maintenance task
-					const extraContext =
-						task.name === "pgconductor.maintenance"
-							? { ...this.extraContext, db: this.db, tasks: this.tasks }
-							: this.extraContext;
-
-					const output = await Promise.race([
-						task.execute(
-							taskEvent,
-							TaskContext.create<Tasks, Events, typeof extraContext>(
-								{
-									db: this.db,
-									abortController: taskAbortController,
-									execution: exec,
-									logger: makeChildLogger(this.logger, {
-										execution_id: exec.id,
-										task_key: exec.task_key,
-										queue: exec.queue,
-									}),
-								},
-								extraContext,
-							),
-						),
-						abortPromise,
-					]);
-
-					if (isTaskAbortReason(output)) {
-						switch (output.reason) {
-							case "wait-for-custom-event":
-								return {
-									execution_id: exec.id,
-									queue: exec.queue,
-									task_key: exec.task_key,
-									status: "wait_for_custom_event",
-									timeout_ms: output.timeout_ms,
-									step_key: output.step_key,
-									event_key: output.event_key,
-									slot_group_number: exec.slot_group_number,
-								} as const;
-							case "wait-for-database-event":
-								return {
-									execution_id: exec.id,
-									queue: exec.queue,
-									task_key: exec.task_key,
-									status: "wait_for_db_event",
-									timeout_ms: output.timeout_ms,
-									step_key: output.step_key,
-									schema_name: output.schema_name,
-									table_name: output.table_name,
-									operation: output.operation,
-									columns: output.columns,
-									slot_group_number: exec.slot_group_number,
-								} as const;
-							case "child-invocation":
-								return {
-									execution_id: exec.id,
-									queue: exec.queue,
-									task_key: exec.task_key,
-									status: "invoke_child",
-									timeout_ms: output.timeout_ms,
-									step_key: output.step_key,
-									child_task_name: output.task.name,
-									child_task_queue: output.task.queue || "default",
-									child_payload: output.payload,
-									slot_group_number: exec.slot_group_number,
-								} as const;
-							case "cancelled":
-								return {
-									execution_id: exec.id,
-									queue: exec.queue,
-									task_key: exec.task_key,
-									status: "permanently_failed",
-									error: exec.last_error || "Task was cancelled",
-									slot_group_number: exec.slot_group_number,
-								} as const;
-							case "released":
-							case "parent-aborted":
-								return {
-									execution_id: exec.id,
-									queue: exec.queue,
-									reschedule_in_ms:
-										output.reason === "released" ? output.reschedule_in_ms : undefined,
-									step_key: output.reason === "released" ? output.step_key : undefined,
-									task_key: exec.task_key,
-									status: "released",
-									slot_group_number: exec.slot_group_number,
-								} as const;
-							default:
-								assert.never(output);
-						}
-					}
-
-					return {
-						execution_id: exec.id,
-						queue: exec.queue,
-						task_key: exec.task_key,
-						status: "completed",
-						result: output,
-						slot_group_number: exec.slot_group_number,
-					} as const;
-				} catch (err) {
-					return {
-						execution_id: exec.id,
-						queue: exec.queue,
-						task_key: exec.task_key,
-						status: "failed",
-						error: coerceError(err).message,
-						slot_group_number: exec.slot_group_number,
-					} as const;
-				} finally {
-					// Clean up running task tracking
-					this._runningTasks.delete(exec.id);
+				// If task has batch config, always use batch execution (even for single items)
+				if (task.batch) {
+					return this.executeBatchTask(task, taskKey, activeExecs);
 				}
+
+				// Execute single (non-batched tasks)
+				const singleExec = activeExecs[0];
+				assert.ok(singleExec, "activeExecs must have at least one item");
+				return this.executeSingleTask(task, singleExec);
 			},
 		)) {
-			yield result;
+			// Yield results (may be single or array)
+			if (Array.isArray(result)) {
+				for (const r of result) yield r;
+			} else {
+				yield result;
+			}
+		}
+	}
+
+	private async executeSingleTask(task: AnyTask, exec: Execution): Promise<ExecutionResult> {
+		const taskAbortController = createTaskSignal(this.signal);
+		this._runningTasks.set(exec.id, taskAbortController);
+
+		const abortPromise = new Promise<TaskAbortReasons>((resolve) => {
+			taskAbortController.signal.addEventListener("abort", () => {
+				resolve(taskAbortController.signal.reason);
+			});
+		});
+
+		try {
+			await this.scheduleNextExecution(exec);
+
+			// Determine event type based on execution data
+			let taskEvent: any;
+			if (exec.cron_expression) {
+				// Extract schedule name from dedupe_key (format: scheduled::{name}::{timestamp})
+				const scheduleName = exec.dedupe_key?.split("::")[1] || "unknown";
+				taskEvent = { event: scheduleName };
+			} else if (
+				exec.payload &&
+				typeof exec.payload === "object" &&
+				"event" in exec.payload &&
+				exec.payload.event !== "pgconductor.invoke"
+			) {
+				// Event-triggered execution (custom event or db event)
+				taskEvent = {
+					event: exec.payload.event,
+					payload: exec.payload.payload,
+				};
+			} else {
+				// Direct invoke
+				taskEvent = { event: "pgconductor.invoke", payload: exec.payload };
+			}
+
+			// Pass db and tasks as extra context to maintenance task
+			const extraContext =
+				task.name === "pgconductor.maintenance"
+					? { ...this.extraContext, db: this.db, tasks: this.tasks }
+					: this.extraContext;
+
+			const output = await Promise.race([
+				task.execute(
+					taskEvent,
+					TaskContext.create<Tasks, Events, typeof extraContext>(
+						{
+							db: this.db,
+							abortController: taskAbortController,
+							execution: exec,
+							logger: makeChildLogger(this.logger, {
+								execution_id: exec.id,
+								task_key: exec.task_key,
+								queue: exec.queue,
+							}),
+						},
+						extraContext,
+					),
+				),
+				abortPromise,
+			]);
+
+			if (isTaskAbortReason(output)) {
+				switch (output.reason) {
+					case "wait-for-custom-event":
+						return {
+							execution_id: exec.id,
+							queue: exec.queue,
+							task_key: exec.task_key,
+							status: "wait_for_custom_event",
+							timeout_ms: output.timeout_ms,
+							step_key: output.step_key,
+							event_key: output.event_key,
+							slot_group_number: exec.slot_group_number,
+						} as const;
+					case "wait-for-database-event":
+						return {
+							execution_id: exec.id,
+							queue: exec.queue,
+							task_key: exec.task_key,
+							status: "wait_for_db_event",
+							timeout_ms: output.timeout_ms,
+							step_key: output.step_key,
+							schema_name: output.schema_name,
+							table_name: output.table_name,
+							operation: output.operation,
+							columns: output.columns,
+							slot_group_number: exec.slot_group_number,
+						} as const;
+					case "child-invocation":
+						return {
+							execution_id: exec.id,
+							queue: exec.queue,
+							task_key: exec.task_key,
+							status: "invoke_child",
+							timeout_ms: output.timeout_ms,
+							step_key: output.step_key,
+							child_task_name: output.task.name,
+							child_task_queue: output.task.queue || "default",
+							child_payload: output.payload,
+							slot_group_number: exec.slot_group_number,
+						} as const;
+					case "cancelled":
+						return {
+							execution_id: exec.id,
+							queue: exec.queue,
+							task_key: exec.task_key,
+							status: "permanently_failed",
+							error: exec.last_error || "Task was cancelled",
+							slot_group_number: exec.slot_group_number,
+						} as const;
+					case "released":
+					case "parent-aborted":
+						return {
+							execution_id: exec.id,
+							queue: exec.queue,
+							reschedule_in_ms: output.reason === "released" ? output.reschedule_in_ms : undefined,
+							step_key: output.reason === "released" ? output.step_key : undefined,
+							task_key: exec.task_key,
+							status: "released",
+							slot_group_number: exec.slot_group_number,
+						} as const;
+					default:
+						assert.never(output);
+				}
+			}
+
+			return {
+				execution_id: exec.id,
+				queue: exec.queue,
+				task_key: exec.task_key,
+				status: "completed",
+				result: output,
+				slot_group_number: exec.slot_group_number,
+			} as const;
+		} catch (err) {
+			return {
+				execution_id: exec.id,
+				queue: exec.queue,
+				task_key: exec.task_key,
+				status: "failed",
+				error: coerceError(err).message,
+				slot_group_number: exec.slot_group_number,
+			} as const;
+		} finally {
+			// Clean up running task tracking
+			this._runningTasks.delete(exec.id);
+		}
+	}
+
+	private async executeBatchTask(
+		task: AnyTask,
+		taskKey: string,
+		executions: Execution[],
+	): Promise<ExecutionResult[]> {
+		// Build event array
+		const events = executions.map((exec) => {
+			if (exec.cron_expression) {
+				const scheduleName = exec.dedupe_key?.split("::")[1] || "unknown";
+				return { event: scheduleName };
+			} else if (
+				exec.payload &&
+				typeof exec.payload === "object" &&
+				"event" in exec.payload &&
+				exec.payload.event !== "pgconductor.invoke"
+			) {
+				return {
+					event: exec.payload.event,
+					payload: exec.payload.payload,
+				};
+			} else {
+				return { event: "pgconductor.invoke", payload: exec.payload };
+			}
+		});
+
+		const taskAbortController = createTaskSignal(this.signal);
+
+		// Create batch context
+		const batchContext = new BatchTaskContext(
+			taskAbortController,
+			makeChildLogger(this.logger, {
+				task_key: taskKey,
+				queue: this.queueName,
+				batch_size: executions.length,
+			}),
+		);
+
+		const abortPromise = new Promise<TaskAbortReasons>((resolve) => {
+			taskAbortController.signal.addEventListener("abort", () => {
+				resolve(taskAbortController.signal.reason);
+			});
+		});
+
+		try {
+			// Schedule next executions for cron tasks
+			await Promise.all(executions.map((exec) => this.scheduleNextExecution(exec)));
+
+			const result = await Promise.race([task.execute(events, batchContext), abortPromise]);
+
+			// Handle abort reasons
+			if (isTaskAbortReason(result)) {
+				if (result.reason === "released") {
+					// Batch sleep - reschedule all
+					return executions.map((exec) => ({
+						execution_id: exec.id,
+						queue: exec.queue,
+						task_key: taskKey,
+						status: "released" as const,
+						reschedule_in_ms: result.reschedule_in_ms,
+						step_key: result.step_key,
+						slot_group_number: exec.slot_group_number,
+					}));
+				}
+
+				// Other abort reasons
+				return executions.map((exec) => ({
+					execution_id: exec.id,
+					queue: exec.queue,
+					task_key: taskKey,
+					status: "failed" as const,
+					error: `Task aborted: ${result.reason}`,
+					slot_group_number: exec.slot_group_number,
+				}));
+			}
+
+			// Void tasks: all succeed
+			if (result === undefined) {
+				return executions.map((exec) => ({
+					execution_id: exec.id,
+					queue: exec.queue,
+					task_key: taskKey,
+					status: "completed" as const,
+					result: undefined,
+					slot_group_number: exec.slot_group_number,
+				}));
+			}
+
+			// Tasks with returns: validate array length
+			if (!Array.isArray(result)) {
+				throw new Error("Batch handler must return array matching input length");
+			}
+
+			if (result.length !== executions.length) {
+				throw new Error(
+					`Batch handler returned ${result.length} results but received ${executions.length} executions`,
+				);
+			}
+
+			// Individual results
+			return executions.map((exec, i) => ({
+				execution_id: exec.id,
+				queue: exec.queue,
+				task_key: taskKey,
+				status: "completed" as const,
+				result: result[i],
+				slot_group_number: exec.slot_group_number,
+			}));
+		} catch (err) {
+			// Handler threw: all fail together
+			const errorMsg = coerceError(err).message;
+			return executions.map((exec) => ({
+				execution_id: exec.id,
+				queue: exec.queue,
+				task_key: taskKey,
+				status: "failed" as const,
+				error: errorMsg,
+				slot_group_number: exec.slot_group_number,
+			}));
 		}
 	}
 

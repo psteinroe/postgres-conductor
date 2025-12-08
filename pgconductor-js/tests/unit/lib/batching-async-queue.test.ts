@@ -10,7 +10,7 @@ describe("BatchingAsyncQueue - AsyncQueue compatibility (no batching)", () => {
 	// All tests from AsyncQueue, adapted to work with arrays
 
 	test("pushes and iterates items", async () => {
-		const queue = new BatchingAsyncQueue<TestItem>(10, () => null);
+		const queue = new BatchingAsyncQueue<TestItem>(10, new Map());
 		const items: TestItem[] = [
 			{ task_key: "task-a", id: "1" },
 			{ task_key: "task-a", id: "2" },
@@ -26,14 +26,14 @@ describe("BatchingAsyncQueue - AsyncQueue compatibility (no batching)", () => {
 
 		const results: TestItem[] = [];
 		for await (const group of queue) {
-			results.push(...group); // Flatten arrays
+			results.push(...group.items); // Access items from BatchGroup
 		}
 
 		expect(results).toEqual(items);
 	});
 
 	test("respects capacity limit", async () => {
-		const queue = new BatchingAsyncQueue<TestItem>(2, () => null);
+		const queue = new BatchingAsyncQueue<TestItem>(2, new Map());
 
 		await queue.push({ task_key: "task-a", id: "1" });
 		await queue.push({ task_key: "task-a", id: "2" });
@@ -50,7 +50,7 @@ describe("BatchingAsyncQueue - AsyncQueue compatibility (no batching)", () => {
 
 		// Consume one item to make space
 		const item = await queue.next();
-		expect(item.value).toEqual([{ task_key: "task-a", id: "1" }]);
+		expect(item.value).toEqual({ taskKey: "task-a", items: [{ task_key: "task-a", id: "1" }] });
 
 		// Now the third push should complete
 		await pushPromise;
@@ -60,7 +60,7 @@ describe("BatchingAsyncQueue - AsyncQueue compatibility (no batching)", () => {
 	});
 
 	test("handles async iteration with for-await", async () => {
-		const queue = new BatchingAsyncQueue<TestItem>(5, () => null);
+		const queue = new BatchingAsyncQueue<TestItem>(5, new Map());
 
 		// Producer
 		(async () => {
@@ -78,7 +78,7 @@ describe("BatchingAsyncQueue - AsyncQueue compatibility (no batching)", () => {
 		// Consumer
 		const results: TestItem[] = [];
 		for await (const group of queue) {
-			results.push(...group);
+			results.push(...group.items);
 		}
 
 		expect(results).toEqual([
@@ -89,7 +89,7 @@ describe("BatchingAsyncQueue - AsyncQueue compatibility (no batching)", () => {
 	});
 
 	test("close stops accepting new items", async () => {
-		const queue = new BatchingAsyncQueue<TestItem>(10, () => null);
+		const queue = new BatchingAsyncQueue<TestItem>(10, new Map());
 
 		await queue.push({ task_key: "task-a", id: "1" });
 		queue.close();
@@ -97,14 +97,14 @@ describe("BatchingAsyncQueue - AsyncQueue compatibility (no batching)", () => {
 
 		const results: TestItem[] = [];
 		for await (const group of queue) {
-			results.push(...group);
+			results.push(...group.items);
 		}
 
 		expect(results).toEqual([{ task_key: "task-a", id: "1" }]);
 	});
 
 	test("returns done when closed and empty", async () => {
-		const queue = new BatchingAsyncQueue<TestItem>(10, () => null);
+		const queue = new BatchingAsyncQueue<TestItem>(10, new Map());
 
 		await queue.push({ task_key: "task-a", id: "1" });
 		await queue.push({ task_key: "task-a", id: "2" });
@@ -112,18 +112,18 @@ describe("BatchingAsyncQueue - AsyncQueue compatibility (no batching)", () => {
 
 		const first = await queue.next();
 		expect(first.done).toBe(false);
-		expect(first.value).toEqual([{ task_key: "task-a", id: "1" }]);
+		expect(first.value).toEqual({ taskKey: "task-a", items: [{ task_key: "task-a", id: "1" }] });
 
 		const second = await queue.next();
 		expect(second.done).toBe(false);
-		expect(second.value).toEqual([{ task_key: "task-a", id: "2" }]);
+		expect(second.value).toEqual({ taskKey: "task-a", items: [{ task_key: "task-a", id: "2" }] });
 
 		const third = await queue.next();
 		expect(third.done).toBe(true);
 	});
 
 	test("handles concurrent producers and consumers", async () => {
-		const queue = new BatchingAsyncQueue<TestItem>(5, () => null);
+		const queue = new BatchingAsyncQueue<TestItem>(5, new Map());
 		const produced: TestItem[] = [];
 		const consumed: TestItem[] = [];
 
@@ -141,7 +141,7 @@ describe("BatchingAsyncQueue - AsyncQueue compatibility (no batching)", () => {
 		// Consumer
 		const consumer = (async () => {
 			for await (const group of queue) {
-				consumed.push(...group);
+				consumed.push(...group.items);
 				await new Promise((r) => setTimeout(r, 2));
 			}
 		})();
@@ -153,7 +153,7 @@ describe("BatchingAsyncQueue - AsyncQueue compatibility (no batching)", () => {
 	});
 
 	test("waits for consumers when full", async () => {
-		const queue = new BatchingAsyncQueue<TestItem>(3, () => null);
+		const queue = new BatchingAsyncQueue<TestItem>(3, new Map());
 
 		// Fill the queue
 		await queue.push({ task_key: "task-a", id: "1" });
@@ -182,7 +182,7 @@ describe("BatchingAsyncQueue - AsyncQueue compatibility (no batching)", () => {
 	});
 
 	test("handles empty queue with pending next", async () => {
-		const queue = new BatchingAsyncQueue<TestItem>(10, () => null);
+		const queue = new BatchingAsyncQueue<TestItem>(10, new Map());
 
 		// Call next before any items are pushed
 		const nextPromise = queue.next();
@@ -191,14 +191,14 @@ describe("BatchingAsyncQueue - AsyncQueue compatibility (no batching)", () => {
 		setTimeout(() => queue.push({ task_key: "task-a", id: "42" }), 50);
 
 		const result = await nextPromise;
-		expect(result.value).toEqual([{ task_key: "task-a", id: "42" }]);
+		expect(result.value).toEqual({ taskKey: "task-a", items: [{ task_key: "task-a", id: "42" }] });
 		expect(result.done).toBe(false);
 
 		queue.close();
 	});
 
 	test("resolves all pending next calls on close", async () => {
-		const queue = new BatchingAsyncQueue<TestItem>(10, () => null);
+		const queue = new BatchingAsyncQueue<TestItem>(10, new Map());
 
 		const next1 = queue.next();
 		const next2 = queue.next();
@@ -214,7 +214,7 @@ describe("BatchingAsyncQueue - AsyncQueue compatibility (no batching)", () => {
 	});
 
 	test("does not duplicate items when resolver is waiting", async () => {
-		const queue = new BatchingAsyncQueue<TestItem>(10, () => null);
+		const queue = new BatchingAsyncQueue<TestItem>(10, new Map());
 
 		// Start a consumer that's waiting for an item
 		const firstNextPromise = queue.next();
@@ -224,7 +224,10 @@ describe("BatchingAsyncQueue - AsyncQueue compatibility (no batching)", () => {
 
 		// First next() should receive the item
 		const firstResult = await firstNextPromise;
-		expect(firstResult.value).toEqual([{ task_key: "task-a", id: "42" }]);
+		expect(firstResult.value).toEqual({
+			taskKey: "task-a",
+			items: [{ task_key: "task-a", id: "42" }],
+		});
 		expect(firstResult.done).toBe(false);
 
 		// Second next() should wait (not get the same item again)
@@ -242,14 +245,17 @@ describe("BatchingAsyncQueue - AsyncQueue compatibility (no batching)", () => {
 		await queue.push({ task_key: "task-a", id: "99" });
 
 		const secondResult = await secondNextPromise;
-		expect(secondResult.value).toEqual([{ task_key: "task-a", id: "99" }]);
+		expect(secondResult.value).toEqual({
+			taskKey: "task-a",
+			items: [{ task_key: "task-a", id: "99" }],
+		});
 		expect(secondResult.done).toBe(false);
 
 		queue.close();
 	});
 
 	test("delivers each item exactly once with multiple waiting consumers", async () => {
-		const queue = new BatchingAsyncQueue<TestItem>(10, () => null);
+		const queue = new BatchingAsyncQueue<TestItem>(10, new Map());
 
 		// Create multiple waiting consumers
 		const consumer1 = queue.next();
@@ -264,7 +270,7 @@ describe("BatchingAsyncQueue - AsyncQueue compatibility (no batching)", () => {
 		const [r1, r2, r3] = await Promise.all([consumer1, consumer2, consumer3]);
 
 		// Each consumer should receive exactly one unique item
-		const receivedValues = [r1.value, r2.value, r3.value].map((group) => group[0].id).sort();
+		const receivedValues = [r1.value, r2.value, r3.value].map((group) => group.items[0].id).sort();
 		expect(receivedValues).toEqual(["1", "2", "3"]);
 
 		// Queue should now be empty
@@ -283,14 +289,13 @@ describe("BatchingAsyncQueue - AsyncQueue compatibility (no batching)", () => {
 
 describe("BatchingAsyncQueue - Batching behavior", () => {
 	test("batched items are accumulated and emitted when size reached", async () => {
-		const queue = new BatchingAsyncQueue<TestItem>(10, (taskKey) =>
-			taskKey === "batched" ? { size: 3, timeoutMs: 1000 } : null,
-		);
+		const batchConfigs = new Map([["batched", { size: 3, timeoutMs: 1000 }]]);
+		const queue = new BatchingAsyncQueue<TestItem>(10, batchConfigs);
 
 		const items: TestItem[][] = [];
 		const consumer = (async () => {
 			for await (const group of queue) {
-				items.push(group);
+				items.push(group.items);
 			}
 		})();
 
@@ -314,14 +319,13 @@ describe("BatchingAsyncQueue - Batching behavior", () => {
 	});
 
 	test("batched items are emitted on timeout", async () => {
-		const queue = new BatchingAsyncQueue<TestItem>(10, (taskKey) =>
-			taskKey === "batched" ? { size: 10, timeoutMs: 50 } : null,
-		);
+		const batchConfigs = new Map([["batched", { size: 10, timeoutMs: 50 }]]);
+		const queue = new BatchingAsyncQueue<TestItem>(10, batchConfigs);
 
 		const items: TestItem[][] = [];
 		const consumer = (async () => {
 			for await (const group of queue) {
-				items.push(group);
+				items.push(group.items);
 			}
 		})();
 
@@ -343,14 +347,16 @@ describe("BatchingAsyncQueue - Batching behavior", () => {
 	});
 
 	test("different tasks maintain separate batches", async () => {
-		const queue = new BatchingAsyncQueue<TestItem>(10, (taskKey) =>
-			taskKey.startsWith("batched") ? { size: 2, timeoutMs: 1000 } : null,
-		);
+		const batchConfigs = new Map([
+			["batched-1", { size: 2, timeoutMs: 1000 }],
+			["batched-2", { size: 2, timeoutMs: 1000 }],
+		]);
+		const queue = new BatchingAsyncQueue<TestItem>(10, batchConfigs);
 
 		const items: TestItem[][] = [];
 		const consumer = (async () => {
 			for await (const group of queue) {
-				items.push(group);
+				items.push(group.items);
 			}
 		})();
 
@@ -378,14 +384,13 @@ describe("BatchingAsyncQueue - Batching behavior", () => {
 	});
 
 	test("mixed batched and non-batched items", async () => {
-		const queue = new BatchingAsyncQueue<TestItem>(10, (taskKey) =>
-			taskKey === "batched" ? { size: 3, timeoutMs: 1000 } : null,
-		);
+		const batchConfigs = new Map([["batched", { size: 3, timeoutMs: 1000 }]]);
+		const queue = new BatchingAsyncQueue<TestItem>(10, batchConfigs);
 
 		const items: TestItem[][] = [];
 		const consumer = (async () => {
 			for await (const group of queue) {
-				items.push(group);
+				items.push(group.items);
 			}
 		})();
 
@@ -415,14 +420,13 @@ describe("BatchingAsyncQueue - Batching behavior", () => {
 	});
 
 	test("close flushes pending batches", async () => {
-		const queue = new BatchingAsyncQueue<TestItem>(10, (taskKey) =>
-			taskKey === "batched" ? { size: 10, timeoutMs: 10000 } : null,
-		);
+		const batchConfigs = new Map([["batched", { size: 10, timeoutMs: 10000 }]]);
+		const queue = new BatchingAsyncQueue<TestItem>(10, batchConfigs);
 
 		const items: TestItem[][] = [];
 		const consumer = (async () => {
 			for await (const group of queue) {
-				items.push(group);
+				items.push(group.items);
 			}
 		})();
 
@@ -443,9 +447,8 @@ describe("BatchingAsyncQueue - Batching behavior", () => {
 	});
 
 	test("batch respects queue capacity", async () => {
-		const queue = new BatchingAsyncQueue<TestItem>(2, (taskKey) =>
-			taskKey === "batched" ? { size: 2, timeoutMs: 1000 } : null,
-		);
+		const batchConfigs = new Map([["batched", { size: 2, timeoutMs: 1000 }]]);
+		const queue = new BatchingAsyncQueue<TestItem>(2, batchConfigs);
 
 		// Push 4 batched items (will create 2 batches of 2)
 		await queue.push({ task_key: "batched", id: "1" });
@@ -475,9 +478,8 @@ describe("BatchingAsyncQueue - Batching behavior", () => {
 	});
 
 	test("batched items deliver directly to waiting consumers", async () => {
-		const queue = new BatchingAsyncQueue<TestItem>(10, (taskKey) =>
-			taskKey === "batched" ? { size: 2, timeoutMs: 1000 } : null,
-		);
+		const batchConfigs = new Map([["batched", { size: 2, timeoutMs: 1000 }]]);
+		const queue = new BatchingAsyncQueue<TestItem>(10, batchConfigs);
 
 		// Start a consumer waiting for items
 		const nextPromise = queue.next();
@@ -488,10 +490,13 @@ describe("BatchingAsyncQueue - Batching behavior", () => {
 
 		// Should deliver directly to waiting consumer
 		const result = await nextPromise;
-		expect(result.value).toEqual([
-			{ task_key: "batched", id: "1" },
-			{ task_key: "batched", id: "2" },
-		]);
+		expect(result.value).toEqual({
+			taskKey: "batched",
+			items: [
+				{ task_key: "batched", id: "1" },
+				{ task_key: "batched", id: "2" },
+			],
+		});
 
 		queue.close();
 	});

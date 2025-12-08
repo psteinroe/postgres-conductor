@@ -24,6 +24,11 @@ export type TaskIdentifier<TName extends string = string, TQueue extends string 
 	readonly queue?: TQueue;
 };
 
+export type BatchConfig = {
+	size: number;
+	timeoutMs: number;
+};
+
 export type TaskConfiguration<
 	TName extends string = string,
 	TQueue extends string = "default",
@@ -33,6 +38,7 @@ export type TaskConfiguration<
 	removeOnComplete?: RetentionSettings;
 	removeOnFail?: RetentionSettings;
 	concurrency?: number;
+	batch?: BatchConfig;
 };
 
 export type RetentionSettings = boolean | { days: number };
@@ -139,10 +145,17 @@ export type TaskEventFromTriggers<
 	| (HasCustomEvent<TTriggers> extends true ? CustomEventUnion<TTriggers, Events> : never)
 	| (HasDatabaseEvent<TTriggers> extends true ? DatabaseEventUnion<TTriggers, Database> : never);
 
-export type ExecuteFunction<EventType, Returns extends object | void, Context extends object> = (
-	event: EventType,
-	context: Context,
-) => Promise<Returns>;
+// Conditional execute function type based on whether task has batch config
+export type ExecuteFunction<
+	EventType,
+	Returns extends object | void,
+	Context extends object,
+	HasBatch extends boolean = false,
+> = HasBatch extends true
+	? Returns extends void
+		? (events: EventType[], context: Context) => Promise<void>
+		: (events: EventType[], context: Context) => Promise<Returns[]>
+	: (event: EventType, context: Context) => Promise<Returns>;
 
 // Represents a task definition that can be invoked or triggered by events
 export class Task<
@@ -160,6 +173,7 @@ export class Task<
 	public readonly removeOnComplete: RetentionSettings;
 	public readonly removeOnFail: RetentionSettings;
 	public readonly concurrency?: number;
+	public readonly batch?: BatchConfig;
 
 	public readonly triggers: NonEmptyArray<Trigger>;
 
@@ -177,6 +191,7 @@ export class Task<
 		this.removeOnComplete = config.removeOnComplete ?? false;
 		this.removeOnFail = config.removeOnFail ?? false;
 		this.concurrency = config.concurrency;
+		this.batch = config.batch;
 
 		this.triggers = Array.isArray(triggers) ? triggers : [triggers];
 	}

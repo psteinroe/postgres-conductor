@@ -1,16 +1,25 @@
 type BatchConfig = { size: number; timeoutMs: number };
 
+export type BatchGroup<T> = {
+	taskKey: string;
+	items: T[];
+};
+
+import type { PollableAsyncIterable } from "./async-queue";
+
 /**
  * AsyncQueue that automatically batches items based on configuration.
  *
- * Follows AsyncQueue implementation exactly, but emits T[] instead of T.
- * - Items with batch config are accumulated and emitted as arrays when size/timeout reached
- * - Items without batch config are emitted immediately as single-item arrays
- * - Always emits T[] (arrays) to downstream consumers
+ * Emits BatchGroup<T> objects containing taskKey metadata and items array.
+ * - Items with batch config are accumulated and emitted as groups when size/timeout reached
+ * - Items without batch config are emitted immediately as single-item groups
+ * - Always emits BatchGroup<T> to downstream consumers
  */
-export class BatchingAsyncQueue<T extends { task_key: string }> implements AsyncIterable<T[]> {
-	private queue: T[][] = [];
-	private resolvers: ((value: IteratorResult<T[]>) => void)[] = [];
+export class BatchingAsyncQueue<T extends { task_key: string }> implements PollableAsyncIterable<
+	BatchGroup<T>
+> {
+	private queue: BatchGroup<T>[] = [];
+	private resolvers: ((value: IteratorResult<BatchGroup<T>>) => void)[] = [];
 	private closed = false;
 
 	// Track batches per task
@@ -25,7 +34,7 @@ export class BatchingAsyncQueue<T extends { task_key: string }> implements Async
 
 	constructor(
 		private readonly capacity: number,
-		private readonly getBatchConfig: (taskKey: string) => BatchConfig | null,
+		private readonly batchConfigs: ReadonlyMap<string, BatchConfig>,
 	) {}
 
 	async push(item: T): Promise<void> {
@@ -37,14 +46,17 @@ export class BatchingAsyncQueue<T extends { task_key: string }> implements Async
 		}
 		if (this.closed) return;
 
-		const batchConfig = this.getBatchConfig(item.task_key);
+		const batchConfig = this.batchConfigs.get(item.task_key);
 
 		if (batchConfig) {
 			// Batched task: accumulate
 			this.addToBatch(item, batchConfig);
 		} else {
-			// Non-batched: emit immediately as single-item array
-			this.emitGroup([item]);
+			// Non-batched: emit immediately as single-item group
+			this.emitGroup({
+				taskKey: item.task_key,
+				items: [item],
+			});
 		}
 	}
 
@@ -84,13 +96,16 @@ export class BatchingAsyncQueue<T extends { task_key: string }> implements Async
 			batch.timer = null;
 		}
 
-		// Emit batch as array
+		// Emit batch as group
 		const items = [...batch.items];
 		batch.items = [];
-		this.emitGroup(items);
+		this.emitGroup({
+			taskKey,
+			items,
+		});
 	}
 
-	private emitGroup(group: T[]): void {
+	private emitGroup(group: BatchGroup<T>): void {
 		if (this.closed) return;
 
 		// If a consumer is waiting, deliver immediately (same as AsyncQueue)
@@ -104,7 +119,14 @@ export class BatchingAsyncQueue<T extends { task_key: string }> implements Async
 		}
 	}
 
-	async next(): Promise<IteratorResult<T[]>> {
+	tryNext(): BatchGroup<T> | undefined {
+		if (this.queue.length > 0) {
+			return this.queue.shift()!;
+		}
+		return undefined;
+	}
+
+	async next(): Promise<IteratorResult<BatchGroup<T>>> {
 		// Same logic as AsyncQueue
 		if (this.queue.length > 0) {
 			const value = this.queue.shift()!;
@@ -117,25 +139,17 @@ export class BatchingAsyncQueue<T extends { task_key: string }> implements Async
 	close(): void {
 		if (this.closed) return;
 
-		// Flush all pending batches to queue BEFORE marking as closed
-		for (const taskKey of this.batches.keys()) {
-			const batch = this.batches.get(taskKey);
-			if (batch && batch.items.length > 0) {
+		// Flush all pending batches using emitGroup (which handles resolvers)
+		for (const [taskKey, batch] of this.batches.entries()) {
+			if (batch.items.length > 0) {
 				if (batch.timer) {
 					clearTimeout(batch.timer);
 					batch.timer = null;
 				}
-				// Add to queue for consumers to process
-				this.queue.push([...batch.items]);
+				const items = [...batch.items];
 				batch.items = [];
+				this.emitGroup({ taskKey, items });
 			}
-		}
-
-		// Deliver queued items to waiting resolvers before marking as done
-		while (this.queue.length > 0 && this.resolvers.length > 0) {
-			const resolver = this.resolvers.shift()!;
-			const value = this.queue.shift()!;
-			resolver({ value, done: false });
 		}
 
 		// Now mark as closed

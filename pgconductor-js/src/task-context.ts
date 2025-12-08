@@ -447,3 +447,33 @@ export class TaskContext<
 		return new Promise(() => {});
 	}
 }
+
+/**
+ * Context for batch task handlers.
+ * Batch tasks cannot use step() or invoke() since batch composition
+ * is non-deterministic across retries.
+ */
+export class BatchTaskContext {
+	constructor(
+		private readonly abortController: TypedAbortController<TaskAbortReasons>,
+		public readonly logger: Logger,
+	) {}
+
+	get signal(): AbortSignal {
+		return this.abortController.signal;
+	}
+
+	/**
+	 * Sleep reschedules ALL executions in the batch.
+	 * After sleep, executions may batch with different peers.
+	 */
+	async sleep(id: string, ms: number): Promise<void> {
+		this.abortController.abort({
+			__pgconductorTaskAborted: true,
+			reason: "released",
+			reschedule_in_ms: ms,
+			step_key: id,
+		} as TaskAbortReasons);
+		return new Promise(() => {});
+	}
+}

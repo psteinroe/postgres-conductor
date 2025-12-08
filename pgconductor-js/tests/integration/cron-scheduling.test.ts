@@ -467,9 +467,9 @@ describe("Cron Scheduling", () => {
 		await db.destroy();
 	}, 40000);
 
-	// Note: This test has a race condition - we schedule next execution before the task runs,
-	// so by the time we unschedule, the next execution may already exist. The core functionality
-	// (preventing re-insertion on retries) is tested implicitly in other tests.
+	// Note: This test has inherent timing/race conditions with real DB and workers.
+	// A deterministic unit test version exists in tests/unit/in-memory-database-client.test.ts
+	// that uses the in-memory client to test the exact same scenario without race conditions.
 	test.skip("unschedule cancels running execution and prevents re-insert on retry", async () => {
 		const db = await pool.child();
 
