@@ -192,7 +192,7 @@ function runBenchmark(): Promise<{ median: number; variance: number }> {
 			// Extract variance from output like "Variance: 37.8%"
 			const varianceMatch = stdout.match(/Trimmed.*?Variance: ([\d.]+)%/s);
 
-			if (!medianMatch || !varianceMatch) {
+			if (!medianMatch || !medianMatch[1] || !varianceMatch || !varianceMatch[1]) {
 				reject(new Error(`Could not parse results from output:\n${stdout.slice(-500)}`));
 				return;
 			}

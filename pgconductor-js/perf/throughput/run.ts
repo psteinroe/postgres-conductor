@@ -54,7 +54,7 @@ async function main() {
 	console.log(`Workers: ${scenario.workers}`);
 	console.log(`Tasks: ${scenario.tasks}`);
 	console.log(`Task Type: ${scenario.taskType}`);
-	if (scenario.taskConcurrency !== undefined) {
+	if ("taskConcurrency" in scenario && scenario.taskConcurrency !== undefined) {
 		console.log(`Task Concurrency: ${scenario.taskConcurrency}`);
 	}
 	console.log(`Worker Settings:`, scenario.workerSettings);
@@ -90,7 +90,7 @@ async function main() {
 	) {
 		startupEnv.FLUSH_BATCH_SIZE = scenario.workerSettings.flushBatchSize.toString();
 	}
-	if (scenario.taskConcurrency !== undefined) {
+	if ("taskConcurrency" in scenario && scenario.taskConcurrency !== undefined) {
 		startupEnv.TASK_CONCURRENCY = scenario.taskConcurrency.toString();
 	}
 	const startupResult = await spawnWorker("worker.ts", DB_URL, startupEnv);
@@ -140,7 +140,7 @@ async function main() {
 		) {
 			env.FLUSH_BATCH_SIZE = scenario.workerSettings.flushBatchSize.toString();
 		}
-		if (scenario.taskConcurrency !== undefined) {
+		if ("taskConcurrency" in scenario && scenario.taskConcurrency !== undefined) {
 			env.TASK_CONCURRENCY = scenario.taskConcurrency.toString();
 		}
 		workerPromises.push(spawnWorker("worker.ts", DB_URL, env));

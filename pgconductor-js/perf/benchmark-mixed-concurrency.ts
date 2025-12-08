@@ -208,6 +208,9 @@ async function main() {
 	console.log();
 
 	const baseline = results[0];
+	if (!baseline) {
+		throw new Error("No baseline result found");
+	}
 
 	console.log("Scenario          │ Overall (t/s) │ Task A (t/s) │ Task B (t/s) │ Overhead");
 	console.log("─".repeat(70));

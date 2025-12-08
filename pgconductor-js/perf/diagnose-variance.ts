@@ -136,12 +136,15 @@ async function main() {
 	// Sort by throughput to identify outliers
 	const sorted = [...results].sort((a, b) => a.throughput - b.throughput);
 	const trimmed = sorted.slice(2, -2); // Remove top/bottom 2
-	const outlierIds = new Set([
-		sorted[0].iteration,
-		sorted[1].iteration,
-		sorted[sorted.length - 1].iteration,
-		sorted[sorted.length - 2].iteration,
-	]);
+
+	const outliers = [
+		sorted[0],
+		sorted[1],
+		sorted[sorted.length - 1],
+		sorted[sorted.length - 2],
+	].filter((r): r is NonNullable<typeof r> => r !== undefined);
+
+	const outlierIds = new Set(outliers.map((r) => r.iteration));
 
 	for (const r of results) {
 		const iter = r.iteration.toString().padStart(4);
@@ -162,6 +165,9 @@ async function main() {
 
 	const trimmedThroughputs = trimmed.map((r) => r.throughput);
 	const median = trimmedThroughputs[Math.floor(trimmedThroughputs.length / 2)];
+	if (!median) {
+		throw new Error("No median value found - insufficient data");
+	}
 	const trimmedMin = Math.min(...trimmedThroughputs);
 	const trimmedMax = Math.max(...trimmedThroughputs);
 	const trimmedAvg = trimmedThroughputs.reduce((a, b) => a + b, 0) / trimmedThroughputs.length;

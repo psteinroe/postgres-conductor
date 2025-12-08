@@ -66,7 +66,7 @@ async function runScenario(dbUrl: string, scenario: ScenarioConfig) {
 			...(scenario.taskAConcurrency && { concurrency: scenario.taskAConcurrency }),
 		},
 		{ invocable: true },
-		async () => ({ done: true }),
+		async () => {},
 	);
 
 	const taskB = conductor.createTask(
@@ -75,7 +75,7 @@ async function runScenario(dbUrl: string, scenario: ScenarioConfig) {
 			...(scenario.taskBConcurrency && { concurrency: scenario.taskBConcurrency }),
 		},
 		{ invocable: true },
-		async () => ({ done: true }),
+		async () => {},
 	);
 
 	// Queue 10k tasks (50/50 split)
@@ -154,6 +154,9 @@ async function main() {
 	console.log();
 
 	const baseline = results[0];
+	if (!baseline) {
+		throw new Error("No baseline result found");
+	}
 
 	console.log("Scenario          │  Throughput (t/s)  │  Time (ms)  │  Overhead");
 	console.log("─".repeat(70));

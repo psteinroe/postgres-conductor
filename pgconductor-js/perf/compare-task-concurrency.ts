@@ -66,12 +66,16 @@ console.log("=".repeat(70));
 console.log();
 
 const baseline = results[0]; // concurrency=1
+if (!baseline) {
+	throw new Error("No baseline result found");
+}
 
 console.log("Task Concurrency  │  Throughput (tasks/s)  │  Duration (ms)  │  Speedup");
 console.log("─".repeat(70));
 
 for (const result of results) {
-	const concurrency = result.label.split(": ")[1].padEnd(16);
+	const concurrencyParts = result.label.split(": ");
+	const concurrency = (concurrencyParts[1] || "unknown").padEnd(16);
 	const throughput = result.throughput.toFixed(2).padStart(22);
 	const duration = result.duration.toString().padStart(15);
 	const speedup = `${(result.throughput / baseline.throughput).toFixed(2)}x`.padStart(8);

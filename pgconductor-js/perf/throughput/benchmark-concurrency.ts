@@ -87,7 +87,7 @@ async function main() {
 	const getConcurrency = (name: string) => {
 		if (name.includes("unlimited")) return "∞";
 		const match = name.match(/concurrency-(\d+)/);
-		return match ? match[1] : "?";
+		return match && match[1] ? match[1] : "?";
 	};
 
 	// Calculate speedup relative to concurrency=1
