@@ -556,4 +556,240 @@ describe("Invoke Support", () => {
 		expect(children[0]?.failed_at).not.toBeNull();
 		expect(children[0]?.last_error).toContain("parent timed out");
 	}, 10000);
+
+	test("dedupe_key replaces unlocked execution with new values", async () => {
+		const db = await pool.child();
+
+		const taskDef = defineTask({
+			name: "dedupe-task",
+			payload: z.object({ value: z.number() }),
+		});
+
+		const conductor = Conductor.create({
+			sql: db.sql,
+			tasks: TaskSchemas.fromSchema([taskDef]),
+			context: {},
+		});
+
+		await conductor.ensureInstalled();
+
+		// First invocation with dedupe_key
+		const id1 = await conductor.invoke(
+			{ name: "dedupe-task" },
+			{ value: 1 },
+			{ dedupe_key: "unique-key-1" },
+		);
+
+		// Second invocation with same dedupe_key should replace (update)
+		const id2 = await conductor.invoke(
+			{ name: "dedupe-task" },
+			{ value: 2 },
+			{ dedupe_key: "unique-key-1", priority: 10 },
+		);
+
+		// Should return same ID
+		expect(id2).toBe(id1);
+
+		// Check database - should have only one execution with updated values
+		const executions = await db.sql<
+			{
+				id: string;
+				payload: { value: number };
+				priority: number;
+			}[]
+		>`
+			select id, payload, priority
+			from pgconductor._private_executions
+			where task_key = 'dedupe-task'
+		`;
+
+		expect(executions.length).toBe(1);
+		expect(executions[0]?.id).toBe(id1);
+		expect(executions[0]?.payload.value).toBe(2);
+		expect(executions[0]?.priority).toBe(10);
+	}, 10000);
+
+	test("dedupe_key creates new execution when existing one is locked", async () => {
+		const db = await pool.child();
+
+		let runCount = 0;
+
+		const taskDef = defineTask({
+			name: "locked-dedupe-task",
+			payload: z.object({ value: z.number() }),
+		});
+
+		const conductor = Conductor.create({
+			sql: db.sql,
+			tasks: TaskSchemas.fromSchema([taskDef]),
+			context: {},
+		});
+
+		const task = conductor.createTask(
+			{ name: "locked-dedupe-task" },
+			{ invocable: true },
+			async (event, _ctx) => {
+				if (event.event === "pgconductor.invoke") {
+					runCount++;
+					// Simulate slow task
+					await new Promise((r) => setTimeout(r, 500));
+				}
+			},
+		);
+
+		const orchestrator = Orchestrator.create({
+			defaultWorker: { pollIntervalMs: 50, flushIntervalMs: 50 },
+			conductor,
+			tasks: [task],
+		});
+
+		await orchestrator.start();
+
+		// First invocation
+		const id1 = await conductor.invoke(
+			{ name: "locked-dedupe-task" },
+			{ value: 1 },
+			{ dedupe_key: "locked-key" },
+		);
+
+		// Wait for it to be locked
+		await new Promise((r) => setTimeout(r, 100));
+
+		// Second invocation while first is locked - should create NEW execution
+		const id2 = await conductor.invoke(
+			{ name: "locked-dedupe-task" },
+			{ value: 2 },
+			{ dedupe_key: "locked-key" },
+		);
+
+		// Should be different IDs
+		expect(id2).not.toBe(id1);
+
+		// Wait for both executions to complete and flush (100ms + 500ms + 500ms + 50ms + margin)
+		await new Promise((r) => setTimeout(r, 1200));
+
+		await orchestrator.stop();
+
+		// First execution should be marked as failed (superseded)
+		const exec1 = await db.sql<
+			{
+				id: string;
+				failed_at: Date | null;
+				last_error: string | null;
+				dedupe_key: string | null;
+			}[]
+		>`
+			select id, failed_at, last_error, dedupe_key
+			from pgconductor._private_executions
+			where id = ${id1}
+		`;
+
+		expect(exec1.length).toBe(1);
+		expect(exec1[0]?.failed_at).not.toBeNull();
+		expect(exec1[0]?.last_error).toBe("superseded by reinvoke");
+		expect(exec1[0]?.dedupe_key).toBeNull();
+
+		// Second execution should have completed successfully
+		const exec2 = await db.sql<
+			{
+				id: string;
+				completed_at: Date | null;
+				payload: { value: number };
+			}[]
+		>`
+			select id, completed_at, payload
+			from pgconductor._private_executions
+			where id = ${id2}
+		`;
+
+		expect(exec2.length).toBe(1);
+		expect(exec2[0]?.completed_at).not.toBeNull();
+		expect(exec2[0]?.payload.value).toBe(2);
+
+		// Should have run twice (first was interrupted, second completed)
+		expect(runCount).toBe(2);
+	}, 10000);
+
+	test("dedupe_key debounce pattern - multiple rapid invocations", async () => {
+		const db = await pool.child();
+
+		let executionCount = 0;
+		let lastValue = 0;
+
+		const taskDef = defineTask({
+			name: "debounce-task",
+			payload: z.object({ value: z.number() }),
+		});
+
+		const conductor = Conductor.create({
+			sql: db.sql,
+			tasks: TaskSchemas.fromSchema([taskDef]),
+			context: {},
+		});
+
+		const task = conductor.createTask(
+			{ name: "debounce-task" },
+			{ invocable: true },
+			async (event, _ctx) => {
+				if (event.event === "pgconductor.invoke") {
+					executionCount++;
+					lastValue = event.payload.value;
+				}
+			},
+		);
+
+		const orchestrator = Orchestrator.create({
+			defaultWorker: { pollIntervalMs: 50, flushIntervalMs: 50 },
+			conductor,
+			tasks: [task],
+		});
+
+		await orchestrator.start();
+
+		// Rapid invocations with same dedupe_key and delayed run_at
+		const futureTime = new Date(Date.now() + 1000);
+
+		const id1 = await conductor.invoke(
+			{ name: "debounce-task" },
+			{ value: 1 },
+			{ dedupe_key: "debounce-1", run_at: futureTime },
+		);
+
+		await new Promise((r) => setTimeout(r, 50));
+
+		const id2 = await conductor.invoke(
+			{ name: "debounce-task" },
+			{ value: 2 },
+			{ dedupe_key: "debounce-1", run_at: futureTime },
+		);
+
+		await new Promise((r) => setTimeout(r, 50));
+
+		const id3 = await conductor.invoke(
+			{ name: "debounce-task" },
+			{ value: 3 },
+			{ dedupe_key: "debounce-1", run_at: futureTime },
+		);
+
+		// All should return same ID (execution was replaced)
+		expect(id2).toBe(id1);
+		expect(id3).toBe(id1);
+
+		// Should have only one execution in database
+		const executions = await db.sql<{ count: number }[]>`
+			select count(*)::int as count
+			from pgconductor._private_executions
+			where task_key = 'debounce-task'
+		`;
+		expect(executions[0]?.count).toBe(1);
+
+		// Wait for execution
+		await new Promise((r) => setTimeout(r, 1500));
+
+		await orchestrator.stop();
+
+		// Should have executed only once with the last value
+		expect(executionCount).toBe(1);
+		expect(lastValue).toBe(3);
+	}, 10000);
 });

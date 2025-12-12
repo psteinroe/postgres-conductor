@@ -261,7 +261,7 @@ export class Conductor<
 		task: TTask,
 		payloadOrItems: any,
 		opts?: Omit<ExecutionSpec, "task_key" | "payload" | "queue">,
-	): Promise<string | string[]> {
+	): Promise<string | null | string[]> {
 		const taskName = task.name;
 		const queue = task.queue || "default";
 
@@ -272,6 +272,9 @@ export class Conductor<
 				payload: item.payload,
 				run_at: item.run_at,
 				dedupe_key: item.dedupe_key,
+				throttle: item.throttle,
+				debounce: item.debounce,
+				cron_expression: item.cron_expression,
 				priority: item.priority,
 			}));
 			return this.db.invokeBatch(specs);

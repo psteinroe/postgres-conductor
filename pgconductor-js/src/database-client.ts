@@ -29,6 +29,8 @@ export interface ExecutionSpec {
 	payload?: Payload | null;
 	run_at?: Date | null;
 	dedupe_key?: string | null;
+	throttle?: { seconds: number } | null;
+	debounce?: { seconds: number } | null;
 	cron_expression?: string | null;
 	priority?: number | null;
 	parent_execution_id?: string | null;
@@ -542,12 +544,12 @@ export class DatabaseClient {
 		});
 	}
 
-	async invoke(spec: ExecutionSpec, opts?: QueryMethodOptions): Promise<string> {
+	async invoke(spec: ExecutionSpec, opts?: QueryMethodOptions): Promise<string | null> {
 		const result = await this.query(() => this.builder.buildInvoke(spec), {
 			label: "invoke",
 			...opts,
 		});
-		return result[0]!.id;
+		return result[0]?.id || null;
 	}
 
 	async invokeBatch(specs: ExecutionSpec[], opts?: QueryMethodOptions): Promise<string[]> {

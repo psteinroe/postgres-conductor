@@ -77,13 +77,13 @@ export class BatchingAsyncQueue<T extends { task_key: string }> implements Polla
 		// Start timeout on first item
 		if (batch.items.length === 1) {
 			batch.timer = setTimeout(() => {
-				void this.flushBatch(item.task_key);
+				this.flushBatch(item.task_key);
 			}, config.timeoutMs);
 		}
 
 		// Flush when size reached
 		if (batch.items.length >= config.size) {
-			void this.flushBatch(item.task_key);
+			this.flushBatch(item.task_key);
 		}
 	}
 

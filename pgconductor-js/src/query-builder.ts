@@ -1067,16 +1067,33 @@ export class QueryBuilder {
 		`;
 	}
 
-	buildInvoke(spec: ExecutionSpec): PendingQuery<[{ id: string }]> {
-		return this.sql<[{ id: string }]>`
+	buildInvoke(spec: ExecutionSpec): PendingQuery<[{ id: string | null }]> {
+		if (spec.throttle && spec.debounce) {
+			throw new Error("Cannot use both throttle and debounce - choose one");
+		}
+
+		let dedupe_seconds: number | null = null;
+		let dedupe_next_slot = false;
+
+		if (spec.throttle) {
+			dedupe_seconds = spec.throttle.seconds;
+			dedupe_next_slot = false;
+		} else if (spec.debounce) {
+			dedupe_seconds = spec.debounce.seconds;
+			dedupe_next_slot = true;
+		}
+
+		return this.sql<[{ id: string | null }]>`
 			select id from pgconductor.invoke(
-				task_key := ${spec.task_key}::text,
-				queue := ${spec.queue}::text,
-				payload := ${spec.payload ? this.sql.json(spec.payload) : null}::jsonb,
-				run_at := ${spec.run_at ? spec.run_at.toISOString() : null}::timestamptz,
-				dedupe_key := ${spec.dedupe_key || null}::text,
-				cron_expression := ${spec.cron_expression || null}::text,
-				priority := ${spec.priority || null}::integer
+				p_task_key := ${spec.task_key}::text,
+				p_queue := ${spec.queue}::text,
+				p_payload := ${spec.payload ? this.sql.json(spec.payload) : null}::jsonb,
+				p_run_at := ${spec.run_at ? spec.run_at.toISOString() : null}::timestamptz,
+				p_dedupe_key := ${spec.dedupe_key || null}::text,
+				p_dedupe_seconds := ${dedupe_seconds}::integer,
+				p_dedupe_next_slot := ${dedupe_next_slot}::boolean,
+				p_cron_expression := ${spec.cron_expression || null}::text,
+				p_priority := ${spec.priority || null}::integer
 			)
 		`;
 	}
@@ -1104,13 +1121,15 @@ export class QueryBuilder {
 					and run_at > pgconductor._private_current_time()
 			)
 			select id from pgconductor.invoke(
-				task_key := ${spec.task_key}::text,
-				queue := ${spec.queue}::text,
-				payload := ${spec.payload ? this.sql.json(spec.payload) : null}::jsonb,
-				run_at := ${runAt.toISOString()}::timestamptz,
-				dedupe_key := ${dedupeKey}::text,
-				cron_expression := ${cronExpression}::text,
-				priority := ${spec.priority || 0}::integer
+				p_task_key := ${spec.task_key}::text,
+				p_queue := ${spec.queue}::text,
+				p_payload := ${spec.payload ? this.sql.json(spec.payload) : null}::jsonb,
+				p_run_at := ${runAt.toISOString()}::timestamptz,
+				p_dedupe_key := ${dedupeKey}::text,
+				p_dedupe_seconds := null::integer,
+				p_dedupe_next_slot := false::boolean,
+				p_cron_expression := ${cronExpression}::text,
+				p_priority := ${spec.priority || 0}::integer
 			)
 		`;
 	}
@@ -1153,20 +1172,40 @@ export class QueryBuilder {
 	}
 
 	buildInvokeBatch(specs: ExecutionSpec[]): PendingQuery<{ id: string }[]> {
-		const specsArray = specs.map((spec) => ({
-			task_key: spec.task_key,
-			queue: spec.queue,
-			payload: spec.payload || null,
-			run_at: spec.run_at,
-			dedupe_key: spec.dedupe_key,
-			cron_expression: spec.cron_expression || null,
-			priority: spec.priority,
-		}));
+		const specsArray = specs.map((spec) => {
+			if (spec.throttle && spec.debounce) {
+				throw new Error("Cannot use both throttle and debounce - choose one");
+			}
+
+			if (spec.debounce) {
+				throw new Error("Batch invoke only supports throttle, not debounce");
+			}
+
+			let dedupe_seconds: number | null = null;
+			let dedupe_next_slot = false;
+
+			if (spec.throttle) {
+				dedupe_seconds = spec.throttle.seconds;
+				dedupe_next_slot = false;
+			}
+
+			return {
+				task_key: spec.task_key,
+				queue: spec.queue,
+				payload: spec.payload || null,
+				run_at: spec.run_at,
+				dedupe_key: spec.dedupe_key || null,
+				dedupe_seconds,
+				dedupe_next_slot,
+				cron_expression: spec.cron_expression || null,
+				priority: spec.priority,
+			};
+		});
 
 		return this.sql<{ id: string }[]>`
 			select id from pgconductor.invoke_batch(
 				array(
-					select json_populate_recordset(null::pgconductor.execution_spec, ${this.sql.json(specsArray)})
+					select jsonb_populate_recordset(null::pgconductor.execution_spec, ${this.sql.json(specsArray)}::jsonb)
 				)
 			)
 		`;

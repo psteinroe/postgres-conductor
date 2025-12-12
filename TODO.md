@@ -9,7 +9,7 @@
 - add throttling (limit, period, key)
 - add concurrency (limit, key)
 - add rateLimit (limit, period, key)
-- add debounce (period, key)
+- add debounce (period, key) on invoke
 - "trigger" vs "call" when invoking within a task
 
 Links:

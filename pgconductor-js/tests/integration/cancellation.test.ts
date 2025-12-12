@@ -854,7 +854,7 @@ describe("Cancellation Support", () => {
 			payload: {},
 		});
 
-		await conductor.invoke({ name: "context-cancel-task" }, { execIdToCancel: pendingExecId });
+		await conductor.invoke({ name: "context-cancel-task" }, { execIdToCancel: pendingExecId! });
 
 		await new Promise((r) => setTimeout(r, 300));
 

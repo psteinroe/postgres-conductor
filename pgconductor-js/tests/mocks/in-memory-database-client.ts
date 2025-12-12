@@ -51,6 +51,7 @@ interface StoredExecution {
 	waiting_step_key: string | null;
 	waiting_timeout_at: Date | null;
 	dedupe_key: string | null;
+	singleton_on: Date | null;
 	cron_expression: string | null;
 	priority: number;
 	orchestrator_id: string | null;
@@ -607,8 +608,124 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 		return true;
 	}
 
-	async invoke(spec: ExecutionSpec, _opts?: { signal?: AbortSignal }): Promise<string> {
-		// Check dedupe
+	async invoke(spec: ExecutionSpec, _opts?: { signal?: AbortSignal }): Promise<string | null> {
+		const now = this.getCurrentTime();
+
+		// Validation
+		if (spec.throttle && spec.debounce) {
+			throw new Error("Cannot use both throttle and debounce");
+		}
+
+		// Calculate singleton_on if throttle/debounce is specified
+		let singletonOn: Date | null = null;
+		let dedupeSeconds: number | null = null;
+		let dedupeNextSlot = false;
+
+		if (spec.throttle) {
+			dedupeSeconds = spec.throttle.seconds;
+			dedupeNextSlot = false;
+		} else if (spec.debounce) {
+			dedupeSeconds = spec.debounce.seconds;
+			dedupeNextSlot = true;
+		}
+
+		if (dedupeSeconds) {
+			// Calculate time slot (pg-boss formula)
+			const epochSeconds = Math.floor(this.getCurrentTime().getTime() / 1000);
+			const slotNumber = Math.floor(epochSeconds / dedupeSeconds);
+			singletonOn = new Date(slotNumber * dedupeSeconds * 1000);
+		}
+
+		// Helper to create execution
+		const createExecution = (singletonOnValue: Date | null): string => {
+			const task = this.tasks.get(spec.task_key);
+			const id = this.generateId();
+
+			const execution: StoredExecution = {
+				id,
+				task_key: spec.task_key,
+				queue: spec.queue,
+				payload: spec.payload || {},
+				state: "pending",
+				run_at: spec.run_at || now,
+				attempts: 0,
+				max_attempts: task?.max_attempts || 3,
+				last_error: null,
+				result: null,
+				cancelled: false,
+				waiting_on_execution_id: null,
+				waiting_step_key: null,
+				waiting_timeout_at: null,
+				dedupe_key: spec.dedupe_key || null,
+				singleton_on: singletonOnValue,
+				cron_expression: spec.cron_expression || null,
+				priority: spec.priority || 0,
+				orchestrator_id: null,
+				parent_execution_id: spec.parent_execution_id || null,
+				parent_step_key: spec.parent_step_key || null,
+				slot_group_number: null,
+				created_at: now,
+				updated_at: now,
+			};
+
+			this.executions.set(id, execution);
+			return id;
+		};
+
+		// Throttle/debounce logic
+		if (singletonOn) {
+			const normalizedDedupeKey = spec.dedupe_key || "";
+
+			if (dedupeNextSlot) {
+				// Debounce: ALWAYS create in next slot (not current slot)
+				const nextSingletonOn = new Date(singletonOn.getTime() + dedupeSeconds! * 1000);
+
+				// Delete existing job in next slot
+				for (const [execId, exec] of this.executions.entries()) {
+					if (
+						exec.task_key === spec.task_key &&
+						exec.queue === spec.queue &&
+						(exec.dedupe_key || "") === normalizedDedupeKey &&
+						exec.singleton_on &&
+						exec.singleton_on.getTime() === nextSingletonOn.getTime() &&
+						exec.state !== "completed" &&
+						exec.state !== "failed" &&
+						!exec.cancelled
+					) {
+						this.executions.delete(execId);
+						this.steps.delete(execId);
+					}
+				}
+
+				// Insert into next slot
+				return createExecution(nextSingletonOn);
+			} else {
+				// Throttle: try current slot
+				// Check singleton constraint on (task_key, singleton_on, COALESCE(dedupe_key, ''))
+				const existingInCurrentSlot = Array.from(this.executions.values()).find(
+					(exec) =>
+						exec.task_key === spec.task_key &&
+						exec.queue === spec.queue &&
+						(exec.dedupe_key || "") === normalizedDedupeKey &&
+						exec.singleton_on &&
+						exec.singleton_on.getTime() === singletonOn.getTime() &&
+						exec.state !== "completed" &&
+						exec.state !== "failed" &&
+						!exec.cancelled,
+				);
+
+				if (existingInCurrentSlot) {
+					// Current slot is occupied - reject
+					return null;
+				} else {
+					// Current slot is free - create execution
+					return createExecution(singletonOn);
+				}
+			}
+		}
+
+		// Standard invocation (no throttle/debounce)
+		// Handle dedupe_key logic
 		if (spec.dedupe_key) {
 			for (const exec of this.executions.values()) {
 				if (
@@ -618,51 +735,92 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 					exec.state !== "failed" &&
 					exec.state !== "completed"
 				) {
-					return exec.id; // Return existing execution
+					// Found existing execution with dedupe_key
+					if (exec.state === "running") {
+						// Locked execution - mark as superseded and clear dedupe_key
+						exec.state = "failed";
+						exec.last_error = "superseded by reinvoke";
+						exec.dedupe_key = null;
+						exec.orchestrator_id = null;
+						// Will create new execution below
+					} else {
+						// Unlocked execution - update it with new values (replace behavior)
+						exec.payload = spec.payload || {};
+						exec.run_at = spec.run_at || now;
+						exec.priority = spec.priority || 0;
+						exec.cron_expression = spec.cron_expression || null;
+						exec.updated_at = now;
+						return exec.id;
+					}
 				}
 			}
 		}
 
-		const task = this.tasks.get(spec.task_key);
-		const id = this.generateId();
-		const now = this.getCurrentTime();
-
-		const execution: StoredExecution = {
-			id,
-			task_key: spec.task_key,
-			queue: spec.queue,
-			payload: spec.payload || {},
-			state: "pending",
-			run_at: spec.run_at || now,
-			attempts: 0,
-			max_attempts: task?.max_attempts || 3,
-			last_error: null,
-			result: null,
-			cancelled: false,
-			waiting_on_execution_id: null,
-			waiting_step_key: null,
-			waiting_timeout_at: null,
-			dedupe_key: spec.dedupe_key || null,
-			cron_expression: spec.cron_expression || null,
-			priority: spec.priority || 0,
-			orchestrator_id: null,
-			parent_execution_id: spec.parent_execution_id || null,
-			parent_step_key: spec.parent_step_key || null,
-			slot_group_number: null,
-			created_at: now,
-			updated_at: now,
-		};
-
-		this.executions.set(id, execution);
-		return id;
+		// Create new execution
+		return createExecution(null);
 	}
 
 	async invokeBatch(specs: ExecutionSpec[], _opts?: { signal?: AbortSignal }): Promise<string[]> {
-		const ids: string[] = [];
+		// Validate: batch invoke doesn't support debounce
 		for (const spec of specs) {
-			const id = await this.invoke(spec);
-			ids.push(id);
+			if (spec.debounce) {
+				throw new Error("Batch invoke only supports throttle, not debounce");
+			}
 		}
+
+		const now = this.getCurrentTime();
+		const ids: string[] = [];
+
+		// Process each spec with batch semantics (ON CONFLICT DO UPDATE)
+		for (const spec of specs) {
+			// Validation
+			if (spec.throttle && spec.debounce) {
+				throw new Error("Cannot use both throttle and debounce");
+			}
+
+			// Calculate singleton_on if throttle is specified
+			let singletonOn: Date | null = null;
+			if (spec.throttle) {
+				const epochSeconds = Math.floor(now.getTime() / 1000);
+				const slotNumber = Math.floor(epochSeconds / spec.throttle.seconds);
+				singletonOn = new Date(slotNumber * spec.throttle.seconds * 1000);
+			}
+
+			// Check for existing execution with same dedupe_key (standard dedupe constraint)
+			// This mimics ON CONFLICT (task_key, dedupe_key, queue) DO UPDATE
+			let foundExisting = false;
+			if (spec.dedupe_key) {
+				for (const exec of this.executions.values()) {
+					if (
+						exec.dedupe_key === spec.dedupe_key &&
+						exec.task_key === spec.task_key &&
+						exec.queue === spec.queue &&
+						exec.state !== "failed" &&
+						exec.state !== "completed"
+					) {
+						// Found existing - update it (ON CONFLICT DO UPDATE)
+						exec.payload = spec.payload || {};
+						exec.run_at = spec.run_at || now;
+						exec.priority = spec.priority || 0;
+						exec.singleton_on = singletonOn;
+						exec.cron_expression = spec.cron_expression || null;
+						exec.updated_at = now;
+						ids.push(exec.id);
+						foundExisting = true;
+						break;
+					}
+				}
+			}
+
+			if (!foundExisting) {
+				// Create new execution
+				const id = await this.invoke(spec);
+				if (id) {
+					ids.push(id);
+				}
+			}
+		}
+
 		return ids;
 	}
 
@@ -709,11 +867,17 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 		const nextRun = this.calculateNextCronRun(spec.cron_expression || "");
 		const dedupeKey = `cron::${args.scheduleName}::${spec.task_key}::${spec.queue}`;
 
-		return this.invoke({
+		const id = await this.invoke({
 			...spec,
 			run_at: nextRun,
 			dedupe_key: dedupeKey,
 		});
+
+		if (!id) {
+			throw new Error("Cron execution was throttled unexpectedly");
+		}
+
+		return id;
 	}
 
 	async unscheduleCronExecution(

@@ -14,7 +14,7 @@ describe("InMemoryDatabaseClient", () => {
 
 			expect(id).toMatch(/^in-memory-/);
 
-			const exec = db.getExecution(id);
+			const exec = db.getExecution(id!);
 			expect(exec).toBeDefined();
 			expect(exec?.task_key).toBe("test-task");
 			expect(exec?.state).toBe("pending");
@@ -72,7 +72,7 @@ describe("InMemoryDatabaseClient", () => {
 
 			await db.returnExecutions([
 				{
-					execution_id: id,
+					execution_id: id!,
 					queue: "default",
 					task_key: "test-task",
 					status: "completed",
@@ -80,7 +80,7 @@ describe("InMemoryDatabaseClient", () => {
 				},
 			]);
 
-			const exec = db.getExecution(id);
+			const exec = db.getExecution(id!);
 			expect(exec?.state).toBe("completed");
 			expect(exec?.result).toEqual({ output: "success" });
 		});
@@ -120,7 +120,7 @@ describe("InMemoryDatabaseClient", () => {
 
 			await db.returnExecutions([
 				{
-					execution_id: id,
+					execution_id: id!,
 					queue: "default",
 					task_key: "test-task",
 					status: "failed",
@@ -128,7 +128,7 @@ describe("InMemoryDatabaseClient", () => {
 				},
 			]);
 
-			const exec = db.getExecution(id);
+			const exec = db.getExecution(id!);
 			expect(exec?.state).toBe("pending");
 			expect(exec?.attempts).toBe(1);
 			expect(exec?.last_error).toBe("Task failed");
@@ -170,7 +170,7 @@ describe("InMemoryDatabaseClient", () => {
 
 			await db.returnExecutions([
 				{
-					execution_id: id,
+					execution_id: id!,
 					queue: "default",
 					task_key: "test-task",
 					status: "failed",
@@ -178,8 +178,8 @@ describe("InMemoryDatabaseClient", () => {
 				},
 			]);
 
-			expect(db.getExecution(id)?.state).toBe("pending");
-			expect(db.getExecution(id)?.attempts).toBe(1);
+			expect(db.getExecution(id!)?.state).toBe("pending");
+			expect(db.getExecution(id!)?.attempts).toBe(1);
 
 			// Second failure - should become permanently failed
 			db.advanceTime(16000);
@@ -193,7 +193,7 @@ describe("InMemoryDatabaseClient", () => {
 
 			await db.returnExecutions([
 				{
-					execution_id: id,
+					execution_id: id!,
 					queue: "default",
 					task_key: "test-task",
 					status: "failed",
@@ -201,8 +201,8 @@ describe("InMemoryDatabaseClient", () => {
 				},
 			]);
 
-			expect(db.getExecution(id)?.state).toBe("failed");
-			expect(db.getExecution(id)?.attempts).toBe(2);
+			expect(db.getExecution(id!)?.state).toBe("failed");
+			expect(db.getExecution(id!)?.attempts).toBe(2);
 		});
 	});
 
@@ -220,7 +220,7 @@ describe("InMemoryDatabaseClient", () => {
 				scheduleName: "test-schedule",
 			});
 
-			const exec = db.getExecution(id);
+			const exec = db.getExecution(id!);
 			expect(exec).toBeDefined();
 			expect(exec?.cron_expression).toBe("*/5 * * * * *");
 			expect(exec?.dedupe_key).toBe("cron::test-schedule::cron-task::default");
@@ -253,7 +253,7 @@ describe("InMemoryDatabaseClient", () => {
 
 			await db.returnExecutions([
 				{
-					execution_id: id,
+					execution_id: id!,
 					queue: "default",
 					task_key: "cron-task",
 					status: "completed",
@@ -294,7 +294,7 @@ describe("InMemoryDatabaseClient", () => {
 			expect(db.getCronSchedules("cron-task").length).toBe(0);
 
 			// Pending execution should be cancelled
-			const exec = db.getExecution(id);
+			const exec = db.getExecution(id!);
 			expect(exec?.cancelled).toBe(true);
 		});
 
@@ -336,7 +336,7 @@ describe("InMemoryDatabaseClient", () => {
 				filterTaskKeys: [],
 			});
 
-			expect(db.getExecution(id)?.state).toBe("running");
+			expect(db.getExecution(id!)?.state).toBe("running");
 
 			// Unschedule while running
 			await db.unscheduleCronExecution({
@@ -348,7 +348,7 @@ describe("InMemoryDatabaseClient", () => {
 			// Fail the execution (simulating task failure)
 			await db.returnExecutions([
 				{
-					execution_id: id,
+					execution_id: id!,
 					queue: "default",
 					task_key: "cron-task",
 					status: "failed",
@@ -357,7 +357,7 @@ describe("InMemoryDatabaseClient", () => {
 			]);
 
 			// Execution should be scheduled for retry
-			const exec = db.getExecution(id);
+			const exec = db.getExecution(id!);
 			expect(exec?.state).toBe("pending");
 			expect(exec?.attempts).toBe(1);
 
@@ -378,7 +378,7 @@ describe("InMemoryDatabaseClient", () => {
 
 			await db.returnExecutions([
 				{
-					execution_id: id,
+					execution_id: id!,
 					queue: "default",
 					task_key: "cron-task",
 					status: "completed",
@@ -436,7 +436,7 @@ describe("InMemoryDatabaseClient", () => {
 
 			expect(batch.length).toBe(1);
 			expect(batch[0]?.id).toBe(id);
-			expect(db.getExecution(id)?.state).toBe("running");
+			expect(db.getExecution(id!)?.state).toBe("running");
 
 			// 3. Unschedule while task is running
 			await db.unscheduleCronExecution({
@@ -451,7 +451,7 @@ describe("InMemoryDatabaseClient", () => {
 			// 4. Task fails (simulating cancellation error)
 			await db.returnExecutions([
 				{
-					execution_id: id,
+					execution_id: id!,
 					queue: "default",
 					task_key: "slow-task",
 					status: "failed",
@@ -460,7 +460,7 @@ describe("InMemoryDatabaseClient", () => {
 			]);
 
 			// 5. Verify execution is pending retry but cron_expression is cleared
-			const exec = db.getExecution(id);
+			const exec = db.getExecution(id!);
 			expect(exec?.state).toBe("pending");
 			expect(exec?.attempts).toBe(1);
 			expect(exec?.cron_expression).toBeNull();
@@ -484,7 +484,7 @@ describe("InMemoryDatabaseClient", () => {
 			// 8. Retry also fails
 			await db.returnExecutions([
 				{
-					execution_id: id,
+					execution_id: id!,
 					queue: "default",
 					task_key: "slow-task",
 					status: "failed",
@@ -527,7 +527,7 @@ describe("InMemoryDatabaseClient", () => {
 
 			await db.returnExecutions([
 				{
-					execution_id: parentId,
+					execution_id: parentId!,
 					queue: "default",
 					task_key: "parent",
 					status: "invoke_child",
@@ -539,7 +539,7 @@ describe("InMemoryDatabaseClient", () => {
 				},
 			]);
 
-			const parent = db.getExecution(parentId);
+			const parent = db.getExecution(parentId!);
 			expect(parent?.state).toBe("pending");
 			expect(parent?.waiting_on_execution_id).toBeTruthy();
 			expect(parent?.waiting_step_key).toBe("child-step");
@@ -570,7 +570,7 @@ describe("InMemoryDatabaseClient", () => {
 
 			await db.returnExecutions([
 				{
-					execution_id: parentId,
+					execution_id: parentId!,
 					queue: "default",
 					task_key: "parent",
 					status: "invoke_child",
@@ -582,7 +582,7 @@ describe("InMemoryDatabaseClient", () => {
 				},
 			]);
 
-			const childId = db.getExecution(parentId)!.waiting_on_execution_id!;
+			const childId = db.getExecution(parentId!)!.waiting_on_execution_id!;
 
 			// Execute child
 			await db.getExecutions({
@@ -604,7 +604,7 @@ describe("InMemoryDatabaseClient", () => {
 			]);
 
 			// Parent should be woken up
-			const parent = db.getExecution(parentId);
+			const parent = db.getExecution(parentId!);
 			expect(parent?.state).toBe("pending");
 			expect(parent?.waiting_on_execution_id).toBeNull();
 			expect(parent?.run_at.getTime()).toBeLessThanOrEqual(db.getCurrentTime().getTime());
@@ -641,7 +641,7 @@ describe("InMemoryDatabaseClient", () => {
 
 			await db.returnExecutions([
 				{
-					execution_id: parentId,
+					execution_id: parentId!,
 					queue: "default",
 					task_key: "parent",
 					status: "invoke_child",
@@ -653,7 +653,7 @@ describe("InMemoryDatabaseClient", () => {
 				},
 			]);
 
-			const childId = db.getExecution(parentId)!.waiting_on_execution_id!;
+			const childId = db.getExecution(parentId!)!.waiting_on_execution_id!;
 
 			// Fail child permanently
 			await db.getExecutions({
@@ -675,7 +675,7 @@ describe("InMemoryDatabaseClient", () => {
 			]);
 
 			// Parent should cascade fail
-			const parent = db.getExecution(parentId);
+			const parent = db.getExecution(parentId!);
 			expect(parent?.state).toBe("failed");
 			expect(parent?.last_error).toContain("Child execution failed");
 		});
@@ -692,14 +692,14 @@ describe("InMemoryDatabaseClient", () => {
 			});
 
 			await db.saveStep({
-				executionId: execId,
+				executionId: execId!,
 				queue: "default",
 				key: "step1",
 				result: { data: "value" },
 			});
 
 			const result = await db.loadStep({
-				executionId: execId,
+				executionId: execId!,
 				key: "step1",
 			});
 
@@ -881,7 +881,7 @@ describe("InMemoryDatabaseClient", () => {
 
 			await db.returnExecutions([
 				{
-					execution_id: id1,
+					execution_id: id1!,
 					queue: "default",
 					task_key: "test",
 					status: "completed",

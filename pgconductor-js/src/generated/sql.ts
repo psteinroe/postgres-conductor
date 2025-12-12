@@ -119,9 +119,17 @@ create table pgconductor._private_executions (
     waiting_on_execution_id uuid,
     waiting_step_key text,
     parent_execution_id uuid,
+    singleton_on timestamptz,
     primary key (id, queue),
     unique (task_key, dedupe_key, queue)
 ) partition by list (queue);
+
+-- unique index for singleton throttle/debounce enforcement on parent table
+-- this automatically creates matching indexes on all partitions
+-- must include partition key (queue) per PostgreSQL requirement
+-- use coalesce to treat NULL dedupe_key as empty string for singleton matching
+create unique index on pgconductor._private_executions (task_key, singleton_on, coalesce(dedupe_key, ''), queue)
+where singleton_on is not null and completed_at is null and failed_at is null and cancelled = false;
 
 create table pgconductor._private_tasks (
     key text primary key,
@@ -442,6 +450,8 @@ create type pgconductor.execution_spec as (
     payload jsonb,
     run_at timestamptz,
     dedupe_key text,
+    dedupe_seconds integer,
+    dedupe_next_slot boolean,
     cron_expression text,
     priority integer
 );
@@ -621,14 +631,18 @@ create or replace function pgconductor.invoke_batch(
  volatile
  set search_path to ''
 as $function$
+declare
+    v_now timestamptz;
 begin
+    v_now := pgconductor._private_current_time();
+
     -- clear locked dedupe keys before batch insert
     update pgconductor._private_executions as e
     set
         dedupe_key = null,
         locked_by = null,
         locked_at = null,
-        failed_at = pgconductor._private_current_time(),
+        failed_at = v_now,
         last_error = 'superseded by reinvoke'
     from unnest(specs) as spec
     where e.dedupe_key = spec.dedupe_key
@@ -638,6 +652,8 @@ begin
         and spec.dedupe_key is not null;
 
     -- batch insert all executions
+    -- note: duplicate dedupe_keys within same batch will cause error
+    -- users should deduplicate client-side if needed
     return query
     insert into pgconductor._private_executions (
         id,
@@ -646,6 +662,7 @@ begin
         payload,
         run_at,
         dedupe_key,
+        singleton_on,
         cron_expression,
         priority
     )
@@ -654,32 +671,149 @@ begin
         spec.task_key,
         coalesce(spec.queue, 'default'),
         spec.payload,
-        coalesce(spec.run_at, pgconductor._private_current_time()),
+        coalesce(spec.run_at, v_now),
         spec.dedupe_key,
+        case
+            when spec.dedupe_seconds is not null then
+                'epoch'::timestamptz + '1 second'::interval * (
+                    spec.dedupe_seconds * floor(
+                        extract(epoch from v_now) / spec.dedupe_seconds
+                    )
+                )
+            else null
+        end,
         spec.cron_expression,
         coalesce(spec.priority, 0)
     from unnest(specs) as spec
-    returning id;
+    on conflict (task_key, dedupe_key, queue) do update set
+        payload = excluded.payload,
+        run_at = excluded.run_at,
+        priority = excluded.priority,
+        cron_expression = excluded.cron_expression,
+        singleton_on = excluded.singleton_on
+    returning pgconductor._private_executions.id;
 end;
 $function$
 ;
 
 create or replace function pgconductor.invoke(
-    task_key text,
-    queue text default 'default',
-    payload jsonb default null,
-    run_at timestamptz default null,
-    dedupe_key text default null,
-    cron_expression text default null,
-    priority integer default null
+    p_task_key text,
+    p_queue text default 'default',
+    p_payload jsonb default null,
+    p_run_at timestamptz default null,
+    p_dedupe_key text default null,
+    p_dedupe_seconds integer default null,
+    p_dedupe_next_slot boolean default false,
+    p_cron_expression text default null,
+    p_priority integer default null
 )
  returns table(id uuid)
  language plpgsql
  volatile
  set search_path to ''
 as $function$
+declare
+    v_now timestamptz;
+    v_singleton_on timestamptz;
+    v_next_singleton_on timestamptz;
+    v_run_at timestamptz;
+    v_new_id uuid;
 begin
-  if invoke.dedupe_key is not null then
+  v_now := pgconductor._private_current_time();
+  v_run_at := coalesce(p_run_at, v_now);
+
+  -- clear locked dedupe key before insert (supersede pattern)
+  if p_dedupe_key is not null then
+      update pgconductor._private_executions
+      set
+          dedupe_key = null,
+          locked_by = null,
+          locked_at = null,
+          failed_at = v_now,
+          last_error = 'superseded by reinvoke'
+      where dedupe_key = p_dedupe_key
+          and task_key = p_task_key
+          and queue = p_queue
+          and locked_at is not null;
+  end if;
+
+  -- singleton throttle/debounce logic
+  if p_dedupe_seconds is not null then
+      -- calculate current time slot (pg-boss formula)
+      v_singleton_on := 'epoch'::timestamptz + '1 second'::interval * (
+          p_dedupe_seconds * floor(
+              extract(epoch from v_now) / p_dedupe_seconds
+          )
+      );
+
+      if p_dedupe_next_slot = false then
+          -- throttle: try current slot, return empty if blocked
+          return query
+          insert into pgconductor._private_executions (
+              id,
+              task_key,
+              queue,
+              payload,
+              run_at,
+              dedupe_key,
+              singleton_on,
+              cron_expression,
+              priority
+          ) values (
+              pgconductor._private_portable_uuidv7(),
+              p_task_key,
+              p_queue,
+              p_payload,
+              v_run_at,
+              p_dedupe_key,
+              v_singleton_on,
+              p_cron_expression,
+              coalesce(p_priority, 0)
+          )
+          on conflict (task_key, singleton_on, coalesce(dedupe_key, ''), queue)
+          where singleton_on is not null and completed_at is null and failed_at is null and cancelled = false
+          do nothing
+          returning _private_executions.id;
+          return;
+      else
+          -- debounce: upsert into next slot
+          v_next_singleton_on := v_singleton_on + (p_dedupe_seconds || ' seconds')::interval;
+
+          return query
+          insert into pgconductor._private_executions (
+              id,
+              task_key,
+              queue,
+              payload,
+              run_at,
+              dedupe_key,
+              singleton_on,
+              cron_expression,
+              priority
+          ) values (
+              pgconductor._private_portable_uuidv7(),
+              p_task_key,
+              p_queue,
+              p_payload,
+              v_next_singleton_on,
+              p_dedupe_key,
+              v_next_singleton_on,
+              p_cron_expression,
+              coalesce(p_priority, 0)
+          )
+          on conflict (task_key, singleton_on, coalesce(dedupe_key, ''), queue)
+          where singleton_on is not null and completed_at is null and failed_at is null and cancelled = false
+          do update set
+              payload = excluded.payload,
+              run_at = excluded.run_at,
+              priority = excluded.priority
+          returning _private_executions.id;
+          return;
+      end if;
+  end if;
+
+  -- regular invoke (no singleton)
+  if p_dedupe_key is not null then
       -- clear keys that are currently locked so a subsequent insert can succeed.
       update pgconductor._private_executions as e
       set
@@ -688,9 +822,9 @@ begin
         locked_at = null,
         failed_at = pgconductor._private_current_time(),
         last_error = 'superseded by reinvoke'
-      where e.dedupe_key = invoke.dedupe_key
-        and e.task_key = invoke.task_key
-        and e.queue = invoke.queue
+      where e.dedupe_key = p_dedupe_key
+        and e.task_key = p_task_key
+        and e.queue = p_queue
         and e.locked_at is not null;
   end if;
 
@@ -705,14 +839,20 @@ begin
     priority
   ) values (
     pgconductor._private_portable_uuidv7(),
-    invoke.task_key,
-    invoke.queue,
-    invoke.payload,
-    coalesce(invoke.run_at, pgconductor._private_current_time()),
-    invoke.dedupe_key,
-    invoke.cron_expression,
-    coalesce(invoke.priority, 0)
-  ) returning e.id;
+    p_task_key,
+    p_queue,
+    p_payload,
+    v_run_at,
+    p_dedupe_key,
+    p_cron_expression,
+    coalesce(p_priority, 0)
+  )
+  on conflict (task_key, dedupe_key, queue) do update set
+    payload = excluded.payload,
+    run_at = excluded.run_at,
+    priority = excluded.priority,
+    cron_expression = excluded.cron_expression
+  returning e.id;
 end;
 $function$
 ;
