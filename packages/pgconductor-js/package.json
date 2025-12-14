@@ -1,0 +1,31 @@
+{
+	"name": "pgconductor-js",
+	"version": "0.1.0",
+	"module": "src/index.ts",
+	"type": "module",
+	"bin": {
+		"pgconductor": "./dist/cli/index.js"
+	},
+	"scripts": {
+		"build": "bun build cli/index.ts --outdir dist/cli --target node",
+		"test": "bun test",
+		"test:unit": "bun test tests/unit",
+		"test:integration": "bun test tests/integration",
+		"typecheck": "tsc --noEmit"
+	},
+	"devDependencies": {
+		"@testcontainers/postgresql": "catalog:",
+		"@types/bun": "catalog:",
+		"expect-type": "catalog:",
+		"zod": "catalog:",
+	},
+	"peerDependencies": {
+		"typescript": "catalog:"
+	},
+	"dependencies": {
+		"@standard-schema/spec": "catalog:",
+		"cron-parser": "catalog:",
+		"postgres": "catalog:",
+		"prettier": "catalog:"
+	}
+}

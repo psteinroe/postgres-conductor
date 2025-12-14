@@ -5,14 +5,25 @@ alias f := format
 alias l := lint
 alias lf := lint-fix
 alias r := ready
+alias t := test
 
-mod demo "pgconductor-js/demo/demo.just"
+mod demo "packages/pgconductor-js/demo/demo.just"
 
 build-migrations:
     sh ./scripts/build-migrations.sh
 
 lint:
     bun run oxlint --type-aware --deny-warnings
+    (cd packages/pgconductor-js && bun run typecheck)
+
+test:
+    (cd packages/pgconductor-js && bun run test)
+
+test-unit:
+    (cd packages/pgconductor-js && bun run test:unit)
+
+test-integration:
+    (cd packages/pgconductor-js && bun run test:integration)
 
 lint-fix:
     bun run oxlint --type-aware --fix --deny-warnings

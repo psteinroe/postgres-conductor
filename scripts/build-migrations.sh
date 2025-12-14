@@ -5,7 +5,7 @@ set -euo pipefail
 # Get the directory where this script is located
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SQL_DIR="$SCRIPT_DIR/../migrations"
-JS_DIR="$SCRIPT_DIR/../pgconductor-js"
+JS_DIR="$SCRIPT_DIR/../packages/pgconductor-js"
 OUTPUT_FILE="$JS_DIR/src/generated/sql.ts"
 VERSIONS_FILE="$JS_DIR/src/versions.ts"
 PACKAGE_JSON="$JS_DIR/package.json"

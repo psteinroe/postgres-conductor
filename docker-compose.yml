@@ -16,18 +16,3 @@ services:
       timeout: 5s
       retries: 5
 
-  event-router:
-    build:
-      context: .
-      dockerfile: event-router/Dockerfile
-    environment:
-      RUST_LOG: info
-      PGHOST: postgres
-      PGPORT: "5432"
-      PGDATABASE: postgres
-      PGUSER: postgres
-      PGPASSWORD: postgres
-    depends_on:
-      postgres:
-        condition: service_healthy
-    restart: unless-stopped
