@@ -16,10 +16,6 @@ export class MockDatabaseClient implements IDatabaseClient {
 	applyMigration = mock(async () => "applied" as const);
 	countActiveOrchestratorsBelow = mock(async () => 0);
 	orchestratorShutdown = mock(async () => {});
-	listEventPartitions = mock(async () => []);
-	createEventPartition = mock(async () => {});
-	dropEventPartition = mock(async () => {});
-	cleanupTriggers = mock(async () => {});
 	getExecutions = mock(async () => []);
 	returnExecutions = mock(async (_results) => {});
 	removeExecutions = mock(async () => false);

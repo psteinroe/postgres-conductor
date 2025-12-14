@@ -90,8 +90,8 @@ function groupResults(results: ExecutionResult[]): GroupedExecutionResults {
 		failed: [],
 		released: [],
 		invokeChild: [],
-		waitForCustomEvent: [],
-		waitForDbEvent: [],
+		// waitForCustomEvent: [],
+		// waitForDbEvent: [],
 		taskKeys: new Set<string>(),
 	};
 

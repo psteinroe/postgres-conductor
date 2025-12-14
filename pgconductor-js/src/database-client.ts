@@ -16,7 +16,7 @@ import {
 	type LoadStepArgs,
 	type SaveStepArgs,
 	type ClearWaitingStateArgs,
-	type EmitEventArgs,
+	// type EmitEventArgs,
 } from "./query-builder";
 import { makeChildLogger, type Logger } from "./lib/logger";
 
@@ -69,9 +69,9 @@ export type ExecutionResult =
 	| ExecutionFailed
 	| ExecutionReleased
 	| ExecutionPermamentlyFailed
-	| ExecutionInvokeChild
-	| ExecutionWaitForCustomEvent
-	| ExecutionWaitForDatabaseEvent;
+	| ExecutionInvokeChild;
+// | ExecutionWaitForCustomEvent
+// | ExecutionWaitForDatabaseEvent;
 
 export type GroupedExecutionResults = {
 	count: number;
@@ -79,8 +79,8 @@ export type GroupedExecutionResults = {
 	failed: (ExecutionFailed | ExecutionPermamentlyFailed)[];
 	released: ExecutionReleased[];
 	invokeChild: ExecutionInvokeChild[];
-	waitForCustomEvent: ExecutionWaitForCustomEvent[];
-	waitForDbEvent: ExecutionWaitForDatabaseEvent[];
+	// waitForCustomEvent: ExecutionWaitForCustomEvent[];
+	// waitForDbEvent: ExecutionWaitForDatabaseEvent[];
 	taskKeys: Set<string>;
 };
 
@@ -134,41 +134,41 @@ export interface ExecutionInvokeChild {
 	slot_group_number?: number | null;
 }
 
-export interface ExecutionWaitForDatabaseEvent {
-	execution_id: string;
-	queue: string;
-	task_key: string;
-	status: "wait_for_db_event";
-	timeout_ms: number | "infinity";
-	step_key: string;
-	schema_name: string;
-	table_name: string;
-	operation: "insert" | "update" | "delete";
-	columns: string[] | undefined;
-	slot_group_number?: number | null;
-}
+// export interface ExecutionWaitForDatabaseEvent {
+// 	execution_id: string;
+// 	queue: string;
+// 	task_key: string;
+// 	status: "wait_for_db_event";
+// 	timeout_ms: number | "infinity";
+// 	step_key: string;
+// 	schema_name: string;
+// 	table_name: string;
+// 	operation: "insert" | "update" | "delete";
+// 	columns: string[] | undefined;
+// 	slot_group_number?: number | null;
+// }
 
-export interface ExecutionWaitForCustomEvent {
-	execution_id: string;
-	queue: string;
-	task_key: string;
-	status: "wait_for_custom_event";
-	timeout_ms: number | "infinity";
-	step_key: string;
-	event_key: string;
-	slot_group_number?: number | null;
-}
+// export interface ExecutionWaitForCustomEvent {
+// 	execution_id: string;
+// 	queue: string;
+// 	task_key: string;
+// 	status: "wait_for_custom_event";
+// 	timeout_ms: number | "infinity";
+// 	step_key: string;
+// 	event_key: string;
+// 	slot_group_number?: number | null;
+// }
 
-export interface EventSubscriptionSpec {
-	task_key: string;
-	queue: string;
-	source: "event" | "db";
-	event_key?: string;
-	schema_name?: string;
-	table_name?: string;
-	operation?: string;
-	columns?: string[];
-}
+// export interface EventSubscriptionSpec {
+// 	task_key: string;
+// 	queue: string;
+// 	source: "event" | "db";
+// 	event_key?: string;
+// 	schema_name?: string;
+// 	table_name?: string;
+// 	operation?: string;
+// 	columns?: string[];
+// }
 
 const RETRYABLE_SQLSTATE_CODES = new Set([
 	"40001", // serialization_failure
@@ -455,37 +455,6 @@ export class DatabaseClient {
 		});
 	}
 
-	async listEventPartitions(opts?: QueryMethodOptions): Promise<{ table_name: string }[]> {
-		return this.query(() => this.builder.buildListEventsPartitions(), {
-			label: "listEventPartitions",
-			...opts,
-		});
-	}
-
-	async createEventPartition(date: Date, opts?: QueryMethodOptions): Promise<void> {
-		await this.query(() => this.builder.buildCreateEventPartition(date), {
-			label: "createEventPartition",
-			...opts,
-		});
-	}
-
-	async dropEventPartition(
-		partition: { table_name: string },
-		opts?: QueryMethodOptions,
-	): Promise<void> {
-		await this.query(() => this.builder.buildDropEventPartition(partition), {
-			label: "dropEventPartition",
-			...opts,
-		});
-	}
-
-	async cleanupTriggers(opts?: QueryMethodOptions): Promise<void> {
-		await this.query(() => this.builder.buildCleanupTriggers(), {
-			label: "getExecutions",
-			...opts,
-		});
-	}
-
 	async getExecutions(args: GetExecutionsArgs, opts?: QueryMethodOptions): Promise<Execution[]> {
 		return this.query(() => this.builder.buildGetExecutions(args), {
 			label: "getExecutions",
@@ -612,24 +581,24 @@ export class DatabaseClient {
 		});
 	}
 
-	/**
-	 * Emit a custom event.
-	 * Returns the event id.
-	 */
-	async emitEvent(
-		{ eventKey, payload }: EmitEventArgs,
-		opts?: QueryMethodOptions,
-	): Promise<string> {
-		const result = await this.query(
-			(sql) =>
-				sql`
-				select pgconductor.emit_event(
-					${eventKey},
-					${sql.json(payload || null)}
-				) as id
-			`,
-			{ label: "emitEvent", ...opts },
-		);
-		return result[0]!.id;
-	}
+	// /**
+	//  * Emit a custom event.
+	//  * Returns the event id.
+	//  */
+	// async emitEvent(
+	// 	{ eventKey, payload }: EmitEventArgs,
+	// 	opts?: QueryMethodOptions,
+	// ): Promise<string> {
+	// 	const result = await this.query(
+	// 		(sql) =>
+	// 			sql`
+	// 			select pgconductor.emit_event(
+	// 				${eventKey},
+	// 				${sql.json(payload || null)}
+	// 			) as id
+	// 		`,
+	// 		{ label: "emitEvent", ...opts },
+	// 	);
+	// 	return result[0]!.id;
+	// }
 }

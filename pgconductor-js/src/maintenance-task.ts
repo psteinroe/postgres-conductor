@@ -10,19 +10,9 @@ function hashToJitter(str: string): number {
 	return int % 61; // → 0–60 minutes after midnight
 }
 
-function createPartitionName(date: Date): string {
-	const year = date.getUTCFullYear();
-	const month = String(date.getUTCMonth() + 1).padStart(2, "0");
-	const day = String(date.getUTCDate()).padStart(2, "0");
-	return `_private_events_${year}${month}${day}`;
-}
-
 // we could make this configurable later
 // should be lower for very high steps per task
 const BATCH_SIZE = 1000;
-
-const PARTITION_RETENTION_DAYS = 7;
-const PARTITION_AHEAD_DAYS = 3;
 
 export const createMaintenanceTask = <Queue extends string = "default">(queue: Queue) => {
 	// Add consistent jitter based on queue name to spread load between midnight and 1am
@@ -66,38 +56,6 @@ export const createMaintenanceTask = <Queue extends string = "default">(queue: Q
 					},
 					{ signal },
 				);
-			}
-
-			// If we are running within the default queue, also
-			// - remove unused triggers
-			// - pre-create events partitions
-			// - remove old event partitions
-			if (queue === "default") {
-				await db.cleanupTriggers({ signal });
-
-				const partitions = await db.listEventPartitions({ signal });
-				const now = new Date();
-				for (let dayOffset = 0; dayOffset <= PARTITION_AHEAD_DAYS; dayOffset++) {
-					const partitionDate = new Date(now);
-					partitionDate.setUTCDate(now.getUTCDate() + dayOffset);
-					const partitionName = createPartitionName(partitionDate);
-
-					if (!partitions.some((p) => p.table_name === partitionName)) {
-						await db.createEventPartition(partitionDate, {
-							signal,
-						});
-					}
-				}
-
-				const cutoffDate = new Date();
-				cutoffDate.setUTCDate(cutoffDate.getUTCDate() - PARTITION_RETENTION_DAYS);
-				const cutoffPartitionName = createPartitionName(cutoffDate);
-
-				for (const partitionName of partitions) {
-					if (partitionName.table_name < cutoffPartitionName) {
-						await db.dropEventPartition(partitionName, { signal });
-					}
-				}
 			}
 		},
 	);

@@ -6,7 +6,7 @@ import type {
 	TaskSpec,
 	Payload,
 	SetFakeTimeArgs,
-	EventSubscriptionSpec,
+	// EventSubscriptionSpec,
 } from "../../src/database-client";
 import { DatabaseClient as RealDatabaseClient } from "../../src/database-client";
 import type {
@@ -252,30 +252,6 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 	}
 
 	// ============================================================================
-	// Event Partitions
-	// ============================================================================
-
-	async listEventPartitions(_opts?: { signal?: AbortSignal }): Promise<{ table_name: string }[]> {
-		return Array.from(this.eventPartitions).map((table_name) => ({ table_name }));
-	}
-
-	async createEventPartition(date: Date, _opts?: { signal?: AbortSignal }): Promise<void> {
-		const tableName = `events_${date.getFullYear()}_${String(date.getMonth() + 1).padStart(2, "0")}`;
-		this.eventPartitions.add(tableName);
-	}
-
-	async dropEventPartition(
-		partition: { table_name: string },
-		_opts?: { signal?: AbortSignal },
-	): Promise<void> {
-		this.eventPartitions.delete(partition.table_name);
-	}
-
-	async cleanupTriggers(_opts?: { signal?: AbortSignal }): Promise<void> {
-		// No-op for in-memory client
-	}
-
-	// ============================================================================
 	// Worker Registration
 	// ============================================================================
 
@@ -402,8 +378,8 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 					...resultsOrGrouped.failed,
 					...resultsOrGrouped.released,
 					...resultsOrGrouped.invokeChild,
-					...resultsOrGrouped.waitForCustomEvent,
-					...resultsOrGrouped.waitForDbEvent,
+					// ...resultsOrGrouped.waitForCustomEvent,
+					// ...resultsOrGrouped.waitForDbEvent,
 				];
 		const now = this.getCurrentTime();
 
@@ -549,50 +525,50 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 					break;
 				}
 
-				case "wait_for_custom_event": {
-					// Create subscription
-					const subscriptionId = this.generateId();
-					this.eventSubscriptions.set(subscriptionId, {
-						id: subscriptionId,
-						execution_id: exec.id,
-						step_key: result.step_key,
-						source: "event",
-						event_key: result.event_key,
-						timeout_at:
-							result.timeout_ms === "infinity"
-								? new Date(8640000000000000)
-								: new Date(now.getTime() + result.timeout_ms),
-					});
+				// case "wait_for_custom_event": {
+				// 	// Create subscription
+				// 	const subscriptionId = this.generateId();
+				// 	this.eventSubscriptions.set(subscriptionId, {
+				// 		id: subscriptionId,
+				// 		execution_id: exec.id,
+				// 		step_key: result.step_key,
+				// 		source: "event",
+				// 		event_key: result.event_key,
+				// 		timeout_at:
+				// 			result.timeout_ms === "infinity"
+				// 				? new Date(8640000000000000)
+				// 				: new Date(now.getTime() + result.timeout_ms),
+				// 	});
 
-					exec.state = "pending";
-					exec.run_at = new Date(8640000000000000); // Wait indefinitely
-					exec.orchestrator_id = null;
-					break;
-				}
+				// 	exec.state = "pending";
+				// 	exec.run_at = new Date(8640000000000000); // Wait indefinitely
+				// 	exec.orchestrator_id = null;
+				// 	break;
+				// }
 
-				case "wait_for_db_event": {
-					// Create subscription
-					const subscriptionId = this.generateId();
-					this.eventSubscriptions.set(subscriptionId, {
-						id: subscriptionId,
-						execution_id: exec.id,
-						step_key: result.step_key,
-						source: "db",
-						schema_name: result.schema_name,
-						table_name: result.table_name,
-						operation: result.operation,
-						columns: result.columns,
-						timeout_at:
-							result.timeout_ms === "infinity"
-								? new Date(8640000000000000)
-								: new Date(now.getTime() + result.timeout_ms),
-					});
+				// case "wait_for_db_event": {
+				// 	// Create subscription
+				// 	const subscriptionId = this.generateId();
+				// 	this.eventSubscriptions.set(subscriptionId, {
+				// 		id: subscriptionId,
+				// 		execution_id: exec.id,
+				// 		step_key: result.step_key,
+				// 		source: "db",
+				// 		schema_name: result.schema_name,
+				// 		table_name: result.table_name,
+				// 		operation: result.operation,
+				// 		columns: result.columns,
+				// 		timeout_at:
+				// 			result.timeout_ms === "infinity"
+				// 				? new Date(8640000000000000)
+				// 				: new Date(now.getTime() + result.timeout_ms),
+				// 	});
 
-					exec.state = "pending";
-					exec.run_at = new Date(8640000000000000); // Wait indefinitely
-					exec.orchestrator_id = null;
-					break;
-				}
+				// 	exec.state = "pending";
+				// 	exec.run_at = new Date(8640000000000000); // Wait indefinitely
+				// 	exec.orchestrator_id = null;
+				// 	break;
+				// }
 			}
 
 			exec.updated_at = now;
@@ -895,7 +871,9 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 		const dedupeKey = `cron::${args.scheduleName}::${args.taskKey}::${args.queue || "default"}`;
 		for (const exec of this.executions.values()) {
 			if (exec.dedupe_key === dedupeKey && exec.state === "pending") {
-				await this.cancelExecution(exec.id, { reason: "Cron schedule was unscheduled" });
+				await this.cancelExecution(exec.id, {
+					reason: "Cron schedule was unscheduled",
+				});
 			}
 		}
 	}

@@ -34,7 +34,7 @@ export const perfTaskDefinitions = [
 ] as const;
 
 // Task implementations
-export function createNoopTask<C extends Conductor<any, any, any, any, any, any, any>>(
+export function createNoopTask<C extends Conductor<any, any, any>>(
 	conductor: C,
 	concurrency?: number,
 ) {
@@ -48,7 +48,7 @@ export function createNoopTask<C extends Conductor<any, any, any, any, any, any,
 	);
 }
 
-export function createCpuTask<C extends Conductor<any, any, any, any, any, any, any>>(
+export function createCpuTask<C extends Conductor<any, any, any>>(
 	conductor: C,
 	concurrency?: number,
 ) {
@@ -68,7 +68,7 @@ export function createCpuTask<C extends Conductor<any, any, any, any, any, any, 
 	);
 }
 
-export function createIoTask<C extends Conductor<any, any, any, any, any, any, any>>(
+export function createIoTask<C extends Conductor<any, any, any>>(
 	conductor: C,
 	concurrency?: number,
 ) {
@@ -83,7 +83,7 @@ export function createIoTask<C extends Conductor<any, any, any, any, any, any, a
 	);
 }
 
-export function createStepsTask<C extends Conductor<any, any, any, any, any, any, any>>(
+export function createStepsTask<C extends Conductor<any, any, any>>(
 	conductor: C,
 	concurrency?: number,
 ) {
@@ -104,7 +104,7 @@ export function createStepsTask<C extends Conductor<any, any, any, any, any, any
 	);
 }
 
-export function createTaskA<C extends Conductor<any, any, any, any, any, any, any>>(
+export function createTaskA<C extends Conductor<any, any, any>>(
 	conductor: C,
 	concurrency?: number,
 ) {
@@ -118,7 +118,7 @@ export function createTaskA<C extends Conductor<any, any, any, any, any, any, an
 	);
 }
 
-export function createTaskB<C extends Conductor<any, any, any, any, any, any, any>>(
+export function createTaskB<C extends Conductor<any, any, any>>(
 	conductor: C,
 	concurrency?: number,
 ) {
@@ -133,7 +133,7 @@ export function createTaskB<C extends Conductor<any, any, any, any, any, any, an
 }
 
 // Factory function to create task based on type
-export function createTaskByType<C extends Conductor<any, any, any, any, any, any, any>>(
+export function createTaskByType<C extends Conductor<any, any, any>>(
 	conductor: C,
 	type: string,
 	concurrency?: number,

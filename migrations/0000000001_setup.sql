@@ -293,131 +293,6 @@ create trigger manage_queue_partition_trigger
 -- create default queue (trigger will create executions_default partition)
 insert into pgconductor._private_queues (name) values ('default');
 
-create table if not exists pgconductor._private_subscriptions (
-    id uuid primary key default pgconductor._private_portable_uuidv7(),
-    source text not null, -- 'db' or 'event'
-    schema_name text,
-    table_name text,
-    operation text, -- 'insert', 'update', 'delete'
-    event_key text,
-    execution_id uuid, -- null for trigger-based (persistent) subscriptions
-    queue text not null default 'default',
-    step_key text, -- step key to save result to when event arrives; null = persistent
-    task_key text, -- task to invoke for trigger-based subscriptions
-    columns text[] -- columns to select for db events
-);
-
-create index if not exists idx_subscriptions_triggers_lookup
-on pgconductor._private_subscriptions (schema_name, table_name, operation);
-
-create table if not exists pgconductor._private_events (
-    id uuid default pgconductor._private_portable_uuidv7() not null,
-    event_key text not null,
-    schema_name text,
-    table_name text,
-    operation text,
-    source text not null default 'event', -- 'db' or 'event'
-    payload jsonb,
-    created_at timestamptz default pgconductor._private_current_time() not null,
-    primary key (created_at, id)
-) partition by range (created_at);
-
--- pre-insert the first 3 daily partitions
-do $$
-declare
-    d date := current_date;
-    i int := 0;
-begin
-    while i < 3 loop
-        execute format('
-            create table if not exists pgconductor._private_events_%s
-            partition of pgconductor._private_events
-            for values from (%L) to (%L);
-        ',
-            to_char(d + i, 'YYYYMMDD'),
-            (d + i)::timestamptz,
-            (d + i + 1)::timestamptz
-        );
-        i := i + 1;
-    end loop;
-end $$;
-
--- we would need to extract columns the user filters on to filter event payloads already here
-create table if not exists pgconductor._private_triggers (
-    schema_name text not null,
-    table_name text not null,
-    operation text not null, -- 'insert', 'update', 'delete'
-    created_at timestamptz default pgconductor._private_current_time() not null,
-    primary key (schema_name, table_name, operation)
-);
-
-create or replace function pgconductor._private_publish_event ()
-    returns trigger
-    language plpgsql
-    security definer
-    as $$
-begin
-    insert into pgconductor._private_events(
-       event_key,
-       schema_name,
-       table_name,
-       operation,
-       source,
-       payload
-    )
-    values (
-        tg_table_schema || '.' || tg_table_name || '.' || tg_op,
-        tg_table_schema,
-        tg_table_name,
-        tg_op,
-        'db',
-        jsonb_build_object(
-            'tg_op', tg_op,
-            'old', to_jsonb(old),
-            'new', to_jsonb(new)
-        )
-    );
-    return new;
-end
-$$;
-
-create or replace function pgconductor._private_sync_database_trigger() returns "trigger"
-    language "plpgsql" security definer
-    as $_$
-declare
-    v_table_name text := coalesce(new.table_name, old.table_name);
-    v_schema_name text := coalesce(new.schema_name, old.schema_name);
-    v_op text := coalesce(new.operation, old.operation);
-begin
-    if tg_op = 'INSERT' then
-        execute format(
-            $sql$
-                create constraint trigger pgconductor_after_%s
-                after %s on %I.%I
-                deferrable initially deferred
-                for each row
-                execute procedure pgconductor._private_publish_event()
-            $sql$,
-            lower(v_op), lower(v_op), v_schema_name, v_table_name
-        );
-    end if;
-
-    if tg_op = 'DELETE' then
-        execute format(
-            $sql$drop trigger if exists pgconductor_after_%s on %I.%I;$sql$,
-            lower(v_op), v_schema_name, v_table_name
-        );
-    end if;
-
-    return new;
-end
-$_$;
-
-create or replace trigger "sync_database_trigger"
-after insert or delete
-on pgconductor._private_triggers
-for each row execute function pgconductor._private_sync_database_trigger();
-
 -- drop a queue (will trigger partition deletion via trigger)
 create or replace function pgconductor.drop_queue(queue_name text)
  returns void
@@ -451,22 +326,10 @@ create type pgconductor.task_spec as (
     concurrency_limit integer
 );
 
-create type pgconductor.subscription_spec as (
-    task_key text,
-    queue text,
-    source text,
-    event_key text,
-    schema_name text,
-    table_name text,
-    operation text,
-    columns text[]
-);
-
 create or replace function pgconductor._private_register_worker(
     p_queue_name text,
     p_task_specs pgconductor.task_spec[],
-    p_cron_schedules pgconductor.execution_spec[],
-    p_event_subscriptions pgconductor.subscription_spec[] default array[]::pgconductor.subscription_spec[]
+    p_cron_schedules pgconductor.execution_spec[]
 )
 returns void
 language plpgsql
@@ -573,37 +436,6 @@ begin
       from unnest(p_cron_schedules) as spec
       where spec.dedupe_key is not null and spec.dedupe_key like 'scheduled::%'
     );
-
-  -- step 5: delete old trigger-based subscriptions for this queue
-  delete from pgconductor._private_subscriptions
-  where queue = p_queue_name
-    and step_key is null  -- only persistent/trigger subscriptions
-    and task_key is not null;
-
-  -- step 6: insert new trigger-based subscriptions
-  insert into pgconductor._private_subscriptions (
-    task_key, queue, source, event_key, schema_name, table_name, operation, columns
-  )
-  select
-    spec.task_key,
-    spec.queue,
-    spec.source,
-    spec.event_key,
-    spec.schema_name,
-    spec.table_name,
-    spec.operation,
-    spec.columns
-  from unnest(p_event_subscriptions) as spec;
-
- -- step 7: make sure we sync database triggers if required
- insert into pgconductor._private_triggers (schema_name, table_name, operation)
-  select
-    spec.schema_name,
-    spec.table_name,
-    spec.operation
-  from unnest(p_event_subscriptions) as spec
-  where spec.schema_name is not null
-  on conflict (schema_name, table_name, operation) do nothing;
 end;
 $function$;
 
@@ -841,49 +673,6 @@ end;
 $function$
 ;
 
--- invoke a task from an event trigger
--- called by event-router when event arrives for trigger-based (persistent) subscriptions
-create or replace function pgconductor._private_invoke_from_event(
-    p_task_key text,
-    p_queue text,
-    p_event_name text,
-    p_payload jsonb
-)
-returns uuid
-language sql
-volatile
-set search_path to ''
-as $function$
-    insert into pgconductor._private_executions (
-        task_key,
-        queue,
-        payload,
-        run_at
-    )
-    values (
-        p_task_key,
-        p_queue,
-        jsonb_build_object('event', p_event_name, 'payload', p_payload),
-        pgconductor._private_current_time()
-    )
-    returning id;
-$function$;
-
--- emit a custom event
-create or replace function pgconductor.emit_event(
-    p_event_key text,
-    p_payload jsonb default null
-)
-returns uuid
-language sql
-volatile
-set search_path to ''
-as $function$
-    insert into pgconductor._private_events (event_key, payload)
-    values (p_event_key, p_payload)
-    returning id;
-$function$;
-
 -- cancel an execution
 create or replace function pgconductor.cancel_execution(
   p_execution_id uuid,
@@ -961,10 +750,3 @@ begin
 end;
 $function$;
 
--- Create publication for event-router to stream events and subscriptions
-do $$
-begin
-  if not exists (select 1 from pg_publication where pubname = 'pgconductor_events') then
-    create publication pgconductor_events for table pgconductor._private_events, pgconductor._private_subscriptions with (publish_via_partition_root = true);
-  end if;
-end $$;

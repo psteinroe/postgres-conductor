@@ -1,5 +1,0 @@
-newline_style = "Unix"
-edition = "2024"
-tab_spaces = 2
-max_width = 100
-use_small_heuristics = "Max"

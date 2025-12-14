@@ -10,7 +10,7 @@ const sql = postgres(
 const conductor = Conductor.create({
 	sql,
 	tasks: TaskSchemas.fromSchema([eventListenerTask, eventEmitterTask]),
-	events: EventSchemas.fromSchema([userCreatedEvent]),
+	// events: EventSchemas.fromSchema([userCreatedEvent]),
 	context: {},
 });
 

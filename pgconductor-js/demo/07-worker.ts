@@ -11,7 +11,7 @@ const sql = postgres(
 const conductor = Conductor.create({
 	sql,
 	tasks: TaskSchemas.fromSchema([eventListenerTask, eventEmitterTask]),
-	events: EventSchemas.fromSchema([userCreatedEvent]),
+	// events: EventSchemas.fromSchema([userCreatedEvent]),
 	context: {},
 });
 
@@ -23,16 +23,18 @@ const listener = conductor.createTask(
 			ctx.logger.info("Listener: Waiting for user.created event...");
 		});
 
-		const eventData = await ctx.waitForEvent("wait-for-user-created", {
-			event: "user.created",
-			timeout: 60000,
-		});
+		// const eventData = await ctx.waitForEvent("wait-for-user-created", {
+		// 	event: "user.created",
+		// 	timeout: 60000,
+		// });
 
-		ctx.logger.info(
-			`Listener: Received event! User: ${eventData.userId}, Email: ${eventData.email}`,
-		);
+		// ctx.logger.info(
+		// 	`Listener: Received event! User: ${eventData.userId}, Email: ${eventData.email}`,
+		// );
 
-		return { eventData };
+		// return { eventData };
+		ctx.logger.info("Event support is currently commented out");
+		return { eventData: null as any };
 	},
 );
 
@@ -44,15 +46,15 @@ const emitter = conductor.createTask(
 			const { message } = event.payload;
 			ctx.logger.info(`Emitter: Sending message "${message}"`);
 
-			await ctx.emit(
-				{ event: "user.created" },
-				{
-					userId: `user_${Date.now()}`,
-					email: "demo@example.com",
-				},
-			);
+			// await ctx.emit(
+			// 	{ event: "user.created" },
+			// 	{
+			// 		userId: `user_${Date.now()}`,
+			// 		email: "demo@example.com",
+			// 	},
+			// );
 
-			ctx.logger.info("Emitter: Event sent!");
+			ctx.logger.info("Event support is currently commented out");
 		}
 	},
 );

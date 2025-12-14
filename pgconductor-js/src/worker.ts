@@ -1,6 +1,6 @@
 import type {
 	DatabaseClient,
-	EventSubscriptionSpec,
+	// EventSubscriptionSpec,
 	Execution,
 	ExecutionResult,
 	ExecutionSpec,
@@ -9,8 +9,8 @@ import type {
 	ExecutionPermamentlyFailed,
 	ExecutionReleased,
 	ExecutionInvokeChild,
-	ExecutionWaitForCustomEvent,
-	ExecutionWaitForDatabaseEvent,
+	// ExecutionWaitForCustomEvent,
+	// ExecutionWaitForDatabaseEvent,
 } from "./database-client";
 import type { AnyTask, BatchConfig } from "./task";
 import type { TaskDefinition } from "./task-definition";
@@ -30,7 +30,7 @@ import {
 import * as assert from "./lib/assert";
 import { createMaintenanceTask } from "./maintenance-task";
 import { makeChildLogger, type Logger } from "./lib/logger";
-import type { EventDefinition } from "./event-definition";
+// import type { EventDefinition } from "./event-definition";
 import { coerceError } from "./lib/coerce-error";
 import type { TypedAbortController } from "./lib/typed-abort-controller";
 
@@ -58,8 +58,8 @@ class BufferState {
 	failed: (ExecutionFailed | ExecutionPermamentlyFailed)[] = [];
 	released: ExecutionReleased[] = [];
 	invokeChild: ExecutionInvokeChild[] = [];
-	waitForCustomEvent: ExecutionWaitForCustomEvent[] = [];
-	waitForDbEvent: ExecutionWaitForDatabaseEvent[] = [];
+	// waitForCustomEvent: ExecutionWaitForCustomEvent[] = [];
+	// waitForDbEvent: ExecutionWaitForDatabaseEvent[] = [];
 	taskKeys = new Set<string>();
 	count = 0;
 
@@ -81,12 +81,12 @@ class BufferState {
 			case "invoke_child":
 				this.invokeChild.push(result);
 				break;
-			case "wait_for_custom_event":
-				this.waitForCustomEvent.push(result);
-				break;
-			case "wait_for_db_event":
-				this.waitForDbEvent.push(result);
-				break;
+			// case "wait_for_custom_event":
+			// 	this.waitForCustomEvent.push(result);
+			// 	break;
+			// case "wait_for_db_event":
+			// 	this.waitForDbEvent.push(result);
+			// 	break;
 		}
 	}
 
@@ -95,8 +95,8 @@ class BufferState {
 		this.failed = [];
 		this.released = [];
 		this.invokeChild = [];
-		this.waitForCustomEvent = [];
-		this.waitForDbEvent = [];
+		// this.waitForCustomEvent = [];
+		// this.waitForDbEvent = [];
 		this.taskKeys.clear();
 		this.count = 0;
 	}
@@ -106,8 +106,8 @@ class BufferState {
 		this.failed.push(...other.failed);
 		this.released.push(...other.released);
 		this.invokeChild.push(...other.invokeChild);
-		this.waitForCustomEvent.push(...other.waitForCustomEvent);
-		this.waitForDbEvent.push(...other.waitForDbEvent);
+		// this.waitForCustomEvent.push(...other.waitForCustomEvent);
+		// this.waitForDbEvent.push(...other.waitForDbEvent);
 		this.count += other.count;
 		for (const key of other.taskKeys) {
 			this.taskKeys.add(key);
@@ -128,7 +128,7 @@ export class Worker<
 		any,
 		string
 	>[],
-	Events extends readonly EventDefinition<string, any>[] = readonly EventDefinition<string, any>[],
+	// Events extends readonly EventDefinition<string, any>[] = readonly EventDefinition<string, any>[],
 > {
 	private orchestratorId: string | null = null;
 
@@ -338,47 +338,47 @@ export class Worker<
 				}),
 		);
 
-		const eventSubscriptions: EventSubscriptionSpec[] = allTasks.flatMap((task) => {
-			const customEvents = task.triggers
-				.filter((t): t is { event: string } => "event" in t && typeof (t as any).event === "string")
-				.map(
-					(trigger): EventSubscriptionSpec => ({
-						task_key: task.name,
-						queue: this.queueName,
-						source: "event",
-						event_key: trigger.event,
-					}),
-				);
+		// const eventSubscriptions: EventSubscriptionSpec[] = allTasks.flatMap((task) => {
+		// 	const customEvents = task.triggers
+		// 		.filter((t): t is { event: string } => "event" in t && typeof (t as any).event === "string")
+		// 		.map(
+		// 			(trigger): EventSubscriptionSpec => ({
+		// 				task_key: task.name,
+		// 				queue: this.queueName,
+		// 				source: "event",
+		// 				event_key: trigger.event,
+		// 			}),
+		// 		);
 
-			const dbEvents = task.triggers
-				.filter((t) => "schema" in t && "table" in t && "operation" in t)
-				.map((trigger): EventSubscriptionSpec => {
-					const dbTrigger = trigger as {
-						schema: string;
-						table: string;
-						operation: string;
-						columns?: string;
-					};
-					return {
-						task_key: task.name,
-						queue: this.queueName,
-						source: "db",
-						schema_name: dbTrigger.schema,
-						table_name: dbTrigger.table,
-						operation: dbTrigger.operation,
-						columns: dbTrigger.columns?.split(",").map((c: string) => c.trim().toLowerCase()),
-					};
-				});
+		// 	const dbEvents = task.triggers
+		// 		.filter((t) => "schema" in t && "table" in t && "operation" in t)
+		// 		.map((trigger): EventSubscriptionSpec => {
+		// 			const dbTrigger = trigger as {
+		// 				schema: string;
+		// 				table: string;
+		// 				operation: string;
+		// 				columns?: string;
+		// 			};
+		// 			return {
+		// 				task_key: task.name,
+		// 				queue: this.queueName,
+		// 				source: "db",
+		// 				schema_name: dbTrigger.schema,
+		// 				table_name: dbTrigger.table,
+		// 				operation: dbTrigger.operation,
+		// 				columns: dbTrigger.columns?.split(",").map((c: string) => c.trim().toLowerCase()),
+		// 			};
+		// 		});
 
-			return [...customEvents, ...dbEvents];
-		});
+		// 	return [...customEvents, ...dbEvents];
+		// });
 
 		await this.db.registerWorker(
 			{
 				queueName: this.queueName,
 				taskSpecs,
 				cronSchedules,
-				eventSubscriptions,
+				// eventSubscriptions,
 			},
 			{ signal: this.signal },
 		);
@@ -569,7 +569,7 @@ export class Worker<
 			const output = await Promise.race([
 				task.execute(
 					taskEvent,
-					TaskContext.create<Tasks, Events, typeof extraContext>(
+					TaskContext.create<Tasks, typeof extraContext>(
 						{
 							db: this.db,
 							abortController: taskAbortController,
@@ -588,31 +588,31 @@ export class Worker<
 
 			if (isTaskAbortReason(output)) {
 				switch (output.reason) {
-					case "wait-for-custom-event":
-						return {
-							execution_id: exec.id,
-							queue: exec.queue,
-							task_key: exec.task_key,
-							status: "wait_for_custom_event",
-							timeout_ms: output.timeout_ms,
-							step_key: output.step_key,
-							event_key: output.event_key,
-							slot_group_number: exec.slot_group_number,
-						} as const;
-					case "wait-for-database-event":
-						return {
-							execution_id: exec.id,
-							queue: exec.queue,
-							task_key: exec.task_key,
-							status: "wait_for_db_event",
-							timeout_ms: output.timeout_ms,
-							step_key: output.step_key,
-							schema_name: output.schema_name,
-							table_name: output.table_name,
-							operation: output.operation,
-							columns: output.columns,
-							slot_group_number: exec.slot_group_number,
-						} as const;
+					// case "wait-for-custom-event":
+					// 	return {
+					// 		execution_id: exec.id,
+					// 		queue: exec.queue,
+					// 		task_key: exec.task_key,
+					// 		status: "wait_for_custom_event",
+					// 		timeout_ms: output.timeout_ms,
+					// 		step_key: output.step_key,
+					// 		event_key: output.event_key,
+					// 		slot_group_number: exec.slot_group_number,
+					// 	} as const;
+					// case "wait-for-database-event":
+					// 	return {
+					// 		execution_id: exec.id,
+					// 		queue: exec.queue,
+					// 		task_key: exec.task_key,
+					// 		status: "wait_for_db_event",
+					// 		timeout_ms: output.timeout_ms,
+					// 		step_key: output.step_key,
+					// 		schema_name: output.schema_name,
+					// 		table_name: output.table_name,
+					// 		operation: output.operation,
+					// 		columns: output.columns,
+					// 		slot_group_number: exec.slot_group_number,
+					// 	} as const;
 					case "child-invocation":
 						return {
 							execution_id: exec.id,

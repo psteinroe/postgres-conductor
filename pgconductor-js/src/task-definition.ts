@@ -121,24 +121,24 @@ export type InvocableTrigger = { invocable: true };
 export type CronTrigger = { cron: string; name: string };
 
 // Event trigger - triggers when a custom event is emitted
-export type CustomEventTrigger<TName extends string = string> = {
-	event: TName;
-};
+// export type CustomEventTrigger<TName extends string = string> = {
+// 	event: TName;
+// };
 
 // Database event trigger - triggers on CDC events
-export type DatabaseEventTrigger<
-	TSchema extends string = string,
-	TTable extends string = string,
-	TOp extends "insert" | "update" | "delete" = "insert" | "update" | "delete",
-	TColumns extends string | undefined = undefined,
-> = {
-	schema: TSchema;
-	table: TTable;
-	operation: TOp;
-	columns?: TColumns;
-};
+// export type DatabaseEventTrigger<
+// 	TSchema extends string = string,
+// 	TTable extends string = string,
+// 	TOp extends "insert" | "update" | "delete" = "insert" | "update" | "delete",
+// 	TColumns extends string | undefined = undefined,
+// > = {
+// 	schema: TSchema;
+// 	table: TTable;
+// 	operation: TOp;
+// 	columns?: TColumns;
+// };
 
-export type Trigger = InvocableTrigger | CronTrigger | CustomEventTrigger | DatabaseEventTrigger;
+export type Trigger = InvocableTrigger | CronTrigger; // | CustomEventTrigger | DatabaseEventTrigger;
 
 // Check if triggers include invocable
 export type HasInvocable<TTriggers> = TTriggers extends readonly any[]
@@ -159,31 +159,31 @@ export type HasCron<TTriggers> = TTriggers extends readonly any[]
 		: false;
 
 // Check if triggers include custom event
-export type HasCustomEvent<TTriggers> = TTriggers extends readonly any[]
-	? Extract<TTriggers[number], CustomEventTrigger> extends never
-		? false
-		: true
-	: TTriggers extends CustomEventTrigger
-		? true
-		: false;
+// export type HasCustomEvent<TTriggers> = TTriggers extends readonly any[]
+// 	? Extract<TTriggers[number], CustomEventTrigger> extends never
+// 		? false
+// 		: true
+// 	: TTriggers extends CustomEventTrigger
+// 		? true
+// 		: false;
 
 // Check if triggers include database event
-export type HasDatabaseEvent<TTriggers> = TTriggers extends readonly any[]
-	? {
-			schema: string;
-			table: string;
-			operation: "insert" | "update" | "delete";
-		} extends TTriggers[number]
-		? false
-		: Extract<
-					TTriggers[number],
-					{ schema: string; table: string; operation: "insert" | "update" | "delete" }
-			  > extends never
-			? false
-			: true
-	: TTriggers extends { schema: string; table: string; operation: "insert" | "update" | "delete" }
-		? true
-		: false;
+// export type HasDatabaseEvent<TTriggers> = TTriggers extends readonly any[]
+// 	? {
+// 			schema: string;
+// 			table: string;
+// 			operation: "insert" | "update" | "delete";
+// 		} extends TTriggers[number]
+// 		? false
+// 		: Extract<
+// 					TTriggers[number],
+// 					{ schema: string; table: string; operation: "insert" | "update" | "delete" }
+// 			  > extends never
+// 			? false
+// 			: true
+// 	: TTriggers extends { schema: string; table: string; operation: "insert" | "update" | "delete" }
+// 		? true
+// 		: false;
 
 // Non-empty array type
 export type NonEmptyArray<T> = [T, ...T[]];
@@ -197,23 +197,23 @@ type TaskIdentifierIsDefined<
 > = Extract<Tasks[number], { name: TName; queue: TQueue }> extends never ? false : true;
 
 // Extract event names from triggers
-type ExtractEventNames<TTriggers> = TTriggers extends readonly any[]
-	? TTriggers[number] extends { event: infer E extends string }
-		? E
-		: never
-	: TTriggers extends { event: infer E extends string }
-		? E
-		: never;
+// type ExtractEventNames<TTriggers> = TTriggers extends readonly any[]
+// 	? TTriggers[number] extends { event: infer E extends string }
+// 		? E
+// 		: never
+// 	: TTriggers extends { event: infer E extends string }
+// 		? E
+// 		: never;
 
 // Check if all event names in triggers exist in the Events schema
-type AllEventsExist<Events extends readonly { name: string }[], TTriggers> =
-	ExtractEventNames<TTriggers> extends infer EventNames
-		? EventNames extends string
-			? EventNames extends Events[number]["name"]
-				? true
-				: EventNames
-			: true // No event triggers
-		: true;
+// type AllEventsExist<Events extends readonly { name: string }[], TTriggers> =
+// 	ExtractEventNames<TTriggers> extends infer EventNames
+// 		? EventNames extends string
+// 			? EventNames extends Events[number]["name"]
+// 				? true
+// 				: EventNames
+// 			: true // No event triggers
+// 		: true;
 
 // Validate triggers based on whether task is defined
 // Rules:
@@ -223,7 +223,7 @@ type AllEventsExist<Events extends readonly { name: string }[], TTriggers> =
 // - Task in catalog can have any trigger type (invocable, cron, event)
 export type ValidateTriggers<
 	Tasks extends readonly TaskDefinition<string, any, any, string>[],
-	Events extends readonly { name: string }[],
+	// Events extends readonly { name: string }[],
 	TName extends string,
 	TTriggers,
 	TQueue extends string = "default",
@@ -232,21 +232,24 @@ export type ValidateTriggers<
 		TTriggers extends NonEmptyReadonlyArray<Trigger>
 		? HasInvocable<TTriggers> extends true
 			? TaskIdentifierIsDefined<Tasks, TName, TQueue> extends true
-				? AllEventsExist<Events, TTriggers> extends true
-					? TTriggers
-					: `Event "${AllEventsExist<Events, TTriggers> & string}" is not defined in the conductor's events. Add an event definition to the conductor's events array.`
-				: `Task "${TName}" of queue "${TQueue}" is not defined in the conductor catalog. Either remove { invocable: true } from triggers, or add a task definition to the conductor's tasks array.`
-			: AllEventsExist<Events, TTriggers> extends true
 				? TTriggers
-				: `Event "${AllEventsExist<Events, TTriggers> & string}" is not defined in the conductor's events. Add an event definition to the conductor's events array.`
-		: `Triggers array cannot be empty. Provide at least one trigger.`
+				: // ? AllEventsExist<Events, TTriggers> extends true
+					// 	? TTriggers
+					// 	: `Event "${AllEventsExist<Events, TTriggers> & string}" is not defined in the conductor's events. Add an event definition to the conductor's events array.`
+					`Task "${TName}" of queue "${TQueue}" is not defined in the conductor catalog. Either remove { invocable: true } from triggers, or add a task definition to the conductor's tasks array.`
+			: TTriggers
+		: // : AllEventsExist<Events, TTriggers> extends true
+			// 	? TTriggers
+			// 	: `Event "${AllEventsExist<Events, TTriggers> & string}" is not defined in the conductor's events. Add an event definition to the conductor's events array.`
+			`Triggers array cannot be empty. Provide at least one trigger.`
 	: // Single trigger case
 		TTriggers extends InvocableTrigger
 		? TaskIdentifierIsDefined<Tasks, TName, TQueue> extends true
 			? TTriggers
 			: `Task "${TName}" of queue "${TQueue}" is not defined in the conductor catalog. Remove { invocable: true } from triggers, or add a task definition to the conductor's tasks array.`
-		: TTriggers extends CustomEventTrigger<infer TEventName>
-			? TEventName extends Events[number]["name"]
-				? TTriggers
-				: `Event "${TEventName}" is not defined in the conductor's events. Add an event definition to the conductor's events array.`
-			: TTriggers;
+		: TTriggers;
+// : TTriggers extends CustomEventTrigger<infer TEventName>
+// 	? TEventName extends Events[number]["name"]
+// 		? TTriggers
+// 		: `Event "${TEventName}" is not defined in the conductor's events. Add an event definition to the conductor's events array.`
+// 	: TTriggers;

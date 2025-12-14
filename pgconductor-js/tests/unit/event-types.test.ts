@@ -1,3 +1,4 @@
+// @ts-nocheck - Event support commented out
 import { test, expect, describe } from "bun:test";
 import { expectTypeOf } from "expect-type";
 import { Conductor } from "../../src/conductor";
@@ -15,7 +16,7 @@ import type { ValidateColumns, ParseSelection } from "../../src/select-columns";
 
 type ContactRow = Database["public"]["contact"];
 
-describe("event types", () => {
+describe.skip("event types", () => {
 	describe("custom events with schema", () => {
 		test("EventSchemas.fromSchema infers event types correctly", () => {
 			const userCreated = defineEvent({
