@@ -9,6 +9,7 @@ import type {
 } from "./task-definition";
 import type { TaskIdentifier } from "./task";
 import type { Logger } from "./lib/logger";
+import { WindowChecker } from "./lib/window-checker";
 // import type {
 // 	CustomEventConfig,
 // 	DatabaseEventConfig,
@@ -104,6 +105,7 @@ export type TaskContextOptions = {
 	db: DatabaseClient;
 	execution: Execution;
 	logger: Logger;
+	window?: [string, string];
 };
 
 type ScheduleOptions = {
@@ -122,7 +124,13 @@ export class TaskContext<
 	// Events extends readonly EventDefinition<string, any>[] = readonly EventDefinition<string, any>[],
 	// TDatabase extends GenericDatabase = GenericDatabase,
 > {
-	constructor(private readonly opts: TaskContextOptions) {}
+	private readonly windowChecker?: WindowChecker;
+
+	constructor(private readonly opts: TaskContextOptions) {
+		if (opts.window) {
+			this.windowChecker = new WindowChecker(opts.window);
+		}
+	}
 
 	static create<
 		Tasks extends readonly TaskDefinition<string, any, any, string>[],
@@ -142,6 +150,27 @@ export class TaskContext<
 	}
 
 	async step<T extends JsonValue | void>(name: string, fn: () => Promise<T> | T): Promise<T> {
+		// Check abort signal
+		if (this.signal.aborted) {
+			return this.abortAndHangup({
+				reason: "released",
+				reschedule_in_ms: 0,
+			});
+		}
+
+		// Check window boundaries
+		if (this.windowChecker) {
+			const now = await this.getNow();
+			if (!this.windowChecker.isWithinWindow(now)) {
+				const nextRunAt = this.windowChecker.getNextValidRunAt(now);
+				const delay = Math.max(nextRunAt.getTime() - now.getTime(), 0);
+				return this.abortAndHangup({
+					reason: "released",
+					reschedule_in_ms: delay,
+				});
+			}
+		}
+
 		// Check if step already completed
 		const cached = await this.opts.db.loadStep(
 			{
@@ -173,11 +202,25 @@ export class TaskContext<
 	}
 
 	async checkpoint(): Promise<void> {
+		// Check abort signal
 		if (this.signal.aborted) {
 			return this.abortAndHangup({
 				reason: "released",
 				reschedule_in_ms: 0,
 			});
+		}
+
+		// Check window boundaries
+		if (this.windowChecker) {
+			const now = await this.getNow();
+			if (!this.windowChecker.isWithinWindow(now)) {
+				const nextRunAt = this.windowChecker.getNextValidRunAt(now);
+				const delay = Math.max(nextRunAt.getTime() - now.getTime(), 0);
+				return this.abortAndHangup({
+					reason: "released",
+					reschedule_in_ms: delay,
+				});
+			}
 		}
 	}
 
@@ -430,7 +473,21 @@ export class TaskContext<
 	 * @returns true if the execution was cancelled, false if it was already completed/failed
 	 */
 	async cancel(executionId: string, options?: { reason?: string }): Promise<boolean> {
-		return this.opts.db.cancelExecution(executionId, { ...options, signal: this.signal });
+		return this.opts.db.cancelExecution(executionId, {
+			...options,
+			signal: this.signal,
+		});
+	}
+
+	/**
+	 * Get current time. In tests, use database time (respects fake_now).
+	 * In production, use system time for performance.
+	 */
+	private async getNow(): Promise<Date> {
+		if (process.env.NODE_ENV === "test") {
+			return this.opts.db.getCurrentTime({ signal: this.signal });
+		}
+		return new Date();
 	}
 
 	/**

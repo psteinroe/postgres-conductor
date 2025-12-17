@@ -117,7 +117,7 @@ describe("InMemoryDatabaseClient", () => {
 				filterTaskKeys: [],
 			});
 
-			const startTime = db.getCurrentTime();
+			const startTime = db.getCurrentTimeSync();
 
 			await db.returnExecutions([
 				{
@@ -608,7 +608,7 @@ describe("InMemoryDatabaseClient", () => {
 			const parent = db.getExecution(parentId!);
 			expect(parent?.state).toBe("pending");
 			expect(parent?.waiting_on_execution_id).toBeNull();
-			expect(parent?.run_at.getTime()).toBeLessThanOrEqual(db.getCurrentTime().getTime());
+			expect(parent?.run_at.getTime()).toBeLessThanOrEqual(db.getCurrentTimeSync().getTime());
 		});
 
 		test("child failure fails parent (cascade)", async () => {
@@ -723,11 +723,11 @@ describe("InMemoryDatabaseClient", () => {
 		test("advanceTime moves current time forward", () => {
 			const db = new InMemoryDatabaseClient(new Date("2024-01-01T00:00:00Z"));
 
-			expect(db.getCurrentTime().toISOString()).toBe("2024-01-01T00:00:00.000Z");
+			expect(db.getCurrentTimeSync().toISOString()).toBe("2024-01-01T00:00:00.000Z");
 
 			db.advanceTime(5000);
 
-			expect(db.getCurrentTime().toISOString()).toBe("2024-01-01T00:00:05.000Z");
+			expect(db.getCurrentTimeSync().toISOString()).toBe("2024-01-01T00:00:05.000Z");
 		});
 
 		test("executions not ready until run_at reached", async () => {

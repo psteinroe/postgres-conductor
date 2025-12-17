@@ -34,6 +34,9 @@ import { makeChildLogger, type Logger } from "./lib/logger";
 import { coerceError } from "./lib/coerce-error";
 import type { TypedAbortController } from "./lib/typed-abort-controller";
 
+/**
+ * The configuration options for the Worker.
+ */
 export type WorkerConfig = {
 	concurrency: number;
 	flushBatchSize: number;
@@ -42,6 +45,9 @@ export type WorkerConfig = {
 	flushIntervalMs: number;
 };
 
+/**
+ * The default configuration for the Worker.
+ */
 export const DEFAULT_WORKER_CONFIG: WorkerConfig = {
 	concurrency: 1,
 	flushBatchSize: 2,
@@ -525,6 +531,12 @@ export class Worker<
 		}
 	}
 
+	/**
+	 * Execute a single task execution.
+	 *
+	 * @param task - The task to execute
+	 * @param exec - The execution details
+	 */
 	private async executeSingleTask(task: AnyTask, exec: Execution): Promise<ExecutionResult> {
 		const taskAbortController = createTaskSignal(this.signal);
 		this._runningTasks.set(exec.id, taskAbortController);
@@ -579,6 +591,7 @@ export class Worker<
 								task_key: exec.task_key,
 								queue: exec.queue,
 							}),
+							window: task.window,
 						},
 						extraContext,
 					),
@@ -674,6 +687,13 @@ export class Worker<
 		}
 	}
 
+	/**
+	 * Execute a batch task with multiple executions.
+	 *
+	 * @param task - The task to execute
+	 * @param taskKey - The task key
+	 * @param executions - The list of executions in this batch
+	 */
 	private async executeBatchTask(
 		task: AnyTask,
 		taskKey: string,
@@ -829,7 +849,6 @@ export class Worker<
 	}
 
 	// --- Stage 3: Flush results to database ---
-
 	private async flushResults(source: AsyncIterable<ExecutionResult>): Promise<void> {
 		let buffer = new BufferState();
 		let flushTimer: Timer | null = null;

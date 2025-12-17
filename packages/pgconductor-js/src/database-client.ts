@@ -342,6 +342,21 @@ export class DatabaseClient {
 		return result[0]?.cancel_execution || false;
 	}
 
+	async getCurrentTime(options?: QueryMethodOptions): Promise<Date> {
+		const result = await this.query(
+			(sql) =>
+				sql<{ now: Date }[]>`
+				select pgconductor._private_current_time() as now
+			`,
+			{ label: "getCurrentTime", ...options },
+		);
+		const row = result[0];
+		if (!row) {
+			throw new Error("getCurrentTime returned no rows");
+		}
+		return row.now;
+	}
+
 	async recoverStaleOrchestrators(
 		args: RecoverStaleOrchestratorsArgs,
 		opts?: QueryMethodOptions,

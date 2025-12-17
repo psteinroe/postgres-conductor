@@ -148,8 +148,19 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 		this.currentTime = new Date(this.currentTime.getTime() + ms);
 	}
 
-	getCurrentTime(): Date {
+	// Internal synchronous method for time management
+	private getInternalTime(): Date {
 		return new Date(this.currentTime);
+	}
+
+	// Public synchronous method for test assertions
+	getCurrentTimeSync(): Date {
+		return this.getInternalTime();
+	}
+
+	// Async method matching DatabaseClient interface
+	async getCurrentTime(): Promise<Date> {
+		return this.getInternalTime();
 	}
 
 	// ============================================================================
@@ -174,7 +185,7 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 			id: args.orchestratorId,
 			version: args.version,
 			migration_number: args.migrationNumber,
-			last_heartbeat: this.getCurrentTime(),
+			last_heartbeat: this.getInternalTime(),
 		};
 		this.orchestrators.set(args.orchestratorId, orchestrator);
 		return [];
@@ -184,7 +195,7 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 		_args: RecoverStaleOrchestratorsArgs,
 		_opts?: { signal?: AbortSignal },
 	): Promise<void> {
-		const staleThreshold = new Date(this.getCurrentTime().getTime() - 30000);
+		const staleThreshold = new Date(this.getInternalTime().getTime() - 30000);
 
 		for (const orchestrator of this.orchestrators.values()) {
 			if (orchestrator.last_heartbeat < staleThreshold) {
@@ -203,7 +214,7 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 		_args: SweepOrchestratorsArgs,
 		_opts?: { signal?: AbortSignal },
 	): Promise<void> {
-		const staleThreshold = new Date(this.getCurrentTime().getTime() - 60000);
+		const staleThreshold = new Date(this.getInternalTime().getTime() - 60000);
 
 		for (const [id, orchestrator] of this.orchestrators.entries()) {
 			if (orchestrator.last_heartbeat < staleThreshold) {
@@ -295,7 +306,7 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 		_opts?: { signal?: AbortSignal },
 	): Promise<Execution[]> {
 		const results: Execution[] = [];
-		const now = this.getCurrentTime();
+		const now = this.getInternalTime();
 		const taskKeysWithConcurrency = new Set(args.taskKeysWithConcurrency || []);
 		const filterTaskKeys = new Set(args.filterTaskKeys || []);
 		const concurrencyCount = new Map<string, number>();
@@ -381,7 +392,7 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 					// ...resultsOrGrouped.waitForCustomEvent,
 					// ...resultsOrGrouped.waitForDbEvent,
 				];
-		const now = this.getCurrentTime();
+		const now = this.getInternalTime();
 
 		for (const result of results) {
 			const exec = this.executions.get(result.execution_id);
@@ -585,7 +596,7 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 	}
 
 	async invoke(spec: ExecutionSpec, _opts?: { signal?: AbortSignal }): Promise<string | null> {
-		const now = this.getCurrentTime();
+		const now = this.getInternalTime();
 
 		// Validation
 		if (spec.throttle && spec.debounce) {
@@ -607,7 +618,7 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 
 		if (dedupeSeconds) {
 			// Calculate time slot (pg-boss formula)
-			const epochSeconds = Math.floor(this.getCurrentTime().getTime() / 1000);
+			const epochSeconds = Math.floor(this.getInternalTime().getTime() / 1000);
 			const slotNumber = Math.floor(epochSeconds / dedupeSeconds);
 			singletonOn = new Date(slotNumber * dedupeSeconds * 1000);
 		}
@@ -744,7 +755,7 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 			}
 		}
 
-		const now = this.getCurrentTime();
+		const now = this.getInternalTime();
 		const ids: string[] = [];
 
 		// Process each spec with batch semantics (ON CONFLICT DO UPDATE)
@@ -910,12 +921,12 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 	private calculateNextCronRun(cronExpression: string): Date {
 		try {
 			const interval = CronExpressionParser.parse(cronExpression, {
-				currentDate: this.getCurrentTime(),
+				currentDate: this.getInternalTime(),
 			});
 			return interval.next().toDate();
 		} catch {
 			// If parsing fails, default to 1 minute from now
-			return new Date(this.getCurrentTime().getTime() + 60000);
+			return new Date(this.getInternalTime().getTime() + 60000);
 		}
 	}
 
@@ -942,7 +953,7 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 			execution_id: args.executionId,
 			step_key: args.key,
 			result: args.result || {},
-			created_at: this.getCurrentTime(),
+			created_at: this.getInternalTime(),
 		});
 	}
 
@@ -964,7 +975,7 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 	//
 	// async emitEvent(args: { eventKey: string; payload: unknown }, _opts?: { signal?: AbortSignal }): Promise<string> {
 	// 	const eventId = this.generateId();
-	// 	const now = this.getCurrentTime();
+	// 	const now = this.getInternalTime();
 	//
 	// 	// Find subscriptions waiting for this event
 	// 	for (const [subId, sub] of this.eventSubscriptions.entries()) {
