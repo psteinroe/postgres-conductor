@@ -51,7 +51,7 @@ jobs:
 
       - name: Publish to NPM
         working-directory: packages/pgconductor-js
-        run: bun publish --tag latest --access public --provenance
+        run: bun publish
         env:
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
 

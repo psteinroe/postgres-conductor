@@ -2,9 +2,6 @@
 	"name": "pgconductor",
 	"type": "module",
 	"workspaces": ["packages/pgconductor-js"],
-	"scripts": {
-		"perf": "bun packages/pgconductor-js/perf/run.ts"
-	},
 	"catalog": {
 		"postgres": "3.4.7",
 		"prettier": "3.4.2",

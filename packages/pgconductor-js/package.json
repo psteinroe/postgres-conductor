@@ -26,12 +26,18 @@
 	],
 	"author": "psteinroe",
 	"license": "MIT",
+	"publishConfig": {
+		"access": "public",
+		"tag": "latest",
+		"provenance": true
+	},
 	"scripts": {
 		"build": "bun build src/index.ts --outdir dist --target node && bun build cli/index.ts --outdir dist/cli --target node",
 		"test": "bun test",
 		"test:unit": "bun test tests/unit",
 		"test:integration": "bun test tests/integration",
-		"typecheck": "tsc --noEmit"
+		"typecheck": "tsc --noEmit",
+		"perf": "bun perf/run.ts"
 	},
 	"devDependencies": {
 		"@testcontainers/postgresql": "catalog:",
