@@ -2,7 +2,10 @@
   <img src="docs/images/logo.png" alt="Postgres Conductor" width="300">
 
   # Postgres Conductor
-  A durable execution engine using only Postgres</div>
+  Durable execution using only Postgres
+
+  [Documentation](https://github.com/psteinroe/pgconductor)
+</div>
 
 ## Installation
 
