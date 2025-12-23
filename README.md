@@ -78,7 +78,7 @@ const orchestrator = Orchestrator.create({
 });
 
 await orchestrator.start();
-console.log(" Worker running. Press Ctrl+C to stop.");
+console.log("Worker running. Press Ctrl+C to stop.");
 await orchestrator.stopped;
 ```
 
