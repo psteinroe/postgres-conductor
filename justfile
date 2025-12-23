@@ -36,4 +36,12 @@ ready:
 docs:
     uv run zensical serve
 
+clear-branches:
+    git branch --merged | egrep -v "(^\\*|main)" | xargs git branch -d
+
+reset-git:
+    git checkout main
+    git pull
+    just clear-branches
+
 
