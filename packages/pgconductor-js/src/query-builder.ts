@@ -4,7 +4,7 @@ import * as assert from "./lib/assert";
 import type {
 	Execution,
 	ExecutionSpec,
-	// EventSubscriptionSpec,
+	EventSubscriptionSpec,
 	Payload,
 	TaskSpec,
 	JsonValue,
@@ -49,7 +49,7 @@ export type RegisterWorkerArgs = {
 	queueName: string;
 	taskSpecs: TaskSpec[];
 	cronSchedules: ExecutionSpec[];
-	// eventSubscriptions: EventSubscriptionSpec[];
+	eventSubscriptions: EventSubscriptionSpec[];
 };
 
 export type ScheduleCronExecutionArgs = {
@@ -80,10 +80,10 @@ export type ClearWaitingStateArgs = {
 	executionId: string;
 };
 
-// export type EmitEventArgs = {
-// 	eventKey: string;
-// 	payload?: JsonValue;
-// };
+export type EmitEventArgs = {
+	eventKey: string;
+	payload?: JsonValue;
+};
 
 export class QueryBuilder {
 	constructor(private readonly sql: Sql) {}
@@ -471,8 +471,6 @@ export class QueryBuilder {
 		const failed = grouped.failed;
 		const released = grouped.released;
 		const invokeChild = grouped.invokeChild;
-		// const waitForCustomEvent = grouped.waitForCustomEvent;
-		// const waitForDbEvent = grouped.waitForDbEvent;
 
 		if (grouped.count === 0) {
 			return null;
@@ -806,120 +804,6 @@ export class QueryBuilder {
 			)`);
 		}
 
-		// if (waitForCustomEvent.length > 0) {
-		// 	ctes.push(this.sql`wait_custom_event_data as (
-		// 		select * from jsonb_to_recordset(${this.sql.json(waitForCustomEvent as unknown as JsonValue)}::jsonb)
-		// 		as x(
-		// 			execution_id uuid,
-		// 			task_key text,
-		// 			queue text,
-		// 			step_key text,
-		// 			timeout_ms text,
-		// 			event_key text
-		// 		)
-		// 	)`);
-
-		// 	// Insert subscriptions
-		// 	ctes.push(this.sql`inserted_custom_event_subscriptions as (
-		// 		insert into pgconductor._private_subscriptions (source, event_key, execution_id, queue, step_key)
-		// 		select
-		// 			'event',
-		// 			wce.event_key,
-		// 			wce.execution_id,
-		// 			wce.queue,
-		// 			wce.step_key
-		// 		from wait_custom_event_data wce
-		// 		returning id
-		// 	)`);
-
-		// 	// Update executions to wait
-		// 	ctes.push(this.sql`updated_wait_custom_event as (
-		// 		update pgconductor._private_executions e
-		// 		set
-		// 			waiting_step_key = wce.step_key,
-		// 			run_at = case
-		// 				when wce.timeout_ms = 'infinity' then 'infinity'::timestamptz
-		// 				else nt.ts + (wce.timeout_ms::bigint || ' milliseconds')::interval
-		// 			end,
-		// 			locked_by = null,
-		// 			locked_at = null
-		// 		from now_ts nt, wait_custom_event_data wce
-		// 		where e.id = wce.execution_id
-		// 	)`);
-		// }
-
-		// if (waitForDbEvent.length > 0) {
-		// 	ctes.push(this.sql`wait_db_event_data as (
-		// 		select * from jsonb_to_recordset(${this.sql.json(waitForDbEvent as unknown as JsonValue)}::jsonb)
-		// 		as x(
-		// 			execution_id uuid,
-		// 			task_key text,
-		// 			queue text,
-		// 			step_key text,
-		// 			timeout_ms text,
-		// 			schema_name text,
-		// 			table_name text,
-		// 			operation text,
-		// 			columns jsonb
-		// 		)
-		// 	)`);
-
-		// 	// Insert subscriptions
-		// 	ctes.push(this.sql`inserted_db_event_subscriptions as (
-		// 		insert into pgconductor._private_subscriptions (
-		// 			source,
-		// 			schema_name,
-		// 			table_name,
-		// 			operation,
-		// 			execution_id,
-		// 			queue,
-		// 			step_key,
-		// 			columns
-		// 		)
-		// 		select
-		// 			'db',
-		// 			wdb.schema_name,
-		// 			wdb.table_name,
-		// 			wdb.operation,
-		// 			wdb.execution_id,
-		// 			wdb.queue,
-		// 			wdb.step_key,
-		// 			case
-		// 				when wdb.columns is not null then
-		// 					array(select jsonb_array_elements_text(wdb.columns))
-		// 				else null
-		// 			end
-		// 		from wait_db_event_data wdb
-		// 		returning id
-		// 	)`);
-
-		// 	// Insert triggers (on conflict do nothing)
-		// 	ctes.push(this.sql`inserted_db_triggers as (
-		// 		insert into pgconductor._private_triggers (schema_name, table_name, operation)
-		// 		select distinct
-		// 			wdb.schema_name,
-		// 			wdb.table_name,
-		// 			wdb.operation
-		// 		from wait_db_event_data wdb
-		// 		on conflict (schema_name, table_name, operation) do nothing
-		// 	)`);
-
-		// 	// Update executions to wait
-		// 	ctes.push(this.sql`updated_wait_db_event as (
-		// 		update pgconductor._private_executions e
-		// 		set
-		// 			waiting_step_key = wdb.step_key,
-		// 			run_at = case
-		// 				when wdb.timeout_ms = 'infinity' then 'infinity'::timestamptz
-		// 				else nt.ts + (wdb.timeout_ms::bigint || ' milliseconds')::interval
-		// 			end,
-		// 			locked_by = null,
-		// 			locked_at = null
-		// 		from now_ts nt, wait_db_event_data wdb
-		// 		where e.id = wdb.execution_id
-		// 	)`);
-		// }
-
 		if (ctes.length <= 1) return null; // Only now_ts
 
 		const combined = ctes.reduce((acc, cte, i) => (i === 0 ? cte : this.sql`${acc}, ${cte}`));
@@ -958,7 +842,7 @@ export class QueryBuilder {
 		queueName,
 		taskSpecs,
 		cronSchedules,
-		// eventSubscriptions,
+		eventSubscriptions,
 	}: RegisterWorkerArgs): PendingQuery<RowList<Row[]>> {
 		const taskSpecRows = taskSpecs.map((spec) => ({
 			key: spec.key,
@@ -985,16 +869,17 @@ export class QueryBuilder {
 			};
 		});
 
-		// const eventSubscriptionRows = eventSubscriptions.map((spec) => ({
-		// 	task_key: spec.task_key,
-		// 	queue: spec.queue,
-		// 	source: spec.source,
-		// 	event_key: spec.event_key || null,
-		// 	schema_name: spec.schema_name || null,
-		// 	table_name: spec.table_name || null,
-		// 	operation: spec.operation || null,
-		// 	columns: spec.columns || null,
-		// }));
+		const eventSubscriptionRows = eventSubscriptions.map((spec) => ({
+			task_key: spec.task_key,
+			queue: spec.queue,
+			event_key: spec.event_key,
+			schema_name: spec.schema_name,
+			table_name: spec.table_name,
+			operation: spec.operation,
+			when_clause: spec.when_clause,
+			payload_fields: spec.payload_fields,
+			column_names: spec.column_names,
+		}));
 
 		return this.sql`
 			select pgconductor._private_register_worker(
@@ -1004,10 +889,10 @@ export class QueryBuilder {
 				),
 				p_cron_schedules := array(
 					select json_populate_recordset(null::pgconductor.execution_spec, ${this.sql.json(cronScheduleRows)}::json)::pgconductor.execution_spec
+				),
+				p_event_subscriptions := array(
+					select json_populate_recordset(null::pgconductor.event_subscription_spec, ${this.sql.json(eventSubscriptionRows)}::json)::pgconductor.event_subscription_spec
 				)
-				-- p_event_subscriptions := array(
-				-- 	select json_populate_recordset(null::pgconductor.subscription_spec, ...eventSubscriptionRows...::json)::pgconductor.subscription_spec
-				-- )
 			)
 		`;
 	}
@@ -1248,6 +1133,15 @@ export class QueryBuilder {
 			from pgconductor._private_orchestrators
 			where migration_number < ${version}::integer
 			  and shutdown_signal = false
+		`;
+	}
+
+	buildEmitEvent({ eventKey, payload }: EmitEventArgs): PendingQuery<{ id: string }[]> {
+		return this.sql<{ id: string }[]>`
+			select pgconductor.emit_event(
+				${eventKey}::text,
+				${this.sql.json(payload || {})}::jsonb
+			) as id
 		`;
 	}
 }

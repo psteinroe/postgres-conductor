@@ -51,7 +51,7 @@ describe("Basic Task Execution", () => {
 			async (event, ctx) => {
 				executionCount++;
 				// This test only uses manual invocation
-				if (event.event === "pgconductor.invoke") {
+				if (event.name === "pgconductor.invoke") {
 					ctx.contextFn(event.payload.name);
 				}
 			},

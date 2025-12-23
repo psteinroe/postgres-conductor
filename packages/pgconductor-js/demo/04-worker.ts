@@ -23,9 +23,9 @@ const dailyReport = conductor.createTask(
 		executionCount++;
 		const timestamp = new Date().toISOString();
 
-		if (event.event === "every-3-seconds") {
+		if (event.name === "every-3-seconds") {
 			ctx.logger.info(`[${executionCount}] Cron: Generating report at ${timestamp}`);
-		} else if (event.event === "pgconductor.invoke") {
+		} else if (event.name === "pgconductor.invoke") {
 			ctx.logger.info(`[${executionCount}] Manual: Generating report at ${timestamp}`);
 		}
 

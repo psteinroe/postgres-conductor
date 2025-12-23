@@ -10,21 +10,13 @@ import type {
 import type { TaskIdentifier } from "./task";
 import type { Logger } from "./lib/logger";
 import { WindowChecker } from "./lib/window-checker";
-// import type {
-// 	CustomEventConfig,
-// 	DatabaseEventConfig,
-// 	DatabaseEventPayload,
-// 	EventDefinition,
-// 	EventName,
-// 	FindEventByIdentifier,
-// 	GenericDatabase,
-// 	InferEventPayload,
-// 	RowType,
-// 	SchemaName,
-// 	SharedEventConfig,
-// 	TableName,
-// } from "./event-definition";
 import { TypedAbortController } from "./lib/typed-abort-controller";
+import type {
+	EventDefinition,
+	EventName,
+	FindEventByIdentifier,
+	InferEventPayload,
+} from "./event-definition";
 
 export type TaskAbortReasons =
 	// if cancelled by a user
@@ -47,25 +39,6 @@ export type TaskAbortReasons =
 			payload: Payload | null;
 			__pgconductorTaskAborted: true;
 	  };
-// the task needs to wait for a custom event
-// | {
-// 		reason: "wait-for-custom-event";
-// 		timeout_ms: number | "infinity";
-// 		step_key: string;
-// 		event_key: string;
-// 		__pgconductorTaskAborted: true;
-//   }
-// the task needs to wait for a database event
-// | {
-// 		reason: "wait-for-database-event";
-// 		timeout_ms: number | "infinity";
-// 		step_key: string;
-// 		schema_name: string;
-// 		table_name: string;
-// 		operation: "insert" | "update" | "delete";
-// 		columns: string[] | undefined;
-// 		__pgconductorTaskAborted: true;
-//   }
 
 type DistributiveOmit<T, K extends PropertyKey> = T extends any ? Omit<T, K> : never;
 
@@ -121,8 +94,7 @@ export class TaskContext<
 		any,
 		string
 	>[],
-	// Events extends readonly EventDefinition<string, any>[] = readonly EventDefinition<string, any>[],
-	// TDatabase extends GenericDatabase = GenericDatabase,
+	Events extends readonly EventDefinition<string, any>[] = readonly EventDefinition<string, any>[],
 > {
 	private readonly windowChecker?: WindowChecker;
 
@@ -134,11 +106,11 @@ export class TaskContext<
 
 	static create<
 		Tasks extends readonly TaskDefinition<string, any, any, string>[],
-		// Events extends readonly EventDefinition<string, any>[],
+		Events extends readonly EventDefinition<string, any>[],
 		Extra extends object,
-	>(opts: TaskContextOptions, extra?: Extra): TaskContext<Tasks> & Extra {
-		const base = new TaskContext<Tasks /* , Events */>(opts);
-		return Object.assign(base, extra) as TaskContext<Tasks> & Extra;
+	>(opts: TaskContextOptions, extra?: Extra): TaskContext<Tasks, Events> & Extra {
+		const base = new TaskContext<Tasks, Events>(opts);
+		return Object.assign(base, extra) as TaskContext<Tasks, Events> & Extra;
 	}
 
 	get logger(): Logger {
@@ -366,105 +338,6 @@ export class TaskContext<
 		);
 	}
 
-	// /**
-	//  * Wait for a custom event to arrive.
-	//  */
-	// async waitForEvent<
-	// 	TName extends EventName<Events>,
-	// 	TDef extends FindEventByIdentifier<Events, TName> = FindEventByIdentifier<Events, TName>,
-	// >(
-	// 	key: string,
-	// 	config: CustomEventConfig<TName> & SharedEventConfig,
-	// ): Promise<InferEventPayload<TDef>>;
-
-	// /**
-	//  * Wait for a database change event.
-	//  */
-	// async waitForEvent<
-	// 	TSchema extends SchemaName<TDatabase>,
-	// 	TTable extends TableName<TDatabase, TSchema>,
-	// 	TOp extends "insert" | "update" | "delete",
-	// 	const TSelection extends string | undefined = undefined,
-	// >(
-	// 	key: string,
-	// 	config: DatabaseEventConfig<TDatabase, TSchema, TTable, TOp, TSelection>,
-	// ): Promise<DatabaseEventPayload<RowType<TDatabase, TSchema, TTable>, TOp, TSelection>>;
-
-	// async waitForEvent(
-	// 	key: string,
-	// 	config: (CustomEventConfig<string> | DatabaseEventConfig<TDatabase, any, any, any, any>) &
-	// 		SharedEventConfig,
-	// ): Promise<unknown> {
-	// 	// Check if we already received the event
-	// 	const cached = await this.opts.db.loadStep(
-	// 		{
-	// 			executionId: this.opts.execution.id,
-	// 			key,
-	// 		},
-	// 		{ signal: this.signal },
-	// 	);
-
-	// 	if (cached !== undefined) {
-	// 		return cached;
-	// 	}
-
-	// 	// Check if we're already waiting (distinguishes first call from timeout)
-	// 	if (this.opts.execution.waiting_step_key !== null) {
-	// 		// We resumed but no step exists → timeout occurred
-	// 		// Clear waiting state before throwing
-	// 		await this.opts.db.clearWaitingState(
-	// 			{
-	// 				executionId: this.opts.execution.id,
-	// 			},
-	// 			{ signal: this.signal },
-	// 		);
-
-	// 		throw new Error(
-	// 			config.timeout ? `Event wait timed out after ${config.timeout}ms` : "Event wait timeout",
-	// 		);
-	// 	}
-
-	// 	// Determine if this is a custom event or database event
-	// 	if ("event" in config) {
-	// 		// Custom event
-	// 		return this.abortAndHangup({
-	// 			reason: "wait-for-custom-event",
-	// 			timeout_ms: config.timeout || "infinity",
-	// 			step_key: key,
-	// 			event_key: config.event,
-	// 		});
-	// 	} else {
-	// 		// Database event
-	// 		// Parse columns string into array if provided
-	// 		const columnsStr = config.columns as string | undefined;
-	// 		const columns = columnsStr
-	// 			? columnsStr.split(",").map((c: string) => c.trim().toLowerCase())
-	// 			: undefined;
-
-	// 		return this.abortAndHangup({
-	// 			reason: "wait-for-database-event",
-	// 			timeout_ms: config.timeout || "infinity",
-	// 			step_key: key,
-	// 			schema_name: config.schema,
-	// 			table_name: config.table,
-	// 			operation: config.operation,
-	// 			columns,
-	// 		});
-	// 	}
-	// }
-
-	// /**
-	//  * Emit a typed custom event.
-	//  * @param config - Event configuration with event name
-	//  * @param payload - Typed event payload
-	//  */
-	// async emit<
-	// 	TName extends EventName<Events>,
-	// 	TDef extends FindEventByIdentifier<Events, TName> = FindEventByIdentifier<Events, TName>,
-	// >({ event }: CustomEventConfig<TName>, payload: InferEventPayload<TDef>): Promise<string> {
-	// 	return this.opts.db.emitEvent({ eventKey: event, payload }, { signal: this.signal });
-	// }
-
 	/**
 	 * Cancel an execution by ID.
 	 * @param executionId - The execution ID to cancel
@@ -477,6 +350,25 @@ export class TaskContext<
 			...options,
 			signal: this.signal,
 		});
+	}
+
+	/**
+	 * Emit a typed custom event.
+	 * @param event - Event name to emit
+	 * @param payload - Typed event payload
+	 * @returns Event ID
+	 */
+	async emit<
+		TName extends EventName<Events>,
+		TDef extends FindEventByIdentifier<Events, TName> = FindEventByIdentifier<Events, TName>,
+	>(event: TName, payload: InferEventPayload<TDef>): Promise<string> {
+		return this.opts.db.emitEvent(
+			{
+				eventKey: event,
+				payload: payload as any,
+			},
+			{ signal: this.signal },
+		);
 	}
 
 	/**

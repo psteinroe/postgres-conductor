@@ -46,10 +46,48 @@ copyright = """
 # can be defined using TOML syntax.
 #
 # Read more: https://zensical.org/docs/setup/navigation/
-# nav = [
-#   { "Get started" = "index.md" },
-#   { "Markdown in 5min" = "markdown.md" },
-# ]
+nav = [
+  { "Getting Started" = [
+    { "Overview" = "index.md" },
+    { "Installation" = "getting-started/installation.md" },
+    { "Your First Task" = "getting-started/first-task.md" },
+  ]},
+  { "Crafting Your Tasks" = [
+    { "Defining Tasks and Events" = "crafting-tasks/defining-tasks.md" },
+    { "Task Triggers" = "crafting-tasks/triggers.md" },
+    { "Retries and Steps" = "crafting-tasks/retries-and-steps.md" },
+    { "Child Invocation" = "crafting-tasks/child-invocation.md" },
+    { "Long-Running Tasks" = "crafting-tasks/long-running.md" },
+    { "Custom Context" = "crafting-tasks/custom-context.md" },
+    { "Logging" = "crafting-tasks/logging.md" },
+    { "Retention Policies" = "crafting-tasks/retention.md" },
+    { "Testing" = "crafting-tasks/testing.md" },
+  ]},
+  { "Task Execution" = [
+    { "Cron Scheduling" = "task-execution/cron.md" },
+    { "Delayed Execution" = "task-execution/delayed.md" },
+    { "Time Windows" = "task-execution/time-windows.md" },
+    { "Retries & Backoff" = "task-execution/retries.md" },
+    { "Timeouts" = "task-execution/timeouts.md" },
+    { "Cancellation" = "task-execution/cancellation.md" },
+    { "Priority" = "task-execution/priority.md" },
+    { "Concurrency" = "task-execution/concurrency.md" },
+    { "Deduplication" = "task-execution/deduplication.md" },
+    { "Rate Limiting" = "task-execution/rate-limiting.md" },
+    { "Batching" = "task-execution/batching.md" },
+  ]},
+  { "Operations" = [
+    { "Horizontal Scaling" = "scaling/horizontal.md" },
+    { "Live Migrations" = "scaling/live-migrations.md" },
+    { "Maintenance Task" = "scaling/maintenance.md" },
+  ]},
+  { "API Reference" = [
+    { "Conductor" = "api/conductor.md" },
+    { "Orchestrator" = "api/orchestrator.md" },
+    { "Task Context" = "api/task-context.md" },
+    { "Worker Configuration" = "api/worker-config.md" },
+  ]},
+]
 
 # With the "extra_css" option you can add your own CSS styling to customize
 # your Zensical project according to your needs. You can add any number of
@@ -114,7 +152,7 @@ repo = "fontawesome/brands/github"
 # - https://zensical.org/docs/setup/logo-and-icons/#favicon
 # - https://developer.mozilla.org/en-US/docs/Glossary/Favicon
 #
-#favicon = "assets/images/favicon.png"
+favicon = "images/favicon.ico"
 
 # Zensical supports more than 60 different languages. This means that the
 # labels and tooltips that Zensical's templates produce are translated.

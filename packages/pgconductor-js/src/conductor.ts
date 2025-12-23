@@ -23,21 +23,20 @@ import {
 import { Worker, type WorkerConfig } from "./worker";
 import { DefaultLogger, type Logger } from "./lib/logger";
 import { SchemaManager } from "./schema-manager";
-// import type {
-// 	CustomEventConfig,
-// 	EventDefinition,
-// 	EventName,
-// 	FindEventByIdentifier,
-// 	GenericDatabase,
-// 	InferEventPayload,
-// } from "./event-definition";
+import type {
+	EventDefinition,
+	GenericDatabase,
+	EventName,
+	FindEventByIdentifier,
+	InferEventPayload,
+} from "./event-definition";
 import {
 	TaskSchemas,
-	// EventSchemas,
-	// DatabaseSchema,
+	EventSchemas,
+	DatabaseSchema,
 	type InferTasksFromSchema,
-	// type InferEventsFromSchema,
-	// type InferDatabaseFromSchema,
+	type InferEventsFromSchema,
+	type InferDatabaseFromSchema,
 } from "./schemas";
 
 type ConnectionOptions =
@@ -64,30 +63,17 @@ type ResolvedReturns<
 	TDef extends { readonly name: string; readonly queue?: string },
 > = TDef["name"] extends TaskName<Tasks> ? InferReturns<ResolvedTaskDef<Tasks, TDef>> : void;
 
-// type ResolvedEvent<
-// 	Tasks extends readonly TaskDefinition<string, any, any, string>[],
-// 	Events extends readonly EventDefinition<string, any>[],
-// 	Database extends GenericDatabase,
-// 	TDef extends { readonly name: string; readonly queue?: string },
-// 	TTriggers,
-// > = TaskEventFromTriggers<
-// 	TTriggers,
-// 	ResolvedPayload<Tasks, TDef>,
-// 	Events,
-// 	Database
-// >;
-
 export type ConductorOptions<
 	TTaskSchemas extends TaskSchemas<any> | undefined,
-	// TEventSchemas extends EventSchemas<any> | undefined,
-	// TDatabaseSchema extends DatabaseSchema<any> | undefined,
+	TEventSchemas extends EventSchemas<any> | undefined,
+	TDatabaseSchema extends DatabaseSchema<any> | undefined,
 	ExtraContext extends object,
 > = ConnectionOptions & {
 	tasks?: TTaskSchemas;
 
-	// events?: TEventSchemas;
+	events?: TEventSchemas;
 
-	// database?: TDatabaseSchema;
+	database?: TDatabaseSchema;
 
 	context: ExtraContext;
 
@@ -98,17 +84,14 @@ export type ConductorOptions<
 // exposes the main createTask methods and handles types
 export class Conductor<
 	TTaskSchemas extends TaskSchemas<any> | undefined = undefined,
-	// TEventSchemas extends EventSchemas<any> | undefined = undefined,
-	// TDatabaseSchema extends DatabaseSchema<any> | undefined = undefined,
+	TEventSchemas extends EventSchemas<any> | undefined = undefined,
+	TDatabaseSchema extends DatabaseSchema<any> | undefined = undefined,
 	ExtraContext extends object = {},
 	// Inferred types from schemas
 	Tasks extends readonly TaskDefinition<string, any, any, string>[] =
 		InferTasksFromSchema<TTaskSchemas>,
-	// Events extends readonly EventDefinition<
-	// 	string,
-	// 	any
-	// >[] = InferEventsFromSchema<TEventSchemas>,
-	// Database extends GenericDatabase = InferDatabaseFromSchema<TDatabaseSchema>,
+	Events extends readonly EventDefinition<string, any>[] = InferEventsFromSchema<TEventSchemas>,
+	Database extends GenericDatabase = InferDatabaseFromSchema<TDatabaseSchema>,
 > {
 	/**
 	 * @internal
@@ -125,8 +108,8 @@ export class Conductor<
 	private constructor(
 		public readonly options: ConductorOptions<
 			TTaskSchemas,
-			// TEventSchemas,
-			// TDatabaseSchema,
+			TEventSchemas,
+			TDatabaseSchema,
 			ExtraContext
 		>,
 	) {
@@ -146,24 +129,19 @@ export class Conductor<
 
 	static create<
 		TTaskSchemas extends TaskSchemas<any> | undefined = undefined,
-		// TEventSchemas extends EventSchemas<any> | undefined = undefined,
-		// TDatabaseSchema extends DatabaseSchema<any> | undefined = undefined,
+		TEventSchemas extends EventSchemas<any> | undefined = undefined,
+		TDatabaseSchema extends DatabaseSchema<any> | undefined = undefined,
 		TExtraContext extends object = {},
 	>(
 		options: ConnectionOptions & {
 			tasks?: TTaskSchemas;
-			// events?: TEventSchemas;
-			// database?: TDatabaseSchema;
+			events?: TEventSchemas;
+			database?: TDatabaseSchema;
 			context: TExtraContext;
 			logger?: Logger;
 		},
-	): Conductor<TTaskSchemas, /* TEventSchemas, TDatabaseSchema, */ TExtraContext> {
-		return new Conductor<
-			TTaskSchemas,
-			// TEventSchemas,
-			// TDatabaseSchema,
-			TExtraContext
-		>(options);
+	): Conductor<TTaskSchemas, TEventSchemas, TDatabaseSchema, TExtraContext> {
+		return new Conductor<TTaskSchemas, TEventSchemas, TDatabaseSchema, TExtraContext>(options);
 	}
 
 	/**
@@ -185,50 +163,47 @@ export class Conductor<
 		const TTriggers extends object | readonly object[],
 	>(
 		definition: TDef,
-		triggers: TTriggers &
-			ValidateTriggers<
-				Tasks,
-				// Events,
-				TDef["name"],
-				TTriggers,
-				ResolvedQueue<TDef>
-			>,
+		triggers: TTriggers & ValidateTriggers<Tasks, TDef["name"], TTriggers, ResolvedQueue<TDef>>,
 		fn: TDef extends { readonly batch: BatchConfig }
 			? ResolvedReturns<Tasks, TDef> extends void
 				? (
-						events: Array<TaskEventFromTriggers<TTriggers, ResolvedPayload<Tasks, TDef>>>,
+						events: Array<
+							TaskEventFromTriggers<TTriggers, ResolvedPayload<Tasks, TDef>, Events, Database>
+						>,
 						ctx: BatchTaskContext,
 					) => Promise<void>
 				: (
-						events: Array<TaskEventFromTriggers<TTriggers, ResolvedPayload<Tasks, TDef>>>,
+						events: Array<
+							TaskEventFromTriggers<TTriggers, ResolvedPayload<Tasks, TDef>, Events, Database>
+						>,
 						ctx: BatchTaskContext,
 					) => Promise<Array<ResolvedReturns<Tasks, TDef>>>
 			: (
-					event: TaskEventFromTriggers<TTriggers, ResolvedPayload<Tasks, TDef>>,
-					ctx: TaskContext<Tasks> & ExtraContext,
+					event: TaskEventFromTriggers<TTriggers, ResolvedPayload<Tasks, TDef>, Events, Database>,
+					ctx: TaskContext<Tasks, Events> & ExtraContext,
 				) => Promise<ResolvedReturns<Tasks, TDef>>,
 	): Task<
 		TDef["name"],
 		ResolvedQueue<TDef>,
 		ResolvedPayload<Tasks, TDef>,
 		ResolvedReturns<Tasks, TDef>,
-		TaskContext<Tasks> & ExtraContext,
-		TaskEventFromTriggers<TTriggers, ResolvedPayload<Tasks, TDef>>
+		TaskContext<Tasks, Events> & ExtraContext,
+		TaskEventFromTriggers<TTriggers, ResolvedPayload<Tasks, TDef>, Events, Database>
 	> {
 		return Task.create<
 			TDef["name"],
 			ResolvedQueue<TDef>,
 			ResolvedPayload<Tasks, TDef>,
 			ResolvedReturns<Tasks, TDef>,
-			TaskContext<Tasks> & ExtraContext,
-			TaskEventFromTriggers<TTriggers, ResolvedPayload<Tasks, TDef>>
+			TaskContext<Tasks, Events> & ExtraContext,
+			TaskEventFromTriggers<TTriggers, ResolvedPayload<Tasks, TDef>, Events, Database>
 		>(
 			definition as TaskConfiguration<TDef["name"], ResolvedQueue<TDef>>,
 			triggers as NonEmptyArray<Trigger> | Trigger,
 			fn as ExecuteFunction<
-				TaskEventFromTriggers<TTriggers, ResolvedPayload<Tasks, TDef>>,
+				TaskEventFromTriggers<TTriggers, ResolvedPayload<Tasks, TDef>, Events, Database>,
 				ResolvedReturns<Tasks, TDef>,
-				TaskContext<Tasks> & ExtraContext
+				TaskContext<Tasks, Events> & ExtraContext
 			>,
 		);
 	}
@@ -307,18 +282,21 @@ export class Conductor<
 		});
 	}
 
-	// async emit<
-	// 	TName extends EventName<Events>,
-	// 	TDef extends FindEventByIdentifier<Events, TName> = FindEventByIdentifier<
-	// 		Events,
-	// 		TName
-	// 	>,
-	// >(
-	// 	{ event }: CustomEventConfig<TName>,
-	// 	payload: InferEventPayload<TDef>,
-	// ): Promise<string> {
-	// 	return this.db.emitEvent({ eventKey: event, payload });
-	// }
+	/**
+	 * Emit a typed custom event.
+	 * @param event - Event name to emit
+	 * @param payload - Typed event payload
+	 * @returns Event ID
+	 */
+	async emit<
+		TName extends EventName<Events>,
+		TDef extends FindEventByIdentifier<Events, TName> = FindEventByIdentifier<Events, TName>,
+	>(event: TName, payload: InferEventPayload<TDef>): Promise<string> {
+		return this.db.emitEvent({
+			eventKey: event,
+			payload: payload as any,
+		});
+	}
 
 	async cancel(executionId: string, options?: { reason?: string }): Promise<boolean> {
 		return this.db.cancelExecution(executionId, options || {});

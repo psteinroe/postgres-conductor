@@ -25,17 +25,17 @@ describe("task event types", () => {
 			[{ invocable: true }, { cron: "0 0 * * *", name: "hourly" }],
 			async (event, _ctx) => {
 				expectTypeOf(event).toExtend<
-					{ event: "hourly" } | { event: "pgconductor.invoke"; payload: { value: number } }
+					{ name: "hourly" } | { name: "pgconductor.invoke"; payload: { value: number } }
 				>();
 
-				if (event.event === "hourly") {
-					expectTypeOf(event).toEqualTypeOf<{ event: "hourly" }>();
+				if (event.name === "hourly") {
+					expectTypeOf(event).toEqualTypeOf<{ name: "hourly" }>();
 
 					// @ts-expect-error - cron events don't have payload
 					const _invalid = event.payload;
 				} else {
 					expectTypeOf(event).toEqualTypeOf<{
-						event: "pgconductor.invoke";
+						name: "pgconductor.invoke";
 						payload: { value: number };
 					}>();
 
@@ -63,11 +63,11 @@ describe("task event types", () => {
 			{ name: "empty-task" },
 			[{ invocable: true }, { cron: "*/5 * * * *", name: "every-5min" }],
 			async (event, _ctx) => {
-				if (event.event === "every-5min") {
-					expectTypeOf(event).toEqualTypeOf<{ event: "every-5min" }>();
+				if (event.name === "every-5min") {
+					expectTypeOf(event).toEqualTypeOf<{ name: "every-5min" }>();
 				} else {
 					expectTypeOf(event).toExtend<{
-						event: "pgconductor.invoke";
+						name: "pgconductor.invoke";
 						payload: object;
 					}>();
 				}
@@ -93,10 +93,10 @@ describe("task event types", () => {
 			[{ cron: "*/5 * * * *", name: "every-5min" }],
 			async (event, _ctx) => {
 				// Event should only be cron, no invoke event possible
-				expectTypeOf(event).toEqualTypeOf<{ event: "every-5min" }>();
+				expectTypeOf(event).toEqualTypeOf<{ name: "every-5min" }>();
 
 				// Verify it's cron
-				expectTypeOf(event.event).toEqualTypeOf<"every-5min">();
+				expectTypeOf(event.name).toEqualTypeOf<"every-5min">();
 			},
 		);
 
@@ -121,12 +121,12 @@ describe("task event types", () => {
 			async (event, _ctx) => {
 				// Event should only be invoke, no cron event possible
 				expectTypeOf(event).toEqualTypeOf<{
-					event: "pgconductor.invoke";
+					name: "pgconductor.invoke";
 					payload: { data: string };
 				}>();
 
 				// Verify event properties
-				expectTypeOf(event.event).toEqualTypeOf<"pgconductor.invoke">();
+				expectTypeOf(event.name).toEqualTypeOf<"pgconductor.invoke">();
 				expectTypeOf(event.payload).toEqualTypeOf<{ data: string }>();
 				expectTypeOf(event.payload.data).toEqualTypeOf<string>();
 			},
@@ -153,14 +153,14 @@ describe("task event types", () => {
 			async (event, _ctx) => {
 				// Event can be either cron or invoke
 				expectTypeOf(event).toExtend<
-					{ event: "hourly" } | { event: "pgconductor.invoke"; payload: { value: number } }
+					{ name: "hourly" } | { name: "pgconductor.invoke"; payload: { value: number } }
 				>();
 
-				if (event.event === "hourly") {
-					expectTypeOf(event).toEqualTypeOf<{ event: "hourly" }>();
+				if (event.name === "hourly") {
+					expectTypeOf(event).toEqualTypeOf<{ name: "hourly" }>();
 				} else {
 					expectTypeOf(event).toEqualTypeOf<{
-						event: "pgconductor.invoke";
+						name: "pgconductor.invoke";
 						payload: { value: number };
 					}>();
 					expectTypeOf(event.payload.value).toEqualTypeOf<number>();
@@ -233,7 +233,7 @@ describe("task event types", () => {
 	// 				payload: { userId: string; email: string };
 	// 			}>();
 	//
-	// 			expectTypeOf(event.event).toEqualTypeOf<"user.created">();
+	// 			expectTypeOf(event.name).toEqualTypeOf<"user.created">();
 	// 			expectTypeOf(event.payload.userId).toEqualTypeOf<string>();
 	// 			expectTypeOf(event.payload.email).toEqualTypeOf<string>();
 	// 		},
@@ -259,7 +259,7 @@ describe("task event types", () => {
 	// 		{ schema: "public", table: "contact", operation: "insert" },
 	// 		async (event, _ctx) => {
 	// 			// Event should be the database event
-	// 			expectTypeOf(event.event).toEqualTypeOf<"public.contact.insert">();
+	// 			expectTypeOf(event.name).toEqualTypeOf<"public.contact.insert">();
 	// 			expectTypeOf(event.payload.tg_op).toEqualTypeOf<"INSERT">();
 	// 			expectTypeOf(event.payload.old).toEqualTypeOf<null>();
 	//
@@ -292,7 +292,7 @@ describe("task event types", () => {
 	// 		{ schema: "public", table: "contact", operation: "insert", columns: "id, email" },
 	// 		async (event, _ctx) => {
 	// 			// Event should be the database event with column selection
-	// 			expectTypeOf(event.event).toEqualTypeOf<"public.contact.insert">();
+	// 			expectTypeOf(event.name).toEqualTypeOf<"public.contact.insert">();
 	// 			expectTypeOf(event.payload.tg_op).toEqualTypeOf<"INSERT">();
 	// 			expectTypeOf(event.payload.old).toEqualTypeOf<null>();
 	//
@@ -331,11 +331,11 @@ describe("task event types", () => {
 	// 		[{ invocable: true }, { event: "order.placed" }],
 	// 		async (event, _ctx) => {
 	// 			// Event can be either invoke or custom event
-	// 			if (event.event === "pgconductor.invoke") {
+	// 			if (event.name === "pgconductor.invoke") {
 	// 				expectTypeOf(event.payload).toEqualTypeOf<{
 	// 					manualOrderId: number;
 	// 				}>();
-	// 			} else if (event.event === "order.placed") {
+	// 			} else if (event.name === "order.placed") {
 	// 				expectTypeOf(event.payload).toEqualTypeOf<{
 	// 					orderId: number;
 	// 					total: number;
@@ -367,9 +367,9 @@ describe("task event types", () => {
 	// 		],
 	// 		async (event, _ctx) => {
 	// 			// Event can be either cron or database event
-	// 			if (event.event === "hourly") {
-	// 				expectTypeOf(event).toEqualTypeOf<{ event: "hourly" }>();
-	// 			} else if (event.event === "public.contact.update") {
+	// 			if (event.name === "hourly") {
+	// 				expectTypeOf(event).toEqualTypeOf<{ name: "hourly" }>();
+	// 			} else if (event.name === "public.contact.update") {
 	// 				expectTypeOf(event.payload.tg_op).toEqualTypeOf<"UPDATE">();
 	// 				// Both old and new should have values for update
 	// 				expectTypeOf(event.payload.old).not.toEqualTypeOf<null>();
@@ -410,14 +410,14 @@ describe("task event types", () => {
 	// 		],
 	// 		async (event, _ctx) => {
 	// 			// Event can be any of the four types
-	// 			if (event.event === "pgconductor.invoke") {
+	// 			if (event.name === "pgconductor.invoke") {
 	// 				expectTypeOf(event.payload).toEqualTypeOf<{ reason: string }>();
-	// 			} else if (event.event === "daily") {
-	// 				expectTypeOf(event).toEqualTypeOf<{ event: "daily" }>();
-	// 			} else if (event.event === "payment.received") {
+	// 			} else if (event.name === "daily") {
+	// 				expectTypeOf(event).toEqualTypeOf<{ name: "daily" }>();
+	// 			} else if (event.name === "payment.received") {
 	// 				expectTypeOf(event.payload.paymentId).toEqualTypeOf<string>();
 	// 				expectTypeOf(event.payload.amount).toEqualTypeOf<number>();
-	// 			} else if (event.event === "public.contact.delete") {
+	// 			} else if (event.name === "public.contact.delete") {
 	// 				expectTypeOf(event.payload.tg_op).toEqualTypeOf<"DELETE">();
 	// 				expectTypeOf(event.payload.new).toEqualTypeOf<null>();
 	// 				// old should have the deleted row

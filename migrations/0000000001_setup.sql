@@ -35,7 +35,7 @@ begin
     return uuidv7 ();
   end if;
   ts_ms := floor(extract(epoch from pgconductor._private_current_time()) * 1000)::bigint;
-  rnd := uuid_send(public.uuid_generate_v4 ());
+  rnd := uuid_send(gen_random_uuid());
   b := repeat(E'\\000', 16)::bytea;
   for i in 0..5 loop
     b := set_byte(b, i, ((ts_ms >> ((5 - i) * 8)) & 255)::int);
@@ -326,10 +326,29 @@ create type pgconductor.task_spec as (
     concurrency_limit integer
 );
 
+create type pgconductor._private_event_operation as enum (
+    'insert',
+    'update',
+    'delete'
+);
+
+create type pgconductor.event_subscription_spec as (
+    task_key text,
+    queue text,
+    event_key text,
+    schema_name text,
+    table_name text,
+    operation pgconductor._private_event_operation,
+    when_clause text,
+    payload_fields text[],
+    column_names text[]
+);
+
 create or replace function pgconductor._private_register_worker(
     p_queue_name text,
     p_task_specs pgconductor.task_spec[],
-    p_cron_schedules pgconductor.execution_spec[]
+    p_cron_schedules pgconductor.execution_spec[],
+    p_event_subscriptions pgconductor.event_subscription_spec[] default array[]::pgconductor.event_subscription_spec[]
 )
 returns void
 language plpgsql
@@ -435,6 +454,60 @@ begin
       select split_part(spec.dedupe_key, '::', 2)
       from unnest(p_cron_schedules) as spec
       where spec.dedupe_key is not null and spec.dedupe_key like 'scheduled::%'
+    );
+
+  -- step 5: manage event subscriptions (only recreate triggers when subscriptions change)
+  merge into pgconductor._private_event_subscriptions as target
+  using (
+    select
+      s.task_key,
+      s.queue,
+      s.event_key,
+      s.schema_name,
+      s.table_name,
+      s.operation,
+      s.when_clause,
+      s.payload_fields,
+      s.column_names
+    from unnest(p_event_subscriptions) as s
+  ) as source
+  on (
+    target.queue = source.queue and
+    target.task_key = source.task_key and
+    coalesce(target.event_key, '') = coalesce(source.event_key, '') and
+    coalesce(target.schema_name, '') = coalesce(source.schema_name, '') and
+    coalesce(target.table_name, '') = coalesce(source.table_name, '') and
+    coalesce(target.operation::text, '') = coalesce(source.operation::text, '') and
+    coalesce(target.when_clause, '') = coalesce(source.when_clause, '') and
+    coalesce(array_to_string(target.payload_fields, ','), '') =
+      coalesce(array_to_string(source.payload_fields, ','), '') and
+    coalesce(array_to_string(target.column_names, ','), '') =
+      coalesce(array_to_string(source.column_names, ','), '')
+  )
+  when not matched then insert (
+    task_key, queue, event_key, schema_name, table_name, operation,
+    when_clause, payload_fields, column_names
+  ) values (
+    source.task_key, source.queue, source.event_key,
+    source.schema_name, source.table_name, source.operation,
+    source.when_clause, source.payload_fields, source.column_names
+  );
+
+  -- step 6: delete old subscriptions for this queue not in new set
+  delete from pgconductor._private_event_subscriptions target
+  where target.queue = p_queue_name
+    and not exists (
+      select 1 from unnest(p_event_subscriptions) source
+      where target.task_key = source.task_key
+        and coalesce(target.event_key, '') = coalesce(source.event_key, '')
+        and coalesce(target.schema_name, '') = coalesce(source.schema_name, '')
+        and coalesce(target.table_name, '') = coalesce(source.table_name, '')
+        and coalesce(target.operation::text, '') = coalesce(source.operation::text, '')
+        and coalesce(target.when_clause, '') = coalesce(source.when_clause, '')
+        and coalesce(array_to_string(target.payload_fields, ','), '') =
+          coalesce(array_to_string(source.payload_fields, ','), '')
+        and coalesce(array_to_string(target.column_names, ','), '') =
+          coalesce(array_to_string(source.column_names, ','), '')
     );
 end;
 $function$;

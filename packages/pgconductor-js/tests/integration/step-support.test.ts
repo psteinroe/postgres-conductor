@@ -46,7 +46,7 @@ describe("Step Support", () => {
 			{ name: "step-task" },
 			{ invocable: true },
 			async (event, ctx) => {
-				if (event.event === "pgconductor.invoke") {
+				if (event.name === "pgconductor.invoke") {
 					const result = await ctx.step("expensive-step", () => {
 						return expensiveFn(event.payload.value);
 					});
@@ -98,7 +98,7 @@ describe("Step Support", () => {
 			{ name: "sleep-task" },
 			{ invocable: true },
 			async (event, ctx) => {
-				if (event.event === "pgconductor.invoke") {
+				if (event.name === "pgconductor.invoke") {
 					executionSteps("before-sleep");
 					await ctx.sleep("wait", event.payload.delay);
 					executionSteps("after-sleep");
@@ -156,7 +156,7 @@ describe("Step Support", () => {
 			{ name: "checkpoint-task" },
 			{ invocable: true },
 			async (event, ctx) => {
-				if (event.event === "pgconductor.invoke") {
+				if (event.name === "pgconductor.invoke") {
 					for (let i = 0; i < event.payload.items; i++) {
 						processedItems(i);
 						await ctx.checkpoint();
@@ -212,7 +212,7 @@ describe("Step Support", () => {
 			{ name: "multi-step-task" },
 			{ invocable: true },
 			async (event, ctx) => {
-				if (event.event === "pgconductor.invoke") {
+				if (event.name === "pgconductor.invoke") {
 					const a = await ctx.step("step1", () => step1Fn(event.payload.x));
 					const b = await ctx.step("step2", () => step2Fn(a));
 					const c = await ctx.step("step3", () => step3Fn(b));
@@ -270,7 +270,7 @@ describe("Step Support", () => {
 			{ name: "step-unwrap-task" },
 			{ invocable: true },
 			async (event, ctx) => {
-				if (event.event === "pgconductor.invoke") {
+				if (event.name === "pgconductor.invoke") {
 					const transformed = await ctx.step("transform", () => {
 						return event.payload.items.map((item) => item.toUpperCase());
 					});

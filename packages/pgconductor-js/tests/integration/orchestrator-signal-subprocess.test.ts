@@ -354,7 +354,7 @@ const task = conductor.createTask(
 	taskDefinition,
 	{ invocable: true },
 	async (event, ctx) => {
-		if (event.event === "pgconductor.invoke") {
+		if (event.name === "pgconductor.invoke") {
 			console.log("TASK_STARTED");
 
 			// Infinite loop that checks abort via checkpoint

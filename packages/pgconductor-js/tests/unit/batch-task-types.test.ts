@@ -26,11 +26,11 @@ describe("batch task types", () => {
 			async (events, ctx) => {
 				// Events should be an array
 				expectTypeOf(events).toEqualTypeOf<
-					Array<{ event: "pgconductor.invoke"; payload: { value: number } }>
+					Array<{ name: "pgconductor.invoke"; payload: { value: number } }>
 				>();
 
 				// Each event should have the correct shape
-				expectTypeOf(events[0]!.event).toEqualTypeOf<"pgconductor.invoke">();
+				expectTypeOf(events[0]!.name).toEqualTypeOf<"pgconductor.invoke">();
 				expectTypeOf(events[0]!.payload.value).toEqualTypeOf<number>();
 
 				// Context should be BatchTaskContext
@@ -71,7 +71,7 @@ describe("batch task types", () => {
 			async (events, ctx) => {
 				// Events should be an array
 				expectTypeOf(events).toEqualTypeOf<
-					Array<{ event: "pgconductor.invoke"; payload: { value: number } }>
+					Array<{ name: "pgconductor.invoke"; payload: { value: number } }>
 				>();
 
 				// Context should be BatchTaskContext
@@ -110,7 +110,7 @@ describe("batch task types", () => {
 				// Events array can contain either cron or invoke events
 				expectTypeOf(events).toEqualTypeOf<
 					Array<
-						{ event: "every-10min" } | { event: "pgconductor.invoke"; payload: { count: number } }
+						{ name: "every-10min" } | { name: "pgconductor.invoke"; payload: { count: number } }
 					>
 				>();
 
@@ -118,14 +118,14 @@ describe("batch task types", () => {
 
 				// Can discriminate on each event
 				for (const event of events) {
-					if (event.event === "every-10min") {
-						expectTypeOf(event).toEqualTypeOf<{ event: "every-10min" }>();
+					if (event.name === "every-10min") {
+						expectTypeOf(event).toEqualTypeOf<{ name: "every-10min" }>();
 
 						// @ts-expect-error - cron events don't have payload
 						const _invalid = event.payload;
 					} else {
 						expectTypeOf(event).toEqualTypeOf<{
-							event: "pgconductor.invoke";
+							name: "pgconductor.invoke";
 							payload: { count: number };
 						}>();
 						expectTypeOf(event.payload.count).toEqualTypeOf<number>();
@@ -197,13 +197,13 @@ describe("batch task types", () => {
 			{ cron: "0 0 * * *", name: "daily" },
 			async (events, ctx) => {
 				// Events should be array with only cron events
-				expectTypeOf(events).toEqualTypeOf<Array<{ event: "daily" }>>();
+				expectTypeOf(events).toEqualTypeOf<Array<{ name: "daily" }>>();
 
 				expectTypeOf(ctx).toEqualTypeOf<BatchTaskContext>();
 
 				// All events should be the same cron trigger
 				for (const event of events) {
-					expectTypeOf(event.event).toEqualTypeOf<"daily">();
+					expectTypeOf(event.name).toEqualTypeOf<"daily">();
 				}
 			},
 		);
@@ -241,7 +241,7 @@ describe("batch task types", () => {
 	// 			// Events can be any of the three types
 	// 			expectTypeOf(events).toEqualTypeOf<
 	// 				Array<
-	// 					| { event: "pgconductor.invoke"; payload: { syncAll: boolean } }
+	// 					| { name: "pgconductor.invoke"; payload: { syncAll: boolean } }
 	// 					| { event: "user.created"; payload: { userId: string } }
 	// 					| { event: "user.deleted"; payload: { userId: string; reason: string } }
 	// 				>
@@ -251,14 +251,14 @@ describe("batch task types", () => {
 
 	// 			// Discriminate on event type
 	// 			for (const event of events) {
-	// 				if (event.event === "pgconductor.invoke") {
+	// 				if (event.name === "pgconductor.invoke") {
 	// 					expectTypeOf(event.payload.syncAll).toEqualTypeOf<boolean>();
-	// 				} else if (event.event === "user.created") {
+	// 				} else if (event.name === "user.created") {
 	// 					expectTypeOf(event.payload.userId).toEqualTypeOf<string>();
 
 	// 					// @ts-expect-error - created event doesn't have reason
 	// 					const _invalid = event.payload.reason;
-	// 				} else if (event.event === "user.deleted") {
+	// 				} else if (event.name === "user.deleted") {
 	// 					expectTypeOf(event.payload.userId).toEqualTypeOf<string>();
 	// 					expectTypeOf(event.payload.reason).toEqualTypeOf<string>();
 	// 				}
@@ -383,7 +383,7 @@ describe("batch task types", () => {
 			async (event, ctx) => {
 				// Event is NOT an array
 				expectTypeOf(event).toEqualTypeOf<{
-					event: "pgconductor.invoke";
+					name: "pgconductor.invoke";
 					payload: { value: number };
 				}>();
 

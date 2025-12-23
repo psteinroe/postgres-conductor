@@ -16,7 +16,7 @@ import {
 	type LoadStepArgs,
 	type SaveStepArgs,
 	type ClearWaitingStateArgs,
-	// type EmitEventArgs,
+	type EmitEventArgs,
 } from "./query-builder";
 import { makeChildLogger, type Logger } from "./lib/logger";
 
@@ -70,8 +70,6 @@ export type ExecutionResult =
 	| ExecutionReleased
 	| ExecutionPermamentlyFailed
 	| ExecutionInvokeChild;
-// | ExecutionWaitForCustomEvent
-// | ExecutionWaitForDatabaseEvent;
 
 export type GroupedExecutionResults = {
 	count: number;
@@ -79,8 +77,6 @@ export type GroupedExecutionResults = {
 	failed: (ExecutionFailed | ExecutionPermamentlyFailed)[];
 	released: ExecutionReleased[];
 	invokeChild: ExecutionInvokeChild[];
-	// waitForCustomEvent: ExecutionWaitForCustomEvent[];
-	// waitForDbEvent: ExecutionWaitForDatabaseEvent[];
 	taskKeys: Set<string>;
 };
 
@@ -134,41 +130,17 @@ export interface ExecutionInvokeChild {
 	slot_group_number?: number | null;
 }
 
-// export interface ExecutionWaitForDatabaseEvent {
-// 	execution_id: string;
-// 	queue: string;
-// 	task_key: string;
-// 	status: "wait_for_db_event";
-// 	timeout_ms: number | "infinity";
-// 	step_key: string;
-// 	schema_name: string;
-// 	table_name: string;
-// 	operation: "insert" | "update" | "delete";
-// 	columns: string[] | undefined;
-// 	slot_group_number?: number | null;
-// }
-
-// export interface ExecutionWaitForCustomEvent {
-// 	execution_id: string;
-// 	queue: string;
-// 	task_key: string;
-// 	status: "wait_for_custom_event";
-// 	timeout_ms: number | "infinity";
-// 	step_key: string;
-// 	event_key: string;
-// 	slot_group_number?: number | null;
-// }
-
-// export interface EventSubscriptionSpec {
-// 	task_key: string;
-// 	queue: string;
-// 	source: "event" | "db";
-// 	event_key?: string;
-// 	schema_name?: string;
-// 	table_name?: string;
-// 	operation?: string;
-// 	columns?: string[];
-// }
+export interface EventSubscriptionSpec {
+	task_key: string;
+	queue: string;
+	event_key: string | null;
+	schema_name: string | null;
+	table_name: string | null;
+	operation: "insert" | "update" | "delete" | null;
+	when_clause: string | null;
+	payload_fields: string[] | null;
+	column_names: string[] | null;
+}
 
 const RETRYABLE_SQLSTATE_CODES = new Set([
 	"40001", // serialization_failure
@@ -573,6 +545,18 @@ export class DatabaseClient {
 		});
 	}
 
+	async emitEvent(args: EmitEventArgs, opts?: QueryMethodOptions): Promise<string> {
+		const result = await this.query(() => this.builder.buildEmitEvent(args), {
+			label: "emitEvent",
+			...opts,
+		});
+		const row = result[0];
+		if (!row) {
+			throw new Error("emitEvent did not return a result");
+		}
+		return row.id;
+	}
+
 	/**
 	 * Set fake time for testing purposes.
 	 * All calls to pgconductor._private_current_time() will return this value.
@@ -595,25 +579,4 @@ export class DatabaseClient {
 			...opts,
 		});
 	}
-
-	// /**
-	//  * Emit a custom event.
-	//  * Returns the event id.
-	//  */
-	// async emitEvent(
-	// 	{ eventKey, payload }: EmitEventArgs,
-	// 	opts?: QueryMethodOptions,
-	// ): Promise<string> {
-	// 	const result = await this.query(
-	// 		(sql) =>
-	// 			sql`
-	// 			select pgconductor.emit_event(
-	// 				${eventKey},
-	// 				${sql.json(payload || null)}
-	// 			) as id
-	// 		`,
-	// 		{ label: "emitEvent", ...opts },
-	// 	);
-	// 	return result[0]!.id;
-	// }
 }

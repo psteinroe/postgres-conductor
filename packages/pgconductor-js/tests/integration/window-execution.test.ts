@@ -50,7 +50,7 @@ describe("Window Execution", () => {
 			{ name: "window-task", window: ["09:00", "17:00"] },
 			{ invocable: true },
 			async (event, ctx) => {
-				if (event.event === "pgconductor.invoke") {
+				if (event.name === "pgconductor.invoke") {
 					// This step will trigger release (we're outside window)
 					const result = await ctx.step("step1", () => {
 						return stepFn(event.payload.value);
@@ -83,11 +83,14 @@ describe("Window Execution", () => {
 			select * from pgconductor._private_executions
 			where id = ${executionId}
 		`;
-		expect(executions[0].completed_at).toBeNull();
+		expect(executions.length).toBeGreaterThan(0);
+		const execution = executions[0];
+		if (!execution) throw new Error("execution not found");
+		expect(execution.completed_at).toBeNull();
 
 		// run_at should be scheduled for next day at 09:00
 		const nextDay9AM = new Date("2024-01-02T09:00:00Z");
-		expect(executions[0].run_at.getTime()).toBeGreaterThanOrEqual(nextDay9AM.getTime());
+		expect(execution.run_at.getTime()).toBeGreaterThanOrEqual(nextDay9AM.getTime());
 
 		await orchestrator.stop();
 	}, 30000);
@@ -119,7 +122,7 @@ describe("Window Execution", () => {
 			{ name: "checkpoint-task", window: ["09:00", "17:00"] },
 			{ invocable: true },
 			async (event, ctx) => {
-				if (event.event === "pgconductor.invoke") {
+				if (event.name === "pgconductor.invoke") {
 					beforeCheckpoint();
 
 					// Checkpoint should trigger release (we're outside window)
@@ -146,16 +149,19 @@ describe("Window Execution", () => {
 		// Wait for execution
 		await new Promise((r) => setTimeout(r, 300));
 
-		// Before checkpoint should have run, after should not
-		expect(beforeCheckpoint).not.toHaveBeenCalled(); // Released at checkpoint
-		expect(afterCheckpoint).not.toHaveBeenCalled();
+		// Task starts executing, reaches checkpoint, then gets released because outside window
+		expect(beforeCheckpoint).toHaveBeenCalledTimes(1); // Called before checkpoint
+		expect(afterCheckpoint).not.toHaveBeenCalled(); // Not called - released at checkpoint
 
 		// Check execution was released (not completed)
 		const executions = await db.sql`
 			select * from pgconductor._private_executions
 			where id = ${executionId}
 		`;
-		expect(executions[0].completed_at).toBeNull();
+		expect(executions.length).toBeGreaterThan(0);
+		const execution2 = executions[0];
+		if (!execution2) throw new Error("execution not found");
+		expect(execution2.completed_at).toBeNull();
 
 		await orchestrator.stop();
 	}, 30000);
@@ -186,7 +192,7 @@ describe("Window Execution", () => {
 			{ name: "inside-window-task", window: ["09:00", "17:00"] },
 			{ invocable: true },
 			async (event, ctx) => {
-				if (event.event === "pgconductor.invoke") {
+				if (event.name === "pgconductor.invoke") {
 					const step1 = await ctx.step("step1", () => {
 						return stepFn(event.payload.value);
 					});
@@ -226,7 +232,10 @@ describe("Window Execution", () => {
 			select * from pgconductor._private_executions
 			where id = ${executionId}
 		`;
-		expect(executions[0].completed_at).not.toBeNull();
+		expect(executions.length).toBeGreaterThan(0);
+		const execution3 = executions[0];
+		if (!execution3) throw new Error("execution not found");
+		expect(execution3.completed_at).not.toBeNull();
 
 		await orchestrator.stop();
 	}, 30000);
@@ -257,7 +266,7 @@ describe("Window Execution", () => {
 			{ name: "resume-task", window: ["09:00", "17:00"] },
 			{ invocable: true },
 			async (event, ctx) => {
-				if (event.event === "pgconductor.invoke") {
+				if (event.name === "pgconductor.invoke") {
 					const result = await ctx.step("step1", () => {
 						return stepFn(event.payload.value);
 					});
@@ -299,7 +308,10 @@ describe("Window Execution", () => {
 			select * from pgconductor._private_executions
 			where id = ${executionId}
 		`;
-		expect(executions[0].completed_at).not.toBeNull();
+		expect(executions.length).toBeGreaterThan(0);
+		const execution3 = executions[0];
+		if (!execution3) throw new Error("execution not found");
+		expect(execution3.completed_at).not.toBeNull();
 
 		await orchestrator.stop();
 	}, 30000);

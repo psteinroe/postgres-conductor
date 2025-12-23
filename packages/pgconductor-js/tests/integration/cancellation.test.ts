@@ -40,7 +40,7 @@ describe("Cancellation Support", () => {
 		});
 
 		conductor.createTask({ name: "slow-task" }, { invocable: true }, async (event, _ctx) => {
-			if (event.event === "pgconductor.invoke") {
+			if (event.name === "pgconductor.invoke") {
 				await new Promise((r) => setTimeout(r, 10000));
 				return { result: "done" };
 			}
@@ -105,7 +105,7 @@ describe("Cancellation Support", () => {
 			{ name: "long-running-task" },
 			{ invocable: true },
 			async (event, _ctx) => {
-				if (event.event === "pgconductor.invoke") {
+				if (event.name === "pgconductor.invoke") {
 					await new Promise((r) => setTimeout(r, 10000));
 					return { completed: true };
 				}
@@ -199,7 +199,7 @@ describe("Cancellation Support", () => {
 			{ name: "retry-task" },
 			{ invocable: true },
 			async (event, _ctx) => {
-				if (event.event === "pgconductor.invoke") {
+				if (event.name === "pgconductor.invoke") {
 					return taskFn();
 				}
 				throw new Error("Unexpected event type");
@@ -308,7 +308,7 @@ describe("Cancellation Support", () => {
 			{ name: "parent-task" },
 			{ invocable: true },
 			async (event, ctx) => {
-				if (event.event === "pgconductor.invoke") {
+				if (event.name === "pgconductor.invoke") {
 					const childResult = await ctx.invoke("invoke-child", { name: "child-task" }, {});
 					return { result: `parent got: ${childResult.result}` };
 				}
@@ -320,7 +320,7 @@ describe("Cancellation Support", () => {
 			{ name: "child-task" },
 			{ invocable: true },
 			async (event, _ctx) => {
-				if (event.event === "pgconductor.invoke") {
+				if (event.name === "pgconductor.invoke") {
 					await new Promise((r) => setTimeout(r, 10000));
 					return { result: "child done" };
 				}
@@ -397,7 +397,7 @@ describe("Cancellation Support", () => {
 			{ name: "parent-task-2" },
 			{ invocable: true },
 			async (event, ctx) => {
-				if (event.event === "pgconductor.invoke") {
+				if (event.name === "pgconductor.invoke") {
 					const childResult = await ctx.invoke("invoke-child-2", { name: "child-task-2" }, {});
 					return { result: `parent got: ${childResult.result}` };
 				}
@@ -409,7 +409,7 @@ describe("Cancellation Support", () => {
 			{ name: "child-task-2" },
 			{ invocable: true },
 			async (event, _ctx) => {
-				if (event.event === "pgconductor.invoke") {
+				if (event.name === "pgconductor.invoke") {
 					await new Promise((r) => setTimeout(r, 10000));
 					return { result: "child done" };
 				}
@@ -480,7 +480,7 @@ describe("Cancellation Support", () => {
 			{ name: "failing-task", maxAttempts: 5 },
 			{ invocable: true },
 			async (event, _ctx) => {
-				if (event.event === "pgconductor.invoke") {
+				if (event.name === "pgconductor.invoke") {
 					attemptCount++;
 					throw new Error("Intentional failure");
 				}
@@ -557,7 +557,7 @@ describe("Cancellation Support", () => {
 		});
 
 		conductor.createTask({ name: "idempotent-task" }, { invocable: true }, async (event, _ctx) => {
-			if (event.event === "pgconductor.invoke") {
+			if (event.name === "pgconductor.invoke") {
 				await new Promise((r) => setTimeout(r, 10000));
 			}
 		});
@@ -621,7 +621,7 @@ describe("Cancellation Support", () => {
 			{ name: "long-task" },
 			{ invocable: true },
 			async (event, _ctx) => {
-				if (event.event === "pgconductor.invoke") {
+				if (event.name === "pgconductor.invoke") {
 					await new Promise((r) => setTimeout(r, 10000));
 					return { result: "done" };
 				}
@@ -716,7 +716,7 @@ describe("Cancellation Support", () => {
 			{ name: "custom-reason-task" },
 			{ invocable: true },
 			async (event, _ctx) => {
-				if (event.event === "pgconductor.invoke") {
+				if (event.name === "pgconductor.invoke") {
 					await new Promise((r) => setTimeout(r, 10000));
 					return { result: "done" };
 				}
@@ -786,7 +786,7 @@ describe("Cancellation Support", () => {
 			{ name: "conductor-cancel-task" },
 			{ invocable: true },
 			async (event, _ctx) => {
-				if (event.event === "pgconductor.invoke") {
+				if (event.name === "pgconductor.invoke") {
 					await new Promise((r) => setTimeout(r, 10000));
 					return { result: "done" };
 				}
@@ -848,7 +848,7 @@ describe("Cancellation Support", () => {
 			{ name: "context-cancel-task" },
 			{ invocable: true },
 			async (event, ctx) => {
-				if (event.event === "pgconductor.invoke") {
+				if (event.name === "pgconductor.invoke") {
 					capturedResult = await ctx.cancel(event.payload.execIdToCancel, {
 						reason: "Cancelled from task context",
 					});

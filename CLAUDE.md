@@ -385,3 +385,5 @@ just lint-fix
 - prefer || ofer ?? in typescript. good: runAtMs || null. bad: runAtMs ?? null
 - NEVER use `as unknown` or `as any`
 - never use `!` in typescript
+- Always use "Postgres Conductor" when referring to this project
+- Always use "Postgres" over "PostgreSQL"

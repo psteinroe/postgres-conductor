@@ -45,7 +45,7 @@ describe("drain() Mode", () => {
 			{ name: "test-task" },
 			{ invocable: true },
 			async (event) => {
-				if (event.event === "pgconductor.invoke") {
+				if (event.name === "pgconductor.invoke") {
 					executionOrder.push(event.payload.value);
 				}
 			},
@@ -160,7 +160,7 @@ describe("drain() Mode", () => {
 			{ name: "chained-task" },
 			{ invocable: true },
 			async (event) => {
-				if (event.event === "pgconductor.invoke") {
+				if (event.name === "pgconductor.invoke") {
 					const depth = event.payload.depth;
 					executionOrder.push(depth);
 
@@ -260,7 +260,7 @@ describe("drain() Mode", () => {
 			{ name: "batch-task" },
 			{ invocable: true },
 			async (event) => {
-				if (event.event === "pgconductor.invoke") {
+				if (event.name === "pgconductor.invoke") {
 					executedIds.push(event.payload.id);
 				}
 			},

@@ -13,14 +13,14 @@ import { noop } from "./lib/noop";
 import { coerceError } from "./lib/coerce-error";
 
 export type OrchestratorOptions<TTasks extends readonly AnyTask[] = readonly AnyTask[]> = {
-	conductor: Conductor<any, any, any>;
+	conductor: Conductor<any, any, any, any, any, any, any>;
 	tasks?: ValidateTasksQueue<"default", TTasks>;
 	defaultWorker?: Partial<WorkerConfig>;
 	workers?: Worker[];
 };
 
 type InternalOrchestratorOptions = {
-	conductor: Conductor<any, any, any>;
+	conductor: Conductor<any, any, any, any, any, any, any>;
 	tasks?: readonly AnyTask[];
 	defaultWorker?: Partial<WorkerConfig>;
 	workers?: Worker[];

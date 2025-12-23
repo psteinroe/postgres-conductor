@@ -47,7 +47,7 @@ describe("Worker API", () => {
 			{ name: "send-email", queue: "notifications" },
 			{ invocable: true },
 			async (event) => {
-				if (event.event === "pgconductor.invoke") {
+				if (event.name === "pgconductor.invoke") {
 					emailResults.push(event.payload.to);
 				}
 			},
@@ -102,7 +102,7 @@ describe("Worker API", () => {
 			{ name: "test-task" },
 			{ invocable: true },
 			async (event) => {
-				if (event.event === "pgconductor.invoke") {
+				if (event.name === "pgconductor.invoke") {
 					results.push(event.payload.value);
 				}
 			},

@@ -155,9 +155,7 @@ export type ParseSelection<S extends string, Obj> =
 			: never
 		: never;
 
-export type SelectedRow<Row, S extends string | undefined> = S extends string
-	? ParseSelection<S, Row>
-	: Row;
+export type SelectedRow<Row, S extends string> = ParseSelection<S, Row>;
 
 // Validate columns string - returns the string if valid, or error string if invalid
 export type ValidateColumns<S extends string, Row> =

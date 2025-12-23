@@ -1012,6 +1012,10 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 		return this.generateId();
 	}
 
+	async emitEvent(): Promise<string> {
+		return this.generateId();
+	}
+
 	// ============================================================================
 	// Helpers
 	// ============================================================================

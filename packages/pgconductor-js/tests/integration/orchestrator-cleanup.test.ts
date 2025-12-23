@@ -87,7 +87,7 @@ test("cleanup releases locked executions", async () => {
 
 	// Create task handler
 	const task = conductor.createTask(taskDefinition, { invocable: true }, async (event, _ctx) => {
-		if (event.event === "pgconductor.invoke") {
+		if (event.name === "pgconductor.invoke") {
 			await blockForever.promise;
 		}
 	});
@@ -158,7 +158,7 @@ test("cleanup runs when worker crashes during running phase", async () => {
 
 	// Create task handler
 	conductor.createTask(taskDefinition, { invocable: true }, async (event, _ctx) => {
-		if (event.event === "pgconductor.invoke") {
+		if (event.name === "pgconductor.invoke") {
 			throw new Error("Task failed");
 		}
 	});

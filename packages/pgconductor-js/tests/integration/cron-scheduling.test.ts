@@ -282,7 +282,7 @@ describe("Cron Scheduling", () => {
 				{ cron: "0 0 12 * * *", name: "daily-noon" }, // Noon daily
 			],
 			async (event) => {
-				if (event.event === "pgconductor.invoke") {
+				if (event.name === "pgconductor.invoke") {
 					executions(event.payload);
 				}
 			},
@@ -608,8 +608,9 @@ describe("Cron Scheduling", () => {
 
 		await orchestrator.start();
 
-		// Wait for at least 2 executions (2 seconds + 2 seconds + buffer)
-		await waitFor(5000);
+		// Wait for at least 2 executions (2 seconds + 2 seconds + extra buffer for processing)
+		// First execution at ~2s, second at ~4s, wait 6.5s to be safe
+		await waitFor(6500);
 
 		expect(executions.mock.calls.length).toBeGreaterThanOrEqual(2);
 

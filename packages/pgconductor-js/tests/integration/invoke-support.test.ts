@@ -52,7 +52,7 @@ describe("Invoke Support", () => {
 			{ name: "child-task" },
 			{ invocable: true },
 			async (event, _ctx) => {
-				if (event.event === "pgconductor.invoke") {
+				if (event.name === "pgconductor.invoke") {
 					const result = childFn(event.payload.input);
 					return { output: result };
 				}
@@ -64,7 +64,7 @@ describe("Invoke Support", () => {
 			{ name: "parent-task" },
 			{ invocable: true },
 			async (event, ctx) => {
-				if (event.event === "pgconductor.invoke") {
+				if (event.name === "pgconductor.invoke") {
 					const childResult = await ctx.invoke(
 						"invoke-child",
 						{ name: "child-task" },
@@ -202,7 +202,7 @@ describe("Invoke Support", () => {
 			{ name: "once-child" },
 			{ invocable: true },
 			async (event, _ctx) => {
-				if (event.event === "pgconductor.invoke") {
+				if (event.name === "pgconductor.invoke") {
 					const result = childFn(event.payload.input);
 					return { output: result };
 				}
@@ -215,7 +215,7 @@ describe("Invoke Support", () => {
 			{ name: "retry-parent", maxAttempts: 3 },
 			{ invocable: true },
 			async (event, ctx) => {
-				if (event.event === "pgconductor.invoke") {
+				if (event.name === "pgconductor.invoke") {
 					parentAttempts++;
 					const childResult = await ctx.invoke(
 						"invoke-once",
@@ -429,7 +429,7 @@ describe("Invoke Support", () => {
 			{ queue: "parent-queue", name: "parent-task" },
 			{ invocable: true },
 			async (event, ctx) => {
-				if (event.event === "pgconductor.invoke") {
+				if (event.name === "pgconductor.invoke") {
 					const childResult = await ctx.invoke(
 						"invoke-child",
 						{ queue: "child-queue", name: "child-task" },
@@ -450,7 +450,7 @@ describe("Invoke Support", () => {
 			{ queue: "child-queue", name: "child-task" },
 			{ invocable: true },
 			async (event, _ctx) => {
-				if (event.event === "pgconductor.invoke") {
+				if (event.name === "pgconductor.invoke") {
 					const result = childFn(event.payload.input);
 					return { output: result };
 				}
@@ -645,7 +645,7 @@ describe("Invoke Support", () => {
 			{ name: "locked-dedupe-task" },
 			{ invocable: true },
 			async (event, _ctx) => {
-				if (event.event === "pgconductor.invoke") {
+				if (event.name === "pgconductor.invoke") {
 					runCount++;
 					// Simulate slow task
 					await new Promise((r) => setTimeout(r, 500));
@@ -748,7 +748,7 @@ describe("Invoke Support", () => {
 			{ name: "debounce-task" },
 			{ invocable: true },
 			async (event, _ctx) => {
-				if (event.event === "pgconductor.invoke") {
+				if (event.name === "pgconductor.invoke") {
 					executionCount++;
 					lastValue = event.payload.value;
 				}

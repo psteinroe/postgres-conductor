@@ -123,7 +123,7 @@ describe("Maintenance Task", () => {
 
 		// Manually invoke maintenance task (internal task created by Worker)
 		// @ts-expect-error - maintenance task is not in conductor's task registry
-		await conductor.invoke({ name: "pgconductor.maintenance" }, {});
+		await conductor.invoke({ event: "pgconductor.maintenance" }, {});
 
 		// Wait for execution
 		await new Promise((r) => setTimeout(r, 3000));
@@ -222,7 +222,7 @@ describe("Maintenance Task", () => {
 
 		// Manually invoke maintenance task (internal task created by Worker)
 		// @ts-expect-error - maintenance task is not in conductor's task registry
-		await conductor.invoke({ name: "pgconductor.maintenance" }, {});
+		await conductor.invoke({ event: "pgconductor.maintenance" }, {});
 
 		// Wait for execution
 		await new Promise((r) => setTimeout(r, 1000));
@@ -316,7 +316,7 @@ describe("Maintenance Task", () => {
 
 		// Manually invoke maintenance task (internal task created by Worker)
 		// @ts-expect-error - maintenance task is not in conductor's task registry
-		await conductor.invoke({ name: "pgconductor.maintenance" }, {});
+		await conductor.invoke({ event: "pgconductor.maintenance" }, {});
 
 		// Wait for execution
 		await new Promise((r) => setTimeout(r, 3000));
@@ -396,7 +396,7 @@ describe("Maintenance Task", () => {
 
 		// Manually invoke maintenance task (internal task created by Worker)
 		// @ts-expect-error - maintenance task is not in conductor's task registry
-		await conductor.invoke({ name: "pgconductor.maintenance" }, {});
+		await conductor.invoke({ event: "pgconductor.maintenance" }, {});
 
 		// Wait for execution (may need multiple cycles for batching)
 		await new Promise((r) => setTimeout(r, 2000));
@@ -464,7 +464,7 @@ describe("Maintenance Task", () => {
 
 		// Manually invoke maintenance task (internal task created by Worker)
 		// @ts-expect-error - maintenance task is not in conductor's task registry
-		await conductor.invoke({ name: "pgconductor.maintenance" }, {});
+		await conductor.invoke({ event: "pgconductor.maintenance" }, {});
 
 		// Wait for execution
 		await new Promise((r) => setTimeout(r, 1000));

@@ -48,7 +48,7 @@ describe("Batch Processing", () => {
 			},
 			{ invocable: true },
 			async (events, ctx) => {
-				if (events.length > 0 && events[0]?.event === "pgconductor.invoke") {
+				if (events.length > 0 && events[0]?.name === "pgconductor.invoke") {
 					const batch = events.map((e) => e.payload.value);
 					processed.push(batch);
 				}
@@ -106,7 +106,7 @@ describe("Batch Processing", () => {
 			},
 			{ invocable: true },
 			async (events, ctx) => {
-				if (events.length > 0 && events[0]?.event === "pgconductor.invoke") {
+				if (events.length > 0 && events[0]?.name === "pgconductor.invoke") {
 					const results = events.map((e) => ({
 						doubled: e.payload.value * 2,
 					}));
@@ -274,7 +274,7 @@ describe("Batch Processing", () => {
 			},
 			{ invocable: true },
 			async (events, ctx) => {
-				if (events.length > 0 && events[0]?.event === "pgconductor.invoke") {
+				if (events.length > 0 && events[0]?.name === "pgconductor.invoke") {
 					const batch = events.map((e) => e.payload.value);
 					batchedProcessed.push(batch);
 				}
@@ -287,7 +287,7 @@ describe("Batch Processing", () => {
 			},
 			{ invocable: true },
 			async (event, ctx) => {
-				if (event.event === "pgconductor.invoke") {
+				if (event.name === "pgconductor.invoke") {
 					normalProcessed.push(event.payload.value);
 				}
 			},

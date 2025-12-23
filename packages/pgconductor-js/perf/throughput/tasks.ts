@@ -104,7 +104,7 @@ export function createStepsTask<C extends Conductor<any, any, any>>(
 	);
 }
 
-export function createTaskA<C extends Conductor<any, any, any>>(
+export function createTaskA<C extends Conductor<any, any, any, any, any, any, any>>(
 	conductor: C,
 	concurrency?: number,
 ) {
@@ -118,7 +118,7 @@ export function createTaskA<C extends Conductor<any, any, any>>(
 	);
 }
 
-export function createTaskB<C extends Conductor<any, any, any>>(
+export function createTaskB<C extends Conductor<any, any, any, any, any, any, any>>(
 	conductor: C,
 	concurrency?: number,
 ) {
@@ -133,7 +133,7 @@ export function createTaskB<C extends Conductor<any, any, any>>(
 }
 
 // Factory function to create task based on type
-export function createTaskByType<C extends Conductor<any, any, any>>(
+export function createTaskByType<C extends Conductor<any, any, any, any, any, any, any>>(
 	conductor: C,
 	type: string,
 	concurrency?: number,

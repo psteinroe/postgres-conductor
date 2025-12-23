@@ -24,7 +24,7 @@ export const createMaintenanceTask = <Queue extends string = "default">(queue: Q
 		object,
 		void,
 		{ db: DatabaseClient; tasks: Map<string, AnyTask> } & TaskContext,
-		{ event: "pgconductor.maintenance" }
+		{ name: "pgconductor.maintenance" }
 	>(
 		{
 			name: "pgconductor.maintenance",

@@ -34,7 +34,7 @@ export class MockDatabaseClient implements IDatabaseClient {
 	clearFakeTime = mock(async () => {});
 	subscribeEvent = mock(async () => "mock-subscription-id");
 	subscribeDbChange = mock(async () => "mock-subscription-id");
-	// emitEvent = mock(async () => "mock-event-id");
+	emitEvent = mock(async () => "mock-event-id");
 
 	constructor(overrides: Partial<IDatabaseClient> = {}) {
 		Object.assign(this, overrides);
