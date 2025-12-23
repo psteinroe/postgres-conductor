@@ -6,6 +6,12 @@ import { defineEvent } from "../../src/event-definition";
 import { TaskSchemas, EventSchemas } from "../../src/schemas";
 import { z } from "zod";
 
+// Mock SQL instance for type-only tests
+const mockSql = Object.assign((() => Promise.resolve([{ id: "mock-id" }])) as any, {
+	json: (val: any) => val,
+	unsafe: () => Promise.resolve([]),
+});
+
 describe("emit method types", () => {
 	test("conductor.emit accepts typed event payload", () => {
 		const userCreated = defineEvent({
@@ -19,7 +25,7 @@ describe("emit method types", () => {
 		});
 
 		const conductor = Conductor.create({
-			connectionString: "postgres://test",
+			sql: mockSql,
 			tasks: TaskSchemas.fromSchema([]),
 			events: EventSchemas.fromSchema([userCreated, orderPlaced]),
 			context: {},
@@ -54,7 +60,7 @@ describe("emit method types", () => {
 		});
 
 		const conductor = Conductor.create({
-			connectionString: "postgres://test",
+			sql: mockSql,
 			tasks: TaskSchemas.fromSchema([taskDef]),
 			events: EventSchemas.fromSchema([userCreated]),
 			context: {},

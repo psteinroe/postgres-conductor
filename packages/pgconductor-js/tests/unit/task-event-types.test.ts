@@ -15,7 +15,7 @@ describe("task event types", () => {
 		});
 
 		const conductor = Conductor.create({
-			connectionString: "postgres://test",
+			sql: {} as any,
 			tasks: TaskSchemas.fromSchema([taskDef]),
 			context: {},
 		});
@@ -54,7 +54,7 @@ describe("task event types", () => {
 		});
 
 		const conductor = Conductor.create({
-			connectionString: "postgres://test",
+			sql: {} as any,
 			tasks: TaskSchemas.fromSchema([taskDef]),
 			context: {},
 		});
@@ -83,7 +83,7 @@ describe("task event types", () => {
 		});
 
 		const conductor = Conductor.create({
-			connectionString: "postgres://test",
+			sql: {} as any,
 			tasks: TaskSchemas.fromSchema([taskDef]),
 			context: {},
 		});
@@ -110,7 +110,7 @@ describe("task event types", () => {
 		});
 
 		const conductor = Conductor.create({
-			connectionString: "postgres://test",
+			sql: {} as any,
 			tasks: TaskSchemas.fromSchema([taskDef]),
 			context: {},
 		});
@@ -142,7 +142,7 @@ describe("task event types", () => {
 		});
 
 		const conductor = Conductor.create({
-			connectionString: "postgres://test",
+			sql: {} as any,
 			tasks: TaskSchemas.fromSchema([taskDef]),
 			context: {},
 		});
@@ -173,7 +173,7 @@ describe("task event types", () => {
 
 	test("type error: invocable trigger without task definition", () => {
 		const conductor = Conductor.create({
-			connectionString: "postgres://test",
+			sql: {} as any,
 			tasks: TaskSchemas.fromSchema([]),
 			context: {},
 		});
@@ -192,7 +192,7 @@ describe("task event types", () => {
 		});
 
 		const conductor = Conductor.create({
-			connectionString: "postgres://test",
+			sql: {} as any,
 			tasks: TaskSchemas.fromSchema([taskDef]),
 			context: {},
 		});
@@ -217,7 +217,7 @@ describe("task event types", () => {
 	// 	});
 	//
 	// 	const conductor = Conductor.create({
-	// 		connectionString: "postgres://test",
+	// 		sql: {} as any,
 	// 		tasks: TaskSchemas.fromSchema([taskDef]),
 	// 		events: EventSchemas.fromSchema([userCreated]),
 	// 		context: {},
@@ -248,7 +248,7 @@ describe("task event types", () => {
 	// 	});
 	//
 	// 	const conductor = Conductor.create({
-	// 		connectionString: "postgres://test",
+	// 		sql: {} as any,
 	// 		tasks: TaskSchemas.fromSchema([taskDef]),
 	// 		database: DatabaseSchema.fromGeneratedTypes<Database>(),
 	// 		context: {},
@@ -281,7 +281,7 @@ describe("task event types", () => {
 	// 	});
 	//
 	// 	const conductor = Conductor.create({
-	// 		connectionString: "postgres://test",
+	// 		sql: {} as any,
 	// 		tasks: TaskSchemas.fromSchema([taskDef]),
 	// 		database: DatabaseSchema.fromGeneratedTypes<Database>(),
 	// 		context: {},
@@ -320,7 +320,7 @@ describe("task event types", () => {
 	// 	});
 	//
 	// 	const conductor = Conductor.create({
-	// 		connectionString: "postgres://test",
+	// 		sql: {} as any,
 	// 		tasks: TaskSchemas.fromSchema([taskDef]),
 	// 		events: EventSchemas.fromSchema([orderPlaced]),
 	// 		context: {},
@@ -353,7 +353,7 @@ describe("task event types", () => {
 	// 	});
 	//
 	// 	const conductor = Conductor.create({
-	// 		connectionString: "postgres://test",
+	// 		sql: {} as any,
 	// 		tasks: TaskSchemas.fromSchema([taskDef]),
 	// 		database: DatabaseSchema.fromGeneratedTypes<Database>(),
 	// 		context: {},
@@ -393,7 +393,7 @@ describe("task event types", () => {
 	// 	});
 	//
 	// 	const conductor = Conductor.create({
-	// 		connectionString: "postgres://test",
+	// 		sql: {} as any,
 	// 		tasks: TaskSchemas.fromSchema([taskDef]),
 	// 		events: EventSchemas.fromSchema([paymentReceived]),
 	// 		database: DatabaseSchema.fromGeneratedTypes<Database>(),
@@ -435,7 +435,7 @@ describe("task event types", () => {
 	// 	});
 	//
 	// 	const conductor = Conductor.create({
-	// 		connectionString: "postgres://test",
+	// 		sql: {} as any,
 	// 		tasks: TaskSchemas.fromSchema([taskDef]),
 	// 		events: EventSchemas.fromSchema([]), // No events defined
 	// 		context: {},

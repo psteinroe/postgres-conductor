@@ -2,7 +2,7 @@ import type { Orchestrator } from "../../src/orchestrator";
 import type { BenchmarkContext } from "../fixtures/benchmark-database";
 
 export type BenchmarkScenario = {
-	orchestrator: Orchestrator<any>;
+	orchestrator: Orchestrator;
 	invoke: () => Promise<void>;
 };
 

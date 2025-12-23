@@ -1,13 +1,33 @@
 {
 	"name": "pgconductor-js",
 	"version": "0.1.0",
-	"module": "src/index.ts",
+	"description": "Durable execution using only Postgres",
+	"module": "dist/index.js",
 	"type": "module",
 	"bin": {
 		"pgconductor": "./dist/cli/index.js"
 	},
+	"files": [
+		"dist",
+	],
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/psteinroe/pgconductor"
+	},
+	"keywords": [
+		"postgres",
+		"queue",
+		"task",
+		"job",
+		"worker",
+		"durable",
+		"execution",
+		"workflow"
+	],
+	"author": "psteinroe",
+	"license": "MIT",
 	"scripts": {
-		"build": "bun build cli/index.ts --outdir dist/cli --target node",
+		"build": "bun build src/index.ts --outdir dist --target node && bun build cli/index.ts --outdir dist/cli --target node",
 		"test": "bun test",
 		"test:unit": "bun test tests/unit",
 		"test:integration": "bun test tests/integration",

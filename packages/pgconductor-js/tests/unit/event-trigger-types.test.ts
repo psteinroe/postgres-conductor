@@ -20,7 +20,7 @@ describe("event triggers", () => {
 		});
 
 		const conductor = Conductor.create({
-			connectionString: "postgres://test",
+			sql: {} as any,
 			tasks: TaskSchemas.fromSchema([taskDef]),
 			events: EventSchemas.fromSchema([userCreated]),
 			context: {},
@@ -43,7 +43,7 @@ describe("event triggers", () => {
 		});
 
 		const conductor = Conductor.create({
-			connectionString: "postgres://test",
+			sql: {} as any,
 			tasks: TaskSchemas.fromSchema([taskDef]),
 			database: DatabaseSchema.fromGeneratedTypes<Database>(),
 			context: {},
@@ -80,7 +80,7 @@ describe("event triggers", () => {
 		});
 
 		const conductor = Conductor.create({
-			connectionString: "postgres://test",
+			sql: {} as any,
 			tasks: TaskSchemas.fromSchema([taskDef]),
 			events: EventSchemas.fromSchema([userCreated]),
 			context: {},
@@ -108,7 +108,7 @@ describe("event triggers", () => {
 		});
 
 		const conductor = Conductor.create({
-			connectionString: "postgres://test",
+			sql: {} as any,
 			tasks: TaskSchemas.fromSchema([taskDef]),
 			database: DatabaseSchema.fromGeneratedTypes<Database>(),
 			context: {},
@@ -151,7 +151,7 @@ describe("event triggers", () => {
 		});
 
 		const conductor = Conductor.create({
-			connectionString: "postgres://test",
+			sql: {} as any,
 			tasks: TaskSchemas.fromSchema([taskDef]),
 			events: EventSchemas.fromSchema([userCreated]),
 			context: {},
@@ -183,7 +183,7 @@ describe("event triggers", () => {
 		});
 
 		const conductor = Conductor.create({
-			connectionString: "postgres://test",
+			sql: {} as any,
 			tasks: TaskSchemas.fromSchema([taskDef]),
 			events: EventSchemas.fromSchema([orderPlaced]),
 			context: {},
@@ -209,7 +209,7 @@ describe("event triggers", () => {
 		});
 
 		const conductor = Conductor.create({
-			connectionString: "postgres://test",
+			sql: {} as any,
 			tasks: TaskSchemas.fromSchema([taskDef]),
 			database: DatabaseSchema.fromGeneratedTypes<Database>(),
 			context: {},
@@ -254,7 +254,7 @@ describe("event triggers", () => {
 		});
 
 		const conductor = Conductor.create({
-			connectionString: "postgres://test",
+			sql: {} as any,
 			tasks: TaskSchemas.fromSchema([taskDef]),
 			database: DatabaseSchema.fromGeneratedTypes<Database>(),
 			context: {},
@@ -287,7 +287,7 @@ describe("event triggers", () => {
 		});
 
 		const conductor = Conductor.create({
-			connectionString: "postgres://test",
+			sql: {} as any,
 			tasks: TaskSchemas.fromSchema([taskDef]),
 			database: DatabaseSchema.fromGeneratedTypes<Database>(),
 			context: {},
@@ -314,7 +314,7 @@ describe("event triggers", () => {
 		});
 
 		const conductor = Conductor.create({
-			connectionString: "postgres://test",
+			sql: {} as any,
 			tasks: TaskSchemas.fromSchema([taskDef]),
 			database: DatabaseSchema.fromGeneratedTypes<Database>(),
 			context: {},
