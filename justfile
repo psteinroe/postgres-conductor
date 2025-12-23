@@ -7,8 +7,6 @@ alias lf := lint-fix
 alias r := ready
 alias t := test
 
-mod demo "packages/pgconductor-js/demo/demo.just"
-
 build-migrations:
     sh ./scripts/build-migrations.sh
 
