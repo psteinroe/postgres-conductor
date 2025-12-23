@@ -65,6 +65,23 @@ export class TestDatabasePool {
 	}
 
 	static async create(): Promise<TestDatabasePool> {
+		// If DATABASE_URL is set (e.g., in CI), use it instead of starting a container
+		const databaseUrl = process.env.DATABASE_URL;
+
+		if (databaseUrl) {
+			// CI mode: use existing Postgres service
+			const testSql = postgres(databaseUrl, { max: 1, connect_timeout: 5 });
+			try {
+				await testSql`SELECT 1`;
+			} finally {
+				await testSql.end();
+			}
+
+			// Return pool without container (container will be null)
+			return new TestDatabasePool(null as any, databaseUrl);
+		}
+
+		// Local mode: start testcontainer
 		const containerConfig = new GenericContainer("postgres:15")
 			.withEnvironment({
 				POSTGRES_PASSWORD: "postgres",
@@ -113,7 +130,9 @@ export class TestDatabasePool {
 
 		this.children.length = 0;
 
-		// Stop container
-		await this.container.stop();
+		// Stop container if running in local mode
+		if (this.container) {
+			await this.container.stop();
+		}
 	}
 }
