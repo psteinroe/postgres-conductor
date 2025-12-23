@@ -3,9 +3,7 @@ import type { BenchmarkContext } from "./fixtures/benchmark-database";
 import type { BenchmarkScenario } from "./lib/benchmark-runner";
 
 function createTasks(ctx: BenchmarkContext) {
-	const simple = ctx.conductor.createTask({ name: "simple" }, { invocable: true }, async () => ({
-		result: "ok",
-	}));
+	const simple = ctx.conductor.createTask({ name: "simple" }, { invocable: true }, async () => {});
 
 	const withSteps = ctx.conductor.createTask(
 		{ name: "with-steps" },

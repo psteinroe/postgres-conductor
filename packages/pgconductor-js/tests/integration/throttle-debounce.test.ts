@@ -331,57 +331,6 @@ describe("Throttle and Debounce Integration", () => {
 		expect(executions.length).toBe(1);
 	});
 
-	test.skip("batch invoke with throttle", async () => {
-		const db = await pool.child();
-		databases.push(db);
-		const taskDefinition = defineTask({
-			name: "test-task",
-			payload: z.any(),
-		});
-
-		const conductor = Conductor.create({
-			sql: db.sql,
-			tasks: TaskSchemas.fromSchema([taskDefinition]),
-			context: {},
-		});
-
-		await conductor.ensureInstalled();
-
-		// Batch invoke with throttle - uses ON CONFLICT DO UPDATE semantics
-		const ids = await conductor.invoke({ name: "test-task" }, [
-			{
-				payload: { value: 1 },
-				dedupe_key: "key1",
-				throttle: { seconds: 60 },
-			},
-			{
-				payload: { value: 2 },
-				dedupe_key: "key1", // Same key - handled by unique constraint
-				throttle: { seconds: 60 },
-			},
-			{
-				payload: { value: 3 },
-				dedupe_key: "key2", // Different key - should succeed
-				throttle: { seconds: 60 },
-			},
-		]);
-
-		expect(ids).toHaveLength(3);
-		expect(Array.isArray(ids)).toBe(true);
-
-		// Verify actual executions in database
-		const executions = await db.sql`
-			select * from pgconductor.executions_default
-			where task_key = 'test-task'
-			order by dedupe_key
-		`;
-
-		// Should have 2 unique executions (key1 and key2)
-		expect(executions.length).toBe(2);
-		expect(executions[0]?.dedupe_key).toBe("key1");
-		expect(executions[1]?.dedupe_key).toBe("key2");
-	});
-
 	test("batch invoke cannot use debounce", async () => {
 		const db = await pool.child();
 		databases.push(db);

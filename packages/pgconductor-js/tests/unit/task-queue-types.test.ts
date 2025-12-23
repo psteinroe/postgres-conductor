@@ -5,6 +5,9 @@ import { defineTask } from "../../src/task-definition";
 import { TaskSchemas } from "../../src/schemas";
 import { z } from "zod";
 
+// Mock sql instance for type-only tests (no actual DB connection)
+const mockSql = {} as any;
+
 describe("task queue type constraints", () => {
 	test("createWorker accepts tasks from matching queue", () => {
 		const notificationTask = defineTask({
@@ -14,7 +17,7 @@ describe("task queue type constraints", () => {
 		});
 
 		const conductor = Conductor.create({
-			connectionString: "postgres://test",
+			sql: mockSql,
 			tasks: TaskSchemas.fromSchema([notificationTask]),
 			context: {},
 		});
@@ -42,7 +45,7 @@ describe("task queue type constraints", () => {
 		});
 
 		const conductor = Conductor.create({
-			connectionString: "postgres://test",
+			sql: mockSql,
 			tasks: TaskSchemas.fromSchema([notificationTask]),
 			context: {},
 		});
@@ -73,7 +76,7 @@ describe("task queue type constraints", () => {
 		});
 
 		const conductor = Conductor.create({
-			connectionString: "postgres://test",
+			sql: mockSql,
 			tasks: TaskSchemas.fromSchema([notificationTask, defaultTask]),
 			context: {},
 		});
@@ -108,7 +111,7 @@ describe("task queue type constraints", () => {
 		});
 
 		const conductor = Conductor.create({
-			connectionString: "postgres://test",
+			sql: mockSql,
 			tasks: TaskSchemas.fromSchema([defaultTask]),
 			context: {},
 		});
@@ -136,7 +139,7 @@ describe("task queue type constraints", () => {
 		});
 
 		const conductor = Conductor.create({
-			connectionString: "postgres://test",
+			sql: mockSql,
 			tasks: TaskSchemas.fromSchema([notificationTask]),
 			context: {},
 		});
@@ -167,7 +170,7 @@ describe("task queue type constraints", () => {
 		});
 
 		const conductor = Conductor.create({
-			connectionString: "postgres://test",
+			sql: mockSql,
 			tasks: TaskSchemas.fromSchema([notificationTask, defaultTask]),
 			context: {},
 		});

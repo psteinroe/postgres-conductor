@@ -147,15 +147,15 @@ describe("Throttle and Debounce", () => {
 	test("cannot use both throttle and debounce", async () => {
 		const db = new InMemoryDatabaseClient();
 
-		await expect(async () => {
-			await db.invoke({
+		await expect(
+			db.invoke({
 				task_key: "test-task",
 				queue: "default",
 				payload: {},
 				throttle: { seconds: 60 },
 				debounce: { seconds: 60 },
-			});
-		}).toThrow("Cannot use both throttle and debounce");
+			}),
+		).rejects.toThrow("Cannot use both throttle and debounce");
 	});
 
 	test("throttle with no dedupe_key uses global throttle", async () => {

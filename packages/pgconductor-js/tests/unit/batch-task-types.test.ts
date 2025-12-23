@@ -15,7 +15,7 @@ describe("batch task types", () => {
 		});
 
 		const conductor = Conductor.create({
-			connectionString: "postgres://test",
+			sql: {} as any,
 			tasks: TaskSchemas.fromSchema([taskDef]),
 			context: {},
 		});
@@ -60,7 +60,7 @@ describe("batch task types", () => {
 		});
 
 		const conductor = Conductor.create({
-			connectionString: "postgres://test",
+			sql: {} as any,
 			tasks: TaskSchemas.fromSchema([taskDef]),
 			context: {},
 		});
@@ -98,7 +98,7 @@ describe("batch task types", () => {
 		});
 
 		const conductor = Conductor.create({
-			connectionString: "postgres://test",
+			sql: {} as any,
 			tasks: TaskSchemas.fromSchema([taskDef]),
 			context: {},
 		});
@@ -149,7 +149,7 @@ describe("batch task types", () => {
 	// 	});
 
 	// 	const conductor = Conductor.create({
-	// 		connectionString: "postgres://test",
+	// 		sql: {} as any,
 	// 		tasks: TaskSchemas.fromSchema([taskDef]),
 	// 		events: EventSchemas.fromSchema([orderPlaced]),
 	// 		context: {},
@@ -187,7 +187,7 @@ describe("batch task types", () => {
 		});
 
 		const conductor = Conductor.create({
-			connectionString: "postgres://test",
+			sql: {} as any,
 			tasks: TaskSchemas.fromSchema([taskDef]),
 			context: {},
 		});
@@ -228,7 +228,7 @@ describe("batch task types", () => {
 	// 	});
 
 	// 	const conductor = Conductor.create({
-	// 		connectionString: "postgres://test",
+	// 		sql: {} as any,
 	// 		tasks: TaskSchemas.fromSchema([taskDef]),
 	// 		events: EventSchemas.fromSchema([userCreated, userDeleted]),
 	// 		context: {},
@@ -275,7 +275,7 @@ describe("batch task types", () => {
 		});
 
 		const conductor = Conductor.create({
-			connectionString: "postgres://test",
+			sql: {} as any,
 			tasks: TaskSchemas.fromSchema([taskDef]),
 			context: {},
 		});
@@ -310,7 +310,7 @@ describe("batch task types", () => {
 		});
 
 		const conductor = Conductor.create({
-			connectionString: "postgres://test",
+			sql: {} as any,
 			tasks: TaskSchemas.fromSchema([taskDef]),
 			context: {},
 		});
@@ -332,7 +332,7 @@ describe("batch task types", () => {
 		});
 
 		const conductor = Conductor.create({
-			connectionString: "postgres://test",
+			sql: {} as any,
 			tasks: TaskSchemas.fromSchema([taskDef]),
 			context: {},
 		});
@@ -371,7 +371,7 @@ describe("batch task types", () => {
 		});
 
 		const conductor = Conductor.create({
-			connectionString: "postgres://test",
+			sql: {} as any,
 			tasks: TaskSchemas.fromSchema([taskDef]),
 			context: {},
 		});
