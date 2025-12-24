@@ -135,9 +135,9 @@ type ValidatePart<Part extends string, Obj> =
 					: // unquoted identifier
 						IsValidUnquoted<P> extends false
 						? `[Column Selection Error]: Invalid identifier "${P}". Must start with a letter or underscore.`
-						: Lowercase<P> extends keyof Obj
-							? Lowercase<P>
-							: `[Column Selection Error]: Column "${Lowercase<P>}" does not exist.`
+						: P extends keyof Obj
+							? P
+							: `[Column Selection Error]: Column "${P}" does not exist.`
 		: never;
 
 type ValidateParts<Parts extends readonly string[], Obj> = {

@@ -52,18 +52,21 @@ describe("event triggers", () => {
 		// Task triggered by database insert - not invocable
 		conductor.createTask(
 			{ name: "on-contact-insert" },
-			{ schema: "public", table: "contact", operation: "insert", columns: "id,email,first_name" },
+			{
+				schema: "public",
+				table: "contact",
+				operation: "insert",
+				columns: "id,email,first_name",
+			},
 			async (event) => {
 				// Event should have database event payload with schema.table.op format
 				expectTypeOf(event.name).toEqualTypeOf<"public.contact.insert">();
 				expectTypeOf(event.payload.tg_op).toEqualTypeOf<"INSERT">();
 				expectTypeOf(event.payload.old).toEqualTypeOf<null>();
 				// new should have selected contact columns
-				if (event.payload.new) {
-					expectTypeOf(event.payload.new.id).toEqualTypeOf<string>();
-					expectTypeOf(event.payload.new.email).toEqualTypeOf<string | null>();
-					expectTypeOf(event.payload.new.first_name).toEqualTypeOf<string>();
-				}
+				expectTypeOf(event.payload.new.id).toEqualTypeOf<string>();
+				expectTypeOf(event.payload.new.email).toEqualTypeOf<string | null>();
+				expectTypeOf(event.payload.new.first_name).toEqualTypeOf<string>();
 			},
 		);
 	});
@@ -119,7 +122,12 @@ describe("event triggers", () => {
 			{ name: "cron-and-event" },
 			[
 				{ cron: "0 * * * *", name: "hourly" },
-				{ schema: "public", table: "contact", operation: "update", columns: "id,email" },
+				{
+					schema: "public",
+					table: "contact",
+					operation: "update",
+					columns: "id,email",
+				},
 			],
 			async (event) => {
 				// Event should be union of cron and database event
@@ -158,15 +166,29 @@ describe("event triggers", () => {
 		});
 
 		// Task with field selection - should only receive selected fields
-		// Note: Field selection type inference is not yet fully implemented at compile time
-		// At runtime, only selected fields will be present in the payload
 		conductor.createTask(
 			{ name: "on-user-created-fields" },
 			{ event: "user.created", fields: "userId,email" },
 			async (event) => {
-				// At runtime, payload will only have selected fields (userId, email)
-				// Type-level inference for field selection is not yet implemented
-				// so event.payload type will show all fields from the event definition
+				// Event name should be correct
+				expectTypeOf(event.name).toEqualTypeOf<"user.created">();
+
+				// Payload should only have selected fields
+				expectTypeOf(event.payload).toEqualTypeOf<{
+					userId: string;
+					email: string;
+				}>();
+
+				// Selected fields should be accessible
+				expectTypeOf(event.payload.userId).toEqualTypeOf<string>();
+				expectTypeOf(event.payload.email).toEqualTypeOf<string>();
+
+				// Non-selected fields should cause type errors
+				// @ts-expect-error - name was not selected
+				event.payload.name;
+
+				// @ts-expect-error - plan was not selected
+				event.payload.plan;
 			},
 		);
 	});
@@ -218,7 +240,12 @@ describe("event triggers", () => {
 		// Task with column selection - should only receive selected columns
 		conductor.createTask(
 			{ name: "on-contact-update-columns" },
-			{ schema: "public", table: "contact", operation: "update", columns: "id,email" },
+			{
+				schema: "public",
+				table: "contact",
+				operation: "update",
+				columns: "id,email",
+			},
 			async (event) => {
 				expectTypeOf(event.name).toEqualTypeOf<"public.contact.update">();
 				expectTypeOf(event.payload.tg_op).toEqualTypeOf<"UPDATE">();
@@ -295,7 +322,12 @@ describe("event triggers", () => {
 
 		conductor.createTask(
 			{ name: "on-contact-delete" },
-			{ schema: "public", table: "contact", operation: "delete", columns: "id" },
+			{
+				schema: "public",
+				table: "contact",
+				operation: "delete",
+				columns: "id",
+			},
 			async (event) => {
 				expectTypeOf(event.payload.tg_op).toEqualTypeOf<"DELETE">();
 				// DELETE has OLD but not NEW
@@ -322,7 +354,12 @@ describe("event triggers", () => {
 
 		conductor.createTask(
 			{ name: "on-contact-update" },
-			{ schema: "public", table: "contact", operation: "update", columns: "id" },
+			{
+				schema: "public",
+				table: "contact",
+				operation: "update",
+				columns: "id",
+			},
 			async (event) => {
 				expectTypeOf(event.payload.tg_op).toEqualTypeOf<"UPDATE">();
 				// UPDATE has both OLD and NEW
