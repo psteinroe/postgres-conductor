@@ -33,6 +33,9 @@ Postgres Conductor uses a slot-based system to enforce concurrency limits:
 
 This happens entirely in Postgres - no external coordination needed.
 
+> [!WARNING]
+> Setting concurrency on any task in a queue reduces throughput by up to 50% for the entire queue, regardless of how many tasks have concurrency limits.
+
 ## Concurrency vs Worker Concurrency
 
 **Task-level concurrency** (this page):

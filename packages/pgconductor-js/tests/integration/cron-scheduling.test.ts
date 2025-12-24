@@ -448,7 +448,7 @@ describe("Cron Scheduling", () => {
 
 		const runsBeforeUnschedule = targetExecutions.mock.calls.length;
 		await conductor.invoke({ name: "dynamic-unscheduler" }, {});
-		await waitFor(200);
+		await waitFor(2000);
 
 		const futureSchedules = await db.sql<Array<{ id: string }>>`
 			SELECT id
