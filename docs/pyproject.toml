@@ -1,8 +1,7 @@
 [project]
-name = "pgconductor"
+name = "pgconductor-docs"
 version = "0.1.0"
-description = "Add your description here"
-readme = "README.md"
+description = "Documentation for Postgres Conductor"
 requires-python = ">=3.10"
 dependencies = [
     "zensical>=0.0.10",

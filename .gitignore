@@ -173,4 +173,5 @@ target
 
 .DS_Store
 
-site/
+docs/site/
+docs/.venv/

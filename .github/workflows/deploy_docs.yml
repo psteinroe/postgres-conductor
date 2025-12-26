@@ -23,15 +23,18 @@ jobs:
           enable-cache: true
       - name: Set up Python
         run: uv python install
+        working-directory: docs
       - name: Install the project
         run: uv sync --all-extras --dev
+        working-directory: docs
       - name: Configure Git
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email 'github-actions[bot]@users.noreply.github.com'
       - run: uv run zensical build --clean
+        working-directory: docs
       - uses: actions/upload-pages-artifact@v4
         with:
-          path: site
+          path: docs/site
       - uses: actions/deploy-pages@v4
         id: deployment
