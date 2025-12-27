@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="docs/images/logo.png" alt="Postgres Conductor" width="300">
+  <img src="docs/content/images/logo.png" alt="Postgres Conductor" width="300">
 
   # Postgres Conductor
   Durable execution using only Postgres
