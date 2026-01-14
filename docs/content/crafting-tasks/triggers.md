@@ -126,7 +126,7 @@ conductor.createTask(
 
 ## Database Triggers
 
-React to database changes automatically using Postgres triggers. When a row is inserted, updated, or deleted, pgconductor creates a task execution with the row data.
+React to database changes automatically using Postgres triggers. When a row is inserted, updated, or deleted, Postgres Conductor creates a task execution with the row data.
 
 ### Setup
 

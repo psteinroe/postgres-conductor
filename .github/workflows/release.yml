@@ -23,7 +23,7 @@ jobs:
 
       - name: Set version name
         id: set_version
-        run: echo "version=$(git cliff --bumped-version)" >> "$GITHUB_OUTPUT"
+        run: echo "version=$(git cliff --bumped-version --include-path \"packages/**/*\")" >> "$GITHUB_OUTPUT"
 
   migrations:
     name: Check Migrations
@@ -154,7 +154,7 @@ jobs:
         id: changelog
         with:
           config: cliff.toml
-          args: --bump --unreleased
+          args: --bump --unreleased --include-path "packages/**/*"
         env:
           GITHUB_REPO: ${{ github.repository }}
 

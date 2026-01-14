@@ -26,7 +26,8 @@ await orchestrator.start();
 await conductor.ensureInstalled();
 ```
 
-If this library will ever ship breaking changes to the schema, it will gracefully handle the upgrade via [live migrations]().
+>![INFO]
+> If this library will ever ship breaking changes to the schema, it will gracefully handle the upgrade via [live migrations](../scaling/live-migrations.md).
 
 ## What's Next?
 

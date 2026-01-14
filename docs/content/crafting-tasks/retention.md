@@ -64,7 +64,7 @@ Old executions are automatically removed by the maintenance task.
 const highVolumeTask = conductor.createTask(
   {
     name: "process-webhook",
-    removeOnComplete: { days: 1 },  // Clean up quickly
+    removeOnComplete: true,  // Clean up quickly
     removeOnFail: { days: 7 },
   },
   { invocable: true },
@@ -86,32 +86,6 @@ const auditedTask = conductor.createTask(
   { invocable: true },
   async (event, ctx) => {
     // Critical operations requiring audit trail
-  }
-);
-```
-
-**External archival before cleanup:**
-
-```typescript
-const archivedTask = conductor.createTask(
-  {
-    name: "important-task",
-    removeOnComplete: { days: 30 },
-  },
-  { invocable: true },
-  async (event, ctx) => {
-    const result = await processData(event.payload);
-
-    // Archive to external storage before cleanup
-    await ctx.step("archive", async () => {
-      await s3.put(`executions/${ctx.executionId}.json`, {
-        event,
-        result,
-        completedAt: new Date(),
-      });
-    });
-
-    return result;
   }
 );
 ```
