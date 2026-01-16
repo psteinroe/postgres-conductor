@@ -4,7 +4,7 @@
   # Postgres Conductor
   Durable execution using only Postgres
 
-  [Documentation](https://github.com/psteinroe/pgconductor)
+  [Documentation](https://pg-conductor.dev/)
 </div>
 
 ## Installation
