@@ -399,22 +399,19 @@ export class Worker<
 		while (!this.signal?.aborted) {
 			try {
 				// Filter tasks based on time windows (if any)
-				// In tests, skip window filtering at fetch time to allow fake time scenarios.
-				// The ctx.step()/ctx.checkpoint() will handle window checks using database time.
-				// In production, use system time for early filtering (optimization).
-				let disallowedTaskKeys: string[] = [];
-				if (process.env.NODE_ENV !== "test") {
-					const now = new Date();
-					const isWithinWindow = (task: AnyTask, now: Date): boolean => {
-						if (!task.window) return true;
-						const [start, end] = task.window;
-						const currentTime = now.toISOString().slice(11, 19);
-						return currentTime >= start && currentTime < end;
-					};
-					disallowedTaskKeys = allTasks
-						.filter((task) => !isWithinWindow(task, now))
-						.map((t) => t.name);
-				}
+				// db.getCurrentTime() handles test vs production: returns fake time in tests, system time in production
+				const now = await this.db.getCurrentTime({ signal: this.signal });
+
+				const isWithinWindow = (task: AnyTask, now: Date): boolean => {
+					if (!task.window) return true;
+					const [start, end] = task.window;
+					const currentTime = now.toISOString().slice(11, 19);
+					return currentTime >= start && currentTime < end;
+				};
+
+				const disallowedTaskKeys = allTasks
+					.filter((task) => !isWithinWindow(task, now))
+					.map((t) => t.name);
 
 				if (disallowedTaskKeys.length === this.tasks.size) {
 					// skip fetch if no tasks are allowed to run now
