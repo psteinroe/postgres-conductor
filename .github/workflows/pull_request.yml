@@ -23,7 +23,7 @@ jobs:
         run: bun install
 
       - name: Build migrations
-        run: sh ./scripts/build-migrations.sh
+        run: bash ./scripts/build-migrations.sh
 
       - name: Format
         run: bun run oxfmt

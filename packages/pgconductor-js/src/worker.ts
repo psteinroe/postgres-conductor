@@ -399,12 +399,16 @@ export class Worker<
 		while (!this.signal?.aborted) {
 			try {
 				// Filter tasks based on time windows (if any)
-				const now = new Date();
+				// In tests, use database time (respects fake_now). In production, use system time.
+				const now =
+					process.env.NODE_ENV === "test"
+						? await this.db.getCurrentTime({ signal: this.signal })
+						: new Date();
 
 				function isWithinWindow(task: AnyTask, now: Date): boolean {
 					if (!task.window) return true;
 					const [start, end] = task.window;
-					const currentTime = now.toTimeString().slice(0, 8);
+					const currentTime = now.toISOString().slice(11, 19);
 					return currentTime >= start && currentTime < end;
 				}
 
