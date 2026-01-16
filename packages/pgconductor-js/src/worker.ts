@@ -398,17 +398,33 @@ export class Worker<
 
 		while (!this.signal?.aborted) {
 			try {
-				// Note: We don't filter tasks based on windows at fetch time.
-				// Window enforcement happens at ctx.step()/ctx.checkpoint() which properly
-				// handles the release and reschedule logic. This avoids issues with fake time
-				// in tests and ensures consistent behavior.
+				// Filter tasks based on time windows (if any)
+				// db.getCurrentTime() handles test vs production: returns fake time in tests, system time in production
+				const now = await this.db.getCurrentTime({ signal: this.signal });
+
+				const isWithinWindow = (task: AnyTask, now: Date): boolean => {
+					if (!task.window) return true;
+					const [start, end] = task.window;
+					const currentTime = now.toISOString().slice(11, 19);
+					return currentTime >= start && currentTime < end;
+				};
+
+				const disallowedTaskKeys = allTasks
+					.filter((task) => !isWithinWindow(task, now))
+					.map((t) => t.name);
+
+				if (disallowedTaskKeys.length === this.tasks.size) {
+					// skip fetch if no tasks are allowed to run now
+					await waitFor(this.pollIntervalMs, { signal: this.signal });
+					continue;
+				}
 
 				const executions = await this.db.getExecutions(
 					{
 						orchestratorId: this.orchestratorId,
 						queueName: this.queueName,
 						batchSize: this.fetchBatchSize,
-						filterTaskKeys: [],
+						filterTaskKeys: disallowedTaskKeys,
 						taskKeysWithConcurrency,
 					},
 					{ signal: this.signal },

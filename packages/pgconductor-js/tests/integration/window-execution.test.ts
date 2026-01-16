@@ -28,9 +28,9 @@ describe("Window Execution", () => {
 		const db = await pool.child();
 		databases.push(db);
 
-		// Set time outside window (18:00, window is 09:00-17:00)
-		const outsideTime = new Date("2024-01-01T18:00:00Z");
-		await db.client.setFakeTime({ date: outsideTime });
+		// Start inside window so task gets fetched
+		const insideTime = new Date("2024-01-01T10:00:00Z");
+		await db.client.setFakeTime({ date: insideTime });
 
 		const taskDefinitions = defineTask({
 			name: "window-task",
@@ -43,7 +43,8 @@ describe("Window Execution", () => {
 		const conductor = Conductor.create({
 			sql: db.sql,
 			tasks: TaskSchemas.fromSchema([taskDefinitions]),
-			context: {},
+			// Pass db client so task can advance time
+			context: { dbClient: db.client },
 		});
 
 		const windowTask = conductor.createTask(
@@ -51,7 +52,11 @@ describe("Window Execution", () => {
 			{ invocable: true },
 			async (event, ctx) => {
 				if (event.name === "pgconductor.invoke") {
-					// This step will trigger release (we're outside window)
+					// Advance time to outside window BEFORE calling ctx.step()
+					// This simulates the scenario where time passes during execution
+					await ctx.dbClient.setFakeTime({ date: new Date("2024-01-01T18:00:00Z") });
+
+					// This step will trigger release (we're now outside window)
 					const result = await ctx.step("step1", () => {
 						return stepFn(event.payload.value);
 					});
@@ -99,9 +104,9 @@ describe("Window Execution", () => {
 		const db = await pool.child();
 		databases.push(db);
 
-		// Set time outside window
-		const outsideTime = new Date("2024-01-01T17:30:00Z");
-		await db.client.setFakeTime({ date: outsideTime });
+		// Start inside window so task gets fetched
+		const insideTime = new Date("2024-01-01T10:00:00Z");
+		await db.client.setFakeTime({ date: insideTime });
 
 		const taskDefinitions = defineTask({
 			name: "checkpoint-task",
@@ -115,7 +120,8 @@ describe("Window Execution", () => {
 		const conductor = Conductor.create({
 			sql: db.sql,
 			tasks: TaskSchemas.fromSchema([taskDefinitions]),
-			context: {},
+			// Pass db client so task can advance time
+			context: { dbClient: db.client },
 		});
 
 		const checkpointTask = conductor.createTask(
@@ -125,7 +131,10 @@ describe("Window Execution", () => {
 				if (event.name === "pgconductor.invoke") {
 					beforeCheckpoint();
 
-					// Checkpoint should trigger release (we're outside window)
+					// Advance time to outside window BEFORE calling ctx.checkpoint()
+					await ctx.dbClient.setFakeTime({ date: new Date("2024-01-01T17:30:00Z") });
+
+					// Checkpoint should trigger release (we're now outside window)
 					await ctx.checkpoint();
 
 					// This should not execute
