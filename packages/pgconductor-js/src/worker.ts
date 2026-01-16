@@ -396,27 +396,38 @@ export class Worker<
 			.filter((task) => task.concurrency != null)
 			.map((task) => task.name);
 
+		// Check if any tasks have windows - only then do we need time-based filtering
+		const tasksWithWindows = allTasks.filter((task) => task.window);
+
 		while (!this.signal?.aborted) {
 			try {
 				// Filter tasks based on time windows (if any)
-				// db.getCurrentTime() handles test vs production: returns fake time in tests, system time in production
-				const now = await this.db.getCurrentTime({ signal: this.signal });
+				let disallowedTaskKeys: string[] = [];
 
-				const isWithinWindow = (task: AnyTask, now: Date): boolean => {
-					if (!task.window) return true;
-					const [start, end] = task.window;
-					const currentTime = now.toISOString().slice(11, 19);
-					return currentTime >= start && currentTime < end;
-				};
+				if (tasksWithWindows.length > 0) {
+					// db.getCurrentTime() handles test vs production: returns fake time in tests, system time in production
+					const now = await this.db.getCurrentTime({ signal: this.signal });
 
-				const disallowedTaskKeys = allTasks
-					.filter((task) => !isWithinWindow(task, now))
-					.map((t) => t.name);
+					const isWithinWindow = (task: AnyTask, now: Date): boolean => {
+						if (!task.window) return true;
+						const [start, end] = task.window;
+						const currentTime = now.toISOString().slice(11, 19);
+						return currentTime >= start && currentTime < end;
+					};
 
-				if (disallowedTaskKeys.length === this.tasks.size) {
-					// skip fetch if no tasks are allowed to run now
-					await waitFor(this.pollIntervalMs, { signal: this.signal });
-					continue;
+					disallowedTaskKeys = tasksWithWindows
+						.filter((task) => !isWithinWindow(task, now))
+						.map((t) => t.name);
+
+					if (disallowedTaskKeys.length === tasksWithWindows.length) {
+						// All windowed tasks are outside their windows, skip fetch for those
+						// But non-windowed tasks can still run
+						if (tasksWithWindows.length === this.tasks.size) {
+							// All tasks have windows and all are outside - skip entirely
+							await waitFor(this.pollIntervalMs, { signal: this.signal });
+							continue;
+						}
+					}
 				}
 
 				const executions = await this.db.getExecutions(
