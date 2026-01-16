@@ -314,7 +314,18 @@ export class DatabaseClient {
 		return result[0]?.cancel_execution || false;
 	}
 
+	/**
+	 * Get current time.
+	 * In production: returns system time directly (no DB call).
+	 * In tests: queries database to respect fake_now setting.
+	 */
 	async getCurrentTime(options?: QueryMethodOptions): Promise<Date> {
+		// In production, use system time for performance
+		if (process.env.NODE_ENV !== "test") {
+			return new Date();
+		}
+
+		// In tests, query DB to respect fake_now
 		const result = await this.query(
 			(sql) =>
 				sql<{ now: Date }[]>`

@@ -372,14 +372,11 @@ export class TaskContext<
 	}
 
 	/**
-	 * Get current time. In tests, use database time (respects fake_now).
-	 * In production, use system time for performance.
+	 * Get current time.
+	 * DatabaseClient handles test vs production: returns fake time in tests, system time in production.
 	 */
 	private async getNow(): Promise<Date> {
-		if (process.env.NODE_ENV === "test") {
-			return this.opts.db.getCurrentTime({ signal: this.signal });
-		}
-		return new Date();
+		return this.opts.db.getCurrentTime({ signal: this.signal });
 	}
 
 	/**
