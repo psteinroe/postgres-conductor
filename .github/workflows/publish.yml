@@ -49,12 +49,11 @@ jobs:
         working-directory: packages/pgconductor-js
         run: bun run build
 
-      - name: Setup NPM Auth
-        run: echo "//registry.npmjs.org/:_authToken=${{ secrets.NPM_TOKEN }}" > ~/.npmrc
-
       - name: Publish to NPM
         working-directory: packages/pgconductor-js
-        run: npm publish
+        run: bun publish
+        env:
+          NPM_CONFIG_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Output Summary
         run: |
