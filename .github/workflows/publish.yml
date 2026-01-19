@@ -54,7 +54,7 @@ jobs:
 
       - name: Publish to NPM
         working-directory: packages/pgconductor-js
-        run: bun publish
+        run: npm publish
 
       - name: Output Summary
         run: |
