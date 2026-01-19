@@ -49,6 +49,9 @@ jobs:
         working-directory: packages/pgconductor-js
         run: bun run build
 
+      - name: Copy README
+        run: cp README.md packages/pgconductor-js/README.md
+
       - name: Publish to NPM
         working-directory: packages/pgconductor-js
         run: bun publish

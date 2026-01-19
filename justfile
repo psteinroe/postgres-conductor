@@ -33,6 +33,7 @@ ready:
     just lint
     just format
 
+[working-directory: 'docs']
 docs:
     uv run zensical serve
 

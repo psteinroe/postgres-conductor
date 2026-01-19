@@ -1,6 +1,14 @@
 # Overview
 
-Postgres Conductor is a durable execution engine using only Postgres, eliminating the need for additional infrastructure like Redis or message queues.
+<p align="center">
+  <img src="images/logo.png" alt="Postgres Conductor" width="300">
+</p>
+
+<h1 align="center">Postgres Conductor</h1>
+
+<p align="center">
+  Postgres Conductor is a durable execution engine using only Postgres, eliminating the need for additional infrastructure like Redis or message queues.
+</p>
 
 ## Why Postgres Conductor?
 
