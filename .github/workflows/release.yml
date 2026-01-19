@@ -170,11 +170,6 @@ jobs:
         with:
           body: |
             ${{ steps.changelog.outputs.content }}
-
-            ## Docker Image
-            ```bash
-            docker pull ghcr.io/${{ github.repository }}:${{ needs.extract_version.outputs.version }}
-            ```
           tag_name: ${{ steps.changelog.outputs.version }}
           draft: true
 
