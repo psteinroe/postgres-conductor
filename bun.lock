@@ -10,29 +10,6 @@
         "oxlint-tsgolint": "catalog:",
       },
     },
-    "packages/pgconductor-instrumentation": {
-      "name": "@pgconductor/instrumentation",
-      "version": "0.1.0",
-      "dependencies": {
-        "@opentelemetry/api": "^1.9.0",
-        "@opentelemetry/instrumentation": "^0.57.0",
-        "@opentelemetry/semantic-conventions": "^1.30.0",
-      },
-      "devDependencies": {
-        "@opentelemetry/sdk-metrics": "^1.30.0",
-        "@opentelemetry/sdk-trace-base": "^1.30.0",
-        "@opentelemetry/sdk-trace-node": "^1.30.0",
-        "@testcontainers/postgresql": "catalog:",
-        "@types/bun": "catalog:",
-        "pgconductor-js": "workspace:*",
-        "zod": "catalog:",
-      },
-      "peerDependencies": {
-        "@opentelemetry/api": "^1.9.0",
-        "@opentelemetry/instrumentation": "^0.57.0",
-        "typescript": "catalog:",
-      },
-    },
     "packages/pgconductor-js": {
       "name": "pgconductor-js",
       "version": "0.1.0",
@@ -52,6 +29,30 @@
         "zod": "catalog:",
       },
       "peerDependencies": {
+        "typescript": "catalog:",
+      },
+    },
+    "packages/pgconductor-js-instrumentation": {
+      "name": "@pgconductor/js-instrumentation",
+      "version": "0.1.0",
+      "dependencies": {
+        "@opentelemetry/api": "^1.9.0",
+        "@opentelemetry/instrumentation": "^0.57.0",
+        "@opentelemetry/semantic-conventions": "^1.30.0",
+      },
+      "devDependencies": {
+        "@opentelemetry/sdk-metrics": "^1.30.0",
+        "@opentelemetry/sdk-trace-base": "^1.30.0",
+        "@opentelemetry/sdk-trace-node": "^1.30.0",
+        "@testcontainers/postgresql": "catalog:",
+        "@types/bun": "catalog:",
+        "pgconductor-js": "workspace:*",
+        "zod": "catalog:",
+      },
+      "peerDependencies": {
+        "@opentelemetry/api": "^1.9.0",
+        "@opentelemetry/instrumentation": "^0.57.0",
+        "pgconductor-js": ">0.1.0",
         "typescript": "catalog:",
       },
     },
@@ -149,7 +150,7 @@
 
     "@oxlint/win32-x64": ["@oxlint/win32-x64@1.30.0", "", { "os": "win32", "cpu": "x64" }, "sha512-tbPnJIBUKke9KpceV+DpGyfN3LdhGaEPJHSuD4/mUEwP9Kk6IKSoDNih681RVGhgvaEZg3uHmQr6n9Uh0P3Yrg=="],
 
-    "@pgconductor/instrumentation": ["@pgconductor/instrumentation@workspace:packages/pgconductor-instrumentation"],
+    "@pgconductor/js-instrumentation": ["@pgconductor/js-instrumentation@workspace:packages/pgconductor-js-instrumentation"],
 
     "@pkgjs/parseargs": ["@pkgjs/parseargs@0.11.0", "", {}, "sha512-+1VkjdD0QBLPodGrJUeqarH8VAIvQODIbwh9XpP5Syisf7YoQgsJKPNFoqqLQlu+VQ/tVSshMR6loPMn8U+dPg=="],
 

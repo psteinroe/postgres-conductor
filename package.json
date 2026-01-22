@@ -1,7 +1,7 @@
 {
 	"name": "pgconductor",
 	"type": "module",
-	"workspaces": ["packages/pgconductor-js", "packages/pgconductor-instrumentation"],
+	"workspaces": ["packages/pgconductor-js", "packages/pgconductor-js-instrumentation"],
 	"catalog": {
 		"postgres": "3.4.7",
 		"prettier": "3.4.2",
