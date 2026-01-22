@@ -104,6 +104,7 @@ create table pgconductor._private_executions (
     waiting_step_key text,
     parent_execution_id uuid,
     singleton_on timestamptz,
+    trace_context jsonb,
     primary key (id, queue),
     unique (task_key, dedupe_key, queue)
 ) partition by list (queue);
@@ -312,7 +313,8 @@ create type pgconductor.execution_spec as (
     dedupe_seconds integer,
     dedupe_next_slot boolean,
     cron_expression text,
-    priority integer
+    priority integer,
+    trace_context jsonb
 );
 
 create type pgconductor.task_spec as (
@@ -553,7 +555,8 @@ begin
         dedupe_key,
         singleton_on,
         cron_expression,
-        priority
+        priority,
+        trace_context
     )
     select
         pgconductor._private_portable_uuidv7(),
@@ -572,14 +575,16 @@ begin
             else null
         end,
         spec.cron_expression,
-        coalesce(spec.priority, 0)
+        coalesce(spec.priority, 0),
+        spec.trace_context
     from unnest(specs) as spec
     on conflict (task_key, dedupe_key, queue) do update set
         payload = excluded.payload,
         run_at = excluded.run_at,
         priority = excluded.priority,
         cron_expression = excluded.cron_expression,
-        singleton_on = excluded.singleton_on
+        singleton_on = excluded.singleton_on,
+        trace_context = excluded.trace_context
     returning pgconductor._private_executions.id;
 end;
 $function$
@@ -594,7 +599,8 @@ create or replace function pgconductor.invoke(
     p_dedupe_seconds integer default null,
     p_dedupe_next_slot boolean default false,
     p_cron_expression text default null,
-    p_priority integer default null
+    p_priority integer default null,
+    p_trace_context jsonb default null
 )
  returns table(id uuid)
  language plpgsql
@@ -647,7 +653,8 @@ begin
               dedupe_key,
               singleton_on,
               cron_expression,
-              priority
+              priority,
+              trace_context
           ) values (
               pgconductor._private_portable_uuidv7(),
               p_task_key,
@@ -657,7 +664,8 @@ begin
               p_dedupe_key,
               v_singleton_on,
               p_cron_expression,
-              coalesce(p_priority, 0)
+              coalesce(p_priority, 0),
+              p_trace_context
           )
           on conflict (task_key, singleton_on, coalesce(dedupe_key, ''), queue)
           where singleton_on is not null and completed_at is null and failed_at is null and cancelled = false
@@ -678,7 +686,8 @@ begin
               dedupe_key,
               singleton_on,
               cron_expression,
-              priority
+              priority,
+              trace_context
           ) values (
               pgconductor._private_portable_uuidv7(),
               p_task_key,
@@ -688,14 +697,16 @@ begin
               p_dedupe_key,
               v_next_singleton_on,
               p_cron_expression,
-              coalesce(p_priority, 0)
+              coalesce(p_priority, 0),
+              p_trace_context
           )
           on conflict (task_key, singleton_on, coalesce(dedupe_key, ''), queue)
           where singleton_on is not null and completed_at is null and failed_at is null and cancelled = false
           do update set
               payload = excluded.payload,
               run_at = excluded.run_at,
-              priority = excluded.priority
+              priority = excluded.priority,
+              trace_context = excluded.trace_context
           returning _private_executions.id;
           return;
       end if;
@@ -725,7 +736,8 @@ begin
     run_at,
     dedupe_key,
     cron_expression,
-    priority
+    priority,
+    trace_context
   ) values (
     pgconductor._private_portable_uuidv7(),
     p_task_key,
@@ -734,13 +746,15 @@ begin
     v_run_at,
     p_dedupe_key,
     p_cron_expression,
-    coalesce(p_priority, 0)
+    coalesce(p_priority, 0),
+    p_trace_context
   )
   on conflict (task_key, dedupe_key, queue) do update set
     payload = excluded.payload,
     run_at = excluded.run_at,
     priority = excluded.priority,
-    cron_expression = excluded.cron_expression
+    cron_expression = excluded.cron_expression,
+    trace_context = excluded.trace_context
   returning e.id;
 end;
 $function$

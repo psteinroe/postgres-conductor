@@ -1,0 +1,54 @@
+{
+	"name": "@pgconductor/js-instrumentation",
+	"version": "0.1.0",
+	"description": "OpenTelemetry instrumentation for pgconductor-js",
+	"module": "dist/index.js",
+	"type": "module",
+	"files": [
+		"dist",
+		"README.md"
+	],
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/psteinroe/pgconductor"
+	},
+	"keywords": [
+		"postgres",
+		"opentelemetry",
+		"instrumentation",
+		"tracing",
+		"observability",
+		"pgconductor"
+	],
+	"author": "psteinroe",
+	"license": "MIT",
+	"publishConfig": {
+		"access": "public",
+		"tag": "latest",
+		"provenance": true
+	},
+	"scripts": {
+		"build": "bun build src/index.ts --outdir dist --target node",
+		"test": "bun test",
+		"typecheck": "tsc --noEmit"
+	},
+	"devDependencies": {
+		"@testcontainers/postgresql": "catalog:",
+		"@types/bun": "catalog:",
+		"@opentelemetry/sdk-trace-base": "^1.30.0",
+		"@opentelemetry/sdk-trace-node": "^1.30.0",
+		"@opentelemetry/sdk-metrics": "^1.30.0",
+		"zod": "catalog:",
+		"pgconductor-js": "workspace:*"
+	},
+	"peerDependencies": {
+		"typescript": "catalog:",
+		"@opentelemetry/api": "^1.9.0",
+		"@opentelemetry/instrumentation": "^0.57.0"
+	},
+	"dependencies": {
+		"@opentelemetry/api": "^1.9.0",
+		"@opentelemetry/instrumentation": "^0.57.0",
+		"@opentelemetry/semantic-conventions": "^1.30.0"
+	}
+}
