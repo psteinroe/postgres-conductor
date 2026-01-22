@@ -10,10 +10,7 @@ import {
 	type TestContext,
 } from "./setup";
 import * as SemanticConventions from "../src/semantic-conventions";
-import {
-	TestDatabasePool,
-	type TestDatabase,
-} from "pgconductor-js/tests/fixtures/test-database";
+import { TestDatabasePool, type TestDatabase } from "pgconductor-js/tests/fixtures/test-database";
 import { Conductor, Orchestrator, TaskSchemas } from "pgconductor-js";
 import { z } from "zod";
 
@@ -96,10 +93,7 @@ describe("Error Handling", () => {
 		expect(processSpan?.status.code).toBe(SpanStatusCode.ERROR);
 
 		// Check error attributes
-		const errorMsg = getSpanAttribute(
-			processSpan!,
-			SemanticConventions.PGCONDUCTOR_ERROR_MESSAGE,
-		);
+		const errorMsg = getSpanAttribute(processSpan!, SemanticConventions.PGCONDUCTOR_ERROR_MESSAGE);
 		expect(errorMsg).toContain("Intentional test error");
 	});
 

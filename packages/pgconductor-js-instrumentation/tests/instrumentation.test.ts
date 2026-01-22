@@ -10,10 +10,7 @@ import {
 	type TestContext,
 } from "./setup";
 import * as SemanticConventions from "../src/semantic-conventions";
-import {
-	TestDatabasePool,
-	type TestDatabase,
-} from "pgconductor-js/tests/fixtures/test-database";
+import { TestDatabasePool, type TestDatabase } from "pgconductor-js/tests/fixtures/test-database";
 import { Conductor, Orchestrator, TaskSchemas } from "pgconductor-js";
 import { z } from "zod";
 

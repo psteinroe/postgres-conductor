@@ -8,10 +8,7 @@ import {
 	findSpanByName,
 	type TestContext,
 } from "./setup";
-import {
-	TestDatabasePool,
-	type TestDatabase,
-} from "pgconductor-js/tests/fixtures/test-database";
+import { TestDatabasePool, type TestDatabase } from "pgconductor-js/tests/fixtures/test-database";
 import { Conductor, Orchestrator, TaskSchemas } from "pgconductor-js";
 import { z } from "zod";
 
@@ -166,7 +163,11 @@ describe("Context Propagation", () => {
 			{ name: "parent-task" },
 			{ invocable: true },
 			async (event, ctx) => {
-				const childResult = await ctx.invoke("invoke-child", { name: "child-task" }, { value: event.payload.value });
+				const childResult = await ctx.invoke(
+					"invoke-child",
+					{ name: "child-task" },
+					{ value: event.payload.value },
+				);
 				return childResult;
 			},
 		);
