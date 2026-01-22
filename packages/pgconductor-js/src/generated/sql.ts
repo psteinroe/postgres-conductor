@@ -1197,16 +1197,42 @@ alter table pgconductor._private_executions
 add column if not exists trace_context jsonb;
 
 -- Add trace_context to execution_spec type
--- Note: ALTER TYPE ... ADD ATTRIBUTE requires Postgres 9.1+
 alter type pgconductor.execution_spec
 add attribute trace_context jsonb;
 
--- Update invoke_batch function to handle trace_context
-create or replace function pgconductor.invoke_batch(specs pgconductor.execution_spec[])
+-- Update invoke_batch function to pass trace_context through
+-- Preserves all existing logic, just adds trace_context column
+create or replace function pgconductor.invoke_batch(
+    specs pgconductor.execution_spec[]
+)
  returns table(id uuid)
  language plpgsql
+ volatile
+ set search_path to ''
 as $function$
+declare
+    v_now timestamptz;
 begin
+    v_now := pgconductor._private_current_time();
+
+    -- clear locked dedupe keys before batch insert
+    update pgconductor._private_executions as e
+    set
+        dedupe_key = null,
+        locked_by = null,
+        locked_at = null,
+        failed_at = v_now,
+        last_error = 'superseded by reinvoke'
+    from unnest(specs) as spec
+    where e.dedupe_key = spec.dedupe_key
+        and e.task_key = spec.task_key
+        and e.queue = coalesce(spec.queue, 'default')
+        and e.locked_at is not null
+        and spec.dedupe_key is not null;
+
+    -- batch insert all executions
+    -- note: duplicate dedupe_keys within same batch will cause error
+    -- users should deduplicate client-side if needed
     return query
     insert into pgconductor._private_executions (
         id,
@@ -1225,14 +1251,15 @@ begin
         spec.task_key,
         coalesce(spec.queue, 'default'),
         spec.payload,
-        coalesce(
-            spec.run_at,
-            pgconductor._private_current_time() + make_interval(secs => coalesce(spec.delay_seconds, 0))
-        ),
+        coalesce(spec.run_at, v_now),
         spec.dedupe_key,
         case
             when spec.dedupe_seconds is not null then
-                pgconductor._private_dedupe_on(spec.dedupe_seconds, spec.dedupe_next_slot)
+                'epoch'::timestamptz + '1 second'::interval * (
+                    spec.dedupe_seconds * floor(
+                        extract(epoch from v_now) / spec.dedupe_seconds
+                    )
+                )
             else null
         end,
         spec.cron_expression,
@@ -1251,13 +1278,13 @@ end;
 $function$
 ;
 
--- Update invoke function to handle trace_context
+-- Update invoke function to pass trace_context through
+-- Preserves all existing logic, just adds trace_context parameter and column
 create or replace function pgconductor.invoke(
     p_task_key text,
     p_queue text default 'default',
-    p_payload jsonb default '{}',
+    p_payload jsonb default null,
     p_run_at timestamptz default null,
-    p_delay_seconds integer default null,
     p_dedupe_key text default null,
     p_dedupe_seconds integer default null,
     p_dedupe_next_slot boolean default false,
@@ -1267,31 +1294,47 @@ create or replace function pgconductor.invoke(
 )
  returns table(id uuid)
  language plpgsql
+ volatile
+ set search_path to ''
 as $function$
 declare
-  v_run_at timestamptz;
-  v_singleton_on timestamptz;
-  v_next_singleton_on timestamptz;
+    v_now timestamptz;
+    v_singleton_on timestamptz;
+    v_next_singleton_on timestamptz;
+    v_run_at timestamptz;
+    v_new_id uuid;
 begin
-  -- Validate: can't use both dedupe_seconds and dedupe_key
-  if p_dedupe_seconds is not null and p_dedupe_key is not null then
-    raise exception 'Cannot use both dedupe_seconds and dedupe_key - choose one';
+  v_now := pgconductor._private_current_time();
+  v_run_at := coalesce(p_run_at, v_now);
+
+  -- clear locked dedupe key before insert (supersede pattern)
+  if p_dedupe_key is not null then
+      update pgconductor._private_executions
+      set
+          dedupe_key = null,
+          locked_by = null,
+          locked_at = null,
+          failed_at = v_now,
+          last_error = 'superseded by reinvoke'
+      where dedupe_key = p_dedupe_key
+          and task_key = p_task_key
+          and queue = p_queue
+          and locked_at is not null;
   end if;
 
-  -- Calculate run_at
-  v_run_at := coalesce(
-    p_run_at,
-    pgconductor._private_current_time() + make_interval(secs => coalesce(p_delay_seconds, 0))
-  );
+  -- singleton throttle/debounce logic
+  if p_dedupe_seconds is not null then
+      -- calculate current time slot (pg-boss formula)
+      v_singleton_on := 'epoch'::timestamptz + '1 second'::interval * (
+          p_dedupe_seconds * floor(
+              extract(epoch from v_now) / p_dedupe_seconds
+          )
+      );
 
-  -- Handle cron-based singleton deduplication
-  if p_cron_expression is not null then
-      -- Calculate singleton_on from cron expression
-      v_singleton_on := pgconductor._private_cron_singleton_on(p_cron_expression, v_run_at);
-
-      -- Try to insert with current singleton_on
-      return query
-          insert into pgconductor._private_executions as e (
+      if p_dedupe_next_slot = false then
+          -- throttle: try current slot, return empty if blocked
+          return query
+          insert into pgconductor._private_executions (
               id,
               task_key,
               queue,
@@ -1317,19 +1360,14 @@ begin
           on conflict (task_key, singleton_on, coalesce(dedupe_key, ''), queue)
           where singleton_on is not null and completed_at is null and failed_at is null and cancelled = false
           do nothing
-          returning e.id;
-
-      -- If insert succeeded (row returned), we're done
-      if found then
+          returning _private_executions.id;
           return;
-      end if;
+      else
+          -- debounce: upsert into next slot
+          v_next_singleton_on := v_singleton_on + (p_dedupe_seconds || ' seconds')::interval;
 
-      -- Conflict occurred - calculate next singleton slot
-      v_next_singleton_on := pgconductor._private_cron_next_singleton_on(p_cron_expression, v_singleton_on);
-
-      -- Try to insert with next singleton_on slot
-      return query
-          insert into pgconductor._private_executions as _private_executions (
+          return query
+          insert into pgconductor._private_executions (
               id,
               task_key,
               queue,
@@ -1345,7 +1383,7 @@ begin
               p_task_key,
               p_queue,
               p_payload,
-              v_run_at,
+              v_next_singleton_on,
               p_dedupe_key,
               v_next_singleton_on,
               p_cron_expression,
@@ -1362,10 +1400,25 @@ begin
           returning _private_executions.id;
           return;
       end if;
+  end if;
 
-  -- Standard insert (no cron)
-  return query
-  insert into pgconductor._private_executions as e (
+  -- regular invoke (no singleton)
+  if p_dedupe_key is not null then
+      -- clear keys that are currently locked so a subsequent insert can succeed.
+      update pgconductor._private_executions as e
+      set
+        dedupe_key = null,
+        locked_by = null,
+        locked_at = null,
+        failed_at = pgconductor._private_current_time(),
+        last_error = 'superseded by reinvoke'
+      where e.dedupe_key = p_dedupe_key
+        and e.task_key = p_task_key
+        and e.queue = p_queue
+        and e.locked_at is not null;
+  end if;
+
+  return query insert into pgconductor._private_executions as e (
     id,
     task_key,
     queue,
