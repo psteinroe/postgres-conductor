@@ -120,7 +120,6 @@ create table pgconductor._private_executions (
     waiting_step_key text,
     parent_execution_id uuid,
     singleton_on timestamptz,
-    trace_context jsonb,
     primary key (id, queue),
     unique (task_key, dedupe_key, queue)
 ) partition by list (queue);
@@ -329,8 +328,7 @@ create type pgconductor.execution_spec as (
     dedupe_seconds integer,
     dedupe_next_slot boolean,
     cron_expression text,
-    priority integer,
-    trace_context jsonb
+    priority integer
 );
 
 create type pgconductor.task_spec as (
@@ -571,8 +569,7 @@ begin
         dedupe_key,
         singleton_on,
         cron_expression,
-        priority,
-        trace_context
+        priority
     )
     select
         pgconductor._private_portable_uuidv7(),
@@ -591,16 +588,14 @@ begin
             else null
         end,
         spec.cron_expression,
-        coalesce(spec.priority, 0),
-        spec.trace_context
+        coalesce(spec.priority, 0)
     from unnest(specs) as spec
     on conflict (task_key, dedupe_key, queue) do update set
         payload = excluded.payload,
         run_at = excluded.run_at,
         priority = excluded.priority,
         cron_expression = excluded.cron_expression,
-        singleton_on = excluded.singleton_on,
-        trace_context = excluded.trace_context
+        singleton_on = excluded.singleton_on
     returning pgconductor._private_executions.id;
 end;
 $function$
@@ -615,8 +610,7 @@ create or replace function pgconductor.invoke(
     p_dedupe_seconds integer default null,
     p_dedupe_next_slot boolean default false,
     p_cron_expression text default null,
-    p_priority integer default null,
-    p_trace_context jsonb default null
+    p_priority integer default null
 )
  returns table(id uuid)
  language plpgsql
@@ -669,8 +663,7 @@ begin
               dedupe_key,
               singleton_on,
               cron_expression,
-              priority,
-              trace_context
+              priority
           ) values (
               pgconductor._private_portable_uuidv7(),
               p_task_key,
@@ -680,8 +673,7 @@ begin
               p_dedupe_key,
               v_singleton_on,
               p_cron_expression,
-              coalesce(p_priority, 0),
-              p_trace_context
+              coalesce(p_priority, 0)
           )
           on conflict (task_key, singleton_on, coalesce(dedupe_key, ''), queue)
           where singleton_on is not null and completed_at is null and failed_at is null and cancelled = false
@@ -702,8 +694,7 @@ begin
               dedupe_key,
               singleton_on,
               cron_expression,
-              priority,
-              trace_context
+              priority
           ) values (
               pgconductor._private_portable_uuidv7(),
               p_task_key,
@@ -713,16 +704,14 @@ begin
               p_dedupe_key,
               v_next_singleton_on,
               p_cron_expression,
-              coalesce(p_priority, 0),
-              p_trace_context
+              coalesce(p_priority, 0)
           )
           on conflict (task_key, singleton_on, coalesce(dedupe_key, ''), queue)
           where singleton_on is not null and completed_at is null and failed_at is null and cancelled = false
           do update set
               payload = excluded.payload,
               run_at = excluded.run_at,
-              priority = excluded.priority,
-              trace_context = excluded.trace_context
+              priority = excluded.priority
           returning _private_executions.id;
           return;
       end if;
@@ -752,8 +741,7 @@ begin
     run_at,
     dedupe_key,
     cron_expression,
-    priority,
-    trace_context
+    priority
   ) values (
     pgconductor._private_portable_uuidv7(),
     p_task_key,
@@ -762,15 +750,13 @@ begin
     v_run_at,
     p_dedupe_key,
     p_cron_expression,
-    coalesce(p_priority, 0),
-    p_trace_context
+    coalesce(p_priority, 0)
   )
   on conflict (task_key, dedupe_key, queue) do update set
     payload = excluded.payload,
     run_at = excluded.run_at,
     priority = excluded.priority,
-    cron_expression = excluded.cron_expression,
-    trace_context = excluded.trace_context
+    cron_expression = excluded.cron_expression
   returning e.id;
 end;
 $function$
@@ -1210,16 +1196,9 @@ $_$;
 alter table pgconductor._private_executions
 add column if not exists trace_context jsonb;
 
--- Add trace_context to execution_spec type (if not already present)
-do $$
-begin
-  alter type pgconductor.execution_spec add attribute trace_context jsonb;
-exception
-  when duplicate_column then null;
-end $$;
-
--- Drop old invoke function to avoid ambiguity (different param count)
-drop function if exists pgconductor.invoke(text, text, jsonb, timestamp with time zone, text, integer, boolean, text, integer);
+-- Add trace_context to execution_spec type
+alter type pgconductor.execution_spec
+add attribute trace_context jsonb;
 
 -- Update invoke_batch function to pass trace_context through
 -- Preserves all existing logic, just adds trace_context column
