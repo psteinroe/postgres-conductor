@@ -47,6 +47,7 @@
         "@testcontainers/postgresql": "catalog:",
         "@types/bun": "catalog:",
         "pgconductor-js": "workspace:*",
+        "postgres": "catalog:",
         "zod": "catalog:",
       },
       "peerDependencies": {

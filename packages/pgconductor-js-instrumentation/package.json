@@ -38,6 +38,7 @@
 		"@opentelemetry/sdk-trace-base": "^1.30.0",
 		"@opentelemetry/sdk-trace-node": "^1.30.0",
 		"@opentelemetry/sdk-metrics": "^1.30.0",
+		"postgres": "catalog:",
 		"zod": "catalog:",
 		"pgconductor-js": "workspace:*"
 	},

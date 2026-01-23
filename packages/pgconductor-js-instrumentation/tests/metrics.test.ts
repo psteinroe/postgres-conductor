@@ -1,7 +1,7 @@
 import { describe, test, expect, beforeAll, afterAll, beforeEach, afterEach } from "bun:test";
 import { setupOtel, cleanupOtel, resetSpans, getMetrics, type TestContext } from "./setup";
 import * as SemanticConventions from "../src/semantic-conventions";
-import { TestDatabasePool, type TestDatabase } from "pgconductor-js/tests/fixtures/test-database";
+import { TestDatabasePool, type TestDatabase } from "./fixtures/test-database";
 import { Conductor, Orchestrator, TaskSchemas } from "pgconductor-js";
 import { z } from "zod";
 import type { DataPoint, SumMetricData, HistogramMetricData } from "@opentelemetry/sdk-metrics";

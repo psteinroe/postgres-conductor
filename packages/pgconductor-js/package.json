@@ -8,10 +8,6 @@
 		".": {
 			"types": "./src/index.ts",
 			"default": "./src/index.ts"
-		},
-		"./tests/fixtures/test-database": {
-			"types": "./tests/fixtures/test-database.ts",
-			"default": "./tests/fixtures/test-database.ts"
 		}
 	},
 	"bin": {

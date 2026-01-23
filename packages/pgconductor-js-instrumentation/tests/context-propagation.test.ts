@@ -8,7 +8,7 @@ import {
 	findSpanByName,
 	type TestContext,
 } from "./setup";
-import { TestDatabasePool, type TestDatabase } from "pgconductor-js/tests/fixtures/test-database";
+import { TestDatabasePool, type TestDatabase } from "./fixtures/test-database";
 import { Conductor, Orchestrator, TaskSchemas } from "pgconductor-js";
 import { z } from "zod";
 
