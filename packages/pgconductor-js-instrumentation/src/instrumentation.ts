@@ -234,7 +234,7 @@ export class PgConductorInstrumentation extends InstrumentationBase<PgConductorI
 					const result = await original.call(this, task, modifiedItems, modifiedOpts);
 
 					// Record metric
-					instrumentation.metrics?.recordTaskInvocation(taskName, queue);
+					instrumentation.metrics?.recordTaskInvocation({ taskName, queue });
 
 					// Set execution ID if returned
 					if (typeof result === "string") {
@@ -400,7 +400,12 @@ export class PgConductorInstrumentation extends InstrumentationBase<PgConductorI
 
 					if (status === "completed") {
 						span.setStatus({ code: SpanStatusCode.OK });
-						instrumentation.metrics?.recordTaskExecution(taskKey, queue, "completed", duration);
+						instrumentation.metrics?.recordTaskExecution({
+							taskName: taskKey,
+							queue,
+							status: "completed",
+							durationMs: duration,
+						});
 					} else if (status === "failed" || status === "permanently_failed") {
 						span.setStatus({ code: SpanStatusCode.ERROR, message: result?.error });
 						if (result?.error) {
@@ -410,23 +415,43 @@ export class PgConductorInstrumentation extends InstrumentationBase<PgConductorI
 							SemanticConventions.PGCONDUCTOR_ERROR_RETRYABLE,
 							status !== "permanently_failed",
 						);
-						instrumentation.metrics?.recordTaskExecution(taskKey, queue, "failed", duration);
+						instrumentation.metrics?.recordTaskExecution({
+							taskName: taskKey,
+							queue,
+							status: "failed",
+							durationMs: duration,
+						});
 						if (status === "failed") {
-							instrumentation.metrics?.recordTaskRetry(taskKey, queue);
+							instrumentation.metrics?.recordTaskRetry({ taskName: taskKey, queue });
 						}
 					} else if (status === "released") {
 						span.setStatus({ code: SpanStatusCode.OK });
-						instrumentation.metrics?.recordTaskExecution(taskKey, queue, "released", duration);
+						instrumentation.metrics?.recordTaskExecution({
+							taskName: taskKey,
+							queue,
+							status: "released",
+							durationMs: duration,
+						});
 					} else if (status === "invoke_child") {
 						span.setStatus({ code: SpanStatusCode.OK });
-						instrumentation.metrics?.recordTaskExecution(taskKey, queue, "invoke_child", duration);
+						instrumentation.metrics?.recordTaskExecution({
+							taskName: taskKey,
+							queue,
+							status: "invoke_child",
+							durationMs: duration,
+						});
 					}
 
 					return result;
 				} catch (error) {
 					instrumentation.recordError(span, error);
 					const duration = Date.now() - startTime;
-					instrumentation.metrics?.recordTaskExecution(taskKey, queue, "failed", duration);
+					instrumentation.metrics?.recordTaskExecution({
+						taskName: taskKey,
+						queue,
+						status: "failed",
+						durationMs: duration,
+					});
 					throw error;
 				} finally {
 					span.end();
@@ -506,12 +531,12 @@ export class PgConductorInstrumentation extends InstrumentationBase<PgConductorI
 
 					// Record metrics for each execution
 					for (const result of results) {
-						instrumentation.metrics?.recordTaskExecution(
-							taskKey,
+						instrumentation.metrics?.recordTaskExecution({
+							taskName: taskKey,
 							queue,
-							result.status,
-							duration / results.length,
-						);
+							status: result.status,
+							durationMs: duration / results.length,
+						});
 					}
 
 					return results;
@@ -519,12 +544,12 @@ export class PgConductorInstrumentation extends InstrumentationBase<PgConductorI
 					instrumentation.recordError(span, error);
 					const duration = Date.now() - startTime;
 					for (const _exec of executions) {
-						instrumentation.metrics?.recordTaskExecution(
-							taskKey,
+						instrumentation.metrics?.recordTaskExecution({
+							taskName: taskKey,
 							queue,
-							"failed",
-							duration / executions.length,
-						);
+							status: "failed",
+							durationMs: duration / executions.length,
+						});
 					}
 					throw error;
 				} finally {
@@ -620,7 +645,7 @@ export class PgConductorInstrumentation extends InstrumentationBase<PgConductorI
 					}
 
 					const duration = Date.now() - startTime;
-					instrumentation.metrics?.recordStepExecution(cached, duration);
+					instrumentation.metrics?.recordStepExecution({ cached, durationMs: duration });
 
 					span.setStatus({ code: SpanStatusCode.OK });
 					return result;

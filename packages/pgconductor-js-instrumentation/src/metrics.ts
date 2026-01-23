@@ -1,6 +1,28 @@
 import type { Meter, Counter, Histogram } from "@opentelemetry/api";
 import * as SemanticConventions from "./semantic-conventions";
 
+export interface TaskInvocationArgs {
+	taskName: string;
+	queue: string;
+}
+
+export interface TaskExecutionArgs {
+	taskName: string;
+	queue: string;
+	status: string;
+	durationMs: number;
+}
+
+export interface TaskRetryArgs {
+	taskName: string;
+	queue: string;
+}
+
+export interface StepExecutionArgs {
+	cached: boolean;
+	durationMs: number;
+}
+
 /**
  * Metrics for Postgres Conductor instrumentation.
  */
@@ -47,46 +69,46 @@ export class PgConductorMetrics {
 	/**
 	 * Record a task invocation (enqueue).
 	 */
-	recordTaskInvocation(taskName: string, queue: string): void {
+	recordTaskInvocation(args: TaskInvocationArgs): void {
 		this.taskInvocations.add(1, {
-			[SemanticConventions.PGCONDUCTOR_TASK_NAME]: taskName,
-			[SemanticConventions.PGCONDUCTOR_TASK_QUEUE]: queue,
+			[SemanticConventions.PGCONDUCTOR_TASK_NAME]: args.taskName,
+			[SemanticConventions.PGCONDUCTOR_TASK_QUEUE]: args.queue,
 		});
 	}
 
 	/**
 	 * Record a task execution completion.
 	 */
-	recordTaskExecution(taskName: string, queue: string, status: string, durationMs: number): void {
+	recordTaskExecution(args: TaskExecutionArgs): void {
 		const attributes = {
-			[SemanticConventions.PGCONDUCTOR_TASK_NAME]: taskName,
-			[SemanticConventions.PGCONDUCTOR_TASK_QUEUE]: queue,
-			[SemanticConventions.PGCONDUCTOR_EXECUTION_STATUS]: status,
+			[SemanticConventions.PGCONDUCTOR_TASK_NAME]: args.taskName,
+			[SemanticConventions.PGCONDUCTOR_TASK_QUEUE]: args.queue,
+			[SemanticConventions.PGCONDUCTOR_EXECUTION_STATUS]: args.status,
 		};
 
 		this.taskExecutions.add(1, attributes);
-		this.taskDuration.record(durationMs, attributes);
+		this.taskDuration.record(args.durationMs, attributes);
 	}
 
 	/**
 	 * Record a task retry.
 	 */
-	recordTaskRetry(taskName: string, queue: string): void {
+	recordTaskRetry(args: TaskRetryArgs): void {
 		this.taskRetries.add(1, {
-			[SemanticConventions.PGCONDUCTOR_TASK_NAME]: taskName,
-			[SemanticConventions.PGCONDUCTOR_TASK_QUEUE]: queue,
+			[SemanticConventions.PGCONDUCTOR_TASK_NAME]: args.taskName,
+			[SemanticConventions.PGCONDUCTOR_TASK_QUEUE]: args.queue,
 		});
 	}
 
 	/**
 	 * Record a step execution.
 	 */
-	recordStepExecution(cached: boolean, durationMs: number): void {
+	recordStepExecution(args: StepExecutionArgs): void {
 		const attributes = {
-			[SemanticConventions.PGCONDUCTOR_STEP_CACHED]: cached,
+			[SemanticConventions.PGCONDUCTOR_STEP_CACHED]: args.cached,
 		};
 
 		this.stepExecutions.add(1, attributes);
-		this.stepDuration.record(durationMs, attributes);
+		this.stepDuration.record(args.durationMs, attributes);
 	}
 }
