@@ -5,9 +5,31 @@
 alter table pgconductor._private_executions
 add column if not exists trace_context jsonb;
 
--- Add trace_context to execution_spec type
-alter type pgconductor.execution_spec
-add attribute trace_context jsonb;
+-- Add trace_context to execution_spec type (with exception handling for idempotency)
+do $$
+begin
+  alter type pgconductor.execution_spec add attribute trace_context jsonb;
+exception
+  when duplicate_column then null;
+end $$;
+
+-- Drop the old 9-param invoke function to avoid ambiguity with the new 10-param version
+do $$
+declare
+  func_oid oid;
+begin
+  -- Find the 9-parameter invoke function
+  select p.oid into func_oid
+  from pg_proc p
+  join pg_namespace n on p.pronamespace = n.oid
+  where n.nspname = 'pgconductor'
+    and p.proname = 'invoke'
+    and p.pronargs = 9;
+
+  if func_oid is not null then
+    execute format('drop function %s', func_oid::regprocedure);
+  end if;
+end $$;
 
 -- Update invoke_batch function to pass trace_context through
 -- Preserves all existing logic, just adds trace_context column
