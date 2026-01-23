@@ -5,9 +5,16 @@
 alter table pgconductor._private_executions
 add column if not exists trace_context jsonb;
 
--- Add trace_context to execution_spec type
-alter type pgconductor.execution_spec
-add attribute trace_context jsonb;
+-- Add trace_context to execution_spec type (if not already present)
+do $$
+begin
+  alter type pgconductor.execution_spec add attribute trace_context jsonb;
+exception
+  when duplicate_column then null;
+end $$;
+
+-- Drop old invoke function to avoid ambiguity (different param count)
+drop function if exists pgconductor.invoke(text, text, jsonb, timestamp with time zone, text, integer, boolean, text, integer);
 
 -- Update invoke_batch function to pass trace_context through
 -- Preserves all existing logic, just adds trace_context column
