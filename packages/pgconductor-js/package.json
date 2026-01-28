@@ -4,6 +4,12 @@
 	"description": "Durable execution using only Postgres",
 	"module": "dist/index.js",
 	"type": "module",
+	"exports": {
+		".": {
+			"types": "./src/index.ts",
+			"default": "./src/index.ts"
+		}
+	},
 	"bin": {
 		"pgconductor": "./dist/cli/index.js"
 	},

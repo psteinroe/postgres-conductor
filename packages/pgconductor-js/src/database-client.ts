@@ -36,6 +36,7 @@ export interface ExecutionSpec {
 	parent_execution_id?: string | null;
 	parent_step_key?: string | null;
 	parent_timeout_ms?: number | null;
+	trace_context?: TraceContext | null;
 }
 
 export interface TaskSpec {
@@ -60,7 +61,12 @@ export interface Execution {
 	dedupe_key?: string | null;
 	cron_expression?: string | null;
 	slot_group_number?: number | null;
+	trace_context?: TraceContext | null;
 }
+
+export type TraceContext = {
+	[key: string]: string | undefined;
+};
 
 // todo: move all of this to query-builder too or create new types.ts file
 
