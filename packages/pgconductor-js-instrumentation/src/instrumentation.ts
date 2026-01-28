@@ -229,29 +229,23 @@ export class PgConductorInstrumentation extends InstrumentationBase<PgConductorI
 				}
 			}
 
-			return context.with(trace.setSpan(context.active(), span), async () => {
-				try {
-					const result = await original.call(this, task, modifiedItems, modifiedOpts);
+			const result = await context.with(trace.setSpan(context.active(), span), () =>
+				original.call(this, task, modifiedItems, modifiedOpts),
+			);
 
-					// Record metric
-					instrumentation.metrics?.recordTaskInvocation({ taskName, queue });
+			// Record metric
+			instrumentation.metrics?.recordTaskInvocation({ taskName, queue });
 
-					// Set execution ID if returned
-					if (typeof result === "string") {
-						span.setAttribute(SemanticConventions.PGCONDUCTOR_EXECUTION_ID, result);
-					} else if (Array.isArray(result)) {
-						span.setAttribute(SemanticConventions.PGCONDUCTOR_BATCH_SIZE, result.length);
-					}
+			// Set execution ID if returned
+			if (typeof result === "string") {
+				span.setAttribute(SemanticConventions.PGCONDUCTOR_EXECUTION_ID, result);
+			} else if (Array.isArray(result)) {
+				span.setAttribute(SemanticConventions.PGCONDUCTOR_BATCH_SIZE, result.length);
+			}
 
-					span.setStatus({ code: SpanStatusCode.OK });
-					return result;
-				} catch (error) {
-					instrumentation.recordError(span, error);
-					throw error;
-				} finally {
-					span.end();
-				}
-			});
+			span.setStatus({ code: SpanStatusCode.OK });
+			span.end();
+			return result;
 		};
 	}
 
@@ -276,18 +270,13 @@ export class PgConductorInstrumentation extends InstrumentationBase<PgConductorI
 				},
 			});
 
-			return context.with(trace.setSpan(context.active(), span), async () => {
-				try {
-					const result = await original.call(this, event, payload);
-					span.setStatus({ code: SpanStatusCode.OK });
-					return result;
-				} catch (error) {
-					instrumentation.recordError(span, error);
-					throw error;
-				} finally {
-					span.end();
-				}
-			});
+			// emit is fire-and-forget, no error recording needed
+			const result = await context.with(trace.setSpan(context.active(), span), () =>
+				original.call(this, event, payload),
+			);
+			span.setStatus({ code: SpanStatusCode.OK });
+			span.end();
+			return result;
 		};
 	}
 
@@ -692,43 +681,33 @@ export class PgConductorInstrumentation extends InstrumentationBase<PgConductorI
 			// Invoke can either:
 			// 1. Return cached result if step exists in DB
 			// 2. Trigger abort (child-invocation) and return a never-resolving promise
-			// We need to end the span in both cases
+			// We need to end the span in both cases (no error recording - this is control flow)
 
 			const abortController = this.opts?.abortController;
 			let abortListener: (() => void) | undefined;
 
-			return context.with(trace.setSpan(context.active(), span), async () => {
-				try {
-					// Set up abort listener to end span when invoke triggers hangup
-					if (abortController?.signal) {
-						abortListener = () => {
-							span.setAttribute(SemanticConventions.PGCONDUCTOR_EXECUTION_STATUS, "invoke_child");
-							span.setStatus({ code: SpanStatusCode.OK });
-							span.end();
-						};
-						abortController.signal.addEventListener("abort", abortListener, { once: true });
-					}
-
-					const result = await original.call(this, key, task, payload, timeout);
-
-					// If we get here, invoke returned (from cache)
-					if (abortListener && abortController?.signal) {
-						abortController.signal.removeEventListener("abort", abortListener);
-					}
-
+			// Set up abort listener to end span when invoke triggers hangup
+			if (abortController?.signal) {
+				abortListener = () => {
+					span.setAttribute(SemanticConventions.PGCONDUCTOR_EXECUTION_STATUS, "invoke_child");
 					span.setStatus({ code: SpanStatusCode.OK });
 					span.end();
-					return result;
-				} catch (error) {
-					// Remove abort listener on error
-					if (abortListener && abortController?.signal) {
-						abortController.signal.removeEventListener("abort", abortListener);
-					}
-					instrumentation.recordError(span, error);
-					span.end();
-					throw error;
-				}
-			});
+				};
+				abortController.signal.addEventListener("abort", abortListener, { once: true });
+			}
+
+			const result = await context.with(trace.setSpan(context.active(), span), () =>
+				original.call(this, key, task, payload, timeout),
+			);
+
+			// If we get here, invoke returned (from cache)
+			if (abortListener && abortController?.signal) {
+				abortController.signal.removeEventListener("abort", abortListener);
+			}
+
+			span.setStatus({ code: SpanStatusCode.OK });
+			span.end();
+			return result;
 		};
 	}
 
@@ -762,44 +741,33 @@ export class PgConductorInstrumentation extends InstrumentationBase<PgConductorI
 			// Sleep can either:
 			// 1. Return immediately if already cached (step exists in DB)
 			// 2. Trigger abort and return a never-resolving promise (not cached)
-			// We need to end the span in both cases
+			// We need to end the span in both cases (no error recording - this is control flow)
 
 			const abortController = this.opts?.abortController;
 			let abortListener: (() => void) | undefined;
 
-			return context.with(trace.setSpan(context.active(), span), async () => {
-				try {
-					// Set up abort listener to end span when sleep triggers hangup
-					if (abortController?.signal) {
-						abortListener = () => {
-							span.setAttribute(SemanticConventions.PGCONDUCTOR_EXECUTION_STATUS, "released");
-							span.setStatus({ code: SpanStatusCode.OK });
-							span.end();
-						};
-						abortController.signal.addEventListener("abort", abortListener, { once: true });
-					}
-
-					const result = await original.call(this, id, ms);
-
-					// If we get here, sleep returned (from cache)
-					// Remove the abort listener since we'll end the span normally
-					if (abortListener && abortController?.signal) {
-						abortController.signal.removeEventListener("abort", abortListener);
-					}
-
+			// Set up abort listener to end span when sleep triggers hangup
+			if (abortController?.signal) {
+				abortListener = () => {
+					span.setAttribute(SemanticConventions.PGCONDUCTOR_EXECUTION_STATUS, "released");
 					span.setStatus({ code: SpanStatusCode.OK });
 					span.end();
-					return result;
-				} catch (error) {
-					// Remove abort listener on error
-					if (abortListener && abortController?.signal) {
-						abortController.signal.removeEventListener("abort", abortListener);
-					}
-					instrumentation.recordError(span, error);
-					span.end();
-					throw error;
-				}
-			});
+				};
+				abortController.signal.addEventListener("abort", abortListener, { once: true });
+			}
+
+			const result = await context.with(trace.setSpan(context.active(), span), () =>
+				original.call(this, id, ms),
+			);
+
+			// If we get here, sleep returned (from cache)
+			if (abortListener && abortController?.signal) {
+				abortController.signal.removeEventListener("abort", abortListener);
+			}
+
+			span.setStatus({ code: SpanStatusCode.OK });
+			span.end();
+			return result;
 		};
 	}
 
