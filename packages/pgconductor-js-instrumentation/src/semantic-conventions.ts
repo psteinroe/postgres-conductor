@@ -41,14 +41,5 @@ export const EXECUTION_STATUS_RELEASED = "released";
 export const EXECUTION_STATUS_INVOKE_CHILD = "invoke_child";
 export const EXECUTION_STATUS_CANCELLED = "cancelled";
 
-// Meter and span names
+// Instrumentation name
 export const INSTRUMENTATION_NAME = "@pgconductor/js-instrumentation";
-
-// Metric names
-export const METRIC_TASK_INVOCATIONS = "pgconductor.task.invocations";
-export const METRIC_TASK_EXECUTIONS = "pgconductor.task.executions";
-export const METRIC_TASK_RETRIES = "pgconductor.task.retries";
-export const METRIC_TASK_DURATION = "pgconductor.task.duration";
-export const METRIC_STEP_EXECUTIONS = "pgconductor.step.executions";
-export const METRIC_STEP_DURATION = "pgconductor.step.duration";
-export const METRIC_QUEUE_DEPTH = "pgconductor.queue.depth";

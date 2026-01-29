@@ -17,7 +17,6 @@ import {
 import type { PgConductorInstrumentationConfig, TraceContext } from "./types";
 import { VERSION } from "./version";
 import * as SemanticConventions from "./semantic-conventions";
-import { PgConductorMetrics } from "./metrics";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyFunction = (...args: any[]) => any;
@@ -25,15 +24,13 @@ type AnyFunction = (...args: any[]) => any;
 /**
  * OpenTelemetry instrumentation for Postgres Conductor.
  *
- * Provides tracing and metrics for:
+ * Provides tracing for:
  * - Task invocations (producer spans)
  * - Task executions (consumer spans)
  * - Step operations (internal spans)
  * - Sleep/invoke child operations
  */
 export class PgConductorInstrumentation extends InstrumentationBase<PgConductorInstrumentationConfig> {
-	private metrics: PgConductorMetrics | null = null;
-
 	constructor(config: PgConductorInstrumentationConfig = {}) {
 		super(SemanticConventions.INSTRUMENTATION_NAME, VERSION, config);
 	}
@@ -65,13 +62,6 @@ export class PgConductorInstrumentation extends InstrumentationBase<PgConductorI
 
 	override getConfig(): PgConductorInstrumentationConfig {
 		return this._config;
-	}
-
-	/**
-	 * Initialize metrics. Call this after registering with a MeterProvider.
-	 */
-	initMetrics(): void {
-		this.metrics = new PgConductorMetrics(this.meter);
 	}
 
 	private get propagateContext(): boolean {
@@ -233,9 +223,6 @@ export class PgConductorInstrumentation extends InstrumentationBase<PgConductorI
 				original.call(this, task, modifiedItems, modifiedOpts),
 			);
 
-			// Record metric
-			instrumentation.metrics?.recordTaskInvocation({ taskName, queue });
-
 			// Set execution ID if returned
 			if (typeof result === "string") {
 				span.setAttribute(SemanticConventions.PGCONDUCTOR_EXECUTION_ID, result);
@@ -372,8 +359,6 @@ export class PgConductorInstrumentation extends InstrumentationBase<PgConductorI
 				}
 			}
 
-			const startTime = Date.now();
-
 			return context.with(trace.setSpan(context.active(), span), async () => {
 				try {
 					const result = (await original.call(this, task, exec)) as {
@@ -381,20 +366,12 @@ export class PgConductorInstrumentation extends InstrumentationBase<PgConductorI
 						error?: string;
 					};
 
-					const duration = Date.now() - startTime;
-
 					// Set status based on result
 					const status = result?.status;
 					span.setAttribute(SemanticConventions.PGCONDUCTOR_EXECUTION_STATUS, status || "unknown");
 
 					if (status === "completed") {
 						span.setStatus({ code: SpanStatusCode.OK });
-						instrumentation.metrics?.recordTaskExecution({
-							taskName: taskKey,
-							queue,
-							status: "completed",
-							durationMs: duration,
-						});
 					} else if (status === "failed" || status === "permanently_failed") {
 						span.setStatus({ code: SpanStatusCode.ERROR, message: result?.error });
 						if (result?.error) {
@@ -404,43 +381,13 @@ export class PgConductorInstrumentation extends InstrumentationBase<PgConductorI
 							SemanticConventions.PGCONDUCTOR_ERROR_RETRYABLE,
 							status !== "permanently_failed",
 						);
-						instrumentation.metrics?.recordTaskExecution({
-							taskName: taskKey,
-							queue,
-							status: "failed",
-							durationMs: duration,
-						});
-						if (status === "failed") {
-							instrumentation.metrics?.recordTaskRetry({ taskName: taskKey, queue });
-						}
-					} else if (status === "released") {
+					} else if (status === "released" || status === "invoke_child") {
 						span.setStatus({ code: SpanStatusCode.OK });
-						instrumentation.metrics?.recordTaskExecution({
-							taskName: taskKey,
-							queue,
-							status: "released",
-							durationMs: duration,
-						});
-					} else if (status === "invoke_child") {
-						span.setStatus({ code: SpanStatusCode.OK });
-						instrumentation.metrics?.recordTaskExecution({
-							taskName: taskKey,
-							queue,
-							status: "invoke_child",
-							durationMs: duration,
-						});
 					}
 
 					return result;
 				} catch (error) {
 					instrumentation.recordError(span, error);
-					const duration = Date.now() - startTime;
-					instrumentation.metrics?.recordTaskExecution({
-						taskName: taskKey,
-						queue,
-						status: "failed",
-						durationMs: duration,
-					});
 					throw error;
 				} finally {
 					span.end();
@@ -491,16 +438,12 @@ export class PgConductorInstrumentation extends InstrumentationBase<PgConductorI
 				links,
 			});
 
-			const startTime = Date.now();
-
 			return context.with(trace.setSpan(context.active(), span), async () => {
 				try {
 					const results = (await original.call(this, task, taskKey, executions)) as {
 						status: string;
 						error?: string;
 					}[];
-
-					const duration = Date.now() - startTime;
 
 					// Count statuses
 					let completed = 0;
@@ -518,28 +461,9 @@ export class PgConductorInstrumentation extends InstrumentationBase<PgConductorI
 						span.setStatus({ code: SpanStatusCode.OK });
 					}
 
-					// Record metrics for each execution
-					for (const result of results) {
-						instrumentation.metrics?.recordTaskExecution({
-							taskName: taskKey,
-							queue,
-							status: result.status,
-							durationMs: duration / results.length,
-						});
-					}
-
 					return results;
 				} catch (error) {
 					instrumentation.recordError(span, error);
-					const duration = Date.now() - startTime;
-					for (const _exec of executions) {
-						instrumentation.metrics?.recordTaskExecution({
-							taskName: taskKey,
-							queue,
-							status: "failed",
-							durationMs: duration / executions.length,
-						});
-					}
 					throw error;
 				} finally {
 					span.end();
@@ -611,8 +535,6 @@ export class PgConductorInstrumentation extends InstrumentationBase<PgConductorI
 				},
 			});
 
-			const startTime = Date.now();
-
 			return context.with(trace.setSpan(context.active(), span), async () => {
 				try {
 					// The original step() will check if cached and return early
@@ -632,9 +554,6 @@ export class PgConductorInstrumentation extends InstrumentationBase<PgConductorI
 					if (config.stepHook) {
 						config.stepHook(span, name, cached);
 					}
-
-					const duration = Date.now() - startTime;
-					instrumentation.metrics?.recordStepExecution({ cached, durationMs: duration });
 
 					span.setStatus({ code: SpanStatusCode.OK });
 					return result;

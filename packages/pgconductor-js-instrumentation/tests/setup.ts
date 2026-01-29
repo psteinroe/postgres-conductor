@@ -4,40 +4,13 @@ import {
 	SimpleSpanProcessor,
 	type ReadableSpan,
 } from "@opentelemetry/sdk-trace-base";
-import {
-	MeterProvider,
-	MetricReader,
-	type ResourceMetrics,
-	type CollectionResult,
-	AggregationTemporality,
-	InstrumentType,
-} from "@opentelemetry/sdk-metrics";
 import { PgConductorInstrumentation, type PgConductorInstrumentationConfig } from "../src";
 import * as pgconductorJs from "pgconductor-js";
 
-/**
- * Simple in-memory metric reader for testing.
- */
-class TestMetricReader extends MetricReader {
-	protected override onForceFlush(): Promise<void> {
-		return Promise.resolve();
-	}
-
-	protected override onShutdown(): Promise<void> {
-		return Promise.resolve();
-	}
-
-	override selectAggregationTemporality(_instrumentType: InstrumentType): AggregationTemporality {
-		return AggregationTemporality.CUMULATIVE;
-	}
-}
-
 export interface TestContext {
 	spanExporter: InMemorySpanExporter;
-	metricReader: TestMetricReader;
 	instrumentation: PgConductorInstrumentation;
 	tracerProvider: NodeTracerProvider;
-	meterProvider: MeterProvider;
 }
 
 /**
@@ -46,21 +19,14 @@ export interface TestContext {
  */
 export function setupOtel(config?: PgConductorInstrumentationConfig): TestContext {
 	const spanExporter = new InMemorySpanExporter();
-	const metricReader = new TestMetricReader();
 
 	const tracerProvider = new NodeTracerProvider();
 	tracerProvider.addSpanProcessor(new SimpleSpanProcessor(spanExporter));
 	tracerProvider.register();
 
-	const meterProvider = new MeterProvider({
-		readers: [metricReader],
-	});
-
 	const instrumentation = new PgConductorInstrumentation(config);
 	instrumentation.setTracerProvider(tracerProvider);
-	instrumentation.setMeterProvider(meterProvider);
 	instrumentation.enable();
-	instrumentation.initMetrics();
 
 	// Manually patch modules for Bun compatibility
 	// Node.js module hooking doesn't work in Bun
@@ -69,10 +35,8 @@ export function setupOtel(config?: PgConductorInstrumentationConfig): TestContex
 
 	return {
 		spanExporter,
-		metricReader,
 		instrumentation,
 		tracerProvider,
-		meterProvider,
 	};
 }
 
@@ -85,7 +49,6 @@ export async function cleanupOtel(ctx: TestContext): Promise<void> {
 	ctx.instrumentation.unpatchModule(pgconductorJs as any);
 	ctx.instrumentation.disable();
 	await ctx.tracerProvider.shutdown();
-	await ctx.meterProvider.shutdown();
 }
 
 /**
@@ -100,13 +63,6 @@ export function resetSpans(ctx: TestContext): void {
  */
 export function getSpans(ctx: TestContext): ReadableSpan[] {
 	return ctx.spanExporter.getFinishedSpans();
-}
-
-/**
- * Get metrics.
- */
-export async function getMetrics(ctx: TestContext): Promise<CollectionResult> {
-	return await ctx.metricReader.collect();
 }
 
 /**
