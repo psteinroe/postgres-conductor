@@ -42,4 +42,4 @@ export const EXECUTION_STATUS_INVOKE_CHILD = "invoke_child";
 export const EXECUTION_STATUS_CANCELLED = "cancelled";
 
 // Instrumentation name
-export const INSTRUMENTATION_NAME = "@pgconductor/js-instrumentation";
+export const INSTRUMENTATION_NAME = "@pgconductor-js/instrumentation";
