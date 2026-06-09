@@ -7,6 +7,9 @@
   [Documentation](https://pg-conductor.dev/)
 </div>
 
+> [!WARNING]
+> Project still in development. Please open an issue if you have any feedback or wishes!
+
 ## Why Postgres Conductor?
 
 **Durable Execution** - Tasks survive crashes and restarts through automatic step memoization
