@@ -113,11 +113,16 @@ test("example", async () => {
 
 ### Modifying Migrations
 
-1. Edit `migrations/0000000001_setup.sql` directly (in-place)
+**IMPORTANT**: Never edit existing migrations that may have been applied to production databases. Always create new migration files for schema changes.
+
+1. Create a new migration file with the next sequence number (e.g., `0000000002_feature_name.sql`)
 2. Run `just build-migrations` to regenerate types
 3. Run tests to verify changes
 
-**Note**: This project is under active development. All SQL changes should be made **in-place** by editing the existing migration file, not by creating new migration files.
+Migration files:
+- `0000000001_setup.sql` - Core schema, tables, SQL functions (DO NOT EDIT)
+- `0000000002_events.sql` - Event subscriptions and triggers (DO NOT EDIT)
+- `0000000003_trace_context.sql` - Adds trace_context for OpenTelemetry
 
 The migration file contains:
 - Table schemas (`tasks`, `executions`, `steps`, `failed_executions`, `test_config`)

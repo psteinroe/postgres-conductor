@@ -1,0 +1,93 @@
+import { NodeTracerProvider } from "@opentelemetry/sdk-trace-node";
+import {
+	InMemorySpanExporter,
+	SimpleSpanProcessor,
+	type ReadableSpan,
+} from "@opentelemetry/sdk-trace-base";
+import { PgConductorInstrumentation, type PgConductorInstrumentationConfig } from "../src";
+import * as pgconductorJs from "pgconductor-js";
+
+export interface TestContext {
+	spanExporter: InMemorySpanExporter;
+	instrumentation: PgConductorInstrumentation;
+	tracerProvider: NodeTracerProvider;
+}
+
+/**
+ * Set up OpenTelemetry SDK for testing.
+ * Manually patches pgconductor-js modules since Bun doesn't support Node.js module hooks.
+ */
+export function setupOtel(config?: PgConductorInstrumentationConfig): TestContext {
+	const spanExporter = new InMemorySpanExporter();
+
+	const tracerProvider = new NodeTracerProvider();
+	tracerProvider.addSpanProcessor(new SimpleSpanProcessor(spanExporter));
+	tracerProvider.register();
+
+	const instrumentation = new PgConductorInstrumentation(config);
+	instrumentation.setTracerProvider(tracerProvider);
+	instrumentation.enable();
+
+	// Manually patch modules for Bun compatibility
+	// Node.js module hooking doesn't work in Bun
+	// eslint-disable-next-line @typescript-eslint/no-explicit-any
+	instrumentation.patchModule(pgconductorJs as any);
+
+	return {
+		spanExporter,
+		instrumentation,
+		tracerProvider,
+	};
+}
+
+/**
+ * Clean up OpenTelemetry SDK.
+ */
+export async function cleanupOtel(ctx: TestContext): Promise<void> {
+	// Manually unpatch modules
+	// eslint-disable-next-line @typescript-eslint/no-explicit-any
+	ctx.instrumentation.unpatchModule(pgconductorJs as any);
+	ctx.instrumentation.disable();
+	await ctx.tracerProvider.shutdown();
+}
+
+/**
+ * Reset span exporter for next test.
+ */
+export function resetSpans(ctx: TestContext): void {
+	ctx.spanExporter.reset();
+}
+
+/**
+ * Get finished spans.
+ */
+export function getSpans(ctx: TestContext): ReadableSpan[] {
+	return ctx.spanExporter.getFinishedSpans();
+}
+
+/**
+ * Find span by name.
+ */
+export function findSpanByName(spans: ReadableSpan[], name: string): ReadableSpan | undefined {
+	return spans.find((s) => s.name === name);
+}
+
+/**
+ * Find spans by name pattern.
+ */
+export function findSpansByPattern(spans: ReadableSpan[], pattern: RegExp): ReadableSpan[] {
+	return spans.filter((s) => pattern.test(s.name));
+}
+
+/**
+ * Get attribute value from span.
+ */
+export function getSpanAttribute(
+	span: ReadableSpan,
+	key: string,
+): string | number | boolean | undefined {
+	const attr = span.attributes[key];
+	if (attr === undefined) return undefined;
+	if (Array.isArray(attr)) return attr[0] as string | number | boolean;
+	return attr as string | number | boolean;
+}

@@ -288,7 +288,8 @@ export class QueryBuilder {
 					_private_executions.last_error,
 					_private_executions.dedupe_key,
 					_private_executions.cron_expression,
-					null as slot_group_number
+					null as slot_group_number,
+					_private_executions.trace_context
 			`;
 		}
 
@@ -462,7 +463,8 @@ export class QueryBuilder {
 				e.last_error,
 				e.dedupe_key,
 				e.cron_expression,
-				p.slot_group_number
+				p.slot_group_number,
+				e.trace_context
 		`;
 	}
 
@@ -923,7 +925,8 @@ export class QueryBuilder {
 				p_dedupe_seconds := ${dedupe_seconds}::integer,
 				p_dedupe_next_slot := ${dedupe_next_slot}::boolean,
 				p_cron_expression := ${spec.cron_expression || null}::text,
-				p_priority := ${spec.priority || null}::integer
+				p_priority := ${spec.priority || null}::integer,
+				p_trace_context := ${spec.trace_context ? this.sql.json(spec.trace_context) : null}::jsonb
 			)
 		`;
 	}
@@ -1029,6 +1032,7 @@ export class QueryBuilder {
 				dedupe_next_slot,
 				cron_expression: spec.cron_expression || null,
 				priority: spec.priority,
+				trace_context: spec.trace_context || null,
 			};
 		});
 
