@@ -311,6 +311,7 @@ export class Worker<
 			removeOnCompleteDays: retentionToDays(task.removeOnComplete),
 			removeOnFailDays: retentionToDays(task.removeOnFail),
 			window: task.window,
+			fifo: task.fifo,
 			concurrency: task.concurrency,
 			groupConcurrency: task.groupConcurrency,
 		}));

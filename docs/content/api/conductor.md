@@ -67,7 +67,9 @@ const task = conductor.createTask(
   name: string;                           // Task name (required)
   queue?: string;                         // Queue name (default: "default")
   maxAttempts?: number;                   // Max retry attempts (default: 3)
-  concurrency?: number;                   // Max concurrent executions (default: unlimited)
+  fifo?: boolean;                          // Strict durable FIFO lane
+  concurrency?: number;                   // Soft max concurrent executions
+  groupConcurrency?: number;               // Soft max per invocation group
   window?: [string, string];              // Time window (e.g., ["09:00", "17:00"])
   removeOnComplete?: { days: number } | false;  // Retention policy
   removeOnFail?: { days: number } | false;      // Retention policy

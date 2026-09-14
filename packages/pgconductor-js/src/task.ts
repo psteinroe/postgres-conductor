@@ -37,10 +37,18 @@ export type TaskConfiguration<
 	window?: [string, string];
 	removeOnComplete?: RetentionSettings;
 	removeOnFail?: RetentionSettings;
+	fifo?: boolean;
 	concurrency?: number;
 	groupConcurrency?: number;
 	batch?: BatchConfig;
 };
+
+/** Configuration validation used by the public task factory. */
+export type ValidateTaskConfiguration<T> = T extends { readonly fifo: true }
+	? T extends { readonly concurrency: number } | { readonly groupConcurrency: number }
+		? "fifo cannot be combined with concurrency or groupConcurrency"
+		: unknown
+	: unknown;
 
 export type RetentionSettings = boolean | { days: number };
 
@@ -200,6 +208,7 @@ export class Task<
 	public readonly window?: [string, string];
 	public readonly removeOnComplete: RetentionSettings;
 	public readonly removeOnFail: RetentionSettings;
+	public readonly fifo?: boolean;
 	public readonly concurrency?: number;
 	public readonly groupConcurrency?: number;
 	public readonly batch?: BatchConfig;
@@ -219,6 +228,13 @@ export class Task<
 		this.window = config.window;
 		this.removeOnComplete = config.removeOnComplete ?? false;
 		this.removeOnFail = config.removeOnFail ?? false;
+		if (
+			config.fifo &&
+			(config.concurrency !== undefined || config.groupConcurrency !== undefined)
+		) {
+			throw new Error("fifo cannot be combined with concurrency or groupConcurrency");
+		}
+		this.fifo = config.fifo;
 		this.concurrency = validateConcurrency(config.concurrency, "concurrency");
 		this.groupConcurrency = validateConcurrency(config.groupConcurrency, "groupConcurrency");
 		this.batch = config.batch;

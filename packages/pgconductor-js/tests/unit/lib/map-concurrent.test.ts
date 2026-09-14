@@ -1,5 +1,6 @@
 import { test, expect, describe } from "bun:test";
 import { mapConcurrent } from "../../../src/lib/map-concurrent";
+import { AsyncQueue } from "../../../src/lib/async-queue";
 import type { PollableAsyncIterable } from "../../../src/lib/async-queue";
 
 class PollableGenerator<T> implements PollableAsyncIterable<T> {
@@ -96,6 +97,27 @@ describe("mapConcurrent", () => {
 		expect(results).toEqual(["item-0", "item-1", "item-2"]);
 	});
 
+	test("continues consuming a live queue while work is active", async () => {
+		const source = new AsyncQueue<number>(4);
+		const results: number[] = [];
+		const consuming = (async () => {
+			for await (const result of mapConcurrent(source, 2, async (n) => {
+				await new Promise((resolve) => setTimeout(resolve, 10));
+				return n * 2;
+			})) {
+				results.push(result);
+			}
+		})();
+
+		await source.push(1);
+		await new Promise((resolve) => setTimeout(resolve, 2));
+		await source.push(2);
+		source.close();
+		await consuming;
+
+		expect(results.sort()).toEqual([2, 4]);
+	});
+
 	test("handles empty source", async () => {
 		async function* empty() {
 			// Yields nothing
@@ -109,21 +131,40 @@ describe("mapConcurrent", () => {
 		expect(results).toEqual([]);
 	});
 
-	test("propagates errors from mapper", async () => {
-		const source = pollable(generateNumbers(5));
+	test("propagates errors from mapper and closes the source", async () => {
+		let returned = false;
+		let first = true;
+		const iterator: AsyncIterator<number> = {
+			next: async () => {
+				if (first) {
+					first = false;
+					return { value: 1, done: false };
+				}
+				return new Promise<IteratorResult<number>>(() => {});
+			},
+			return: async () => {
+				returned = true;
+				return { value: undefined, done: true };
+			},
+		};
+		const source: PollableAsyncIterable<number> = {
+			tryNext: () => undefined,
+			[Symbol.asyncIterator]: () => iterator,
+		};
 
 		try {
-			for await (const _ of mapConcurrent(source, 2, async (n) => {
-				if (n === 2) throw new Error("test error");
-				return n;
+			for await (const _ of mapConcurrent(source, 1, async () => {
+				throw new Error("test error");
 			})) {
-				// Should throw before completing
+				expect.unreachable();
 			}
 			expect.unreachable();
 		} catch (err) {
 			expect(err).toBeInstanceOf(Error);
 			expect((err as Error).message).toBe("test error");
 		}
+
+		expect(returned).toBe(true);
 	});
 
 	test("handles single concurrency", async () => {

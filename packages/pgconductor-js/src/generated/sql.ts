@@ -163,6 +163,9 @@ create table pgconductor._private_tasks (
         )
     ),
 
+    -- FIFO is a strict, persistent single-lane policy. It cannot be combined
+    -- with soft concurrency controls.
+    fifo boolean default false not null,
     -- concurrency controls are intentionally soft and coordinated at claim time
     -- NULL means no limit (unlimited concurrency)
     concurrency_limit integer,
@@ -170,6 +173,9 @@ create table pgconductor._private_tasks (
     constraint positive_concurrency_limits check (
         (concurrency_limit is null or concurrency_limit > 0) and
         (group_concurrency_limit is null or group_concurrency_limit > 0)
+    ),
+    constraint fifo_excludes_concurrency check (
+        not fifo or (concurrency_limit is null and group_concurrency_limit is null)
     ),
 
     primary key (queue, key)
@@ -187,6 +193,19 @@ create table pgconductor._private_steps (
 );
 
 create index idx_steps_execution_id on pgconductor._private_steps (execution_id);
+
+-- A FIFO task owns one durable lane. The owner survives every non-terminal
+-- execution state so another worker cannot pass a sleeping or waiting owner.
+create table pgconductor._private_fifo_owners (
+    queue text not null,
+    task_key text not null,
+    execution_id uuid not null,
+    primary key (queue, task_key),
+    constraint fk_fifo_owner_execution foreign key (execution_id, queue)
+        references pgconductor._private_executions(id, queue) on delete cascade
+);
+
+create index idx_fifo_owners_execution on pgconductor._private_fifo_owners (execution_id, queue);
 
 -- Trigger function to manage executions partitions per queue
 -- Automatically creates partition when queue is inserted
@@ -355,6 +374,7 @@ create type pgconductor.task_spec as (
     window_start timetz,
     window_end timetz,
     concurrency_limit integer,
+    fifo boolean,
     group_concurrency_limit integer
 );
 
@@ -394,7 +414,7 @@ begin
   on conflict (name) do nothing;
 
   -- step 2: register/update tasks
-  insert into pgconductor._private_tasks (key, queue, max_attempts, remove_on_complete_days, remove_on_fail_days, window_start, window_end, concurrency_limit, group_concurrency_limit)
+  insert into pgconductor._private_tasks (key, queue, max_attempts, remove_on_complete_days, remove_on_fail_days, window_start, window_end, fifo, concurrency_limit, group_concurrency_limit)
   select
     spec.key,
     coalesce(spec.queue, 'default'),
@@ -403,6 +423,7 @@ begin
     spec.remove_on_fail_days,
     spec.window_start,
     spec.window_end,
+    coalesce(spec.fifo, false),
     spec.concurrency_limit,
     spec.group_concurrency_limit
   from unnest(p_task_specs) as spec
@@ -414,8 +435,16 @@ begin
     remove_on_fail_days = excluded.remove_on_fail_days,
     window_start = excluded.window_start,
     window_end = excluded.window_end,
+    fifo = excluded.fifo,
     concurrency_limit = excluded.concurrency_limit,
     group_concurrency_limit = excluded.group_concurrency_limit;
+
+  -- A task leaving FIFO must release its lane immediately. Re-enabling FIFO
+  -- intentionally leaves pending work ownerless; the claim query elects its
+  -- current head on the next poll.
+  delete from pgconductor._private_fifo_owners o
+  using pgconductor._private_tasks t
+  where t.queue = o.queue and t.key = o.task_key and t.fifo = false;
 
   -- step 3: insert scheduled cron executions
   insert into pgconductor._private_executions (task_key, queue, payload, run_at, dedupe_key, cron_expression, "group")
@@ -533,6 +562,11 @@ declare
 begin
     v_now := pgconductor._private_current_time();
 
+    insert into pgconductor._private_queues (name)
+    select distinct coalesce(spec.queue, 'default')
+    from unnest(specs) as spec
+    on conflict (name) do nothing;
+
     -- clear locked dedupe keys before batch insert
     with superseded as (
         select e.id, e.queue, e.task_key
@@ -555,6 +589,11 @@ begin
         last_error = 'superseded by reinvoke'
     from superseded s
     where e.id = s.id;
+
+    delete from pgconductor._private_fifo_owners o
+    using pgconductor._private_executions e
+    where o.execution_id = e.id and o.queue = e.queue
+      and e.failed_at = v_now and e.last_error = 'superseded by reinvoke';
 
     -- batch insert all executions
     -- note: duplicate dedupe_keys within same batch will cause error
@@ -631,6 +670,10 @@ begin
   v_now := pgconductor._private_current_time();
   v_run_at := coalesce(p_run_at, v_now);
 
+  insert into pgconductor._private_queues (name)
+  values (p_queue)
+  on conflict (name) do nothing;
+
   -- clear locked dedupe key before insert (supersede pattern)
   if p_dedupe_key is not null then
       with superseded as (
@@ -652,6 +695,11 @@ begin
           last_error = 'superseded by reinvoke'
       from superseded s
       where e.id = s.id;
+
+      delete from pgconductor._private_fifo_owners o
+      using pgconductor._private_executions e
+      where o.execution_id = e.id and o.queue = e.queue
+        and e.failed_at = v_now and e.last_error = 'superseded by reinvoke';
   end if;
 
   -- singleton throttle/debounce logic
@@ -762,7 +810,12 @@ begin
     run_at = excluded.run_at,
     priority = excluded.priority,
     cron_expression = excluded.cron_expression,
-    "group" = excluded."group"
+    "group" = excluded."group",
+    failed_at = case when e.last_error = 'superseded by reinvoke' then null else e.failed_at end,
+    locked_by = case when e.last_error = 'superseded by reinvoke' then null else e.locked_by end,
+    locked_at = case when e.last_error = 'superseded by reinvoke' then null else e.locked_at end,
+    claim_token = case when e.last_error = 'superseded by reinvoke' then null else e.claim_token end,
+    cancelled = case when e.last_error = 'superseded by reinvoke' then false else e.cancelled end
   returning e.id;
 end;
 $function$
@@ -829,6 +882,12 @@ begin
         where id = v_child_id
           and completed_at is null
           and failed_at is null;
+
+        get diagnostics v_rows_affected = row_count;
+        if v_rows_affected > 0 then
+          delete from pgconductor._private_fifo_owners
+          where execution_id = v_child_id and queue = v_child_queue;
+        end if;
       elsif found then
         update pgconductor._private_executions
         set cancelled = true, last_error = p_reason
@@ -839,6 +898,8 @@ begin
 
         get diagnostics v_rows_affected = row_count;
         if v_rows_affected > 0 then
+          -- A running child keeps its FIFO owner until its cancellation is
+          -- fenced and settled by return/recovery.
           insert into pgconductor._private_orchestrator_signals
             (orchestrator_id, type, execution_id, payload)
           values (
@@ -870,6 +931,10 @@ begin
       and locked_at is null;
 
     get diagnostics v_rows_affected = row_count;
+    if v_rows_affected > 0 then
+      delete from pgconductor._private_fifo_owners
+      where execution_id = p_execution_id and queue = v_queue;
+    end if;
     return v_rows_affected > 0;
   else
     -- running: signal orchestrator + set cancelled flag

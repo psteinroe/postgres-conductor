@@ -46,6 +46,7 @@ export interface TaskSpec {
 	removeOnCompleteDays?: number | null;
 	removeOnFailDays?: number | null;
 	window?: [string, string] | null;
+	fifo?: boolean | null;
 	concurrency?: number | null;
 	groupConcurrency?: number | null;
 }

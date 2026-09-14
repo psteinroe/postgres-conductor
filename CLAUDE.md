@@ -207,6 +207,9 @@ conductor.createTask(
     pollInterval: 1000,    // How often to poll for new executions in ms (default: 1000)
     partition: false,      // Enable partitioning (default: false)
     window: ["09:00", "17:00"],  // Time window for execution [start, end]
+    fifo: true,                    // Durable strict FIFO (exclusive with concurrency)
+    concurrency: 10,               // Soft task-level limit
+    groupConcurrency: 2,            // Soft task/group-level limit
   },
   handler,
 );

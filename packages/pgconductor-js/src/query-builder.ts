@@ -176,17 +176,17 @@ export class QueryBuilder {
 			-- fail cancelled executions from expired orchestrators
 			failed_cancelled as (
 				update pgconductor._private_executions e
-				set
-					failed_at = pgconductor._private_current_time(),
-					locked_by = null,
-					locked_at = null,
-					claim_token = null
+				set failed_at = pgconductor._private_current_time(), locked_by = null,
+					locked_at = null, claim_token = null
 				from expired
-				where e.locked_by = expired.id
-					and e.cancelled = true
-					and e.failed_at is null
-					and e.completed_at is null
-				returning e.id
+				where e.locked_by = expired.id and e.cancelled = true
+					and e.failed_at is null and e.completed_at is null
+				returning e.id, e.queue
+			), released_fifo_owners as (
+				delete from pgconductor._private_fifo_owners o
+				using failed_cancelled f
+				where o.execution_id = f.id and o.queue = f.queue
+				returning o.execution_id
 			)
 			-- unlock remaining (non-cancelled) executions
 			update pgconductor._private_executions e
@@ -234,17 +234,16 @@ export class QueryBuilder {
 			-- fail cancelled executions from this orchestrator
 			failed_cancelled as (
 				update pgconductor._private_executions e
-				set
-					failed_at = pgconductor._private_current_time(),
-					locked_by = null,
-					locked_at = null,
-					claim_token = null
+				set failed_at = pgconductor._private_current_time(), locked_by = null,
+					locked_at = null, claim_token = null
 				from deleted
-				where e.locked_by = deleted.id
-					and e.cancelled = true
-					and e.failed_at is null
-					and e.completed_at is null
-				returning e.id
+				where e.locked_by = deleted.id and e.cancelled = true
+					and e.failed_at is null and e.completed_at is null
+				returning e.id, e.queue
+			), released_fifo_owners as (
+				delete from pgconductor._private_fifo_owners o using failed_cancelled f
+				where o.execution_id = f.id and o.queue = f.queue
+				returning o.execution_id
 			)
 			-- unlock remaining (non-cancelled) executions
 			update pgconductor._private_executions e
@@ -268,93 +267,116 @@ export class QueryBuilder {
 			with active_tasks as (
 				select e.task_key, count(*)::integer as active_count
 				from pgconductor._private_executions e
-				where e.queue = ${queueName}::text
-					and e.locked_at is not null
-					and e.failed_at is null
-					and e.completed_at is null
+				where e.queue = ${queueName}::text and e.locked_at is not null
+					and e.failed_at is null and e.completed_at is null
 				group by e.task_key
 			), active_groups as (
 				select e.task_key, e."group", count(*)::integer as active_count
 				from pgconductor._private_executions e
-				where e.queue = ${queueName}::text
-					and e."group" is not null
-					and e.locked_at is not null
-					and e.failed_at is null
-					and e.completed_at is null
+				where e.queue = ${queueName}::text and e."group" is not null
+					and e.locked_at is not null and e.failed_at is null and e.completed_at is null
 				group by e.task_key, e."group"
 			), ranked as (
-				select
-					e.id,
-					e.task_key,
-					e.queue,
-					e.priority,
-					e.run_at,
-					e.enqueue_position,
-					e."group",
-					t.concurrency_limit,
-					t.group_concurrency_limit,
+				select e.id, e.task_key, e.queue, e.priority, e.run_at, e.enqueue_position, e."group",
+					t.concurrency_limit, t.group_concurrency_limit,
 					coalesce(at.active_count, 0) as active_task_count,
 					coalesce(ag.active_count, 0) as active_group_count,
-					row_number() over (
-						partition by e.task_key
-						order by e.priority asc, e.run_at asc, e.enqueue_position asc
-					) as task_rank,
-					row_number() over (
-						partition by e.task_key, e."group"
-						order by e.priority asc, e.run_at asc, e.enqueue_position asc
-					) as group_rank
+					row_number() over (partition by e.task_key
+						order by e.priority asc, e.run_at asc, e.enqueue_position asc) as task_rank,
+					row_number() over (partition by e.task_key, e."group"
+						order by e.priority asc, e.run_at asc, e.enqueue_position asc) as group_rank
 				from pgconductor._private_executions e
-				left join pgconductor._private_tasks t
-					on t.key = e.task_key and t.queue = e.queue
+				join pgconductor._private_tasks t on t.key = e.task_key and t.queue = e.queue
 				left join active_tasks at on at.task_key = e.task_key
 				left join active_groups ag on ag.task_key = e.task_key and ag."group" = e."group"
-				where e.queue = ${queueName}::text
-					and e.run_at <= pgconductor._private_current_time()
-					and e.is_available = true
+				where e.queue = ${queueName}::text and t.fifo = false
+					and e.run_at <= pgconductor._private_current_time() and e.is_available = true
 					${filterTaskKeys?.length ? this.sql`and not (e.task_key = any(${this.sql.array(filterTaskKeys)}::text[]))` : this.sql``}
 			), group_eligible as (
-				select r.*,
-					row_number() over (
-						partition by r.task_key
-						order by r.priority asc, r.run_at asc, r.enqueue_position asc
-					) as available_task_rank
+				select r.*, row_number() over (partition by r.task_key
+					order by r.priority asc, r.run_at asc, r.enqueue_position asc) as available_task_rank
 				from ranked r
-				where r.group_concurrency_limit is null
-					or r."group" is null
+				where r.group_concurrency_limit is null or r."group" is null
 					or r.active_group_count + r.group_rank <= r.group_concurrency_limit
-			), eligible as (
+			), standard_eligible as (
 				select r.id, r.priority, r.run_at, r.enqueue_position
 				from group_eligible r
 				where r.concurrency_limit is null
 					or r.active_task_count + r.available_task_rank <= r.concurrency_limit
-				order by r.priority asc, r.run_at asc, r.enqueue_position asc
-				-- Keep a bounded candidate pool so SKIP LOCKED can backfill a batch.
-				limit greatest(${batchSize}::integer * 4, ${batchSize}::integer)
+			), stale_fifo_owners as (
+				delete from pgconductor._private_fifo_owners o
+				where o.queue = ${queueName}::text
+					and not exists (
+						select 1 from pgconductor._private_executions e
+						where e.id = o.execution_id and e.queue = o.queue
+							and e.completed_at is null and e.failed_at is null
+					)
+				returning o.queue, o.task_key
+			), fifo_ranked as (
+				-- Future executions do not block ready work, but locked rows remain in
+				-- the ranking so a racing client cannot elect a later head.
+				select e.id, e.task_key, e.queue, e.priority, e.run_at, e.enqueue_position,
+					e.is_available, o.execution_id as owner_execution_id,
+					row_number() over (partition by e.task_key order by e.enqueue_position asc) as fifo_rank
+				from pgconductor._private_executions e
+				join pgconductor._private_tasks t on t.key = e.task_key and t.queue = e.queue
+				left join pgconductor._private_fifo_owners o
+					on o.queue = e.queue and o.task_key = e.task_key
+				left join stale_fifo_owners stale on stale.queue = e.queue and stale.task_key = e.task_key
+				where e.queue = ${queueName}::text and t.fifo = true
+					and e.run_at <= pgconductor._private_current_time()
+					and e.completed_at is null and e.failed_at is null
+					and stale.queue is null
+					${filterTaskKeys?.length ? this.sql`and not (e.task_key = any(${this.sql.array(filterTaskKeys)}::text[]))` : this.sql``}
+			), fifo_candidates as (
+				select id, task_key, queue, priority, run_at, enqueue_position, owner_execution_id
+				from fifo_ranked
+				where (owner_execution_id = id or (owner_execution_id is null and fifo_rank = 1))
+					and is_available
+			), eligible as (
+				select id, null::text as task_key, false as is_fifo, priority, run_at, enqueue_position,
+					null::uuid as owner_execution_id
+				from standard_eligible
+				union all
+				select id, task_key, true, priority, run_at, enqueue_position, owner_execution_id
+				from fifo_candidates
 			), locked_candidates as (
-				select e.id
+				-- The global batch limit and row locks happen before creating FIFO
+				-- owners. Thus an unclaimed FIFO row outside this batch gets no owner.
+				select e.id, c.task_key, c.is_fifo, c.owner_execution_id
 				from pgconductor._private_executions e
 				join eligible c on c.id = e.id
-				where e.queue = ${queueName}::text
+				where e.queue = ${queueName}::text and e.is_available = true
 				order by c.priority asc, c.run_at asc, c.enqueue_position asc
 				limit ${batchSize}::integer
 				for update of e skip locked
+			), new_fifo_owners as (
+				insert into pgconductor._private_fifo_owners (queue, task_key, execution_id)
+				select ${queueName}::text, c.task_key, c.id
+				from locked_candidates c
+				where c.is_fifo and c.owner_execution_id is null
+				on conflict (queue, task_key) do nothing
+				returning queue, task_key, execution_id
 			), claimed as (
 				update pgconductor._private_executions e
-				set
-					attempts = e.attempts + 1,
-					locked_by = ${orchestratorId}::uuid,
+				set attempts = e.attempts + 1, locked_by = ${orchestratorId}::uuid,
 					claim_token = pgconductor._private_portable_uuidv7(),
 					locked_at = pgconductor._private_current_time()
 				from locked_candidates c
 				where e.id = c.id and e.queue = ${queueName}::text and e.is_available = true
+					and (not c.is_fifo
+						or c.owner_execution_id = e.id
+						or exists (
+							select 1 from new_fifo_owners n
+							where n.queue = e.queue and n.task_key = e.task_key and n.execution_id = e.id
+						))
 				returning e.id, e.task_key, e.queue, e.payload, e.waiting_on_execution_id,
 					e.waiting_step_key, e.cancelled, e.last_error, e.dedupe_key, e.cron_expression,
 					e.locked_by, e.claim_token, e."group", e.priority, e.run_at, e.enqueue_position
 			)
 			select id, task_key, queue, payload, waiting_on_execution_id, waiting_step_key,
 				cancelled, last_error, dedupe_key, cron_expression, locked_by, claim_token, "group"
-			from claimed
-			order by priority asc, run_at asc, enqueue_position asc
+			from claimed order by priority asc, run_at asc, enqueue_position asc
 		`;
 	}
 
@@ -405,10 +427,10 @@ export class QueryBuilder {
 		ctes.push(this.sql`failed_results as (
 			select * from valid_results
 			where status in ('failed', 'permanently_failed')
-				or (status = 'completed' and execution_cancelled)
+				or (status in ('completed', 'released') and execution_cancelled)
 		)`);
 		ctes.push(this.sql`released_results as (
-			select * from valid_results where status = 'released'
+			select * from valid_results where status = 'released' and not execution_cancelled
 		)`);
 		ctes.push(this.sql`invoke_child_data as (
 			select * from valid_results where status = 'invoke_child'
@@ -476,7 +498,15 @@ export class QueryBuilder {
 				and tc.key = r.task_key and tc.queue = r.queue
 				and (tc.remove_on_complete_days is null or tc.remove_on_complete_days != 0)
 				and not exists (select 1 from orphaned_children oc where oc.id = e.id)
-			returning e.id
+			returning e.id, e.queue
+		)`);
+		ctes.push(this.sql`terminal_fifo_owners as (
+			delete from pgconductor._private_fifo_owners o
+			where exists (
+				select 1 from completed_results r
+				where r.execution_id = o.execution_id and r.queue = o.queue
+			)
+			returning o.execution_id
 		)`);
 
 		ctes.push(this.sql`permanently_failed_children as materialized (
@@ -535,7 +565,19 @@ export class QueryBuilder {
 				locked_by = null, locked_at = null, claim_token = null
 			from now_ts nt, failed_updates f
 			where e.id = f.target_id and e.queue = f.queue
-			returning e.id
+			returning e.id, e.queue
+		)`);
+		ctes.push(this.sql`failed_fifo_owners as (
+			delete from pgconductor._private_fifo_owners o
+			where exists (
+				select 1 from permanently_failed_children p
+				where p.execution_id = o.execution_id and p.queue = o.queue
+			)
+			or exists (
+				select 1 from failed_parent_targets p
+				where p.parent_id = o.execution_id and p.parent_queue = o.queue
+			)
+			returning o.execution_id
 		)`);
 		ctes.push(this.sql`retried as (
 			update pgconductor._private_executions e
@@ -644,6 +686,7 @@ export class QueryBuilder {
 			remove_on_fail_days: spec.removeOnFailDays ?? null,
 			window_start: spec.window?.[0] || null,
 			window_end: spec.window?.[1] || null,
+			fifo: spec.fifo || false,
 			concurrency_limit: spec.concurrency || null,
 			group_concurrency_limit: spec.groupConcurrency || null,
 		}));
@@ -945,7 +988,7 @@ export class QueryBuilder {
 					and ci.child_locked_by is null   -- not currently executing
 					and e.completed_at is null
 					and e.failed_at is null
-				returning e.id
+				returning e.id, e.queue
 			),
 			-- Signal executing (locked) children to cancel
 			signaled_executing_child as (
@@ -957,6 +1000,12 @@ export class QueryBuilder {
 					and e.completed_at is null
 					and e.failed_at is null
 				returning e.id
+			),
+			released_pending_child_owner as (
+				delete from pgconductor._private_fifo_owners o
+				using failed_pending_child c
+				where o.execution_id = c.id and o.queue = c.queue
+				returning o.execution_id
 			),
 			-- Always clear parent's waiting state
 			cleared_parent as (
