@@ -72,6 +72,7 @@ const task = conductor.createTask(
   removeOnComplete?: { days: number } | false;  // Retention policy
   removeOnFail?: { days: number } | false;      // Retention policy
   batch?: { size: number; timeoutMs: number };  // Batch processing config
+  deadLetter?: { queue: string; task?: Task };    // Final-failure destination
 }
 ```
 

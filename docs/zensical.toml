@@ -73,6 +73,7 @@ nav = [
     { "Cancellation" = "task-execution/cancellation.md" },
     { "Priority" = "task-execution/priority.md" },
     { "Concurrency" = "task-execution/concurrency.md" },
+    { "Dead-letter queues" = "task-execution/dead-letter-queue.md" },
     { "Deduplication" = "task-execution/deduplication.md" },
     { "Rate Limiting" = "task-execution/rate-limiting.md" },
     { "Batching" = "task-execution/batching.md" },
