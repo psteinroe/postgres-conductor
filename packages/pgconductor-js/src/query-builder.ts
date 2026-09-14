@@ -44,6 +44,16 @@ export type RemoveExecutionsArgs = {
 	batchSize: number;
 };
 
+export type RemoveCustomEventsArgs = {
+	before: Date;
+	batchSize: number;
+};
+
+export type DispatchCustomEventsArgs = {
+	eventIds: string[];
+	orchestratorId: string;
+};
+
 export type RegisterWorkerArgs = {
 	queueName: string;
 	taskSpecs: TaskSpec[];
@@ -374,12 +384,14 @@ export class QueryBuilder {
 				returning e.id, e.task_key, e.queue, e.payload, e.waiting_on_execution_id,
 					e.waiting_step_key, e.cancelled, e.last_error, e.dedupe_key, e.cron_expression,
 					e.locked_by, e."group", e.priority, e.run_at, e.created_at,
+					e.source_event_id, e.event_subscription_id,
 					e.dead_letter_source_execution_id, e.dead_letter_source_queue,
 					e.dead_letter_source_task_key, e.dead_letter_error,
 					e.dead_letter_attempts, e.dead_letter_failed_at
 			)
 			select id, task_key, queue, payload, waiting_on_execution_id, waiting_step_key,
 				cancelled, last_error, dedupe_key, cron_expression, locked_by, "group",
+				source_event_id, event_subscription_id,
 				dead_letter_source_execution_id, dead_letter_source_queue,
 				dead_letter_source_task_key, dead_letter_error, dead_letter_attempts, dead_letter_failed_at
 			from claimed
@@ -714,6 +726,18 @@ export class QueryBuilder {
 		`;
 	}
 
+	buildRemoveCustomEvents({
+		before,
+		batchSize,
+	}: RemoveCustomEventsArgs): PendingQuery<{ deleted_count: number }[]> {
+		return this.sql<{ deleted_count: number }[]>`
+			select pgconductor._private_remove_custom_events(
+				${before.toISOString()}::timestamptz,
+				${batchSize}::integer
+			)::integer as deleted_count
+		`;
+	}
+
 	buildRegisterWorker({
 		queueName,
 		taskSpecs,
@@ -751,14 +775,9 @@ export class QueryBuilder {
 
 		const eventSubscriptionRows = eventSubscriptions.map((spec) => ({
 			task_key: spec.task_key,
-			queue: spec.queue,
 			event_key: spec.event_key,
-			schema_name: spec.schema_name,
-			table_name: spec.table_name,
-			operation: spec.operation,
-			when_clause: spec.when_clause,
 			payload_fields: spec.payload_fields,
-			column_names: spec.column_names,
+			filter: spec.filter,
 		}));
 
 		return this.sql`
@@ -1064,6 +1083,19 @@ export class QueryBuilder {
 			from pgconductor._private_orchestrators
 			where migration_number < ${version}::integer
 			  and shutdown_signal = false
+		`;
+	}
+
+	buildDispatchCustomEvents({
+		eventIds,
+		orchestratorId,
+	}: DispatchCustomEventsArgs): PendingQuery<{ event_id: string }[]> {
+		return this.sql<{ event_id: string }[]>`
+			select event_id
+			from pgconductor._private_dispatch_custom_events(
+				${this.sql.array(eventIds)}::uuid[],
+				${orchestratorId}::uuid
+			)
 		`;
 	}
 

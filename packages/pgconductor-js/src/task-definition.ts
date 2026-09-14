@@ -1,4 +1,11 @@
 import type { StandardSchemaV1 } from "@standard-schema/spec";
+import type {
+	EventDefinition,
+	FilterForEvent,
+	FindEventByIdentifier,
+	InferEventPayload,
+} from "./event-definition";
+import type { ValidateColumns } from "./select-columns";
 
 type ObjectSchema = StandardSchemaV1<unknown, object>;
 
@@ -123,28 +130,53 @@ export type CronTrigger = { cron: string; name: string; group?: string };
 // Event trigger - triggers when a custom event is emitted
 export type CustomEventTrigger<
 	TName extends string = string,
-	TFields extends string | undefined = undefined,
+	TFields extends string | undefined = string | undefined,
+	TFilter extends Record<string, unknown> | undefined = Record<string, unknown> | undefined,
 > = {
 	event: TName;
-	when?: string;
 	fields?: TFields;
+	filter?: TFilter;
 };
 
-// Database event trigger - triggers on CDC events
-export type DatabaseEventTrigger<
-	TSchema extends string = string,
-	TTable extends string = string,
-	TOp extends "insert" | "update" | "delete" = "insert" | "update" | "delete",
-	TColumns extends string = string,
-> = {
-	schema: TSchema;
-	table: TTable;
-	operation: TOp;
-	when?: string;
-	columns: TColumns;
-};
+export type Trigger = InvocableTrigger | CronTrigger | CustomEventTrigger;
 
-export type Trigger = InvocableTrigger | CronTrigger | CustomEventTrigger | DatabaseEventTrigger;
+type ValidateEventFields<Event, T> = T extends { fields: infer Fields extends string }
+	? ValidateColumns<Fields, InferEventPayload<Event>> extends Fields
+		? T
+		: ValidateColumns<Fields, InferEventPayload<Event>>
+	: T;
+
+type ValidateEventFilter<Event, Name extends string, T> = T extends { filter: infer Filter }
+	? Filter extends FilterForEvent<Event>
+		? Exclude<keyof Filter, keyof FilterForEvent<Event>> extends never
+			? T
+			: `Filter for event "${Name}" contains undeclared fields.`
+		: `Filter for event "${Name}" contains undeclared or incorrectly typed fields.`
+	: T;
+
+type ValidateCustomEventTrigger<
+	Events extends readonly EventDefinition<string, any, any>[],
+	T,
+> = T extends { event: infer Name extends string }
+	? Events extends readonly []
+		? T
+		: FindEventByIdentifier<Events, Name> extends infer Event
+			? [Event] extends [never]
+				? `Event "${Name}" is not defined in the conductor event catalog.`
+				: ValidateEventFields<Event, T> extends infer FieldsResult
+					? FieldsResult extends T
+						? ValidateEventFilter<Event, Name, T>
+						: FieldsResult
+					: never
+			: never
+	: T;
+
+export type ValidateEventTriggers<
+	Events extends readonly EventDefinition<string, any, any>[],
+	TTriggers,
+> = TTriggers extends readonly any[]
+	? { [K in keyof TTriggers]: ValidateCustomEventTrigger<Events, TTriggers[K]> }
+	: ValidateCustomEventTrigger<Events, TTriggers>;
 
 // Check if triggers include invocable
 export type HasInvocable<TTriggers> = TTriggers extends readonly any[]
@@ -164,36 +196,12 @@ export type HasCron<TTriggers> = TTriggers extends readonly any[]
 		? true
 		: false;
 
-// Check if triggers include custom event
+// Check if triggers include a custom event.
 export type HasCustomEvent<TTriggers> = TTriggers extends readonly any[]
-	? Extract<TTriggers[number], { event: string }> extends infer Extracted
-		? Extracted extends never
-			? false
-			: Exclude<Extracted, { schema: string }> extends never
-				? false // All events are database events
-				: true // At least one custom event
-		: false
-	: TTriggers extends { event: string }
-		? TTriggers extends { schema: string }
-			? false // Database event, not custom event
-			: true
-		: false;
-
-// Check if triggers include database event
-export type HasDatabaseEvent<TTriggers> = TTriggers extends readonly any[]
-	? {
-			schema: string;
-			table: string;
-			operation: "insert" | "update" | "delete";
-		} extends TTriggers[number]
+	? Extract<TTriggers[number], { event: string }> extends never
 		? false
-		: Extract<
-					TTriggers[number],
-					{ schema: string; table: string; operation: "insert" | "update" | "delete" }
-			  > extends never
-			? false
-			: true
-	: TTriggers extends { schema: string; table: string; operation: "insert" | "update" | "delete" }
+		: true
+	: TTriggers extends { event: string }
 		? true
 		: false;
 
@@ -229,8 +237,10 @@ export type ValidateTriggers<
 			: TTriggers
 		: `Triggers array cannot be empty. Provide at least one trigger.`
 	: // Single trigger case
-		TTriggers extends InvocableTrigger
-		? TaskIdentifierIsDefined<Tasks, TName, TQueue> extends true
-			? TTriggers
-			: `Task "${TName}" of queue "${TQueue}" is not defined in the conductor catalog. Remove { invocable: true } from triggers, or add a task definition to the conductor's tasks array.`
-		: TTriggers;
+		TTriggers extends Trigger
+		? TTriggers extends InvocableTrigger
+			? TaskIdentifierIsDefined<Tasks, TName, TQueue> extends true
+				? TTriggers
+				: `Task "${TName}" of queue "${TQueue}" is not defined in the conductor catalog. Remove { invocable: true } from triggers, or add a task definition to the conductor's tasks array.`
+			: TTriggers
+		: "Invalid trigger. Use an invocable, cron, or custom event trigger.";

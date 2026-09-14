@@ -3,7 +3,7 @@ import { expectTypeOf } from "expect-type";
 import { Conductor } from "../../src/conductor";
 import { defineTask } from "../../src/task-definition";
 // import { defineEvent } from "../../src/event-definition";
-import { TaskSchemas /*, EventSchemas, DatabaseSchema */ } from "../../src/schemas";
+import { TaskSchemas /*, EventSchemas */ } from "../../src/schemas";
 import { z } from "zod";
 import type { Database } from "../database.types";
 
@@ -242,72 +242,6 @@ describe("task event types", () => {
 	// 	expect(task.name).toBe("on-user-created");
 	// });
 	//
-	// test.skip("createTask with only database event trigger", () => {
-	// 	const taskDef = defineTask({
-	// 		name: "on-contact-insert",
-	// 	});
-	//
-	// 	const conductor = Conductor.create({
-	// 		sql: {} as any,
-	// 		tasks: TaskSchemas.fromSchema([taskDef]),
-	// 		database: DatabaseSchema.fromGeneratedTypes<Database>(),
-	// 		context: {},
-	// 	});
-	//
-	// 	const task = conductor.createTask(
-	// 		{ name: "on-contact-insert" },
-	// 		{ schema: "public", table: "contact", operation: "insert" },
-	// 		async (event, _ctx) => {
-	// 			// Event should be the database event
-	// 			expectTypeOf(event.name).toEqualTypeOf<"public.contact.insert">();
-	// 			expectTypeOf(event.payload.tg_op).toEqualTypeOf<"INSERT">();
-	// 			expectTypeOf(event.payload.old).toEqualTypeOf<null>();
-	//
-	// 			// new should have contact row type
-	// 			if (event.payload.new) {
-	// 				expectTypeOf(event.payload.new.id).toEqualTypeOf<string>();
-	// 				expectTypeOf(event.payload.new.first_name).toEqualTypeOf<string>();
-	// 				expectTypeOf(event.payload.new.email).toEqualTypeOf<string | null>();
-	// 			}
-	// 		},
-	// 	);
-	//
-	// 	expect(task.name).toBe("on-contact-insert");
-	// });
-	//
-	// test.skip("createTask with database event trigger and column selection", () => {
-	// 	const taskDef = defineTask({
-	// 		name: "on-contact-columns",
-	// 	});
-	//
-	// 	const conductor = Conductor.create({
-	// 		sql: {} as any,
-	// 		tasks: TaskSchemas.fromSchema([taskDef]),
-	// 		database: DatabaseSchema.fromGeneratedTypes<Database>(),
-	// 		context: {},
-	// 	});
-	//
-	// 	conductor.createTask(
-	// 		{ name: "on-contact-columns" },
-	// 		{ schema: "public", table: "contact", operation: "insert", columns: "id, email" },
-	// 		async (event, _ctx) => {
-	// 			// Event should be the database event with column selection
-	// 			expectTypeOf(event.name).toEqualTypeOf<"public.contact.insert">();
-	// 			expectTypeOf(event.payload.tg_op).toEqualTypeOf<"INSERT">();
-	// 			expectTypeOf(event.payload.old).toEqualTypeOf<null>();
-	//
-	// 			// new should only have selected columns
-	// 			if (event.payload.new) {
-	// 				expectTypeOf(event.payload.new.id).toEqualTypeOf<string>();
-	// 				expectTypeOf(event.payload.new.email).toEqualTypeOf<string | null>();
-	//
-	// 				// @ts-expect-error - first_name not in column selection
-	// 				const _invalid = event.payload.new.first_name;
-	// 			}
-	// 		},
-	// 	);
-	// });
-	//
 	// test.skip("createTask with custom event and invocable triggers", () => {
 	// 	const orderPlaced = defineEvent({
 	// 		name: "order.placed",
@@ -345,88 +279,6 @@ describe("task event types", () => {
 	// 	);
 	//
 	// 	expect(task.name).toBe("process-order");
-	// });
-	//
-	// test.skip("createTask with database event and cron triggers", () => {
-	// 	const taskDef = defineTask({
-	// 		name: "sync-contacts",
-	// 	});
-	//
-	// 	const conductor = Conductor.create({
-	// 		sql: {} as any,
-	// 		tasks: TaskSchemas.fromSchema([taskDef]),
-	// 		database: DatabaseSchema.fromGeneratedTypes<Database>(),
-	// 		context: {},
-	// 	});
-	//
-	// 	const task = conductor.createTask(
-	// 		{ name: "sync-contacts" },
-	// 		[
-	// 			{ cron: "0 * * * *", name: "hourly" },
-	// 			{ schema: "public", table: "contact", operation: "update" },
-	// 		],
-	// 		async (event, _ctx) => {
-	// 			// Event can be either cron or database event
-	// 			if (event.name === "hourly") {
-	// 				expectTypeOf(event).toEqualTypeOf<{ name: "hourly" }>();
-	// 			} else if (event.name === "public.contact.update") {
-	// 				expectTypeOf(event.payload.tg_op).toEqualTypeOf<"UPDATE">();
-	// 				// Both old and new should have values for update
-	// 				expectTypeOf(event.payload.old).not.toEqualTypeOf<null>();
-	// 				expectTypeOf(event.payload.new).not.toEqualTypeOf<null>();
-	// 			}
-	// 		},
-	// 	);
-	//
-	// 	expect(task.name).toBe("sync-contacts");
-	// });
-	//
-	// test.skip("createTask with all trigger types", () => {
-	// 	const paymentReceived = defineEvent({
-	// 		name: "payment.received",
-	// 		payload: z.object({ paymentId: z.string(), amount: z.number() }),
-	// 	});
-	//
-	// 	const taskDef = defineTask({
-	// 		name: "audit-task",
-	// 		payload: z.object({ reason: z.string() }),
-	// 	});
-	//
-	// 	const conductor = Conductor.create({
-	// 		sql: {} as any,
-	// 		tasks: TaskSchemas.fromSchema([taskDef]),
-	// 		events: EventSchemas.fromSchema([paymentReceived]),
-	// 		database: DatabaseSchema.fromGeneratedTypes<Database>(),
-	// 		context: {},
-	// 	});
-	//
-	// 	const task = conductor.createTask(
-	// 		{ name: "audit-task" },
-	// 		[
-	// 			{ invocable: true },
-	// 			{ cron: "0 0 * * *", name: "daily" },
-	// 			{ event: "payment.received" },
-	// 			{ schema: "public", table: "contact", operation: "delete" },
-	// 		],
-	// 		async (event, _ctx) => {
-	// 			// Event can be any of the four types
-	// 			if (event.name === "pgconductor.invoke") {
-	// 				expectTypeOf(event.payload).toEqualTypeOf<{ reason: string }>();
-	// 			} else if (event.name === "daily") {
-	// 				expectTypeOf(event).toEqualTypeOf<{ name: "daily" }>();
-	// 			} else if (event.name === "payment.received") {
-	// 				expectTypeOf(event.payload.paymentId).toEqualTypeOf<string>();
-	// 				expectTypeOf(event.payload.amount).toEqualTypeOf<number>();
-	// 			} else if (event.name === "public.contact.delete") {
-	// 				expectTypeOf(event.payload.tg_op).toEqualTypeOf<"DELETE">();
-	// 				expectTypeOf(event.payload.new).toEqualTypeOf<null>();
-	// 				// old should have the deleted row
-	// 				expectTypeOf(event.payload.old).not.toEqualTypeOf<null>();
-	// 			}
-	// 		},
-	// 	);
-	//
-	// 	expect(task.name).toBe("audit-task");
 	// });
 	//
 	// test.skip("type error: custom event trigger without event definition", () => {

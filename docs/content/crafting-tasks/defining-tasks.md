@@ -1,6 +1,6 @@
 # Defining Tasks and Events
 
-Define type-safe tasks, events, and database schemas that work across your entire application.
+Define type-safe tasks and events that work across your entire application.
 
 ## Why Define Schemas?
 
@@ -151,60 +151,6 @@ const conductor = Conductor.create({
 });
 ```
 
-## Database Schema
-
-Database schemas enable type-safe database triggers. These are always TypeScript types generated from your database.
-
-### Generating Types
-
-Use your preferred tool to generate types from your database:
-
-**With pgconductor CLI:**
-
-```bash
-pnpx pgconductor gen types typescript --db-url "postgres://localhost/mydb" --schemas "public" > database.types.ts
-```
-
-**With Supabase CLI:**
-
-```bash
-pnpx supabase gen types typescript --linked > database.types.ts
-```
-
-### Registering Database Schema
-
-```typescript
-import { DatabaseSchema } from "pgconductor-js";
-import type { Database } from "./database.types";
-
-const conductor = Conductor.create({
-  connectionString: "postgres://localhost/mydb",
-  tasks: TaskSchemas.fromSchema([...]),
-  database: DatabaseSchema.fromGeneratedTypes<Database>(),
-  // or if you are using Supabase CLI
-  // database: DatabaseSchema.fromSupabaseTypes<Database>(),
-  context: {},
-});
-```
-
-Now database triggers are fully typed:
-
-```typescript
-conductor.createTask(
-  { name: "on-user-created" },
-  {
-    schema: "public",
-    table: "users",
-    operation: "insert",
-    columns: "id,email,name", // TypeScript validates these columns exist!
-  },
-  async (event, ctx) => {
-    // event.payload.new is typed as { id: string, email: string, name: string }
-    const { id, email, name } = event.payload.new;
-  }
-);
-```
-
 ## Return Types
 
 Tasks can return typed results when invoked from other tasks using `ctx.invoke()`:
@@ -264,8 +210,7 @@ packages/
 ├── schemas/              # Shared schema package
 │   ├── package.json
 │   ├── tasks.ts          # Task definitions
-│   ├── events.ts         # Event definitions
-│   └── database.types.ts # Generated database types
+│   └── events.ts         # Event definitions
 ├── worker/               # Worker service
 │   ├── package.json
 │   └── src/
@@ -328,16 +273,14 @@ export const userCreated = defineEvent({
 `worker/src/index.ts`:
 
 ```typescript
-import { Conductor, Orchestrator, TaskSchemas, EventSchemas, DatabaseSchema } from "pgconductor-js";
+import { Conductor, Orchestrator, TaskSchemas, EventSchemas } from "pgconductor-js";
 import { sendEmailTask, processOrderTask } from "@myapp/schemas/tasks";
 import { userCreated } from "@myapp/schemas/events";
-import type { Database } from "@myapp/schemas/database.types";
 
 const conductor = Conductor.create({
   connectionString: process.env.DATABASE_URL,
   tasks: TaskSchemas.fromSchema([sendEmailTask, processOrderTask]),
   events: EventSchemas.fromSchema([userCreated]),
-  database: DatabaseSchema.fromGeneratedTypes<Database>(),
   context: {},
 });
 
@@ -407,6 +350,6 @@ await conductor.emit("user.created", {
 
 ## What's Next?
 
-- [Task Triggers](triggers.md) - Configure invocable, cron, event, and database triggers
+- [Task Triggers](triggers.md) - Configure invocable, cron, and custom event triggers
 - [Testing](testing.md) - Unit test tasks with type-safe mocks
 - [Conductor API](../api/conductor.md) - Full API documentation

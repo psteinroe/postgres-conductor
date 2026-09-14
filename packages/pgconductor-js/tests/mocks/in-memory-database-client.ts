@@ -16,6 +16,7 @@ import type {
 	CountActiveOrchestratorsBelowArgs,
 	GetExecutionsArgs,
 	RemoveExecutionsArgs,
+	RemoveCustomEventsArgs,
 	RegisterWorkerArgs,
 	ScheduleCronExecutionArgs,
 	UnscheduleCronExecutionArgs,
@@ -61,6 +62,8 @@ interface StoredExecution {
 	created_at: Date;
 	updated_at: Date;
 	failed_at: Date | null;
+	source_event_id: string | null;
+	event_subscription_id: string | null;
 	dead_letter_source_execution_id: string | null;
 	dead_letter_source_queue: string | null;
 	dead_letter_source_task_key: string | null;
@@ -107,15 +110,11 @@ interface StoredOrchestrator {
 
 interface StoredEventSubscription {
 	id: string;
-	execution_id: string;
-	step_key: string;
-	source: "event" | "db";
-	event_key?: string;
-	schema_name?: string;
-	table_name?: string;
-	operation?: string;
-	columns?: string[];
-	timeout_at: Date | null;
+	task_key: string;
+	queue: string;
+	event_key: string;
+	payload_fields: string[] | null;
+	filter: Record<string, unknown[]> | null;
 }
 
 interface SignalData {
@@ -133,7 +132,7 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 	private cronSchedules = new Map<string, StoredCronSchedule>();
 	private orchestrators = new Map<string, StoredOrchestrator>();
 	private eventSubscriptions = new Map<string, StoredEventSubscription>();
-	private eventPartitions = new Set<string>();
+	private dispatchedEvents = new Set<string>();
 	private currentTime: Date;
 	private migrationNumber = -1;
 	private idCounter = 0;
@@ -309,6 +308,23 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 			this.tasks.set(this.taskId(taskSpec.key, task.queue), task);
 		}
 
+		// Registration is authoritative for this queue, just like PostgreSQL.
+		for (const id of [...this.eventSubscriptions.keys()]) {
+			if (this.eventSubscriptions.get(id)?.queue === args.queueName)
+				this.eventSubscriptions.delete(id);
+		}
+		for (const spec of args.eventSubscriptions || []) {
+			const id = this.generateId();
+			this.eventSubscriptions.set(id, {
+				id,
+				task_key: spec.task_key,
+				queue: args.queueName,
+				event_key: spec.event_key,
+				payload_fields: spec.payload_fields,
+				filter: spec.filter as Record<string, unknown[]> | null,
+			});
+		}
+
 		// Register cron schedules (ExecutionSpec[])
 		for (const cronSpec of args.cronSchedules || []) {
 			if (cronSpec.cron_expression) {
@@ -416,6 +432,8 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 				dedupe_key: exec.dedupe_key || undefined,
 				cron_expression: exec.cron_expression || undefined,
 				group: exec.group,
+				source_event_id: exec.source_event_id,
+				event_subscription_id: exec.event_subscription_id,
 				dead_letter_source_execution_id: exec.dead_letter_source_execution_id,
 				dead_letter_source_queue: exec.dead_letter_source_queue,
 				dead_letter_source_task_key: exec.dead_letter_source_task_key,
@@ -642,30 +660,6 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 				// 	exec.orchestrator_id = null;
 				// 	break;
 				// }
-
-				// case "wait_for_db_event": {
-				// 	// Create subscription
-				// 	const subscriptionId = this.generateId();
-				// 	this.eventSubscriptions.set(subscriptionId, {
-				// 		id: subscriptionId,
-				// 		execution_id: exec.id,
-				// 		step_key: result.step_key,
-				// 		source: "db",
-				// 		schema_name: result.schema_name,
-				// 		table_name: result.table_name,
-				// 		operation: result.operation,
-				// 		columns: result.columns,
-				// 		timeout_at:
-				// 			result.timeout_ms === "infinity"
-				// 				? new Date(8640000000000000)
-				// 				: new Date(now.getTime() + result.timeout_ms),
-				// 	});
-
-				// 	exec.state = "pending";
-				// 	exec.run_at = new Date(8640000000000000); // Wait indefinitely
-				// 	exec.orchestrator_id = null;
-				// 	break;
-				// }
 			}
 
 			exec.updated_at = now;
@@ -673,12 +667,69 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 	}
 
 	async removeExecutions(
-		_args: RemoveExecutionsArgs,
+		args: RemoveExecutionsArgs,
 		_opts?: { signal?: AbortSignal },
 	): Promise<boolean> {
-		// In the real implementation, this removes old completed/failed executions
-		// For the in-memory client, we'll just return true (could be enhanced later)
-		return true;
+		const now = this.getInternalTime();
+		const candidates = Array.from(this.executions.values())
+			.filter((exec) => {
+				if (
+					exec.queue !== args.queueName ||
+					(exec.state !== "completed" && exec.state !== "failed")
+				) {
+					return false;
+				}
+				const task = this.tasks.get(this.taskId(exec.task_key, exec.queue));
+				if (!task) return false;
+				const retentionDays =
+					exec.state === "completed" ? task.remove_on_complete_days : task.remove_on_fail_days;
+				if (retentionDays == null || retentionDays <= 0) return false;
+				const terminalAt = exec.state === "completed" ? exec.updated_at : exec.failed_at;
+				return (
+					terminalAt != null && terminalAt.getTime() < now.getTime() - retentionDays * 86400000
+				);
+			})
+			.slice(0, args.batchSize);
+
+		for (const exec of candidates) {
+			this.executions.delete(exec.id);
+			this.steps.delete(exec.id);
+		}
+		return candidates.length >= args.batchSize;
+	}
+
+	async removeCustomEvents(
+		before: Date,
+		batchSize: number,
+		_opts?: { signal?: AbortSignal },
+	): Promise<boolean>;
+	async removeCustomEvents(
+		args: RemoveCustomEventsArgs,
+		_opts?: { signal?: AbortSignal },
+	): Promise<boolean>;
+	async removeCustomEvents(
+		beforeOrArgs: Date | RemoveCustomEventsArgs,
+		batchSizeOrOpts?: number | { signal?: AbortSignal },
+		_opts?: { signal?: AbortSignal },
+	): Promise<boolean> {
+		const before = beforeOrArgs instanceof Date ? beforeOrArgs : beforeOrArgs.before;
+		const batchSize =
+			beforeOrArgs instanceof Date ? (batchSizeOrOpts as number) : beforeOrArgs.batchSize;
+		const candidates = Array.from(this.executions.values())
+			.filter(
+				(exec) =>
+					exec.queue === "pgconductor.internal" &&
+					exec.task_key === "pgconductor.event-dispatch" &&
+					exec.created_at < before &&
+					(exec.state === "completed" || exec.state === "failed" || exec.cancelled),
+			)
+			.slice(0, batchSize);
+
+		for (const exec of candidates) {
+			this.executions.delete(exec.id);
+			this.steps.delete(exec.id);
+		}
+		return candidates.length >= batchSize;
 	}
 
 	async invoke(spec: ExecutionSpec, _opts?: { signal?: AbortSignal }): Promise<string | null> {
@@ -740,6 +791,8 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 				created_at: now,
 				updated_at: now,
 				failed_at: null,
+				source_event_id: null,
+				event_subscription_id: null,
 				dead_letter_source_execution_id: null,
 				dead_letter_source_queue: null,
 				dead_letter_source_task_key: null,
@@ -1095,21 +1148,76 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 	// 	return eventId;
 	// }
 	//
-	// // Methods referenced in mock but not in main interface
-	// async subscribeEvent(): Promise<string> {
-	// 	return this.generateId();
-	// }
-	//
-	// async subscribeDbChange(): Promise<string> {
-	// 	return this.generateId();
-	// }
 
 	async invokeChild(): Promise<string> {
 		return this.generateId();
 	}
 
-	async emitEvent(): Promise<string> {
-		return this.generateId();
+	async emitEvent(args: { eventKey: string; payload?: unknown }): Promise<string> {
+		const id = await this.invoke({
+			task_key: "pgconductor.event-dispatch",
+			queue: "pgconductor.internal",
+			payload: {
+				event_key: args.eventKey,
+				payload: args.payload && typeof args.payload === "object" ? (args.payload as Payload) : {},
+			},
+		});
+		if (!id) throw new Error("Failed to persist event execution");
+		return id;
+	}
+
+	async dispatchCustomEvents(args: {
+		eventIds: string[];
+		orchestratorId: string;
+	}): Promise<string[]> {
+		const dispatched: string[] = [];
+		for (const eventId of args.eventIds) {
+			const source = this.executions.get(eventId);
+			if (
+				!source ||
+				source.queue !== "pgconductor.internal" ||
+				source.task_key !== "pgconductor.event-dispatch" ||
+				source.orchestrator_id !== args.orchestratorId ||
+				source.cancelled
+			) {
+				continue;
+			}
+			if (this.dispatchedEvents.has(eventId)) {
+				dispatched.push(eventId);
+				continue;
+			}
+			const eventKey = String(source.payload.event_key);
+			const payload = source.payload.payload as Payload;
+			for (const subscription of this.eventSubscriptions.values()) {
+				if (subscription.event_key !== eventKey) continue;
+				const matches = Object.entries(subscription.filter || {}).every(([field, values]) =>
+					values.some((value) => Object.is(value, payload[field])),
+				);
+				if (!matches) continue;
+				const destinationPayload = subscription.payload_fields
+					? (Object.fromEntries(
+							subscription.payload_fields
+								.filter((field) => Object.prototype.hasOwnProperty.call(payload, field))
+								.map((field) => [field, payload[field]]),
+						) as Payload)
+					: structuredClone(payload);
+				const destinationId = await this.invoke({
+					task_key: subscription.task_key,
+					queue: subscription.queue,
+					payload: { event: eventKey, payload: destinationPayload },
+				});
+				if (destinationId) {
+					const destination = this.executions.get(destinationId);
+					if (destination) {
+						destination.source_event_id = eventId;
+						destination.event_subscription_id = subscription.id;
+					}
+				}
+			}
+			this.dispatchedEvents.add(eventId);
+			dispatched.push(eventId);
+		}
+		return dispatched;
 	}
 
 	// ============================================================================
@@ -1155,6 +1263,8 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 			created_at: now,
 			updated_at: now,
 			failed_at: null,
+			source_event_id: null,
+			event_subscription_id: null,
 			dead_letter_source_execution_id: exec.id,
 			dead_letter_source_queue: exec.queue,
 			dead_letter_source_task_key: exec.task_key,
@@ -1240,7 +1350,6 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 		this.cronSchedules.clear();
 		this.orchestrators.clear();
 		this.eventSubscriptions.clear();
-		this.eventPartitions.clear();
 		this.idCounter = 0;
 	}
 

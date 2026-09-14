@@ -10,6 +10,8 @@ import {
 	type CountActiveOrchestratorsBelowArgs,
 	type GetExecutionsArgs,
 	type RemoveExecutionsArgs,
+	type RemoveCustomEventsArgs,
+	type DispatchCustomEventsArgs,
 	type RegisterWorkerArgs,
 	type ScheduleCronExecutionArgs,
 	type UnscheduleCronExecutionArgs,
@@ -74,6 +76,8 @@ export interface Execution {
 	dedupe_key?: string | null;
 	cron_expression?: string | null;
 	group?: string | null;
+	source_event_id?: string | null;
+	event_subscription_id?: string | null;
 	dead_letter_source_execution_id?: string | null;
 	dead_letter_source_queue?: string | null;
 	dead_letter_source_task_key?: string | null;
@@ -154,14 +158,9 @@ export interface ExecutionInvokeChild {
 
 export interface EventSubscriptionSpec {
 	task_key: string;
-	queue: string;
-	event_key: string | null;
-	schema_name: string | null;
-	table_name: string | null;
-	operation: "insert" | "update" | "delete" | null;
-	when_clause: string | null;
+	event_key: string;
 	payload_fields: string[] | null;
-	column_names: string[] | null;
+	filter: Record<string, JsonValue[]> | null;
 }
 
 const RETRYABLE_SQLSTATE_CODES = new Set([
@@ -508,6 +507,34 @@ export class DatabaseClient {
 		return deletedCount >= args.batchSize;
 	}
 
+	async removeCustomEvents(
+		before: Date,
+		batchSize: number,
+		opts?: QueryMethodOptions,
+	): Promise<boolean>;
+	async removeCustomEvents(
+		args: RemoveCustomEventsArgs,
+		opts?: QueryMethodOptions,
+	): Promise<boolean>;
+	async removeCustomEvents(
+		beforeOrArgs: Date | RemoveCustomEventsArgs,
+		batchSizeOrOpts?: number | QueryMethodOptions,
+		opts?: QueryMethodOptions,
+	): Promise<boolean> {
+		const args: RemoveCustomEventsArgs =
+			beforeOrArgs instanceof Date
+				? { before: beforeOrArgs, batchSize: batchSizeOrOpts as number }
+				: beforeOrArgs;
+		const options = beforeOrArgs instanceof Date ? opts : (batchSizeOrOpts as QueryMethodOptions);
+		const result = await this.query(() => this.builder.buildRemoveCustomEvents(args), {
+			label: "removeCustomEvents",
+			...options,
+		});
+
+		const deletedCount = result[0]?.deleted_count ?? 0;
+		return deletedCount >= args.batchSize;
+	}
+
 	async registerWorker(args: RegisterWorkerArgs, opts?: QueryMethodOptions): Promise<void> {
 		await this.query(() => this.builder.buildRegisterWorker(args), {
 			label: "registerWorker",
@@ -579,6 +606,17 @@ export class DatabaseClient {
 			label: "clearWaitingState",
 			...opts,
 		});
+	}
+
+	async dispatchCustomEvents(
+		args: DispatchCustomEventsArgs,
+		opts?: QueryMethodOptions,
+	): Promise<string[]> {
+		const rows = await this.query(() => this.builder.buildDispatchCustomEvents(args), {
+			label: "dispatchCustomEvents",
+			...opts,
+		});
+		return rows.map((row) => row.event_id);
 	}
 
 	async emitEvent(args: EmitEventArgs, opts?: QueryMethodOptions): Promise<string> {

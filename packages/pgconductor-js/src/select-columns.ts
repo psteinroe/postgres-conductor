@@ -115,29 +115,23 @@ type FirstError<T extends readonly any[]> = T extends [infer Head, ...infer Tail
 			: undefined
 	: undefined;
 
+type FirstDuplicate<T extends readonly any[]> = T extends [infer Head, ...infer Tail]
+	? Head extends Tail[number]
+		? Head
+		: FirstDuplicate<Tail>
+	: never;
+
 type PickFromKeys<Keys extends keyof Obj, Obj> = { [K in Keys]: Obj[K] };
 
 type ValidatePart<Part extends string, Obj> =
 	Trim<Part> extends infer P extends string
 		? P extends ""
 			? `[Column Selection Error]: Empty entry. Remove trailing commas or extra spaces.`
-			: // quoted identifier
-				P extends `"${infer Body}"`
-				? // forbid raw " inside quoted body
-					Body extends `${string}"${string}`
-					? `[Column Selection Error]: Invalid quote in "${P}". Use "" to escape quotes inside identifiers.`
-					: Body extends keyof Obj
-						? Body
-						: `[Column Selection Error]: Column "${Body}" does not exist.`
-				: // malformed quoting
-					P extends `${string}"${string}`
-					? `[Column Selection Error]: Malformed quotes in "${P}". Quoted identifiers must be fully wrapped.`
-					: // unquoted identifier
-						IsValidUnquoted<P> extends false
-						? `[Column Selection Error]: Invalid identifier "${P}". Must start with a letter or underscore.`
-						: P extends keyof Obj
-							? P
-							: `[Column Selection Error]: Column "${P}" does not exist.`
+			: IsValidUnquoted<P> extends false
+				? `[Column Selection Error]: Invalid identifier "${P}". Must start with a letter or underscore.`
+				: P extends keyof Obj
+					? P
+					: `[Column Selection Error]: Column "${P}" does not exist.`
 		: never;
 
 type ValidateParts<Parts extends readonly string[], Obj> = {
@@ -151,7 +145,11 @@ export type ParseSelection<S extends string, Obj> =
 				? FirstError<V> extends string
 					? ColumnSelectionError<FirstError<V>>
 					: never
-				: PickFromKeys<ExtractKeys<V>, Obj>
+				: FirstDuplicate<V> extends infer Duplicate extends string
+					? [Duplicate] extends [never]
+						? PickFromKeys<ExtractKeys<V>, Obj>
+						: ColumnSelectionError<`[Column Selection Error]: Duplicate column "${Duplicate}".`>
+					: never
 			: never
 		: never;
 

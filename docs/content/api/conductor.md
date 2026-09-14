@@ -16,7 +16,6 @@ const conductor = Conductor.create({
   context,              // Custom context object
   logger?,              // Optional custom logger
   events?,              // Optional EventSchemas
-  database?,            // Optional DatabaseSchema
 });
 ```
 
@@ -28,7 +27,6 @@ const conductor = Conductor.create({
 - `context`: Object passed to task handlers as `ctx.{property}` (see [Custom Context](../crafting-tasks/custom-context.md))
 - `logger`: (optional) Custom logger implementation
 - `events`: (optional) `EventSchemas.fromSchema([...])` for typed custom events
-- `database`: (optional) `DatabaseSchema.fromSchema({...})` for database event triggers
 
 **Connection options:**
 

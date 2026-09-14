@@ -10,7 +10,7 @@ import type {
 	ExecutionReleased,
 	ExecutionInvokeChild,
 } from "./database-client";
-import type { AnyTask, BatchConfig } from "./task";
+import { Task, type AnyTask, type BatchConfig } from "./task";
 import type { TaskDefinition } from "./task-definition";
 import { waitFor } from "./lib/wait-for";
 import { mapConcurrent } from "./lib/map-concurrent";
@@ -30,6 +30,7 @@ import * as assert from "./lib/assert";
 import { createMaintenanceTask } from "./maintenance-task";
 import { makeChildLogger, type Logger } from "./lib/logger";
 import type { EventDefinition } from "./event-definition";
+import { compileEventTriggers } from "./event-trigger-validation";
 import { coerceError } from "./lib/coerce-error";
 import type { TypedAbortController } from "./lib/typed-abort-controller";
 
@@ -47,6 +48,26 @@ export type WorkerConfig = {
 /**
  * The default configuration for the Worker.
  */
+export const EVENT_DISPATCH_QUEUE = "pgconductor.internal";
+export const EVENT_DISPATCH_TASK = "pgconductor.event-dispatch";
+const EVENT_DISPATCH_BATCH_SIZE = 10;
+
+export function createEventDispatchTask(): AnyTask {
+	return new Task(
+		{
+			name: EVENT_DISPATCH_TASK,
+			queue: EVENT_DISPATCH_QUEUE,
+			maxAttempts: 3,
+			removeOnComplete: true,
+			batch: { size: EVENT_DISPATCH_BATCH_SIZE, timeoutMs: 10 },
+		},
+		{ invocable: true },
+		async () => {
+			throw new Error("Event dispatch must be executed by the internal worker");
+		},
+	);
+}
+
 export const DEFAULT_WORKER_CONFIG: WorkerConfig = {
 	concurrency: 1,
 	flushBatchSize: 2,
@@ -124,7 +145,11 @@ export class Worker<
 		any,
 		string
 	>[],
-	Events extends readonly EventDefinition<string, any>[] = readonly EventDefinition<string, any>[],
+	Events extends readonly EventDefinition<string, any, any>[] = readonly EventDefinition<
+		string,
+		any,
+		any
+	>[],
 > {
 	private orchestratorId: string | null = null;
 
@@ -140,6 +165,7 @@ export class Worker<
 	private _startDeferred: Deferred<void> | null = null;
 	private _stopDeferred: Deferred<void> | null = null;
 	private _abortController: AbortController | null = null;
+	private _drainDidWork = false;
 	private _runningTasks = new Map<string, TypedAbortController<TaskAbortReasons>>();
 
 	constructor(
@@ -149,15 +175,19 @@ export class Worker<
 		private readonly logger: Logger,
 		config: Partial<WorkerConfig> = {},
 		private readonly extraContext: object = {},
+		private readonly eventDefinitions: readonly EventDefinition<string, any, any>[] = [],
+		includeMaintenance = true,
+		private readonly allowUnknownEvents = false,
 	) {
-		const maintenanceTask = createMaintenanceTask(this.queueName);
-		this.tasks = tasks.reduce(
-			(m, task) => {
-				m.set(task.name, task);
-				return m;
-			},
-			new Map<string, AnyTask>([[maintenanceTask.name, maintenanceTask]]),
-		);
+		const initialTasks = new Map<string, AnyTask>();
+		if (includeMaintenance) {
+			const maintenanceTask = createMaintenanceTask(this.queueName);
+			initialTasks.set(maintenanceTask.name, maintenanceTask);
+		}
+		this.tasks = tasks.reduce((registered, task) => {
+			registered.set(task.name, task);
+			return registered;
+		}, initialTasks);
 
 		const fullConfig = { ...DEFAULT_WORKER_CONFIG, ...config };
 
@@ -186,6 +216,11 @@ export class Worker<
 	 */
 	get stopped(): Promise<void> {
 		return this._stopDeferred?.promise || Promise.resolve();
+	}
+
+	/** @internal Whether the last run-once pass observed any work. */
+	get drainDidWork(): boolean {
+		return this._drainDidWork;
 	}
 
 	/**
@@ -226,13 +261,32 @@ export class Worker<
 		}
 
 		this.orchestratorId = orchestratorId;
+		this._drainDidWork = false;
 		this._startDeferred = new Deferred<void>();
 		this._stopDeferred = new Deferred<void>();
 		this._abortController = new AbortController();
 
-		// Sample before calculating or registering cron schedules.
-		await this.clock.start(this.abortController.signal);
-		await this.register();
+		// Startup failures reject both lifecycle promises; callers must never
+		// observe a worker that started partially.
+		try {
+			// Sample before calculating or registering cron schedules.
+			await this.clock.start(this.abortController.signal);
+			await this.register();
+		} catch (error) {
+			// Registration is part of startup, not a running pipeline. Resolve the
+			// stop promise so callers that only await `start()` do not get an
+			// unhandled rejection, then discard every piece of this failed attempt.
+			const stopDeferred = this._stopDeferred;
+			this._abortController.abort();
+			// Reject `started` so an Orchestrator observes registration failure, but
+			// attach a noop handler because callers that only use start() do not
+			// necessarily observe this internal lifecycle promise.
+			this._startDeferred.promise.catch(() => {});
+			this._startDeferred.reject(error);
+			if (!stopDeferred.isSettled) stopDeferred.resolve();
+			this.resetLifecycle();
+			throw error;
+		}
 
 		// Worker is now started
 		this._startDeferred.resolve();
@@ -247,25 +301,47 @@ export class Worker<
 		}
 
 		const queue = new BatchingAsyncQueue<Execution>(this.fetchBatchSize * 2, batchConfigs);
-		void this.fetchExecutions(queue, { runOnce });
-
-		(async () => {
-			try {
-				// Consume from queue → execute → flush
-				await this.flushResults(this.executeTasks(queue));
-			} catch (err) {
-				this.logger.error("Worker pipeline error:", err);
-			} finally {
-				queue.close();
-				this.clock.stop();
-				this._stopDeferred?.resolve();
-				this._startDeferred = null;
-				this._stopDeferred = null;
-				this._abortController = null;
-			}
-		})();
+		if (runOnce) {
+			void this.runDrainPipeline(queue);
+		} else {
+			void this.fetchExecutions(queue, { runOnce });
+			void (async () => {
+				try {
+					await this.flushResults(this.executeTasks(queue));
+				} catch (error) {
+					this.logger.error("Worker pipeline error:", error);
+					this._stopDeferred?.reject(error);
+				} finally {
+					queue.close();
+					if (this._stopDeferred && !this._stopDeferred.isSettled) this._stopDeferred.resolve();
+					this.resetLifecycle();
+				}
+			})();
+		}
 
 		return this._startDeferred.promise;
+	}
+
+	private async runDrainPipeline(queue: BatchingAsyncQueue<Execution>): Promise<void> {
+		try {
+			const fetched = this.fetchExecutions(queue, { runOnce: true });
+			await this.flushResults(this.executeTasks(queue));
+			this._drainDidWork = (await fetched) > 0;
+		} catch (error) {
+			this.logger.error("Worker pipeline error:", error);
+			this._stopDeferred?.reject(error);
+		} finally {
+			if (this._stopDeferred && !this._stopDeferred.isSettled) this._stopDeferred.resolve();
+			this.resetLifecycle();
+		}
+	}
+
+	private resetLifecycle(): void {
+		this.clock.stop();
+		this._startDeferred = null;
+		this._stopDeferred = null;
+		this._abortController = null;
+		this.orchestratorId = null;
 	}
 
 	/**
@@ -344,43 +420,14 @@ export class Worker<
 				}),
 		);
 
-		const eventSubscriptions: EventSubscriptionSpec[] = allTasks.flatMap((task) => {
-			const customEvents = task.triggers
-				.filter((t) => "event" in t && typeof t.event === "string")
-				.map((trigger): EventSubscriptionSpec => {
-					const customTrigger = trigger as any;
-					return {
-						task_key: task.name,
-						queue: this.queueName,
-						event_key: customTrigger.event,
-						schema_name: null,
-						table_name: null,
-						operation: null,
-						when_clause: customTrigger.when || null,
-						payload_fields: customTrigger.fields?.split(",").map((f: string) => f.trim()) || null,
-						column_names: null,
-					};
-				});
-
-			const dbEvents = task.triggers
-				.filter((t) => "schema" in t && "table" in t && "operation" in t)
-				.map((trigger): EventSubscriptionSpec => {
-					const dbTrigger = trigger as any;
-					return {
-						task_key: task.name,
-						queue: this.queueName,
-						event_key: null,
-						schema_name: dbTrigger.schema,
-						table_name: dbTrigger.table,
-						operation: dbTrigger.operation,
-						when_clause: dbTrigger.when || null,
-						payload_fields: null,
-						column_names: dbTrigger.columns?.split(",").map((c: string) => c.trim()) || null,
-					};
-				});
-
-			return [...customEvents, ...dbEvents];
-		});
+		const eventSubscriptions: EventSubscriptionSpec[] = allTasks.flatMap((task) =>
+			compileEventTriggers(task.triggers, this.eventDefinitions, this.allowUnknownEvents).map(
+				(spec) => ({
+					task_key: task.name,
+					...spec,
+				}),
+			),
+		);
 
 		await this.db.registerWorker(
 			{
@@ -397,7 +444,8 @@ export class Worker<
 	private async fetchExecutions(
 		queue: BatchingAsyncQueue<Execution>,
 		{ runOnce = false }: { runOnce?: boolean },
-	) {
+	): Promise<number> {
+		let fetched = 0;
 		assert.ok(this.orchestratorId, "orchestratorId must be set when starting the pipeline");
 
 		// Pre-compute task metadata once
@@ -460,6 +508,7 @@ export class Worker<
 				}
 
 				for (const exec of executions) {
+					fetched++;
 					await queue.push(exec); // waits if full
 					if (this.signal.aborted) break;
 				}
@@ -469,6 +518,7 @@ export class Worker<
 		}
 
 		queue.close();
+		return fetched;
 	}
 
 	// --- Stage 2: Execute tasks concurrently ---
@@ -521,6 +571,10 @@ export class Worker<
 					return [];
 				}
 
+				if (this.queueName === EVENT_DISPATCH_QUEUE && taskKey === EVENT_DISPATCH_TASK) {
+					return this.executeEventDispatchBatch(activeExecs);
+				}
+
 				// If task has batch config, always use batch execution (even for single items)
 				if (task.batch) {
 					return this.executeBatchTask(task, taskKey, activeExecs);
@@ -538,6 +592,52 @@ export class Worker<
 			} else {
 				yield result;
 			}
+		}
+	}
+
+	private async executeEventDispatchBatch(executions: Execution[]): Promise<ExecutionResult[]> {
+		assert.ok(this.orchestratorId, "orchestratorId must be set while dispatching events");
+
+		try {
+			const dispatched = await this.db.dispatchCustomEvents(
+				{
+					eventIds: executions.map((execution) => execution.id),
+					orchestratorId: this.orchestratorId,
+				},
+				{ signal: this.signal },
+			);
+			const dispatchedIds = new Set(dispatched);
+
+			return executions.map((execution) => {
+				if (!dispatchedIds.has(execution.id)) {
+					return {
+						execution_id: execution.id,
+						orchestrator_id: execution.locked_by,
+						queue: execution.queue,
+						task_key: execution.task_key,
+						status: "failed" as const,
+						error: "Event dispatch claim is no longer valid",
+					};
+				}
+				return {
+					execution_id: execution.id,
+					orchestrator_id: execution.locked_by,
+					queue: execution.queue,
+					task_key: execution.task_key,
+					status: "completed" as const,
+					result: undefined,
+				};
+			});
+		} catch (error) {
+			const message = coerceError(error).message;
+			return executions.map((execution) => ({
+				execution_id: execution.id,
+				orchestrator_id: execution.locked_by,
+				queue: execution.queue,
+				task_key: execution.task_key,
+				status: "failed" as const,
+				error: message,
+			}));
 		}
 	}
 
@@ -567,12 +667,12 @@ export class Worker<
 				const scheduleName = exec.dedupe_key?.split("::")[1] || "unknown";
 				taskEvent = { name: scheduleName };
 			} else if (
+				exec.source_event_id != null &&
 				exec.payload &&
 				typeof exec.payload === "object" &&
-				"event" in exec.payload &&
-				exec.payload.event !== "pgconductor.invoke"
+				"event" in exec.payload
 			) {
-				// Event-triggered execution (custom event or db event)
+				// Event-triggered executions carry dedicated database identity.
 				taskEvent = {
 					name: exec.payload.event,
 					payload: exec.payload.payload,
@@ -693,10 +793,10 @@ export class Worker<
 				const scheduleName = exec.dedupe_key?.split("::")[1] || "unknown";
 				return { name: scheduleName };
 			} else if (
+				exec.source_event_id != null &&
 				exec.payload &&
 				typeof exec.payload === "object" &&
-				"event" in exec.payload &&
-				exec.payload.event !== "pgconductor.invoke"
+				"event" in exec.payload
 			) {
 				return {
 					name: exec.payload.event,

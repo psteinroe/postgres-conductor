@@ -5,7 +5,6 @@ Tasks can be triggered in multiple ways:
 - **Invocable** - Triggered manually via `conductor.invoke()`
 - **Cron** - Triggered on a schedule
 - **Custom Events** - Triggered when you emit custom application events
-- **Database Triggers** - Triggered automatically by Postgres triggers on INSERT/UPDATE/DELETE
 
 ## Invocable Tasks
 
@@ -109,6 +108,55 @@ await conductor.emit("user.created", {
 });
 ```
 
+Each event is appended to the event log and paired with a short-lived internal dispatch execution. Destination fan-out and the event's `dispatched_at` state commit in one database transaction, so failures retry without duplicating destination executions. Event rows are retained independently for seven days by default.
+
+### Emitting from Database Triggers
+
+Postgres Conductor does not create or manage triggers on application tables. If a database change should emit an event, define the trigger in your own migrations and call `pgconductor.emit_event()`:
+
+```sql
+create function app.emit_user_created()
+returns trigger
+language plpgsql
+as $$
+begin
+  perform pgconductor.emit_event('user.created', to_jsonb(new));
+  return new;
+end;
+$$;
+
+create trigger emit_user_created
+after insert on app.users
+for each row execute function app.emit_user_created();
+```
+
+Because `emit_event()` inserts both the event row and its dispatch execution in the current transaction, emission is committed or rolled back with the database change.
+
+### Event Filters
+
+Declare top-level scalar fields as filterable, then register equality allowlists on handlers:
+
+```typescript
+const orderChanged = defineEvent({
+  name: "order.changed",
+  payload: z.object({ status: z.string(), region: z.string() }),
+  filterable: ["status", "region"],
+});
+
+conductor.createTask(
+  { name: "handle-paid-us-orders" },
+  {
+    event: "order.changed",
+    filter: { status: ["paid", "trial"], region: ["us"] },
+  },
+  async (event, ctx) => {
+    // Both fields matched; values within one field are alternatives.
+  }
+);
+```
+
+Fields are combined with AND and values within a field with OR. Strings, numbers, booleans, and `null` are type-sensitive; a missing field does not match `null`. A filter may contain up to 8 fields and 4 values per field.
+
 ### Field Selection
 
 For large events, you can select only specific fields to reduce payload size:
@@ -124,124 +172,6 @@ conductor.createTask(
 );
 ```
 
-## Database Triggers
-
-React to database changes automatically using Postgres triggers. When a row is inserted, updated, or deleted, Postgres Conductor creates a task execution with the row data.
-
-### Setup
-
-Provide your database schema types to enable type-safe database triggers:
-
-```typescript
-import { DatabaseSchema } from "pgconductor-js";
-import type { Database } from "./database.types"; // Generated types
-
-const conductor = Conductor.create({
-  connectionString: "postgres://localhost/mydb",
-  tasks: TaskSchemas.fromSchema([taskDef]),
-  database: DatabaseSchema.fromGeneratedTypes<Database>(),
-  context: {},
-});
-```
-
-### Creating Database Triggers
-
-```typescript
-const onContactInsert = conductor.createTask(
-  { name: "on-contact-insert" },
-  {
-    schema: "public",
-    table: "contact",
-    operation: "insert",
-    columns: "id,email,first_name", // Required
-  },
-  async (event, ctx) => {
-    // event.name === "public.contact.insert"
-    // event.payload.tg_op === "INSERT"
-    // event.payload.old === null (no old row on insert)
-    // event.payload.new contains selected columns
-
-    const { id, email, first_name } = event.payload.new;
-    ctx.logger.info(`New contact: ${first_name} (${email})`);
-  }
-);
-```
-
-The orchestrator automatically creates Postgres triggers on your tables when it starts.
-
-### Operations
-
-Support for INSERT, UPDATE, and DELETE:
-
-**INSERT** - Only `new` row available:
-```typescript
-{
-  schema: "public",
-  table: "contact",
-  operation: "insert",
-  columns: "id,email"
-}
-// event.payload.old === null
-// event.payload.new === { id: string, email: string | null }
-```
-
-**UPDATE** - Both `old` and `new` rows available:
-```typescript
-{
-  schema: "public",
-  table: "contact",
-  operation: "update",
-  columns: "id,email,name"
-}
-// event.payload.old === { id: string, email: string | null, name: string }
-// event.payload.new === { id: string, email: string | null, name: string }
-```
-
-**DELETE** - Only `old` row available:
-```typescript
-{
-  schema: "public",
-  table: "contact",
-  operation: "delete",
-  columns: "id,email"
-}
-// event.payload.old === { id: string, email: string | null }
-// event.payload.new === null
-```
-
-### Conditional Triggers
-
-Use `when` clause to filter which rows trigger task execution:
-
-```typescript
-conductor.createTask(
-  { name: "on-active-user" },
-  {
-    schema: "public",
-    table: "users",
-    operation: "insert",
-    columns: "id,email,name",
-    when: "NEW.active = true", // Only trigger for active users
-  },
-  async (event, ctx) => {
-    // Only called when active = true
-  }
-);
-```
-
-The `when` clause is evaluated in the Postgres trigger before creating a task execution.
-
-### How It Works
-
-When you start the orchestrator:
-
-1. Postgres triggers are created on your specified tables
-2. When a row changes, the trigger captures the row data
-3. A task execution is created with the selected columns
-4. Your task handler receives the event with typed payload
-
-The triggers persist in the database even after the orchestrator stops.
-
 ## Multiple Triggers
 
 Tasks can respond to multiple trigger types:
@@ -253,12 +183,6 @@ const flexibleTask = conductor.createTask(
     { invocable: true },
     { cron: "0 * * * *", name: "hourly" },
     { event: "user.created" },
-    {
-      schema: "public",
-      table: "contact",
-      operation: "insert",
-      columns: "id,email"
-    },
   ],
   async (event, ctx) => {
     // Discriminate based on event.name
@@ -270,9 +194,6 @@ const flexibleTask = conductor.createTask(
     } else if (event.name === "user.created") {
       // Custom event
       const { userId, email, name } = event.payload;
-    } else if (event.name === "public.contact.insert") {
-      // Database trigger
-      const { id, email } = event.payload.new;
     }
   }
 );

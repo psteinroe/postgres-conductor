@@ -41,11 +41,13 @@ describe("emit method types", () => {
 			Promise<string>
 		>();
 
-		// @ts-expect-error - wrong payload type
-		conductor.emit("user.created", { orderId: 123 });
+		if (false) {
+			// @ts-expect-error - wrong payload type
+			conductor.emit("user.created", { orderId: 123 });
 
-		// @ts-expect-error - non-existent event
-		conductor.emit("non.existent", {});
+			// @ts-expect-error - non-existent event
+			conductor.emit("non.existent", {});
+		}
 	});
 
 	test("ctx.emit accepts typed event payload", () => {

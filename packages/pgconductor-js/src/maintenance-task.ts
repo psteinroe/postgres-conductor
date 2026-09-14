@@ -37,7 +37,19 @@ export const createMaintenanceTask = <Queue extends string = "default">(queue: Q
 		},
 		async (_, ctx) => {
 			const { db, tasks, signal } = ctx;
-			// Skip if no tasks have retention settings (check in-memory config)
+
+			// Custom event logs have a fixed seven-day retention policy. The
+			// always-present internal worker performs this global cleanup.
+			if (queue === "pgconductor.internal") {
+				const now = await db.getCurrentTime({ signal });
+				const before = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+				let hasMoreEvents = true;
+				while (hasMoreEvents) {
+					hasMoreEvents = await db.removeCustomEvents(before, BATCH_SIZE, { signal });
+				}
+			}
+
+			// Skip execution cleanup when no tasks have retention settings (check in-memory config)
 			const hasRetention = Array.from(tasks.values()).some(
 				(t) => t.removeOnComplete || t.removeOnFail,
 			);

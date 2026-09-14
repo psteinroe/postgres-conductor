@@ -5,20 +5,22 @@ import { defineTask } from "../../src/task-definition";
 import { defineEvent } from "../../src/event-definition";
 import { TaskSchemas } from "../../src/schemas";
 import { EventSchemas } from "../../src/schemas";
-import { DatabaseSchema } from "../../src/schemas";
 import { z } from "zod";
 import { TestDatabasePool, TestDatabase } from "../fixtures/test-database";
-import type { Database } from "../database.types";
+import { waitForCondition } from "../test-utils";
 
 describe("Event Subscription Lifecycle", () => {
 	let pool: TestDatabasePool;
 	const databases: TestDatabase[] = [];
+	const orchestrators: Orchestrator[] = [];
 
 	beforeAll(async () => {
 		pool = await TestDatabasePool.create();
 	}, 60000);
 
 	afterEach(async () => {
+		await Promise.all(orchestrators.map((orchestrator) => orchestrator.stop()));
+		orchestrators.length = 0;
 		await Promise.all(databases.map((db) => db.destroy()));
 		databases.length = 0;
 	});
@@ -27,7 +29,7 @@ describe("Event Subscription Lifecycle", () => {
 		await pool?.destroy();
 	});
 
-	test("custom event triggers are created on orchestrator start", async () => {
+	test("custom event subscriptions are persisted and processed asynchronously", async () => {
 		const db = await pool.child();
 		databases.push(db);
 
@@ -48,10 +50,11 @@ describe("Event Subscription Lifecycle", () => {
 			context: {},
 		});
 
+		const taskFn = mock(async () => {});
 		const task = conductor.createTask(
 			{ name: "on-user-created" },
 			{ event: "user.created" },
-			mock(async () => {}),
+			taskFn,
 		);
 
 		const orchestrator = Orchestrator.create({
@@ -59,13 +62,14 @@ describe("Event Subscription Lifecycle", () => {
 			tasks: [task],
 			defaultWorker: { pollIntervalMs: 50, flushIntervalMs: 50 },
 		});
+		orchestrators.push(orchestrator);
 
 		await orchestrator.start();
 
-		// Check subscription was created
-		const [sub] = await db.sql<[{ event_key: string; task_key: string }]>`
-			select event_key, task_key
-			from pgconductor._private_event_subscriptions
+		// Check the persistent subscription was created
+		const [sub] = await db.sql<[{ id: string; event_key: string; task_key: string }]>`
+			select id, event_key, task_key
+			from pgconductor._private_custom_event_subscriptions
 			where event_key = 'user.created'
 		`;
 
@@ -73,94 +77,39 @@ describe("Event Subscription Lifecycle", () => {
 		expect(sub.event_key).toBe("user.created");
 		expect(sub.task_key).toBe("on-user-created");
 
-		// Check trigger function was created
-		const [trigger] = await db.sql<[{ exists: boolean }]>`
-			select exists(
-				select 1
-				from pg_trigger
-				where tgname = 'pgconductor_custom_event'
-					and tgrelid = 'pgconductor._private_custom_events'::regclass
-			)
+		const [compiledFilter] = await db.sql<
+			[{ filter: Record<string, unknown>; field_count: number; predicate_count: string }]
+		>`
+			select subscription.filter, subscription.field_count, count(predicate.id)::text as predicate_count
+			from pgconductor._private_custom_event_subscriptions subscription
+			left join pgconductor._private_custom_event_predicates predicate
+				on predicate.subscription_id = subscription.id
+			where subscription.id = ${sub.id}
+			group by subscription.id
 		`;
+		expect(compiledFilter).toEqual({ filter: {}, field_count: 0, predicate_count: "0" });
 
-		expect(trigger.exists).toBe(true);
-
-		await orchestrator.stop();
+		const eventId = await conductor.emit("user.created", { userId: "user-123" });
+		await waitForCondition(() => taskFn.mock.calls.length === 1);
+		await waitForCondition(async () => {
+			const [source] = await db.sql<{ exists: boolean }[]>`
+				select exists(
+					select 1 from pgconductor._private_executions
+					where id = ${eventId}::uuid and queue = 'pgconductor.internal'
+				) as exists
+			`;
+			return !source?.exists;
+		});
 	}, 30000);
 
-	test("database triggers are created on orchestrator start", async () => {
-		const db = await pool.child();
-		databases.push(db);
-
-		// Create contact table
-		await db.sql`
-			create table if not exists public.contact (
-				id text primary key default gen_random_uuid()::text,
-				email text,
-				name text
-			)
-		`;
-
-		const taskDef = defineTask({
-			name: "on-contact-insert",
-			payload: z.object({}),
-		});
-
-		const conductor = Conductor.create({
-			sql: db.sql,
-			tasks: TaskSchemas.fromSchema([taskDef]),
-			database: DatabaseSchema.fromGeneratedTypes<Database>(),
-			context: {},
-		});
-
-		const task = conductor.createTask(
-			{ name: "on-contact-insert" },
-			{ schema: "public", table: "contact", operation: "insert", columns: "id,email,name" },
-			mock(async () => {}),
-		);
-
-		const orchestrator = Orchestrator.create({
-			conductor,
-			tasks: [task],
-			defaultWorker: { pollIntervalMs: 50, flushIntervalMs: 50 },
-		});
-
-		await orchestrator.start();
-
-		// Check subscription was created
-		const [sub] = await db.sql<[{ schema_name: string; table_name: string; operation: string }]>`
-			select schema_name, table_name, operation::text
-			from pgconductor._private_event_subscriptions
-			where schema_name = 'public' and table_name = 'contact' and operation = 'insert'
-		`;
-
-		expect(sub).toBeTruthy();
-		expect(sub.schema_name).toBe("public");
-		expect(sub.table_name).toBe("contact");
-		expect(sub.operation).toBe("insert");
-
-		// Check trigger was created on table
-		const [trigger] = await db.sql<[{ exists: boolean }]>`
-			select exists(
-				select 1
-				from pg_trigger
-				where tgname = 'pgconductor_event_insert'
-					and tgrelid = 'public.contact'::regclass
-			)
-		`;
-
-		expect(trigger.exists).toBe(true);
-
-		await orchestrator.stop();
-	}, 30000);
-
-	test("stopping orchestrator does not remove triggers", async () => {
+	test("custom event subscriptions and compiled filters persist after stop", async () => {
 		const db = await pool.child();
 		databases.push(db);
 
 		const userCreated = defineEvent({
 			name: "user.created.persistent",
 			payload: z.object({ userId: z.string() }),
+			filterable: ["userId"],
 		});
 
 		const taskDef = defineTask({
@@ -177,7 +126,10 @@ describe("Event Subscription Lifecycle", () => {
 
 		const task = conductor.createTask(
 			{ name: "on-user-persistent" },
-			{ event: "user.created.persistent" },
+			{
+				event: "user.created.persistent",
+				filter: { userId: ["user-123", "user-456", "user-123"] },
+			},
 			mock(async () => {}),
 		);
 
@@ -186,45 +138,69 @@ describe("Event Subscription Lifecycle", () => {
 			tasks: [task],
 			defaultWorker: { pollIntervalMs: 50, flushIntervalMs: 50 },
 		});
+		orchestrators.push(orchestrator);
 
 		await orchestrator.start();
 
-		// Verify trigger exists
-		const [beforeStop] = await db.sql<[{ exists: boolean }]>`
-			select exists(
+		const [beforeStop] = await db.sql<[{ id: string; exists: boolean }]>`
+			select subscription.id, exists(
 				select 1
-				from pg_trigger
-				where tgname = 'pgconductor_custom_event'
-					and tgrelid = 'pgconductor._private_custom_events'::regclass
-			)
+				from pgconductor._private_custom_event_predicates predicate
+				where predicate.subscription_id = subscription.id
+			) as exists
+			from pgconductor._private_custom_event_subscriptions subscription
+			where event_key = 'user.created.persistent'
 		`;
+		expect(beforeStop).toBeTruthy();
 		expect(beforeStop.exists).toBe(true);
+
+		const [invariants] = await db.sql<
+			{
+				predicates: number;
+				field_count: number;
+				events_match: boolean;
+				has_expected_predicate: boolean;
+			}[]
+		>`
+			select
+				count(predicate.id)::integer as predicates,
+				subscription.field_count,
+				bool_and(predicate.event_key = subscription.event_key) as events_match,
+				bool_or(
+					predicate.field_name = 'userId'
+					and predicate.value = '"user-123"'::jsonb
+				) as has_expected_predicate
+			from pgconductor._private_custom_event_subscriptions subscription
+			join pgconductor._private_custom_event_predicates predicate
+				on predicate.subscription_id = subscription.id
+			where subscription.id = ${beforeStop.id}
+			group by subscription.id
+		`;
+		expect(invariants).toEqual({
+			predicates: 2,
+			field_count: 1,
+			events_match: true,
+			has_expected_predicate: true,
+		});
 
 		await orchestrator.stop();
 
-		// Verify trigger still exists after stop
-		const [afterStop] = await db.sql<[{ exists: boolean }]>`
+		const [afterStop] = await db.sql<[{ exists: boolean; filter_count: string }]>`
 			select exists(
-				select 1
-				from pg_trigger
-				where tgname = 'pgconductor_custom_event'
-					and tgrelid = 'pgconductor._private_custom_events'::regclass
-			)
+				select 1 from pgconductor._private_custom_event_subscriptions
+				where id = ${beforeStop.id}
+			) as exists,
+			(
+				select count(*)::text
+				from pgconductor._private_custom_event_predicates predicate
+				where predicate.subscription_id = ${beforeStop.id}
+			) as filter_count
 		`;
 		expect(afterStop.exists).toBe(true);
-
-		// Verify subscription still exists
-		const [sub] = await db.sql<[{ exists: boolean }]>`
-			select exists(
-				select 1
-				from pgconductor._private_event_subscriptions
-				where event_key = 'user.created.persistent'
-			)
-		`;
-		expect(sub.exists).toBe(true);
+		expect(afterStop.filter_count).toBe("2");
 	}, 30000);
 
-	test("triggers are recreated when subscriptions change", async () => {
+	test("custom event subscriptions are replaced when their configuration changes", async () => {
 		const db = await pool.child();
 		databases.push(db);
 
@@ -262,13 +238,14 @@ describe("Event Subscription Lifecycle", () => {
 			tasks: [task1],
 			defaultWorker: { pollIntervalMs: 50, flushIntervalMs: 50 },
 		});
+		orchestrators.push(orchestrator1);
 
 		await orchestrator1.start();
 
 		// Check subscription without field selection
 		const [sub1] = await db.sql<[{ payload_fields: string[] | null }]>`
 			select payload_fields
-			from pgconductor._private_event_subscriptions
+			from pgconductor._private_custom_event_subscriptions
 			where event_key = 'user.created.change'
 		`;
 		expect(sub1.payload_fields).toBeNull();
@@ -294,13 +271,14 @@ describe("Event Subscription Lifecycle", () => {
 			],
 			defaultWorker: { pollIntervalMs: 50, flushIntervalMs: 50 },
 		});
+		orchestrators.push(orchestrator2);
 
 		await orchestrator2.start();
 
 		// Check subscription was updated with field selection
 		const [sub2] = await db.sql<[{ payload_fields: string[]; task_key: string }]>`
 			select payload_fields, task_key
-			from pgconductor._private_event_subscriptions
+			from pgconductor._private_custom_event_subscriptions
 			where event_key = 'user.created.change'
 		`;
 		expect(sub2.payload_fields).toEqual(["userId"]);
@@ -352,13 +330,14 @@ describe("Event Subscription Lifecycle", () => {
 			tasks: [task1, task2],
 			defaultWorker: { pollIntervalMs: 50, flushIntervalMs: 50 },
 		});
+		orchestrators.push(orchestrator);
 
 		await orchestrator.start();
 
 		// Check both subscriptions exist
 		const subs = await db.sql<{ task_key: string }[]>`
 			select task_key
-			from pgconductor._private_event_subscriptions
+			from pgconductor._private_custom_event_subscriptions
 			where event_key = 'user.created.multi'
 			order by task_key
 		`;
@@ -370,94 +349,5 @@ describe("Event Subscription Lifecycle", () => {
 		}
 
 		await orchestrator.stop();
-	}, 30000);
-
-	test("when clause changes trigger recreation", async () => {
-		const db = await pool.child();
-		databases.push(db);
-
-		// Create contact table
-		await db.sql`
-			create table if not exists public.contact (
-				id text primary key default gen_random_uuid()::text,
-				email text,
-				active boolean default true
-			)
-		`;
-
-		const taskDef = defineTask({
-			name: "on-contact-conditional",
-			payload: z.object({}),
-		});
-
-		// First orchestrator without when clause
-		const conductor1 = Conductor.create({
-			sql: db.sql,
-			tasks: TaskSchemas.fromSchema([taskDef]),
-			database: DatabaseSchema.fromGeneratedTypes<Database>(),
-			context: {},
-		});
-
-		const task1 = conductor1.createTask(
-			{ name: "on-contact-conditional" },
-			{ schema: "public", table: "contact", operation: "insert", columns: "id,email,active" },
-			mock(async () => {}),
-		);
-
-		const orchestrator1 = Orchestrator.create({
-			conductor: conductor1,
-			tasks: [task1],
-			defaultWorker: { pollIntervalMs: 50, flushIntervalMs: 50 },
-		});
-
-		await orchestrator1.start();
-
-		// Check subscription without when clause
-		const [sub1] = await db.sql<[{ when_clause: string | null }]>`
-			select when_clause
-			from pgconductor._private_event_subscriptions
-			where schema_name = 'public' and table_name = 'contact'
-		`;
-		expect(sub1.when_clause).toBeNull();
-
-		await orchestrator1.stop();
-
-		// Second orchestrator with when clause
-		const conductor2 = Conductor.create({
-			sql: db.sql,
-			tasks: TaskSchemas.fromSchema([taskDef]),
-			database: DatabaseSchema.fromGeneratedTypes<Database>(),
-			context: {},
-		});
-
-		const task2 = conductor2.createTask(
-			{ name: "on-contact-conditional" },
-			{
-				schema: "public",
-				table: "contact",
-				operation: "insert",
-				when: "NEW.active = true",
-				columns: "id,email,active",
-			},
-			mock(async () => {}),
-		);
-
-		const orchestrator2 = Orchestrator.create({
-			conductor: conductor2,
-			tasks: [task2],
-			defaultWorker: { pollIntervalMs: 50, flushIntervalMs: 50 },
-		});
-
-		await orchestrator2.start();
-
-		// Check subscription was updated with when clause
-		const [sub2] = await db.sql<[{ when_clause: string }]>`
-			select when_clause
-			from pgconductor._private_event_subscriptions
-			where schema_name = 'public' and table_name = 'contact'
-		`;
-		expect(sub2.when_clause).toBe("NEW.active = true");
-
-		await orchestrator2.stop();
 	}, 30000);
 });
