@@ -13,6 +13,7 @@ function hashToJitter(str: string): number {
 // we could make this configurable later
 // should be lower for very high steps per task
 const BATCH_SIZE = 1000;
+const EVENT_RETENTION_DAYS = 7;
 
 export const createMaintenanceTask = <Queue extends string = "default">(queue: Queue) => {
 	// Add consistent jitter based on queue name to spread load between midnight and 1am
@@ -37,23 +38,31 @@ export const createMaintenanceTask = <Queue extends string = "default">(queue: Q
 		},
 		async (_, ctx) => {
 			const { db, tasks, signal } = ctx;
-			// Skip if no tasks have retention settings (check in-memory config)
+			// Delete old completed/failed executions based on retention settings.
+			// Steps and event deliveries are removed by their foreign-key cascades.
 			const hasRetention = Array.from(tasks.values()).some(
 				(t) => t.removeOnComplete || t.removeOnFail,
 			);
-			if (!hasRetention) {
-				return;
+			if (hasRetention) {
+				let hasMore = true;
+				while (hasMore) {
+					hasMore = await db.removeExecutions(
+						{ queueName: queue, batchSize: BATCH_SIZE },
+						{ signal },
+					);
+				}
 			}
 
-			// Delete old completed/failed executions based on retention settings
-			// Steps are automatically deleted via CASCADE foreign key
-			let hasMore = true;
-			while (hasMore) {
-				hasMore = await db.removeExecutions(
-					{
-						queueName: queue,
-						batchSize: BATCH_SIZE,
-					},
+			// Keep acknowledged inbox rows only for a bounded period. Process in
+			// batches so maintenance cannot monopolize the queue.
+			const before = new Date(
+				(await db.getCurrentTime({ signal })).getTime() -
+					EVENT_RETENTION_DAYS * 24 * 60 * 60 * 1000,
+			);
+			let eventsRemain = true;
+			while (eventsRemain) {
+				eventsRemain = await db.removeProcessedEvents(
+					{ before, batchSize: BATCH_SIZE },
 					{ signal },
 				);
 			}

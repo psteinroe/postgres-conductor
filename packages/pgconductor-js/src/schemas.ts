@@ -65,15 +65,15 @@ export class TaskSchemas<
  *   .fromUnion<AppAccountCreated | UserDeleted>()
  */
 export class EventSchemas<
-	TSchemaTypes extends readonly EventDefinition<string, any>[] = readonly [],
-	TUnionTypes extends EventDefinition<string, any> = never,
+	TSchemaTypes extends readonly EventDefinition<string, any, any>[] = readonly [],
+	TUnionTypes extends EventDefinition<string, any, any> = never,
 > {
 	private constructor(readonly definitions: TSchemaTypes) {}
 
 	/**
 	 * Create EventSchemas from standard-schema based event definitions.
 	 */
-	static fromSchema<const T extends readonly EventDefinition<string, any>[]>(
+	static fromSchema<const T extends readonly EventDefinition<string, any, any>[]>(
 		events: T,
 	): EventSchemas<T, never> {
 		return new EventSchemas(events);
@@ -82,7 +82,7 @@ export class EventSchemas<
 	/**
 	 * Add type-only event definitions via union type.
 	 */
-	static fromUnion<TUnion extends EventDefinition<string, any>>(): EventSchemas<
+	static fromUnion<TUnion extends EventDefinition<string, any, any>>(): EventSchemas<
 		readonly [],
 		TUnion
 	> {
@@ -92,7 +92,7 @@ export class EventSchemas<
 	/**
 	 * Chain: Add more standard-schema based event definitions.
 	 */
-	fromSchema<const T extends readonly EventDefinition<string, any>[]>(
+	fromSchema<const T extends readonly EventDefinition<string, any, any>[]>(
 		events: T,
 	): EventSchemas<readonly [...TSchemaTypes, ...T], TUnionTypes> {
 		return new EventSchemas([...this.definitions, ...events]);
@@ -101,7 +101,7 @@ export class EventSchemas<
 	/**
 	 * Chain: Add type-only event definitions via union type.
 	 */
-	fromUnion<TUnion extends EventDefinition<string, any>>(): EventSchemas<
+	fromUnion<TUnion extends EventDefinition<string, any, any>>(): EventSchemas<
 		TSchemaTypes,
 		TUnionTypes | TUnion
 	> {

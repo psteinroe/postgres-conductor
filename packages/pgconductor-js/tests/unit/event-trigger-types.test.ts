@@ -193,7 +193,7 @@ describe("event triggers", () => {
 		);
 	});
 
-	test("custom event trigger with when clause", () => {
+	test("custom event trigger rejects a when clause", () => {
 		const orderPlaced = defineEvent({
 			name: "order.placed",
 			payload: z.object({ orderId: z.string(), total: z.number() }),
@@ -211,17 +211,18 @@ describe("event triggers", () => {
 			context: {},
 		});
 
-		// Task with when clause - still receives full payload
-		conductor.createTask(
-			{ name: "on-large-order" },
-			{ event: "order.placed", when: "new.payload->>'total'::numeric > 1000" },
-			async (event) => {
-				expectTypeOf(event.payload).toEqualTypeOf<{
-					orderId: string;
-					total: number;
-				}>();
-			},
-		);
+		expect(() =>
+			conductor.createTask(
+				{ name: "on-large-order" },
+				{ event: "order.placed", when: "new.payload->>'total'::numeric > 1000" },
+				async (event) => {
+					expectTypeOf(event.payload).toEqualTypeOf<{
+						orderId: string;
+						total: number;
+					}>();
+				},
+			),
+		).toThrow("does not support a when clause");
 	});
 
 	test("database trigger with column selection", () => {

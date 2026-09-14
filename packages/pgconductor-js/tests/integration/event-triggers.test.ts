@@ -146,6 +146,7 @@ describe("Event Triggers - Custom Events", () => {
 		const orderPlaced = defineEvent({
 			name: "order.placed",
 			payload: z.object({ orderId: z.string(), total: z.number() }),
+			filterable: ["total"],
 		});
 
 		const taskDef = defineTask({
@@ -167,7 +168,7 @@ describe("Event Triggers - Custom Events", () => {
 
 		const task = conductor.createTask(
 			{ name: "on-large-order" },
-			{ event: "order.placed", when: "(new.payload->>'total')::numeric > 1000" },
+			{ event: "order.placed", filter: { total: [1500] } },
 			taskFn,
 		);
 

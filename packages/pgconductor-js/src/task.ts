@@ -133,11 +133,11 @@ type CronEventUnion<TTriggers> =
 		: never;
 
 // Build custom event union from triggers
-type CustomEventUnion<TTriggers, Events extends readonly EventDefinition<string, any>[]> =
+type CustomEventUnion<TTriggers, Events extends readonly EventDefinition<string, any, any>[]> =
 	ExtractCustomEventTriggers<TTriggers> extends infer T
 		? T extends { event: infer TName extends string }
 			? FindEventByIdentifier<Events, TName> extends infer TEvent
-				? TEvent extends EventDefinition<string, any>
+				? TEvent extends EventDefinition<string, any, any>
 					? T extends { fields: infer TFields extends string }
 						? {
 								name: TName;
@@ -198,7 +198,7 @@ type DatabaseEventUnion<TTriggers, Database extends GenericDatabase> =
 export type TaskEventFromTriggers<
 	TTriggers,
 	TPayload extends object,
-	Events extends readonly EventDefinition<string, any>[] = [],
+	Events extends readonly EventDefinition<string, any, any>[] = [],
 	Database extends GenericDatabase = {},
 > =
 	| (HasInvocable<TTriggers> extends true

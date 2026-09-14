@@ -13,12 +13,15 @@ import type { Database } from "../database.types";
 describe("Event Subscription Lifecycle", () => {
 	let pool: TestDatabasePool;
 	const databases: TestDatabase[] = [];
+	const orchestrators: Orchestrator[] = [];
 
 	beforeAll(async () => {
 		pool = await TestDatabasePool.create();
 	}, 60000);
 
 	afterEach(async () => {
+		await Promise.all(orchestrators.map((orchestrator) => orchestrator.stop()));
+		orchestrators.length = 0;
 		await Promise.all(databases.map((db) => db.destroy()));
 		databases.length = 0;
 	});
@@ -27,7 +30,16 @@ describe("Event Subscription Lifecycle", () => {
 		await pool?.destroy();
 	});
 
-	test("custom event triggers are created on orchestrator start", async () => {
+	async function waitUntil(check: () => Promise<boolean>, timeout = 5000): Promise<void> {
+		const deadline = Date.now() + timeout;
+		while (Date.now() < deadline) {
+			if (await check()) return;
+			await Bun.sleep(10);
+		}
+		throw new Error("condition was not met before timeout");
+	}
+
+	test("custom event subscriptions are persisted and processed asynchronously", async () => {
 		const db = await pool.child();
 		databases.push(db);
 
@@ -48,10 +60,11 @@ describe("Event Subscription Lifecycle", () => {
 			context: {},
 		});
 
+		const taskFn = mock(async () => {});
 		const task = conductor.createTask(
 			{ name: "on-user-created" },
 			{ event: "user.created" },
-			mock(async () => {}),
+			taskFn,
 		);
 
 		const orchestrator = Orchestrator.create({
@@ -59,12 +72,13 @@ describe("Event Subscription Lifecycle", () => {
 			tasks: [task],
 			defaultWorker: { pollIntervalMs: 50, flushIntervalMs: 50 },
 		});
+		orchestrators.push(orchestrator);
 
 		await orchestrator.start();
 
-		// Check subscription was created
-		const [sub] = await db.sql<[{ event_key: string; task_key: string }]>`
-			select event_key, task_key
+		// Check the persistent subscription was created
+		const [sub] = await db.sql<[{ id: string; event_key: string; task_key: string }]>`
+			select id, event_key, task_key
 			from pgconductor._private_event_subscriptions
 			where event_key = 'user.created'
 		`;
@@ -73,19 +87,24 @@ describe("Event Subscription Lifecycle", () => {
 		expect(sub.event_key).toBe("user.created");
 		expect(sub.task_key).toBe("on-user-created");
 
-		// Check trigger function was created
-		const [trigger] = await db.sql<[{ exists: boolean }]>`
-			select exists(
-				select 1
-				from pg_trigger
-				where tgname = 'pgconductor_custom_event'
-					and tgrelid = 'pgconductor._private_custom_events'::regclass
-			)
+		const [compiledFilters] = await db.sql<[{ count: string }]>`
+			select count(*)::text as count
+			from pgconductor._private_event_subscription_filters
+			where subscription_id = ${sub.id}
 		`;
+		expect(compiledFilters.count).toBe("0");
 
-		expect(trigger.exists).toBe(true);
+		await conductor.emit("user.created", { userId: "user-123" });
+		await waitUntil(async () => taskFn.mock.calls.length === 1);
 
-		await orchestrator.stop();
+		const [processedEvent] = await db.sql<[{ processed_at: Date | null }]>`
+			select processed_at
+			from pgconductor._private_custom_events
+			where event_key = 'user.created'
+			order by created_at desc
+			limit 1
+		`;
+		expect(processedEvent.processed_at).not.toBeNull();
 	}, 30000);
 
 	test("database triggers are created on orchestrator start", async () => {
@@ -124,6 +143,7 @@ describe("Event Subscription Lifecycle", () => {
 			tasks: [task],
 			defaultWorker: { pollIntervalMs: 50, flushIntervalMs: 50 },
 		});
+		orchestrators.push(orchestrator);
 
 		await orchestrator.start();
 
@@ -154,13 +174,14 @@ describe("Event Subscription Lifecycle", () => {
 		await orchestrator.stop();
 	}, 30000);
 
-	test("stopping orchestrator does not remove triggers", async () => {
+	test("custom event subscriptions and compiled filters persist after stop", async () => {
 		const db = await pool.child();
 		databases.push(db);
 
 		const userCreated = defineEvent({
 			name: "user.created.persistent",
 			payload: z.object({ userId: z.string() }),
+			filterable: ["userId"],
 		});
 
 		const taskDef = defineTask({
@@ -177,7 +198,7 @@ describe("Event Subscription Lifecycle", () => {
 
 		const task = conductor.createTask(
 			{ name: "on-user-persistent" },
-			{ event: "user.created.persistent" },
+			{ event: "user.created.persistent", filter: { userId: ["user-123"] } },
 			mock(async () => {}),
 		);
 
@@ -186,45 +207,40 @@ describe("Event Subscription Lifecycle", () => {
 			tasks: [task],
 			defaultWorker: { pollIntervalMs: 50, flushIntervalMs: 50 },
 		});
+		orchestrators.push(orchestrator);
 
 		await orchestrator.start();
 
-		// Verify trigger exists
-		const [beforeStop] = await db.sql<[{ exists: boolean }]>`
-			select exists(
+		const [beforeStop] = await db.sql<[{ id: string; exists: boolean }]>`
+			select id, exists(
 				select 1
-				from pg_trigger
-				where tgname = 'pgconductor_custom_event'
-					and tgrelid = 'pgconductor._private_custom_events'::regclass
-			)
+				from pgconductor._private_event_subscription_filters
+				where subscription_id = pgconductor._private_event_subscriptions.id
+			) as exists
+			from pgconductor._private_event_subscriptions
+			where event_key = 'user.created.persistent'
 		`;
+		expect(beforeStop).toBeTruthy();
 		expect(beforeStop.exists).toBe(true);
 
 		await orchestrator.stop();
 
-		// Verify trigger still exists after stop
-		const [afterStop] = await db.sql<[{ exists: boolean }]>`
+		const [afterStop] = await db.sql<[{ exists: boolean; filter_count: string }]>`
 			select exists(
-				select 1
-				from pg_trigger
-				where tgname = 'pgconductor_custom_event'
-					and tgrelid = 'pgconductor._private_custom_events'::regclass
-			)
+				select 1 from pgconductor._private_event_subscriptions
+				where id = ${beforeStop.id}
+			) as exists,
+			(
+				select count(*)::text
+				from pgconductor._private_event_subscription_filters
+				where subscription_id = ${beforeStop.id}
+			) as filter_count
 		`;
 		expect(afterStop.exists).toBe(true);
-
-		// Verify subscription still exists
-		const [sub] = await db.sql<[{ exists: boolean }]>`
-			select exists(
-				select 1
-				from pgconductor._private_event_subscriptions
-				where event_key = 'user.created.persistent'
-			)
-		`;
-		expect(sub.exists).toBe(true);
+		expect(afterStop.filter_count).toBe("1");
 	}, 30000);
 
-	test("triggers are recreated when subscriptions change", async () => {
+	test("custom event subscriptions are replaced when their configuration changes", async () => {
 		const db = await pool.child();
 		databases.push(db);
 
@@ -262,6 +278,7 @@ describe("Event Subscription Lifecycle", () => {
 			tasks: [task1],
 			defaultWorker: { pollIntervalMs: 50, flushIntervalMs: 50 },
 		});
+		orchestrators.push(orchestrator1);
 
 		await orchestrator1.start();
 
@@ -294,6 +311,7 @@ describe("Event Subscription Lifecycle", () => {
 			],
 			defaultWorker: { pollIntervalMs: 50, flushIntervalMs: 50 },
 		});
+		orchestrators.push(orchestrator2);
 
 		await orchestrator2.start();
 
@@ -352,6 +370,7 @@ describe("Event Subscription Lifecycle", () => {
 			tasks: [task1, task2],
 			defaultWorker: { pollIntervalMs: 50, flushIntervalMs: 50 },
 		});
+		orchestrators.push(orchestrator);
 
 		await orchestrator.start();
 
@@ -409,6 +428,7 @@ describe("Event Subscription Lifecycle", () => {
 			tasks: [task1],
 			defaultWorker: { pollIntervalMs: 50, flushIntervalMs: 50 },
 		});
+		orchestrators.push(orchestrator1);
 
 		await orchestrator1.start();
 
@@ -447,6 +467,7 @@ describe("Event Subscription Lifecycle", () => {
 			tasks: [task2],
 			defaultWorker: { pollIntervalMs: 50, flushIntervalMs: 50 },
 		});
+		orchestrators.push(orchestrator2);
 
 		await orchestrator2.start();
 

@@ -48,6 +48,7 @@ export class Orchestrator {
 	private _stopDeferred: Deferred<void> | null = null;
 	private _startDeferred: Deferred<void> | null = null;
 	private _abortController: AbortController | null = null;
+	private _eventProcessingGate: Deferred<void> | null = null;
 
 	private releaseSignalHandlers: (() => void) | null = null;
 
@@ -69,16 +70,23 @@ export class Orchestrator {
 				this.logger,
 				options.defaultWorker,
 				options.conductor.options.context,
+				options.conductor.options.events?.definitions ?? [],
 			);
 			this.workers.push(worker);
 		}
 
 		for (const w of options.workers || []) {
-			if (this.workers.find((existing) => existing.queueName === w.queueName)) {
-				throw new Error(`Duplicate worker name: ${w.queueName}`);
-			}
-
 			this.workers.push(w);
+		}
+
+		const queues = new Set<string>();
+		for (const worker of this.workers) {
+			if (queues.has(worker.queueName)) {
+				throw new Error(
+					`Orchestrator cannot configure multiple workers for queue "${worker.queueName}"; configure one worker with all tasks for that queue`,
+				);
+			}
+			queues.add(worker.queueName);
 		}
 	}
 
@@ -189,32 +197,55 @@ export class Orchestrator {
 				// Start heartbeat loop
 				this.startHeartbeatLoop();
 
-				// Kick off all workers (don't await yet!)
-				if (runOnce) {
-					// Drain mode: workers will process and stop
-					this.workers.forEach((w) => void w.drain(this.orchestratorId));
-				} else {
-					// Normal mode: workers will run continuously
-					this.workers.forEach((w) => void w.run(this.orchestratorId));
-				}
+				const startWorkers = () => {
+					// Gate local event fan-out until every worker in this pass has
+					// registered. A pass is deliberately global: an event processor on
+					// one queue may create executions on every other queue.
+					this._eventProcessingGate = new Deferred<void>();
+					for (const worker of this.workers)
+						worker.setEventProcessingGate(this._eventProcessingGate.promise);
+					const workerLifecycles = this.workers.map((worker) =>
+						runOnce ? worker.drain(this.orchestratorId) : worker.run(this.orchestratorId),
+					);
+					return {
+						workerLifecycles,
+						allWorkers: Promise.all(workerLifecycles),
+					};
+				};
 
-				// Wait for ALL workers to finish starting (register() complete)
+				let { allWorkers } = startWorkers();
+
+				// Wait for ALL workers to finish registering before allowing event work.
 				await Promise.all(this.workers.map((w) => w.started));
+				this._eventProcessingGate?.resolve();
 
 				// NOW signal that orchestrator has started
 				this.startDeferred.resolve();
 
-				// Wait for shutdown signal or all workers to complete
-				await Promise.race([
-					Promise.all(this.workers.map((w) => w.stopped)),
-					this.waitForShutdownSignal(),
-				]);
+				if (runOnce) {
+					// A worker can observe its queue empty just before another queue
+					// finishes a task that fans an event out to it. Keep the workers as
+					// coordinated drain passes until an entire global pass observes no
+					// work. This is also why event processing is gated per pass rather
+					// than letting a queue permanently declare itself drained.
+					await allWorkers;
+					while (this.workers.some((worker) => worker.drainDidWork)) {
+						({ allWorkers } = startWorkers());
+						await Promise.all(this.workers.map((w) => w.started));
+						this._eventProcessingGate?.resolve();
+						await allWorkers;
+					}
+				} else {
+					// Wait for shutdown signal or all workers to complete
+					await Promise.race([allWorkers, this.waitForShutdownSignal()]);
+				}
 
 				// Stop gracefully
 				await this.stopWorkers();
 			} catch (err) {
 				error = coerceError(err);
 				this.logger.error(err);
+				await this.stopWorkers();
 
 				// Only reject startDeferred if startup hasn't completed yet
 				if (!this.startDeferred.isSettled) {
@@ -225,6 +256,7 @@ export class Orchestrator {
 				const stopDeferred = this._stopDeferred;
 
 				try {
+					this._eventProcessingGate?.resolve();
 					await this.cleanup();
 				} catch (cleanupErr) {
 					this.logger.error("Cleanup failed:", cleanupErr);
