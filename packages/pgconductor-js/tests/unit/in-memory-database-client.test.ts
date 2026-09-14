@@ -3,6 +3,17 @@ import { test, expect, describe } from "bun:test";
 import { InMemoryDatabaseClient } from "../mocks/in-memory-database-client";
 
 describe("InMemoryDatabaseClient", () => {
+	function fencing(db: InMemoryDatabaseClient, executionId: string) {
+		const execution = db.getExecution(executionId);
+		if (!execution?.orchestrator_id || !execution.claim_token) {
+			throw new Error(`execution ${executionId} is not claimed`);
+		}
+		return {
+			orchestrator_id: execution.orchestrator_id,
+			claim_token: execution.claim_token,
+		};
+	}
+
 	describe("Basic Execution Lifecycle", () => {
 		test("invoke creates pending execution", async () => {
 			const db = new InMemoryDatabaseClient();
@@ -74,6 +85,7 @@ describe("InMemoryDatabaseClient", () => {
 			await db.returnExecutions([
 				{
 					execution_id: id!,
+					...fencing(db, id!),
 					queue: "default",
 					task_key: "test-task",
 					status: "completed",
@@ -122,6 +134,7 @@ describe("InMemoryDatabaseClient", () => {
 			await db.returnExecutions([
 				{
 					execution_id: id!,
+					...fencing(db, id!),
 					queue: "default",
 					task_key: "test-task",
 					status: "failed",
@@ -172,6 +185,7 @@ describe("InMemoryDatabaseClient", () => {
 			await db.returnExecutions([
 				{
 					execution_id: id!,
+					...fencing(db, id!),
 					queue: "default",
 					task_key: "test-task",
 					status: "failed",
@@ -195,6 +209,7 @@ describe("InMemoryDatabaseClient", () => {
 			await db.returnExecutions([
 				{
 					execution_id: id!,
+					...fencing(db, id!),
 					queue: "default",
 					task_key: "test-task",
 					status: "failed",
@@ -243,8 +258,9 @@ describe("InMemoryDatabaseClient", () => {
 				},
 				scheduleName: "test-schedule",
 			});
+			db.advanceTime(60000);
 
-			await db.getExecutions({
+			const claimed = await db.getExecutions({
 				orchestratorId: "test-orch",
 				queueName: "default",
 				batchSize: 10,
@@ -255,6 +271,8 @@ describe("InMemoryDatabaseClient", () => {
 			await db.returnExecutions([
 				{
 					execution_id: id!,
+					orchestrator_id: claimed[0]!.locked_by,
+					claim_token: claimed[0]!.claim_token,
 					queue: "default",
 					task_key: "cron-task",
 					status: "completed",
@@ -350,6 +368,7 @@ describe("InMemoryDatabaseClient", () => {
 			await db.returnExecutions([
 				{
 					execution_id: id!,
+					...fencing(db, id!),
 					queue: "default",
 					task_key: "cron-task",
 					status: "failed",
@@ -380,6 +399,7 @@ describe("InMemoryDatabaseClient", () => {
 			await db.returnExecutions([
 				{
 					execution_id: id!,
+					...fencing(db, id!),
 					queue: "default",
 					task_key: "cron-task",
 					status: "completed",
@@ -453,6 +473,7 @@ describe("InMemoryDatabaseClient", () => {
 			await db.returnExecutions([
 				{
 					execution_id: id!,
+					...fencing(db, id!),
 					queue: "default",
 					task_key: "slow-task",
 					status: "failed",
@@ -486,6 +507,7 @@ describe("InMemoryDatabaseClient", () => {
 			await db.returnExecutions([
 				{
 					execution_id: id!,
+					...fencing(db, id!),
 					queue: "default",
 					task_key: "slow-task",
 					status: "failed",
@@ -529,6 +551,7 @@ describe("InMemoryDatabaseClient", () => {
 			await db.returnExecutions([
 				{
 					execution_id: parentId!,
+					...fencing(db, parentId!),
 					queue: "default",
 					task_key: "parent",
 					status: "invoke_child",
@@ -572,6 +595,7 @@ describe("InMemoryDatabaseClient", () => {
 			await db.returnExecutions([
 				{
 					execution_id: parentId!,
+					...fencing(db, parentId!),
 					queue: "default",
 					task_key: "parent",
 					status: "invoke_child",
@@ -597,6 +621,7 @@ describe("InMemoryDatabaseClient", () => {
 			await db.returnExecutions([
 				{
 					execution_id: childId,
+					...fencing(db, childId),
 					queue: "default",
 					task_key: "child",
 					status: "completed",
@@ -643,6 +668,7 @@ describe("InMemoryDatabaseClient", () => {
 			await db.returnExecutions([
 				{
 					execution_id: parentId!,
+					...fencing(db, parentId!),
 					queue: "default",
 					task_key: "parent",
 					status: "invoke_child",
@@ -668,6 +694,7 @@ describe("InMemoryDatabaseClient", () => {
 			await db.returnExecutions([
 				{
 					execution_id: childId,
+					...fencing(db, childId),
 					queue: "default",
 					task_key: "child",
 					status: "failed",
@@ -691,16 +718,30 @@ describe("InMemoryDatabaseClient", () => {
 				queue: "default",
 				payload: {},
 			});
+			const claimed = (
+				await db.getExecutions({
+					orchestratorId: "test-orch",
+					queueName: "default",
+					batchSize: 1,
+					taskKeysWithConcurrency: [],
+					filterTaskKeys: [],
+				})
+			)[0]!;
 
 			await db.saveStep({
 				executionId: execId!,
-				queue: "default",
+				queue: claimed.queue,
+				orchestratorId: claimed.locked_by,
+				claimToken: claimed.claim_token,
 				key: "step1",
 				result: { data: "value" },
 			});
 
 			const result = await db.loadStep({
 				executionId: execId!,
+				queue: claimed.queue,
+				orchestratorId: claimed.locked_by,
+				claimToken: claimed.claim_token,
 				key: "step1",
 			});
 
@@ -712,10 +753,13 @@ describe("InMemoryDatabaseClient", () => {
 
 			const result = await db.loadStep({
 				executionId: "nonexistent",
+				queue: "default",
+				orchestratorId: "test-orch",
+				claimToken: "test-claim-token",
 				key: "step1",
 			});
 
-			expect(result).toBeNull();
+			expect(result).toBeUndefined();
 		});
 	});
 
@@ -818,6 +862,7 @@ describe("InMemoryDatabaseClient", () => {
 			await db.returnExecutions([
 				{
 					execution_id: batch1[0]!.id,
+					...fencing(db, batch1[0]!.id),
 					queue: "default",
 					task_key: "limited-task",
 					status: "completed",
@@ -883,6 +928,7 @@ describe("InMemoryDatabaseClient", () => {
 			await db.returnExecutions([
 				{
 					execution_id: id1!,
+					...fencing(db, id1!),
 					queue: "default",
 					task_key: "test",
 					status: "completed",

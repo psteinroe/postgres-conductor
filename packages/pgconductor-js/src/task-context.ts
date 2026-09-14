@@ -147,6 +147,9 @@ export class TaskContext<
 		const cached = await this.opts.db.loadStep(
 			{
 				executionId: this.opts.execution.id,
+				queue: this.opts.execution.queue,
+				orchestratorId: this.opts.execution.locked_by,
+				claimToken: this.opts.execution.claim_token,
 				key: name,
 			},
 			{ signal: this.signal },
@@ -163,6 +166,8 @@ export class TaskContext<
 			{
 				executionId: this.opts.execution.id,
 				queue: this.opts.execution.queue,
+				orchestratorId: this.opts.execution.locked_by,
+				claimToken: this.opts.execution.claim_token,
 				key: name,
 				result: { result: result as JsonValue },
 				runAtMs: undefined,
@@ -201,6 +206,9 @@ export class TaskContext<
 		const cached = await this.opts.db.loadStep(
 			{
 				executionId: this.opts.execution.id,
+				queue: this.opts.execution.queue,
+				orchestratorId: this.opts.execution.locked_by,
+				claimToken: this.opts.execution.claim_token,
 				key: id,
 			},
 			{ signal: this.signal },
@@ -234,6 +242,9 @@ export class TaskContext<
 		const cached = await this.opts.db.loadStep(
 			{
 				executionId: this.opts.execution.id,
+				queue: this.opts.execution.queue,
+				orchestratorId: this.opts.execution.locked_by,
+				claimToken: this.opts.execution.claim_token,
 				key,
 			},
 			{ signal: this.signal },
@@ -251,6 +262,9 @@ export class TaskContext<
 			await this.opts.db.clearWaitingState(
 				{
 					executionId: this.opts.execution.id,
+					queue: this.opts.execution.queue,
+					orchestratorId: this.opts.execution.locked_by,
+					claimToken: this.opts.execution.claim_token,
 				},
 				{ signal: this.signal },
 			);

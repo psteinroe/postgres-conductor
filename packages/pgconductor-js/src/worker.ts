@@ -58,6 +58,7 @@ export const DEFAULT_WORKER_CONFIG: WorkerConfig = {
  * Encapsulates buffered execution results with internal counting and task key tracking.
  */
 class BufferState {
+	orchestratorId = "";
 	completed: ExecutionCompleted[] = [];
 	failed: (ExecutionFailed | ExecutionPermamentlyFailed)[] = [];
 	released: ExecutionReleased[] = [];
@@ -66,6 +67,7 @@ class BufferState {
 	count = 0;
 
 	add(result: ExecutionResult): void {
+		this.orchestratorId = result.orchestrator_id || this.orchestratorId;
 		this.taskKeys.add(result.task_key);
 		this.count++;
 
@@ -100,6 +102,7 @@ class BufferState {
 		this.failed.push(...other.failed);
 		this.released.push(...other.released);
 		this.invokeChild.push(...other.invokeChild);
+		this.orchestratorId = this.orchestratorId || other.orchestratorId;
 		this.count += other.count;
 		for (const key of other.taskKeys) {
 			this.taskKeys.add(key);
@@ -476,6 +479,8 @@ export class Worker<
 					return executions.map((exec) => ({
 						queue: exec.queue,
 						execution_id: exec.id,
+						orchestrator_id: exec.locked_by,
+						claim_token: exec.claim_token,
 						task_key: taskKey,
 						status: "failed",
 						error: `Task not found: ${taskKey}`,
@@ -489,6 +494,8 @@ export class Worker<
 					// All cancelled - return failures for all
 					return executions.map((exec) => ({
 						execution_id: exec.id,
+						orchestrator_id: exec.locked_by,
+						claim_token: exec.claim_token,
 						queue: exec.queue,
 						task_key: taskKey,
 						status: "permanently_failed",
@@ -589,6 +596,8 @@ export class Worker<
 							execution: exec,
 							logger: makeChildLogger(this.logger, {
 								execution_id: exec.id,
+								orchestrator_id: exec.locked_by,
+								claim_token: exec.claim_token,
 								task_key: exec.task_key,
 								queue: exec.queue,
 							}),
@@ -605,6 +614,8 @@ export class Worker<
 					case "child-invocation":
 						return {
 							execution_id: exec.id,
+							orchestrator_id: exec.locked_by,
+							claim_token: exec.claim_token,
 							queue: exec.queue,
 							task_key: exec.task_key,
 							status: "invoke_child",
@@ -618,6 +629,8 @@ export class Worker<
 					case "cancelled":
 						return {
 							execution_id: exec.id,
+							orchestrator_id: exec.locked_by,
+							claim_token: exec.claim_token,
 							queue: exec.queue,
 							task_key: exec.task_key,
 							status: "permanently_failed",
@@ -628,6 +641,8 @@ export class Worker<
 					case "parent-aborted":
 						return {
 							execution_id: exec.id,
+							orchestrator_id: exec.locked_by,
+							claim_token: exec.claim_token,
 							queue: exec.queue,
 							reschedule_in_ms: output.reason === "released" ? output.reschedule_in_ms : undefined,
 							step_key: output.reason === "released" ? output.step_key : undefined,
@@ -642,6 +657,8 @@ export class Worker<
 
 			return {
 				execution_id: exec.id,
+				orchestrator_id: exec.locked_by,
+				claim_token: exec.claim_token,
 				queue: exec.queue,
 				task_key: exec.task_key,
 				status: "completed",
@@ -651,6 +668,8 @@ export class Worker<
 		} catch (err) {
 			return {
 				execution_id: exec.id,
+				orchestrator_id: exec.locked_by,
+				claim_token: exec.claim_token,
 				queue: exec.queue,
 				task_key: exec.task_key,
 				status: "failed",
@@ -725,6 +744,8 @@ export class Worker<
 					// Batch sleep - reschedule all
 					return executions.map((exec) => ({
 						execution_id: exec.id,
+						orchestrator_id: exec.locked_by,
+						claim_token: exec.claim_token,
 						queue: exec.queue,
 						task_key: taskKey,
 						status: "released" as const,
@@ -737,6 +758,8 @@ export class Worker<
 				// Other abort reasons
 				return executions.map((exec) => ({
 					execution_id: exec.id,
+					orchestrator_id: exec.locked_by,
+					claim_token: exec.claim_token,
 					queue: exec.queue,
 					task_key: taskKey,
 					status: "failed" as const,
@@ -749,6 +772,8 @@ export class Worker<
 			if (result === undefined) {
 				return executions.map((exec) => ({
 					execution_id: exec.id,
+					orchestrator_id: exec.locked_by,
+					claim_token: exec.claim_token,
 					queue: exec.queue,
 					task_key: taskKey,
 					status: "completed" as const,
@@ -771,6 +796,8 @@ export class Worker<
 			// Individual results
 			return executions.map((exec, i) => ({
 				execution_id: exec.id,
+				orchestrator_id: exec.locked_by,
+				claim_token: exec.claim_token,
 				queue: exec.queue,
 				task_key: taskKey,
 				status: "completed" as const,
@@ -782,6 +809,8 @@ export class Worker<
 			const errorMsg = coerceError(err).message;
 			return executions.map((exec) => ({
 				execution_id: exec.id,
+				orchestrator_id: exec.locked_by,
+				claim_token: exec.claim_token,
 				queue: exec.queue,
 				task_key: taskKey,
 				status: "failed" as const,
@@ -841,6 +870,7 @@ export class Worker<
 			}
 
 			try {
+				batch.orchestratorId = this.orchestratorId || batch.orchestratorId;
 				await this.db.returnExecutions(batch, { signal: this.signal });
 			} catch (err) {
 				this.logger.error("Error flushing results:", err);

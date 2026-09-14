@@ -65,6 +65,8 @@ begin
 end;
 $$;
 
+create sequence pgconductor._private_enqueue_position_seq as bigint;
+
 create table pgconductor._private_orchestrators (
     id uuid default pgconductor._private_portable_uuidv7() primary key,
     last_heartbeat_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -111,6 +113,9 @@ create table pgconductor._private_executions (
     run_at timestamptz default pgconductor._private_current_time() not null,
     locked_at timestamptz,
     locked_by uuid,
+    claim_token uuid,
+    slot_group_number integer,
+    enqueue_position bigint not null default nextval('pgconductor._private_enqueue_position_seq'),
     is_available boolean generated always as (locked_at is null and failed_at is null and completed_at is null) stored not null,
     attempts integer default 0 not null,
     last_error text,
@@ -132,7 +137,7 @@ create unique index on pgconductor._private_executions (task_key, singleton_on, 
 where singleton_on is not null and completed_at is null and failed_at is null and cancelled = false;
 
 create table pgconductor._private_tasks (
-    key text primary key,
+    key text not null,
 
     -- queue that this task belongs to (used for queue-based worker assignment)
     queue text default 'default' not null,
@@ -160,19 +165,22 @@ create table pgconductor._private_tasks (
 
     -- concurrency control: maximum number of concurrent executions across all workers
     -- NULL means no limit (unlimited concurrency)
-    concurrency_limit integer
+    concurrency_limit integer,
+
+    primary key (queue, key)
 );
 
 create table pgconductor._private_concurrency_slots (
     task_key text not null,
+    queue text not null,
     slot_group_number integer not null,
     capacity integer not null,
     used integer default 0 not null,
-    primary key (task_key, slot_group_number)
+    primary key (queue, task_key, slot_group_number)
 );
 
 create index idx_slots_claim
-    on pgconductor._private_concurrency_slots (task_key, capacity, used);
+    on pgconductor._private_concurrency_slots (queue, task_key, capacity, used);
 
 create table pgconductor._private_steps (
     id uuid default pgconductor._private_portable_uuidv7() primary key,
@@ -212,7 +220,7 @@ begin
 
     -- main index for fetching available executions
     execute format(
-      'create index if not exists %I on pgconductor.%I (priority, run_at) include (id, task_key) where is_available = true',
+      'create index if not exists %I on pgconductor.%I (priority, run_at, enqueue_position) include (id, task_key) where is_available = true',
       'idx_' || v_partition_name || '_get_executions',
       v_partition_name
     );
@@ -389,7 +397,7 @@ begin
     spec.window_end,
     spec.concurrency_limit
   from unnest(p_task_specs) as spec
-  on conflict (key)
+  on conflict (queue, key)
   do update set
     queue = coalesce(excluded.queue, pgconductor._private_tasks.queue),
     max_attempts = coalesce(excluded.max_attempts, pgconductor._private_tasks.max_attempts),
@@ -401,34 +409,39 @@ begin
 
   -- step 2a: manage concurrency slots
   -- create one row per slot (capacity=1 each)
-  insert into pgconductor._private_concurrency_slots (task_key, slot_group_number, capacity, used)
+  insert into pgconductor._private_concurrency_slots (task_key, queue, slot_group_number, capacity, used)
   select
     spec.key,
+    coalesce(spec.queue, p_queue_name),
     slot_num,
     1 as capacity,
     0 as used
   from unnest(p_task_specs) as spec
   cross join lateral generate_series(1, spec.concurrency_limit) as slot_num
   where spec.concurrency_limit is not null
-  on conflict (task_key, slot_group_number)
+  on conflict (queue, task_key, slot_group_number)
   do update set
     capacity = excluded.capacity,
     used = least(pgconductor._private_concurrency_slots.used, excluded.capacity);
 
   -- clean up orphaned slots (tasks removed or concurrency_limit set to null)
   delete from pgconductor._private_concurrency_slots
-  where task_key not in (
-    select key from pgconductor._private_tasks
-    where concurrency_limit is not null
-  );
+  where queue = p_queue_name
+    and used = 0
+    and (task_key, queue) not in (
+      select key, queue from pgconductor._private_tasks
+      where concurrency_limit is not null
+    );
 
   -- clean up excess slots when concurrency decreased
   delete from pgconductor._private_concurrency_slots cs
-  where cs.slot_group_number > (
-    select concurrency_limit
-    from pgconductor._private_tasks t
-    where t.key = cs.task_key
-  );
+  where cs.queue = p_queue_name
+    and cs.used = 0
+    and cs.slot_group_number > (
+      select concurrency_limit
+      from pgconductor._private_tasks t
+      where t.key = cs.task_key and t.queue = cs.queue
+    );
 
   -- step 3: insert scheduled cron executions (on conflict do nothing)
   insert into pgconductor._private_executions (task_key, queue, payload, run_at, dedupe_key, cron_expression)
@@ -542,19 +555,37 @@ begin
     v_now := pgconductor._private_current_time();
 
     -- clear locked dedupe keys before batch insert
-    update pgconductor._private_executions as e
+    with superseded as (
+        select e.id, e.queue, e.task_key, e.slot_group_number
+        from pgconductor._private_executions as e
+        cross join unnest(specs) as spec
+        where e.dedupe_key = spec.dedupe_key
+            and e.task_key = spec.task_key
+            and e.queue = coalesce(spec.queue, 'default')
+            and e.locked_at is not null
+            and spec.dedupe_key is not null
+        for update of e
+    ),
+    released_slots as (
+        update pgconductor._private_concurrency_slots cs
+        set used = 0
+        from superseded s
+        where cs.queue = s.queue
+            and cs.task_key = s.task_key
+            and cs.slot_group_number = s.slot_group_number
+            and s.slot_group_number is not null
+    )
+    update pgconductor._private_executions e
     set
         dedupe_key = null,
         locked_by = null,
         locked_at = null,
+        claim_token = null,
         failed_at = v_now,
-        last_error = 'superseded by reinvoke'
-    from unnest(specs) as spec
-    where e.dedupe_key = spec.dedupe_key
-        and e.task_key = spec.task_key
-        and e.queue = coalesce(spec.queue, 'default')
-        and e.locked_at is not null
-        and spec.dedupe_key is not null;
+        last_error = 'superseded by reinvoke',
+        slot_group_number = null
+    from superseded s
+    where e.id = s.id;
 
     -- batch insert all executions
     -- note: duplicate dedupe_keys within same batch will cause error
@@ -629,17 +660,35 @@ begin
 
   -- clear locked dedupe key before insert (supersede pattern)
   if p_dedupe_key is not null then
-      update pgconductor._private_executions
+      with superseded as (
+          select e.id, e.queue, e.task_key, e.slot_group_number
+          from pgconductor._private_executions e
+          where e.dedupe_key = p_dedupe_key
+              and e.task_key = p_task_key
+              and e.queue = p_queue
+              and e.locked_at is not null
+          for update of e
+      ),
+      released_slots as (
+          update pgconductor._private_concurrency_slots cs
+          set used = 0
+          from superseded s
+          where cs.queue = s.queue
+              and cs.task_key = s.task_key
+              and cs.slot_group_number = s.slot_group_number
+              and s.slot_group_number is not null
+      )
+      update pgconductor._private_executions e
       set
           dedupe_key = null,
           locked_by = null,
           locked_at = null,
+          claim_token = null,
           failed_at = v_now,
-          last_error = 'superseded by reinvoke'
-      where dedupe_key = p_dedupe_key
-          and task_key = p_task_key
-          and queue = p_queue
-          and locked_at is not null;
+          last_error = 'superseded by reinvoke',
+          slot_group_number = null
+      from superseded s
+      where e.id = s.id;
   end if;
 
   -- singleton throttle/debounce logic
@@ -718,21 +767,6 @@ begin
   end if;
 
   -- regular invoke (no singleton)
-  if p_dedupe_key is not null then
-      -- clear keys that are currently locked so a subsequent insert can succeed.
-      update pgconductor._private_executions as e
-      set
-        dedupe_key = null,
-        locked_by = null,
-        locked_at = null,
-        failed_at = pgconductor._private_current_time(),
-        last_error = 'superseded by reinvoke'
-      where e.dedupe_key = p_dedupe_key
-        and e.task_key = p_task_key
-        and e.queue = p_queue
-        and e.locked_at is not null;
-  end if;
-
   return query insert into pgconductor._private_executions as e (
     id,
     task_key,
@@ -774,35 +808,94 @@ set search_path to ''
 as $function$
 declare
   v_orchestrator_id uuid;
+  v_claim_token uuid;
   v_queue text;
+  v_child_id uuid;
+  v_child_orchestrator_id uuid;
+  v_child_queue text;
   v_completed boolean;
   v_failed boolean;
   v_rows_affected integer;
 begin
   select
     locked_by,
+    claim_token,
     queue,
+    waiting_on_execution_id,
     completed_at is not null,
     failed_at is not null
-  into v_orchestrator_id, v_queue, v_completed, v_failed
+  into v_orchestrator_id, v_claim_token, v_queue, v_child_id, v_completed, v_failed
   from pgconductor._private_executions
-  where id = p_execution_id;
+  where id = p_execution_id
+  for update;
 
   if not found or v_completed or v_failed then
     return false;
   end if;
 
   if v_orchestrator_id is null then
-    -- pending: fail immediately
+    -- pending: fail immediately. If this is a waiting parent, resolve its
+    -- child relationship in the same transaction so the child cannot become
+    -- orphaned or leave the workflow stranded.
+    if v_child_id is not null then
+      select locked_by, queue
+      into v_child_orchestrator_id, v_child_queue
+      from pgconductor._private_executions
+      where id = v_child_id
+      for update;
+
+      if found and v_child_orchestrator_id is null then
+        update pgconductor._private_executions
+        set
+          failed_at = pgconductor._private_current_time(),
+          last_error = 'Cancelled: parent execution was cancelled',
+          locked_by = null,
+          locked_at = null,
+          claim_token = null,
+          waiting_on_execution_id = null,
+          waiting_step_key = null
+        where id = v_child_id
+          and completed_at is null
+          and failed_at is null;
+      elsif found then
+        update pgconductor._private_executions
+        set cancelled = true, last_error = p_reason
+        where id = v_child_id
+          and completed_at is null
+          and failed_at is null
+          and cancelled = false;
+
+        get diagnostics v_rows_affected = row_count;
+        if v_rows_affected > 0 then
+          insert into pgconductor._private_orchestrator_signals
+            (orchestrator_id, type, execution_id, payload)
+          values (
+            v_child_orchestrator_id,
+            'cancel_execution',
+            v_child_id,
+            jsonb_build_object('queue', v_child_queue, 'reason', p_reason)
+          )
+          on conflict (orchestrator_id, execution_id)
+            where type = 'cancel_execution' and execution_id is not null
+          do nothing;
+        end if;
+      end if;
+    end if;
+
     update pgconductor._private_executions
     set
       failed_at = pgconductor._private_current_time(),
       last_error = p_reason,
       locked_by = null,
-      locked_at = null
+      locked_at = null,
+      claim_token = null,
+      waiting_on_execution_id = null,
+      waiting_step_key = null
     where id = p_execution_id
       and completed_at is null
-      and failed_at is null;
+      and failed_at is null
+      and locked_by is null
+      and locked_at is null;
 
     get diagnostics v_rows_affected = row_count;
     return v_rows_affected > 0;
@@ -813,6 +906,9 @@ begin
       cancelled = true,
       last_error = p_reason
     where id = p_execution_id
+      and queue = v_queue
+      and locked_by = v_orchestrator_id
+      and claim_token = v_claim_token
       and completed_at is null
       and cancelled = false;
 
@@ -935,7 +1031,7 @@ begin
                 sub.id
             ), e'\n')
             from pgconductor._private_event_subscriptions as sub
-            join pgconductor._private_tasks as t on t.key = sub.task_key
+            join pgconductor._private_tasks as t on t.key = sub.task_key and t.queue = sub.queue
             where sub.event_key is not null
         );
 
@@ -1100,7 +1196,7 @@ begin
                     sub.id
                 ), e'\n')
                 from pgconductor._private_event_subscriptions as sub
-                join pgconductor._private_tasks as t on t.key = sub.task_key
+                join pgconductor._private_tasks as t on t.key = sub.task_key and t.queue = sub.queue
                 where sub.table_name = v_table_name
                     and sub.schema_name = v_schema_name
                     and sub.operation = v_op
