@@ -8,7 +8,7 @@ alias r := ready
 alias t := test
 
 build-migrations:
-    sh ./scripts/build-migrations.sh
+    bash ./scripts/build-migrations.sh
 
 lint:
     bun run oxlint --type-aware --deny-warnings
