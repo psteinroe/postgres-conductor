@@ -1,5 +1,6 @@
-import CronExpressionParser from "cron-parser";
 import type { DatabaseClient, JsonValue, Execution, Payload } from "./database-client";
+import { nextCronOccurrence } from "./lib/cron";
+import type { WorkerClock } from "./lib/clock-skew";
 import type {
 	TaskDefinition,
 	TaskName,
@@ -76,6 +77,7 @@ export function createTaskSignal(
 export type TaskContextOptions = {
 	abortController: TypedAbortController<TaskAbortReasons>;
 	db: DatabaseClient;
+	clock: WorkerClock;
 	execution: Execution;
 	logger: Logger;
 	window?: [string, string];
@@ -295,8 +297,7 @@ export class TaskContext<
 			throw new Error("cron expression is required");
 		}
 
-		const interval = CronExpressionParser.parse(options.cron);
-		const nextTimestamp = interval.next().toDate();
+		const nextTimestamp = nextCronOccurrence(options.cron, this.opts.clock.now());
 		const queue = task.queue || "default";
 
 		await this.opts.db.scheduleCronExecution(

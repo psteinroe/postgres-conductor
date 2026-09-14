@@ -325,17 +325,20 @@ export class DatabaseClient {
 			return new Date();
 		}
 
-		// In tests, query DB to respect fake_now
+		return this.getDatabaseTime(options);
+	}
+
+	async getDatabaseTime(options?: QueryMethodOptions): Promise<Date> {
 		const result = await this.query(
 			(sql) =>
 				sql<{ now: Date }[]>`
 				select pgconductor._private_current_time() as now
 			`,
-			{ label: "getCurrentTime", ...options },
+			{ label: "getDatabaseTime", ...options },
 		);
 		const row = result[0];
 		if (!row) {
-			throw new Error("getCurrentTime returned no rows");
+			throw new Error("getDatabaseTime returned no rows");
 		}
 		return row.now;
 	}

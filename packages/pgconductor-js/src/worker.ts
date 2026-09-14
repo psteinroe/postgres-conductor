@@ -17,7 +17,8 @@ import { mapConcurrent } from "./lib/map-concurrent";
 import { Deferred } from "./lib/deferred";
 import { type PollableAsyncIterable } from "./lib/async-queue";
 import { BatchingAsyncQueue, type BatchGroup } from "./lib/batching-async-queue";
-import CronExpressionParser from "cron-parser";
+import { nextCronOccurrence } from "./lib/cron";
+import { DatabaseClockOffset, type WorkerClock } from "./lib/clock-skew";
 import {
 	createTaskSignal,
 	isTaskAbortReason,
@@ -37,6 +38,7 @@ import type { TypedAbortController } from "./lib/typed-abort-controller";
  */
 export type WorkerConfig = {
 	concurrency: number;
+	clock?: WorkerClock;
 	flushBatchSize: number;
 	fetchBatchSize: number;
 	pollIntervalMs: number;
@@ -131,6 +133,7 @@ export class Worker<
 	private readonly flushBatchSize: number;
 	private readonly flushIntervalMs: number;
 	private readonly pollIntervalMs: number;
+	private readonly clock: WorkerClock;
 
 	private _startDeferred: Deferred<void> | null = null;
 	private _stopDeferred: Deferred<void> | null = null;
@@ -161,6 +164,9 @@ export class Worker<
 		this.flushIntervalMs = fullConfig.flushIntervalMs;
 		this.fetchBatchSize = fullConfig.fetchBatchSize;
 		this.flushBatchSize = fullConfig.flushBatchSize;
+		this.clock =
+			fullConfig.clock ||
+			new DatabaseClockOffset((signal) => this.db.getDatabaseTime({ signal }), this.logger);
 	}
 
 	/**
@@ -217,15 +223,27 @@ export class Worker<
 		}
 
 		this.orchestratorId = orchestratorId;
-		this._startDeferred = new Deferred<void>();
-		this._stopDeferred = new Deferred<void>();
-		this._abortController = new AbortController();
+		const started = (this._startDeferred = new Deferred<void>());
+		const stopped = (this._stopDeferred = new Deferred<void>());
+		const controller = (this._abortController = new AbortController());
 
-		// Synchronous registration
-		await this.register();
+		try {
+			// Sample before calculating or registering cron schedules.
+			await this.clock.start(controller.signal);
+			await this.register();
+		} catch (error) {
+			this.clock.stop();
+			controller.abort();
+			started.reject(error);
+			stopped.resolve();
+			this._startDeferred = null;
+			this._stopDeferred = null;
+			this._abortController = null;
+			throw error;
+		}
 
 		// Worker is now started
-		this._startDeferred.resolve();
+		started.resolve();
 
 		// Run pipeline in background
 		// Build batch configs map
@@ -247,6 +265,7 @@ export class Worker<
 				this.logger.error("Worker pipeline error:", err);
 			} finally {
 				queue.close();
+				this.clock.stop();
 				this._stopDeferred?.resolve();
 				this._startDeferred = null;
 				this._stopDeferred = null;
@@ -254,7 +273,7 @@ export class Worker<
 			}
 		})();
 
-		return this._startDeferred.promise;
+		return started.promise;
 	}
 
 	/**
@@ -317,8 +336,7 @@ export class Worker<
 			task.triggers
 				.filter((t): t is { cron: string; name: string } => "cron" in t)
 				.map((trigger) => {
-					const interval = CronExpressionParser.parse(trigger.cron);
-					const nextTimestamp = interval.next().toDate();
+					const nextTimestamp = nextCronOccurrence(trigger.cron, this.clock.now());
 					const timestampSeconds = Math.floor(nextTimestamp.getTime() / 1000);
 					return {
 						task_key: task.name,
@@ -585,6 +603,7 @@ export class Worker<
 					TaskContext.create<Tasks, Events, typeof extraContext>(
 						{
 							db: this.db,
+							clock: this.clock,
 							abortController: taskAbortController,
 							execution: exec,
 							logger: makeChildLogger(this.logger, {
@@ -807,8 +826,7 @@ export class Worker<
 		}
 
 		const scheduleName = parts[1];
-		const interval = CronExpressionParser.parse(execution.cron_expression);
-		const nextTimestamp = interval.next().toDate();
+		const nextTimestamp = nextCronOccurrence(execution.cron_expression, this.clock.now());
 		const timestampSeconds = Math.floor(nextTimestamp.getTime() / 1000);
 		const nextDedupeKey = `scheduled::${scheduleName}::${timestampSeconds}`;
 
