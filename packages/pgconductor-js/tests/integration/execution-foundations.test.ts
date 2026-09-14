@@ -95,7 +95,6 @@ describe("execution foundations", () => {
 				queueName: "queue-a",
 				batchSize: 1,
 				filterTaskKeys: [],
-				taskKeysWithConcurrency: [],
 			})
 		)[0];
 		const second = (
@@ -104,7 +103,6 @@ describe("execution foundations", () => {
 				queueName: "queue-b",
 				batchSize: 1,
 				filterTaskKeys: [],
-				taskKeysWithConcurrency: [],
 			})
 		)[0];
 		expect(first?.queue).toBe("queue-a");
@@ -143,58 +141,6 @@ describe("execution foundations", () => {
 		expect(remaining[0]?.completed_at).not.toBeNull();
 	});
 
-	test("releases concurrency slots when recovering a stale orchestrator", async () => {
-		const db = await database();
-		await db.client.registerWorker({
-			queueName: "recovery-slots",
-			taskSpecs: [{ key: "slot-task", queue: "recovery-slots", concurrency: 1 }],
-			cronSchedules: [],
-			eventSubscriptions: [],
-		});
-		await db.client.invoke({ task_key: "slot-task", queue: "recovery-slots" });
-
-		const orchestratorId = crypto.randomUUID();
-		await db.client.orchestratorHeartbeat({ orchestratorId, version: "test", migrationNumber: 1 });
-		const claimed = (
-			await db.client.getExecutions({
-				orchestratorId,
-				queueName: "recovery-slots",
-				batchSize: 1,
-				filterTaskKeys: [],
-				taskKeysWithConcurrency: ["slot-task"],
-			})
-		)[0];
-		if (!claimed || claimed.slot_group_number == null) {
-			throw new Error("expected execution to be claimed with a slot");
-		}
-		const slotGroupNumber = claimed.slot_group_number;
-
-		const before = await db.sql<{ used: number }[]>`
-			select used from pgconductor._private_concurrency_slots
-			where queue = 'recovery-slots' and task_key = 'slot-task' and slot_group_number = ${slotGroupNumber}
-		`;
-		expect(before[0]?.used).toBe(1);
-
-		await db.sql`
-			update pgconductor._private_orchestrators
-			set last_heartbeat_at = now() - interval '1 hour'
-			where id = ${orchestratorId}::uuid
-		`;
-		await db.client.recoverStaleOrchestrators({ maxAge: "1 second" });
-
-		const after = await db.sql<{ used: number }[]>`
-			select used from pgconductor._private_concurrency_slots
-			where queue = 'recovery-slots' and task_key = 'slot-task'
-			`;
-		const recovered = await db.sql<{ locked_by: string | null; claim_token: string | null }[]>`
-			select locked_by, claim_token from pgconductor._private_executions
-			where queue = 'recovery-slots' and task_key = 'slot-task'
-			`;
-		expect(after[0]?.used).toBe(0);
-		expect(recovered[0]?.locked_by).toBeNull();
-		expect(recovered[0]?.claim_token).toBeNull();
-	});
-
 	test("retains a parent when its permanently failed child is configured for removal", async () => {
 		const db = await database();
 		await db.client.registerWorker({
@@ -214,7 +160,6 @@ describe("execution foundations", () => {
 				queueName: "parent-retention",
 				batchSize: 1,
 				filterTaskKeys: [],
-				taskKeysWithConcurrency: [],
 			})
 		)[0];
 		if (!parent) throw new Error("expected parent claim");
@@ -256,7 +201,6 @@ describe("execution foundations", () => {
 				queueName: "parent-retention",
 				batchSize: 1,
 				filterTaskKeys: [],
-				taskKeysWithConcurrency: [],
 			})
 		)[0];
 		if (!child) throw new Error("expected child claim");
@@ -318,7 +262,6 @@ describe("execution foundations", () => {
 				queueName: "parent-queue",
 				batchSize: 1,
 				filterTaskKeys: [],
-				taskKeysWithConcurrency: [],
 			})
 		)[0];
 		if (!parent) throw new Error("expected parent claim");
@@ -353,7 +296,6 @@ describe("execution foundations", () => {
 				queueName: "child-queue",
 				batchSize: 1,
 				filterTaskKeys: [],
-				taskKeysWithConcurrency: [],
 			})
 		)[0];
 		if (!child) throw new Error("expected child claim");
@@ -404,7 +346,6 @@ describe("execution foundations", () => {
 				queueName: "cancel-buffered",
 				batchSize: 1,
 				filterTaskKeys: [],
-				taskKeysWithConcurrency: [],
 			})
 		)[0];
 		if (!claimed) throw new Error("expected claim");
@@ -462,7 +403,6 @@ describe("execution foundations", () => {
 				queueName: "cascade-parent",
 				batchSize: 1,
 				filterTaskKeys: [],
-				taskKeysWithConcurrency: [],
 			})
 		)[0];
 		if (!parent) throw new Error("expected parent claim");
@@ -533,7 +473,6 @@ describe("execution foundations", () => {
 			queueName: "enqueue-order",
 			batchSize: 3,
 			filterTaskKeys: [],
-			taskKeysWithConcurrency: [],
 		});
 		expect(claimed.map((execution) => execution.id)).toEqual(ids);
 	});
@@ -561,7 +500,6 @@ describe("execution foundations", () => {
 				queueName: "fenced",
 				batchSize: 1,
 				filterTaskKeys: [],
-				taskKeysWithConcurrency: [],
 			})
 		)[0];
 		if (!oldClaim) throw new Error("expected old claim");
@@ -580,7 +518,6 @@ describe("execution foundations", () => {
 				queueName: "fenced",
 				batchSize: 1,
 				filterTaskKeys: [],
-				taskKeysWithConcurrency: [],
 			})
 		)[0];
 		if (!currentClaim) throw new Error("expected recovered execution to be re-claimed");

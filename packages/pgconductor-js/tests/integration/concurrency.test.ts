@@ -216,68 +216,6 @@ describe("Task-Level Concurrency", () => {
 		await orchestrator.stopped;
 	}, 30000);
 
-	test("high concurrency uses slot groups correctly", async () => {
-		const db = await pool.child();
-		databases.push(db);
-
-		const taskDef = defineTask({ name: "high-concurrency-task" });
-
-		const conductor = Conductor.create({
-			sql: db.sql,
-			tasks: TaskSchemas.fromSchema([taskDef]),
-			context: {},
-		});
-
-		let completed = 0;
-
-		const highConcurrencyTask = conductor.createTask(
-			{ name: "high-concurrency-task", concurrency: 500 },
-			{ invocable: true },
-			async () => {
-				completed++;
-			},
-		);
-
-		const orchestrator = Orchestrator.create({
-			conductor,
-			tasks: [highConcurrencyTask],
-			defaultWorker: { pollIntervalMs: 50, flushIntervalMs: 50, concurrency: 50 },
-		});
-
-		await orchestrator.start();
-
-		// queue 100 tasks
-		for (let i = 0; i < 100; i++) {
-			await conductor.invoke({ name: "high-concurrency-task" }, {});
-		}
-
-		// wait for completion
-		await new Promise((r) => setTimeout(r, 5000));
-
-		await orchestrator.stop();
-		await orchestrator.stopped;
-
-		// extra wait to ensure all flushes complete
-		await new Promise((r) => setTimeout(r, 1000));
-
-		// all tasks should complete
-		expect(completed).toBe(100);
-
-		// verify slots were created (one row per slot, concurrency=500 → 500 rows)
-		const slots = await db.sql`
-			select * from pgconductor._private_concurrency_slots
-			where task_key = 'high-concurrency-task'
-		`;
-
-		expect(slots.length).toBe(500); // one row per slot
-		expect(slots.every((s) => s.capacity === 1)).toBe(true); // each slot has capacity=1
-
-		// verify all slots are released (used = 0)
-		for (const slot of slots) {
-			expect(slot.used).toBe(0);
-		}
-	}, 30000);
-
 	test("mixed queue with concurrency and without", async () => {
 		const db = await pool.child();
 		databases.push(db);

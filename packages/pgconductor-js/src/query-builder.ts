@@ -37,7 +37,6 @@ export type GetExecutionsArgs = {
 	queueName: string;
 	batchSize: number;
 	filterTaskKeys: string[];
-	taskKeysWithConcurrency: string[];
 };
 
 export type RemoveExecutionsArgs = {
@@ -174,16 +173,6 @@ export class QueryBuilder {
 				where o.last_heartbeat_at < pgconductor._private_current_time() - ${maxAge}::interval
 				returning o.id
 			),
-			released_slots as (
-				update pgconductor._private_concurrency_slots cs
-				set used = 0
-				from pgconductor._private_executions e, expired
-				where e.locked_by = expired.id
-					and e.slot_group_number is not null
-					and cs.queue = e.queue
-					and cs.task_key = e.task_key
-					and cs.slot_group_number = e.slot_group_number
-			),
 			-- fail cancelled executions from expired orchestrators
 			failed_cancelled as (
 				update pgconductor._private_executions e
@@ -191,21 +180,20 @@ export class QueryBuilder {
 					failed_at = pgconductor._private_current_time(),
 					locked_by = null,
 					locked_at = null,
-					claim_token = null,
-					slot_group_number = null
+					claim_token = null
 				from expired
 				where e.locked_by = expired.id
 					and e.cancelled = true
 					and e.failed_at is null
 					and e.completed_at is null
+				returning e.id
 			)
 			-- unlock remaining (non-cancelled) executions
 			update pgconductor._private_executions e
 			set
 				locked_by = null,
 				locked_at = null,
-				claim_token = null,
-				slot_group_number = null
+				claim_token = null
 			from expired
 			where e.locked_by = expired.id
 				and e.cancelled = false
@@ -243,16 +231,6 @@ export class QueryBuilder {
 				where id = ${orchestratorId}::uuid
 				returning id
 			),
-			released_slots as (
-				update pgconductor._private_concurrency_slots cs
-				set used = 0
-				from pgconductor._private_executions e, deleted
-				where e.locked_by = deleted.id
-					and e.slot_group_number is not null
-					and cs.queue = e.queue
-					and cs.task_key = e.task_key
-					and cs.slot_group_number = e.slot_group_number
-			),
 			-- fail cancelled executions from this orchestrator
 			failed_cancelled as (
 				update pgconductor._private_executions e
@@ -260,21 +238,20 @@ export class QueryBuilder {
 					failed_at = pgconductor._private_current_time(),
 					locked_by = null,
 					locked_at = null,
-					claim_token = null,
-					slot_group_number = null
+					claim_token = null
 				from deleted
 				where e.locked_by = deleted.id
 					and e.cancelled = true
 					and e.failed_at is null
 					and e.completed_at is null
+				returning e.id
 			)
 			-- unlock remaining (non-cancelled) executions
 			update pgconductor._private_executions e
 			set
 				locked_by = null,
 				locked_at = null,
-				claim_token = null,
-				slot_group_number = null
+				claim_token = null
 			from deleted
 			where e.locked_by = deleted.id
 				and e.cancelled = false
@@ -286,273 +263,98 @@ export class QueryBuilder {
 		queueName,
 		batchSize,
 		filterTaskKeys,
-		taskKeysWithConcurrency,
 	}: GetExecutionsArgs): PendingQuery<Execution[]> {
-		// fast path: no tasks have concurrency limits
-		if (!taskKeysWithConcurrency.length) {
-			return this.sql<Execution[]>`
-				with e as (
-					select
-						e.id,
-						e.task_key
-					from pgconductor._private_executions e
-					where e.queue = ${queueName}::text
-						${filterTaskKeys?.length ? this.sql`and not (e.task_key = any(${this.sql.array(filterTaskKeys)}::text[]))` : this.sql``}
-						and e.run_at <= pgconductor._private_current_time()
-						and e.is_available = true
-					order by e.priority asc, e.run_at asc, e.enqueue_position asc
-					limit ${batchSize}::integer
-					for update skip locked
-				),
-
-				claimed as (
-					update pgconductor._private_executions
-					set
-						attempts = _private_executions.attempts + 1,
-						locked_by = ${orchestratorId}::uuid,
-						claim_token = pgconductor._private_portable_uuidv7(),
-						locked_at = pgconductor._private_current_time()
-					from e
-					where _private_executions.id = e.id
-						and _private_executions.queue = ${queueName}::text
-					returning
-						_private_executions.id,
-						_private_executions.task_key,
-						_private_executions.queue,
-						_private_executions.payload,
-						_private_executions.waiting_on_execution_id,
-						_private_executions.waiting_step_key,
-						_private_executions.cancelled,
-						_private_executions.last_error,
-						_private_executions.dedupe_key,
-						_private_executions.cron_expression,
-						_private_executions.locked_by,
-						_private_executions.claim_token,
-						_private_executions.slot_group_number,
-						_private_executions.priority,
-						_private_executions.run_at,
-						_private_executions.enqueue_position
-				)
-				select
-					c.id,
-					c.task_key,
-					c.queue,
-					c.payload,
-					c.waiting_on_execution_id,
-					c.waiting_step_key,
-					c.cancelled,
-					c.last_error,
-					c.dedupe_key,
-					c.cron_expression,
-					c.locked_by,
-					c.claim_token,
-					c.slot_group_number
-				from claimed c
-				order by c.priority asc, c.run_at asc, c.enqueue_position asc
-			`;
-		}
-
-		// slow path: some tasks have concurrency limits (OPTIMIZED)
 		return this.sql<Execution[]>`
-			with
-				-- lock up to batchSize slots per concurrency task
-				locked_slots_raw as (
-					select t.task_key, ls.slot_group_number
-					from unnest(${this.sql.array(taskKeysWithConcurrency)}::text[]) as t(task_key)
-					cross join lateral (
-						select s.slot_group_number
-						from pgconductor._private_concurrency_slots s
-						where s.task_key = t.task_key
-							and s.queue = ${queueName}::text
-							and s.used = 0
-						order by s.slot_group_number
-						limit ${batchSize}::integer
-						for update skip locked
-					) as ls
-				),
-
-				-- count slots per task
-				slots_per_task as (
-					select task_key, count(*) as slot_count
-					from locked_slots_raw
-					group by task_key
-				),
-
-				-- lock jobs for concurrency tasks (limit by slot count)
-				concurrency_execs as (
-					select t.task_key, le.*
-					from slots_per_task t
-					cross join lateral (
-						select
-							e.id,
-							e.task_key as exec_task_key,
-							e.queue,
-							e.payload,
-							e.waiting_on_execution_id,
-							e.waiting_step_key,
-							e.cancelled,
-							e.last_error,
-							e.dedupe_key,
-							e.cron_expression,
-							e.priority,
-							e.run_at,
-							e.enqueue_position
-						from pgconductor._private_executions e
-						where e.is_available = true
-							and e.run_at <= pgconductor._private_current_time()
-							and e.queue = ${queueName}::text
-							and e.task_key = t.task_key
-							${filterTaskKeys.length ? this.sql`and not (e.task_key = any(${this.sql.array(filterTaskKeys)}::text[]))` : this.sql``}
+			with active_tasks as (
+				select e.task_key, count(*)::integer as active_count
+				from pgconductor._private_executions e
+				where e.queue = ${queueName}::text
+					and e.locked_at is not null
+					and e.failed_at is null
+					and e.completed_at is null
+				group by e.task_key
+			), active_groups as (
+				select e.task_key, e."group", count(*)::integer as active_count
+				from pgconductor._private_executions e
+				where e.queue = ${queueName}::text
+					and e."group" is not null
+					and e.locked_at is not null
+					and e.failed_at is null
+					and e.completed_at is null
+				group by e.task_key, e."group"
+			), ranked as (
+				select
+					e.id,
+					e.task_key,
+					e.queue,
+					e.priority,
+					e.run_at,
+					e.enqueue_position,
+					e."group",
+					t.concurrency_limit,
+					t.group_concurrency_limit,
+					coalesce(at.active_count, 0) as active_task_count,
+					coalesce(ag.active_count, 0) as active_group_count,
+					row_number() over (
+						partition by e.task_key
 						order by e.priority asc, e.run_at asc, e.enqueue_position asc
-						limit t.slot_count
-						for update skip locked
-					) as le
-				),
-
-				-- lock jobs from non-concurrency tasks
-				unlimited_execs as (
-					select
-						e.id,
-						e.task_key,
-						e.queue,
-						e.payload,
-						e.waiting_on_execution_id,
-						e.waiting_step_key,
-						e.cancelled,
-						e.last_error,
-						e.dedupe_key,
-						e.cron_expression,
-						e.priority,
-						e.run_at
-					from pgconductor._private_executions e
-					where e.is_available = true
-						and e.run_at <= pgconductor._private_current_time()
-						and e.queue = ${queueName}::text
-						and not (e.task_key = any(${this.sql.array(taskKeysWithConcurrency)}::text[]))
-						${filterTaskKeys.length > 0 ? this.sql`and not (e.task_key = any(${this.sql.array(filterTaskKeys)}::text[]))` : this.sql``}
-					order by e.priority asc, e.run_at asc, e.enqueue_position asc
-					limit ${batchSize}::integer
-					for update skip locked
-				),
-
-				-- row number concurrency executions by task
-				concurrency_execs_rn as (
-					select
-						ce.*,
-						row_number() over (partition by ce.task_key order by ce.priority asc, ce.run_at asc, ce.enqueue_position asc) as exec_rn
-					from concurrency_execs ce
-				),
-
-				-- row number slots by task
-				slots_rn as (
-					select
-						ls.*,
-						row_number() over (partition by ls.task_key order by ls.slot_group_number) as slot_rn
-					from locked_slots_raw ls
-				),
-
-				-- pair concurrency executions with slots
-				concurrency_paired as (
-					select
-						e.id,
-						e.exec_task_key as task_key,
-						e.queue,
-						e.payload,
-						e.waiting_on_execution_id,
-						e.waiting_step_key,
-						e.cancelled,
-						e.last_error,
-						e.dedupe_key,
-						e.cron_expression,
-						s.slot_group_number
-					from concurrency_execs_rn e
-					join slots_rn s
-						on e.task_key = s.task_key
-						and e.exec_rn = s.slot_rn
-				),
-
-				-- unlimited executions don't need slots
-				unlimited_paired as (
-					select
-						id,
-						task_key,
-						queue,
-						payload,
-						waiting_on_execution_id,
-						waiting_step_key,
-						cancelled,
-						last_error,
-						dedupe_key,
-						cron_expression,
-						null::integer as slot_group_number
-					from unlimited_execs
-				),
-
-				-- merge all paired executions
-				paired as (
-					select * from concurrency_paired
-					union all
-					select * from unlimited_paired
-				),
-
-				-- mark slots as used
-				mark_used as (
-					update pgconductor._private_concurrency_slots cs
-					set used = 1
-					from paired p
-					where cs.queue = ${queueName}::text
-						and cs.task_key = p.task_key
-						and cs.slot_group_number = p.slot_group_number
-						and p.slot_group_number is not null
-				),
-
-			-- update and return executions. The outer select owns result ordering;
-			-- update returning order is not defined.
-			claimed as (
+					) as task_rank,
+					row_number() over (
+						partition by e.task_key, e."group"
+						order by e.priority asc, e.run_at asc, e.enqueue_position asc
+					) as group_rank
+				from pgconductor._private_executions e
+				left join pgconductor._private_tasks t
+					on t.key = e.task_key and t.queue = e.queue
+				left join active_tasks at on at.task_key = e.task_key
+				left join active_groups ag on ag.task_key = e.task_key and ag."group" = e."group"
+				where e.queue = ${queueName}::text
+					and e.run_at <= pgconductor._private_current_time()
+					and e.is_available = true
+					${filterTaskKeys?.length ? this.sql`and not (e.task_key = any(${this.sql.array(filterTaskKeys)}::text[]))` : this.sql``}
+			), group_eligible as (
+				select r.*,
+					row_number() over (
+						partition by r.task_key
+						order by r.priority asc, r.run_at asc, r.enqueue_position asc
+					) as available_task_rank
+				from ranked r
+				where r.group_concurrency_limit is null
+					or r."group" is null
+					or r.active_group_count + r.group_rank <= r.group_concurrency_limit
+			), eligible as (
+				select r.id, r.priority, r.run_at, r.enqueue_position
+				from group_eligible r
+				where r.concurrency_limit is null
+					or r.active_task_count + r.available_task_rank <= r.concurrency_limit
+				order by r.priority asc, r.run_at asc, r.enqueue_position asc
+				-- Keep a bounded candidate pool so SKIP LOCKED can backfill a batch.
+				limit greatest(${batchSize}::integer * 4, ${batchSize}::integer)
+			), locked_candidates as (
+				select e.id
+				from pgconductor._private_executions e
+				join eligible c on c.id = e.id
+				where e.queue = ${queueName}::text
+				order by c.priority asc, c.run_at asc, c.enqueue_position asc
+				limit ${batchSize}::integer
+				for update of e skip locked
+			), claimed as (
 				update pgconductor._private_executions e
 				set
 					attempts = e.attempts + 1,
 					locked_by = ${orchestratorId}::uuid,
 					claim_token = pgconductor._private_portable_uuidv7(),
-					slot_group_number = p.slot_group_number,
 					locked_at = pgconductor._private_current_time()
-				from paired p
-				where e.id = p.id
-					and e.queue = p.queue
-				returning
-					e.id,
-					e.task_key,
-					e.queue,
-					e.payload,
-					e.waiting_on_execution_id,
-					e.waiting_step_key,
-					e.cancelled,
-					e.last_error,
-					e.dedupe_key,
-					e.cron_expression,
-					e.locked_by,
-					e.claim_token,
-					e.slot_group_number,
-					e.priority,
-					e.run_at,
-					e.enqueue_position
+				from locked_candidates c
+				where e.id = c.id and e.queue = ${queueName}::text and e.is_available = true
+				returning e.id, e.task_key, e.queue, e.payload, e.waiting_on_execution_id,
+					e.waiting_step_key, e.cancelled, e.last_error, e.dedupe_key, e.cron_expression,
+					e.locked_by, e.claim_token, e."group", e.priority, e.run_at, e.enqueue_position
 			)
-			select
-				c.id,
-				c.task_key,
-				c.queue,
-				c.payload,
-				c.waiting_on_execution_id,
-				c.waiting_step_key,
-				c.cancelled,
-				c.last_error,
-				c.dedupe_key,
-				c.cron_expression,
-				c.locked_by,
-				c.claim_token,
-				c.slot_group_number
-			from claimed c
-			order by c.priority asc, c.run_at asc, c.enqueue_position asc
+			select id, task_key, queue, payload, waiting_on_execution_id, waiting_step_key,
+				cancelled, last_error, dedupe_key, cron_expression, locked_by, claim_token, "group"
+			from claimed
+			order by priority asc, run_at asc, enqueue_position asc
 		`;
 	}
 
@@ -575,13 +377,13 @@ export class QueryBuilder {
 				orchestrator_id uuid, claim_token uuid, result jsonb, error text,
 				reschedule_in_ms text, step_key text, timeout_ms text,
 				child_task_name text, child_task_queue text, child_payload jsonb,
-				slot_group_number integer
+				"group" text
 			)
 		)`);
 		// Lock the claimed rows for the whole statement. This prevents recovery or a
 		// new claim from racing the side effects below.
 		ctes.push(this.sql`valid_results as materialized (
-			select r.*, e.slot_group_number as owned_slot_group_number,
+			select r.*,
 				e.cancelled as execution_cancelled, e.last_error as execution_last_error
 			from result_data r
 			join pgconductor._private_executions e
@@ -612,17 +414,6 @@ export class QueryBuilder {
 			select * from valid_results where status = 'invoke_child'
 		)`);
 
-		ctes.push(this.sql`released_slots as (
-			update pgconductor._private_concurrency_slots cs
-			set used = 0
-			from valid_results r
-			where r.owned_slot_group_number is not null
-				and cs.queue = r.queue
-				and cs.task_key = r.task_key
-				and cs.slot_group_number = r.owned_slot_group_number
-				and cs.used > 0
-		)`);
-
 		// A completed child may wake only a parent which is still waiting and is not
 		// currently claimed. The row lock makes this check race-safe.
 		ctes.push(this.sql`completed_parents as materialized (
@@ -647,7 +438,7 @@ export class QueryBuilder {
 			update pgconductor._private_executions e
 			set failed_at = nt.ts, completed_at = null,
 				last_error = 'Parent timed out before child completed',
-				locked_by = null, locked_at = null, claim_token = null, slot_group_number = null
+				locked_by = null, locked_at = null, claim_token = null
 			from now_ts nt, completed_results r
 			where e.id = r.execution_id and e.queue = r.queue
 				and e.locked_by = r.orchestrator_id and e.claim_token = r.claim_token
@@ -661,7 +452,7 @@ export class QueryBuilder {
 		ctes.push(this.sql`updated_parents_all as (
 			update pgconductor._private_executions e
 			set run_at = nt.ts, waiting_on_execution_id = null, waiting_step_key = null,
-				locked_by = null, locked_at = null, claim_token = null, slot_group_number = null
+				locked_by = null, locked_at = null, claim_token = null
 			from now_ts nt, completed_parents p
 			where e.id = p.parent_id and e.queue = p.queue
 			returning e.id
@@ -678,7 +469,7 @@ export class QueryBuilder {
 		ctes.push(this.sql`updated_completed as (
 			update pgconductor._private_executions e
 			set completed_at = nt.ts, locked_by = null, locked_at = null,
-				claim_token = null, slot_group_number = null
+				claim_token = null
 			from now_ts nt, completed_results r, task_configs tc
 			where e.id = r.execution_id and e.queue = r.queue
 				and e.locked_by = r.orchestrator_id and e.claim_token = r.claim_token
@@ -741,7 +532,7 @@ export class QueryBuilder {
 				last_error = case when f.is_child then coalesce(f.child_error, 'unknown error')
 					else 'Child execution failed: ' || coalesce(f.child_error, 'unknown error') end,
 				waiting_on_execution_id = null, waiting_step_key = null,
-				locked_by = null, locked_at = null, claim_token = null, slot_group_number = null
+				locked_by = null, locked_at = null, claim_token = null
 			from now_ts nt, failed_updates f
 			where e.id = f.target_id and e.queue = f.queue
 			returning e.id
@@ -751,7 +542,7 @@ export class QueryBuilder {
 			set last_error = coalesce(r.error, 'unknown error'),
 				run_at = greatest(nt.ts, coalesce(e.run_at, nt.ts)) +
 					((array[15, 30, 60, 120, 300, 600, 1200, 2400, 3600, 7200])[least(greatest(e.attempts, 1), 10)] * interval '1 second'),
-				locked_by = null, locked_at = null, claim_token = null, slot_group_number = null
+				locked_by = null, locked_at = null, claim_token = null
 			from now_ts nt, failed_results r, task_configs tc
 			where e.id = r.execution_id and e.queue = r.queue
 				and e.locked_by = r.orchestrator_id and e.claim_token = r.claim_token
@@ -776,7 +567,7 @@ export class QueryBuilder {
 					when nullif(trim(r.reschedule_in_ms), '') is not null then
 						nt.ts + (nullif(trim(r.reschedule_in_ms), '')::bigint || ' milliseconds')::interval
 					else nt.ts end,
-				locked_by = null, locked_at = null, claim_token = null, slot_group_number = null
+				locked_by = null, locked_at = null, claim_token = null
 			from now_ts nt, released_results r
 			where e.id = r.execution_id and e.queue = r.queue
 				and e.locked_by = r.orchestrator_id and e.claim_token = r.claim_token
@@ -784,8 +575,8 @@ export class QueryBuilder {
 		)`);
 
 		ctes.push(this.sql`inserted_children as (
-			insert into pgconductor._private_executions (id, task_key, queue, payload, run_at, parent_execution_id)
-			select pgconductor._private_portable_uuidv7(), r.child_task_name, r.child_task_queue, r.child_payload, nt.ts, r.execution_id
+			insert into pgconductor._private_executions (id, task_key, queue, payload, run_at, parent_execution_id, "group")
+			select pgconductor._private_portable_uuidv7(), r.child_task_name, r.child_task_queue, r.child_payload, nt.ts, r.execution_id, r."group"
 			from invoke_child_data r, now_ts nt
 			where exists (
 				select 1 from pgconductor._private_executions parent
@@ -801,7 +592,7 @@ export class QueryBuilder {
 					when nullif(trim(r.timeout_ms), '') is not null then
 						nt.ts + (nullif(trim(r.timeout_ms), '')::bigint || ' milliseconds')::interval
 					else nt.ts end,
-				locked_by = null, locked_at = null, claim_token = null, slot_group_number = null
+				locked_by = null, locked_at = null, claim_token = null
 			from now_ts nt, inserted_children ic
 			join invoke_child_data r on r.execution_id = ic.parent_execution_id
 			where e.id = r.execution_id and e.queue = r.queue
@@ -854,6 +645,7 @@ export class QueryBuilder {
 			window_start: spec.window?.[0] || null,
 			window_end: spec.window?.[1] || null,
 			concurrency_limit: spec.concurrency || null,
+			group_concurrency_limit: spec.groupConcurrency || null,
 		}));
 
 		const cronScheduleRows = cronSchedules.map((spec) => {
@@ -867,6 +659,7 @@ export class QueryBuilder {
 				dedupe_key: spec.dedupe_key,
 				cron_expression: spec.cron_expression,
 				priority: spec.priority || null,
+				group: spec.group || null,
 			};
 		});
 
@@ -924,7 +717,8 @@ export class QueryBuilder {
 				p_dedupe_seconds := ${dedupe_seconds}::integer,
 				p_dedupe_next_slot := ${dedupe_next_slot}::boolean,
 				p_cron_expression := ${spec.cron_expression || null}::text,
-				p_priority := ${spec.priority || null}::integer
+				p_priority := ${spec.priority || null}::integer,
+				p_group := ${spec.group || null}::text
 			)
 		`;
 	}
@@ -960,7 +754,8 @@ export class QueryBuilder {
 				p_dedupe_seconds := null::integer,
 				p_dedupe_next_slot := false::boolean,
 				p_cron_expression := ${cronExpression}::text,
-				p_priority := ${spec.priority || 0}::integer
+				p_priority := ${spec.priority || 0}::integer,
+				p_group := ${spec.group || null}::text
 			)
 		`;
 	}
@@ -1030,6 +825,7 @@ export class QueryBuilder {
 				dedupe_next_slot,
 				cron_expression: spec.cron_expression || null,
 				priority: spec.priority,
+				group: spec.group || null,
 			};
 		});
 

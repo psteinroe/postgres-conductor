@@ -38,10 +38,19 @@ export type TaskConfiguration<
 	removeOnComplete?: RetentionSettings;
 	removeOnFail?: RetentionSettings;
 	concurrency?: number;
+	groupConcurrency?: number;
 	batch?: BatchConfig;
 };
 
 export type RetentionSettings = boolean | { days: number };
+
+function validateConcurrency(value: number | undefined, name: string): number | undefined {
+	if (value === undefined) return undefined;
+	if (!Number.isInteger(value) || value <= 0) {
+		throw new Error(`${name} must be a positive integer`);
+	}
+	return value;
+}
 
 export type TaskEvent<P extends object = object> =
 	| { name: "pgconductor.cron" }
@@ -192,6 +201,7 @@ export class Task<
 	public readonly removeOnComplete: RetentionSettings;
 	public readonly removeOnFail: RetentionSettings;
 	public readonly concurrency?: number;
+	public readonly groupConcurrency?: number;
 	public readonly batch?: BatchConfig;
 
 	public readonly triggers: NonEmptyArray<Trigger>;
@@ -209,7 +219,8 @@ export class Task<
 		this.window = config.window;
 		this.removeOnComplete = config.removeOnComplete ?? false;
 		this.removeOnFail = config.removeOnFail ?? false;
-		this.concurrency = config.concurrency;
+		this.concurrency = validateConcurrency(config.concurrency, "concurrency");
+		this.groupConcurrency = validateConcurrency(config.groupConcurrency, "groupConcurrency");
 		this.batch = config.batch;
 
 		this.triggers = Array.isArray(triggers) ? triggers : [triggers];
