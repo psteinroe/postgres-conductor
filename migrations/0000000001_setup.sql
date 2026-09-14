@@ -105,6 +105,14 @@ create table pgconductor._private_executions (
     waiting_step_key text,
     parent_execution_id uuid,
     singleton_on timestamptz,
+
+    -- Dead-letter metadata is denormalized so retained source rows are optional.
+    dead_letter_source_execution_id uuid,
+    dead_letter_source_queue text,
+    dead_letter_source_task_key text,
+    dead_letter_error text,
+    dead_letter_attempts integer,
+    dead_letter_failed_at timestamptz,
     primary key (id, queue),
     unique (task_key, dedupe_key, queue)
 ) partition by list (queue);
@@ -147,9 +155,18 @@ create table pgconductor._private_tasks (
     -- NULL means no limit (unlimited concurrency)
     concurrency_limit integer,
     group_concurrency_limit integer,
+
+    -- Destination copied onto each source task registration.
+    dead_letter_queue text,
+    dead_letter_task_key text,
+
     constraint positive_concurrency_limits check (
         (concurrency_limit is null or concurrency_limit > 0) and
         (group_concurrency_limit is null or group_concurrency_limit > 0)
+    ),
+    constraint dead_letter_not_self check (
+        dead_letter_queue is null or dead_letter_queue <> queue or
+        (dead_letter_task_key is not null and dead_letter_task_key <> key)
     ),
 
     primary key (queue, key)
@@ -167,6 +184,10 @@ create table pgconductor._private_steps (
 );
 
 create index idx_steps_execution_id on pgconductor._private_steps (execution_id);
+
+create unique index idx_executions_dead_letter_delivery
+    on pgconductor._private_executions (dead_letter_source_execution_id, queue, task_key)
+    where dead_letter_source_execution_id is not null;
 
 -- Trigger function to manage executions partitions per queue
 -- Automatically creates partition when queue is inserted
@@ -335,7 +356,9 @@ create type pgconductor.task_spec as (
     window_start timetz,
     window_end timetz,
     concurrency_limit integer,
-    group_concurrency_limit integer
+    group_concurrency_limit integer,
+    dead_letter_queue text,
+    dead_letter_task_key text
 );
 
 create type pgconductor._private_event_operation as enum (
@@ -373,8 +396,15 @@ begin
   values (p_queue_name)
   on conflict (name) do nothing;
 
+  -- Dead-letter destinations may not have a worker yet; create their partitions.
+  insert into pgconductor._private_queues (name)
+  select distinct spec.dead_letter_queue
+  from unnest(p_task_specs) as spec
+  where spec.dead_letter_queue is not null
+  on conflict (name) do nothing;
+
   -- step 2: register/update tasks
-  insert into pgconductor._private_tasks (key, queue, max_attempts, remove_on_complete_days, remove_on_fail_days, window_start, window_end, concurrency_limit, group_concurrency_limit)
+  insert into pgconductor._private_tasks (key, queue, max_attempts, remove_on_complete_days, remove_on_fail_days, window_start, window_end, concurrency_limit, group_concurrency_limit, dead_letter_queue, dead_letter_task_key)
   select
     spec.key,
     coalesce(spec.queue, 'default'),
@@ -384,7 +414,9 @@ begin
     spec.window_start,
     spec.window_end,
     spec.concurrency_limit,
-    spec.group_concurrency_limit
+    spec.group_concurrency_limit,
+    spec.dead_letter_queue,
+    spec.dead_letter_task_key
   from unnest(p_task_specs) as spec
   on conflict (queue, key)
   do update set
@@ -395,7 +427,9 @@ begin
     window_start = excluded.window_start,
     window_end = excluded.window_end,
     concurrency_limit = excluded.concurrency_limit,
-    group_concurrency_limit = excluded.group_concurrency_limit;
+    group_concurrency_limit = excluded.group_concurrency_limit,
+    dead_letter_queue = excluded.dead_letter_queue,
+    dead_letter_task_key = excluded.dead_letter_task_key;
 
   -- step 3: insert scheduled cron executions
   insert into pgconductor._private_executions (task_key, queue, payload, run_at, dedupe_key, cron_expression, "group")
