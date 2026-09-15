@@ -9,6 +9,7 @@ import { DatabaseSchema } from "../../src/schemas";
 import { z } from "zod";
 import { TestDatabasePool, TestDatabase } from "../fixtures/test-database";
 import type { Database } from "../database.types";
+import { waitForCondition } from "../test-utils";
 
 describe("Event Subscription Lifecycle", () => {
 	let pool: TestDatabasePool;
@@ -29,15 +30,6 @@ describe("Event Subscription Lifecycle", () => {
 	afterAll(async () => {
 		await pool?.destroy();
 	});
-
-	async function waitUntil(check: () => Promise<boolean>, timeout = 5000): Promise<void> {
-		const deadline = Date.now() + timeout;
-		while (Date.now() < deadline) {
-			if (await check()) return;
-			await Bun.sleep(10);
-		}
-		throw new Error("condition was not met before timeout");
-	}
 
 	test("custom event subscriptions are persisted and processed asynchronously", async () => {
 		const db = await pool.child();
@@ -95,7 +87,7 @@ describe("Event Subscription Lifecycle", () => {
 		expect(compiledFilters.count).toBe("0");
 
 		await conductor.emit("user.created", { userId: "user-123" });
-		await waitUntil(async () => taskFn.mock.calls.length === 1);
+		await waitForCondition(async () => taskFn.mock.calls.length === 1);
 
 		const [processedEvent] = await db.sql<[{ processed_at: Date | null }]>`
 			select processed_at

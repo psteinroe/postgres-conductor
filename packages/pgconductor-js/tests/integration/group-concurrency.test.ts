@@ -7,6 +7,7 @@ import { TaskSchemas } from "../../src/schemas";
 import { Deferred } from "../../src/lib/deferred";
 import { TestDatabasePool } from "../fixtures/test-database";
 import type { TestDatabase } from "../fixtures/test-database";
+import { waitForCondition } from "../test-utils";
 
 const workerConfig = {
 	concurrency: 10,
@@ -18,16 +19,6 @@ const workerConfig = {
 
 // Group limits are intentionally soft: concurrent claim transactions may race.
 // These tests use blockers and avoid asserting exact global bounds across workers.
-
-async function waitUntil(predicate: () => boolean, timeoutMs = 20_000): Promise<void> {
-	const deadline = Date.now() + timeoutMs;
-	while (!predicate()) {
-		if (Date.now() >= deadline) {
-			throw new Error("Timed out waiting for condition");
-		}
-		await new Promise((resolve) => setTimeout(resolve, 10));
-	}
-}
 
 describe("Group concurrency", () => {
 	let pool: TestDatabasePool;
@@ -82,13 +73,13 @@ describe("Group concurrency", () => {
 		try {
 			await conductor.invoke({ name: "same-group" }, { id: 1 }, { group: "tenant-a" });
 			await conductor.invoke({ name: "same-group" }, { id: 2 }, { group: "tenant-a" });
-			await waitUntil(() => started.length === 1);
+			await waitForCondition(() => started.length === 1);
 			await new Promise((resolve) => setTimeout(resolve, 100));
 			const first = started[0];
 			expect(first === 1 || first === 2).toBe(true);
 
 			blockers.get(first!)?.resolve();
-			await waitUntil(() => started.length === 2);
+			await waitForCondition(() => started.length === 2);
 			expect(new Set(started)).toEqual(new Set([1, 2]));
 		} finally {
 			blockers.forEach((blocker) => blocker.resolve());
@@ -127,9 +118,9 @@ describe("Group concurrency", () => {
 		await orchestrator.start();
 		try {
 			await conductor.invoke({ name: "different-groups" }, { id: 1 }, { group: "tenant-a" });
-			await waitUntil(() => started.includes(1));
+			await waitForCondition(() => started.includes(1));
 			await conductor.invoke({ name: "different-groups" }, { id: 2 }, { group: "tenant-b" });
-			await waitUntil(() => started.length === 2);
+			await waitForCondition(() => started.length === 2);
 			expect(new Set(started)).toEqual(new Set([1, 2]));
 		} finally {
 			blocker.resolve();
@@ -169,7 +160,7 @@ describe("Group concurrency", () => {
 		try {
 			await conductor.invoke({ name: "ungrouped" }, { id: 1 }, { group: "tenant-a" });
 			await conductor.invoke({ name: "ungrouped" }, { id: 2 });
-			await waitUntil(() => started.length === 2);
+			await waitForCondition(() => started.length === 2);
 			expect(new Set(started)).toEqual(new Set([1, 2]));
 		} finally {
 			blocker.resolve();
@@ -215,13 +206,15 @@ describe("Group concurrency", () => {
 			await conductor.invoke({ name: "composed-limits" }, { id: 1 }, { group: "tenant-a" });
 			await conductor.invoke({ name: "composed-limits" }, { id: 3 }, { group: "tenant-b" });
 			await conductor.invoke({ name: "composed-limits" }, { id: 2 }, { group: "tenant-a" });
-			await waitUntil(() => started.includes(3) && started.some((id) => id === 1 || id === 2));
+			await waitForCondition(
+				() => started.includes(3) && started.some((id) => id === 1 || id === 2),
+			);
 			await new Promise((resolve) => setTimeout(resolve, 100));
 			expect(started).toContain(3);
 			expect(started.filter((id) => id === 1 || id === 2)).toHaveLength(1);
 
 			blockers.forEach((blocker) => blocker.resolve());
-			await waitUntil(() => started.length === 3);
+			await waitForCondition(() => started.length === 3);
 		} finally {
 			blockers.forEach((blocker) => blocker.resolve());
 			await orchestrator.stop();
@@ -282,7 +275,7 @@ describe("Group concurrency", () => {
 			await conductor.invoke({ name: "scope-a" }, {}, { group: "shared" });
 			await conductor.invoke({ name: "scope-b" }, {}, { group: "shared" });
 			await conductor.invoke({ name: "scope-queue", queue: "other" }, {}, { group: "shared" });
-			await waitUntil(() => started.size === 3);
+			await waitForCondition(() => started.size === 3);
 			expect(started).toEqual(new Set(["task-a", "task-b", "queue"]));
 		} finally {
 			blocker.resolve();
@@ -336,12 +329,12 @@ describe("Group concurrency", () => {
 			`;
 			expect(rows.map((row) => row.group)).toEqual(["batch-tenant", "batch-tenant"]);
 
-			await waitUntil(() => started.length === 1);
+			await waitForCondition(() => started.length === 1);
 			await new Promise((resolve) => setTimeout(resolve, 100));
 			const first = started[0];
 			expect(first === 1 || first === 2).toBe(true);
 			blockers.get(first!)?.resolve();
-			await waitUntil(() => started.length === 2);
+			await waitForCondition(() => started.length === 2);
 			expect(new Set(started)).toEqual(new Set([1, 2]));
 		} finally {
 			blockers.forEach((blocker) => blocker.resolve());

@@ -6,17 +6,7 @@ import { defineTask } from "../../src/task-definition";
 import { TestDatabasePool } from "../fixtures/test-database";
 import { waitFor } from "../../src/lib/wait-for";
 import { TaskSchemas } from "../../src/schemas";
-
-async function waitForCondition(
-	condition: () => boolean | Promise<boolean>,
-	timeoutMs = 5000,
-): Promise<void> {
-	const deadline = Date.now() + timeoutMs;
-	while (!(await condition())) {
-		if (Date.now() >= deadline) throw new Error("condition was not met before timeout");
-		await waitFor(50);
-	}
-}
+import { waitForCondition } from "../test-utils";
 
 describe("Cron Scheduling", () => {
 	let pool: TestDatabasePool;

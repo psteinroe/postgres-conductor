@@ -7,6 +7,7 @@ import { defineTask } from "../../src/task-definition";
 import { EventSchemas, TaskSchemas } from "../../src/schemas";
 import { WaitForEventTimeoutError } from "../../src/index";
 import { TestDatabasePool, type TestDatabase } from "../fixtures/test-database";
+import { waitForCondition } from "../test-utils";
 
 const event = defineEvent({
 	name: "wait.order",
@@ -16,15 +17,6 @@ const event = defineEvent({
 const taskDefinition = defineTask({ name: "wait.task", payload: z.object({ id: z.string() }) });
 
 type Handler = (id: string, ctx: any) => Promise<void>;
-
-async function until(check: () => Promise<boolean>, timeout = 20_000) {
-	const end = Date.now() + timeout;
-	while (Date.now() < end) {
-		if (await check()) return;
-		await Bun.sleep(10);
-	}
-	throw new Error("condition was not met");
-}
 
 async function setup(db: TestDatabase, fn: Handler, orchestrators: Orchestrator[] = []) {
 	const conductor = Conductor.create({
@@ -78,7 +70,7 @@ describe.serial("waitForEvent", () => {
 	}
 
 	async function waiting(database: TestDatabase, count = 1) {
-		await until(
+		await waitForCondition(
 			async () =>
 				Number(
 					(
@@ -119,7 +111,9 @@ describe.serial("waitForEvent", () => {
 			await Bun.sleep(100);
 			expect(entries).toEqual(["entered:one", "entered:two"]);
 			await conductor.emit("wait.order", { id: "yes", kind: "match" });
-			await until(async () => entries.filter((entry) => entry.startsWith("replay:")).length === 2);
+			await waitForCondition(
+				async () => entries.filter((entry) => entry.startsWith("replay:")).length === 2,
+			);
 			expect(entries).toEqual([
 				"entered:one",
 				"entered:two",
@@ -152,7 +146,7 @@ describe.serial("waitForEvent", () => {
 		);
 
 		await conductor.invoke({ name: "wait.task" }, { id: "one" });
-		await until(async () => errors.length === 1);
+		await waitForCondition(async () => errors.length === 1);
 		expect(entered).toEqual(["one", "one"]);
 		expect(errors).toHaveLength(1);
 		expect(errors[0]).toBeInstanceOf(WaitForEventTimeoutError);
@@ -173,7 +167,7 @@ describe.serial("waitForEvent", () => {
 		await conductor.invoke({ name: "wait.task" }, { id: "race" });
 		await waiting(database);
 		await conductor.emit("wait.order", { id: "race", kind: "match" });
-		await until(async () => result.length === 1);
+		await waitForCondition(async () => result.length === 1);
 		expect(result).toEqual(["race"]);
 	});
 
@@ -196,7 +190,7 @@ describe.serial("waitForEvent", () => {
 		await first.orchestrator.stop();
 		const second = await setup(database, handler, orchestrators);
 		await second.conductor.emit("wait.order", { id: "new", kind: "match" });
-		await until(async () => result.length === 1);
+		await waitForCondition(async () => result.length === 1);
 		expect(result).toEqual(["new"]);
 		expect(executionId).toBeTruthy();
 	});
@@ -216,7 +210,7 @@ describe.serial("waitForEvent", () => {
 		await first.orchestrator.stop();
 		const second = await setup(database, handler, orchestrators);
 		await second.conductor.emit("wait.order", { id: "restart", kind: "match" });
-		await until(async () => result.length === 1);
+		await waitForCondition(async () => result.length === 1);
 		expect(entered).toEqual(["restart", "restart"]);
 		expect(result).toEqual(["restart"]);
 	});
@@ -242,7 +236,7 @@ describe.serial("waitForEvent", () => {
 		await conductor.emit("wait.order", { id: "second", kind: "match" });
 		await Bun.sleep(5);
 		await conductor.emit("wait.order", { id: "third", kind: "match" });
-		await until(async () => result.length === 1);
+		await waitForCondition(async () => result.length === 1);
 		expect(result).toEqual(["first"]);
 	});
 
@@ -353,7 +347,7 @@ describe.serial("waitForEvent", () => {
 		await conductor.invoke({ name: "wait.task" }, { id: "outcome" });
 		await waiting(database);
 		await conductor.emit("wait.order", { id: "outcome", kind: "match" });
-		await until(async () => outcomes.length === 1);
+		await waitForCondition(async () => outcomes.length === 1);
 		await Bun.sleep(150);
 		expect(outcomes).toEqual(["match:outcome"]);
 		expect(
@@ -415,7 +409,7 @@ describe.serial("waitForEvent", () => {
 				),
 			).toBe(1);
 			await conductor.emit("wait.order", { id: "once", kind: "match" });
-			await until(async () => result.length === 1);
+			await waitForCondition(async () => result.length === 1);
 			await Bun.sleep(100);
 			expect(entered).toEqual(["once", "once"]);
 			expect(result).toEqual(["once"]);

@@ -33,6 +33,7 @@ import { TestDatabasePool, type TestDatabase } from "../fixtures/test-database";
 import { defineEvent } from "../../src/event-definition";
 import { defineTask } from "../../src/task-definition";
 import { z } from "zod";
+import { waitForCondition } from "../test-utils";
 
 const logger = new DefaultLogger();
 const fakeSql = Object.assign((async () => []) as unknown as Sql, {
@@ -127,15 +128,6 @@ function externalProducer(name: string, destination = "default") {
 	return { span, carrier };
 }
 
-async function until(check: () => Promise<boolean>, timeout = 20_000) {
-	const end = Date.now() + timeout;
-	while (Date.now() < end) {
-		if (await check()) return;
-		await Bun.sleep(10);
-	}
-	throw new Error("condition was not met");
-}
-
 describe.serial("OpenTelemetry trace propagation feature paths", () => {
 	test("Conductor.emit producer becomes the event-trigger consumer parent", async () => {
 		const { exporter, provider } = installProvider();
@@ -191,7 +183,7 @@ describe.serial("OpenTelemetry trace propagation feature paths", () => {
 		activeOrchestrators.add(orchestrator);
 		await orchestrator.start();
 		const invocation = await conductor.invoke({ name: "feature.waiter" }, {});
-		await until(async () => {
+		await waitForCondition(async () => {
 			const rows = await db.sql<{ n: number }[]>`
 				select count(*)::int as n from pgconductor._private_event_subscriptions
 				where kind = 'execution_wait'
@@ -199,7 +191,7 @@ describe.serial("OpenTelemetry trace propagation feature paths", () => {
 			return Number(rows[0]?.n || 0) === 1;
 		});
 		const eventId = await conductor.emit("feature.wait", { id: "event" });
-		await until(async () => {
+		await waitForCondition(async () => {
 			const rows = await db.sql<{ completed_at: Date | null }[]>`
 				select completed_at from pgconductor._private_executions where id = ${invocation}
 			`;
@@ -260,7 +252,7 @@ describe.serial("OpenTelemetry trace propagation feature paths", () => {
 		activeOrchestrators.add(orchestrator);
 		await orchestrator.start();
 		const invocation = await conductor.invoke({ name: task.name }, {});
-		await until(async () => {
+		await waitForCondition(async () => {
 			const rows = await db.sql<{ n: number }[]>`
 				select count(*)::int as n from pgconductor._private_event_subscriptions
 				where execution_id = ${invocation}::uuid
@@ -268,14 +260,14 @@ describe.serial("OpenTelemetry trace propagation feature paths", () => {
 			return Number(rows[0]?.n || 0) === 1;
 		});
 		await conductor.emit(event.name, { id: "matched" });
-		await until(async () => {
+		await waitForCondition(async () => {
 			const rows = await db.sql<{ step_key: string }[]>`
 				select step_key from pgconductor._private_event_subscriptions
 				where execution_id = ${invocation}::uuid
 			`;
 			return rows[0]?.step_key === "timed-out";
 		});
-		await until(async () => {
+		await waitForCondition(async () => {
 			const rows = await db.sql<{ completed_at: Date | null }[]>`
 				select completed_at from pgconductor._private_executions where id = ${invocation}::uuid
 			`;
@@ -423,7 +415,7 @@ describe.serial("OpenTelemetry trace propagation feature paths", () => {
 		activeOrchestrators.add(sourceOrchestrator);
 		await sourceOrchestrator.start();
 		await conductor.invoke({ name: parent.name }, {});
-		await until(async () => {
+		await waitForCondition(async () => {
 			const rows = await db.sql<{ queue: string; count: string }[]>`
 				select queue, count(*)::text as count from pgconductor._private_executions
 				where queue in ('feature.child-dlq', 'feature.parent-dlq') group by queue
@@ -449,7 +441,7 @@ describe.serial("OpenTelemetry trace propagation feature paths", () => {
 		});
 		activeOrchestrators.add(destinationOrchestrator);
 		await destinationOrchestrator.start();
-		await until(async () => {
+		await waitForCondition(async () => {
 			const rows = await db.sql<{ count: string }[]>`
 				select count(*)::text as count from pgconductor._private_executions
 				where queue in ('feature.child-dlq', 'feature.parent-dlq') and completed_at is not null
