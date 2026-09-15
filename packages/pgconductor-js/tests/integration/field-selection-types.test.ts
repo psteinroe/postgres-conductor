@@ -7,6 +7,7 @@ import { defineEvent } from "../../src/event-definition";
 import { TaskSchemas, EventSchemas } from "../../src/schemas";
 import { TestDatabasePool } from "../fixtures/test-database";
 import type { TestDatabase } from "../fixtures/test-database";
+import { Deferred } from "../../src/lib/deferred";
 
 describe("Field Selection - Type Safety & Runtime", () => {
 	let pool: TestDatabasePool;
@@ -48,6 +49,7 @@ describe("Field Selection - Type Safety & Runtime", () => {
 			payload: z.object({}),
 		});
 
+		const handled = new Deferred<void>();
 		const taskFn = mock(async (event) => {
 			// Type-level: TypeScript should know these fields exist with correct types
 			const str: string = event.payload.stringField;
@@ -70,6 +72,7 @@ describe("Field Selection - Type Safety & Runtime", () => {
 			// Non-selected fields should not exist at runtime
 			expect(event.payload.extraString).toBeUndefined();
 			expect(event.payload.extraNumber).toBeUndefined();
+			handled.resolve();
 		});
 
 		const conductor = Conductor.create({
@@ -107,9 +110,7 @@ describe("Field Selection - Type Safety & Runtime", () => {
 			extraNumber: 999,
 		});
 
-		// Wait for task to execute
-		await new Promise((r) => setTimeout(r, 300));
-
+		await handled.promise;
 		expect(taskFn).toHaveBeenCalledTimes(1);
 
 		await orchestrator.stop();
@@ -135,6 +136,7 @@ describe("Field Selection - Type Safety & Runtime", () => {
 			payload: z.object({}),
 		});
 
+		const handled = new Deferred<void>();
 		const taskFn = mock(async (event) => {
 			// Type-level: Selected fields with correct camelCase
 			const userId: string = event.payload.userId;
@@ -146,6 +148,7 @@ describe("Field Selection - Type Safety & Runtime", () => {
 			expect(event.payload.firstName).toBeUndefined();
 			expect(event.payload.lastName).toBeUndefined();
 			expect(event.payload.accountType).toBeUndefined();
+			handled.resolve();
 		});
 
 		const conductor = Conductor.create({
@@ -177,8 +180,7 @@ describe("Field Selection - Type Safety & Runtime", () => {
 			accountType: "premium",
 		});
 
-		await new Promise((r) => setTimeout(r, 300));
-
+		await handled.promise;
 		expect(taskFn).toHaveBeenCalledTimes(1);
 
 		await orchestrator.stop();
@@ -202,6 +204,7 @@ describe("Field Selection - Type Safety & Runtime", () => {
 			payload: z.object({}),
 		});
 
+		const handled = new Deferred<void>();
 		const taskFn = mock(async (event) => {
 			// Type-level: All fields should be available
 			const f1: string = event.payload.field1;
@@ -212,6 +215,7 @@ describe("Field Selection - Type Safety & Runtime", () => {
 			expect(event.payload.field1).toBe("value1");
 			expect(event.payload.field2).toBe(123);
 			expect(event.payload.field3).toBe(true);
+			handled.resolve();
 		});
 
 		const conductor = Conductor.create({
@@ -238,8 +242,7 @@ describe("Field Selection - Type Safety & Runtime", () => {
 			field3: true,
 		});
 
-		await new Promise((r) => setTimeout(r, 300));
-
+		await handled.promise;
 		expect(taskFn).toHaveBeenCalledTimes(1);
 
 		await orchestrator.stop();
