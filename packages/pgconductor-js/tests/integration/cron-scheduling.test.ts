@@ -7,6 +7,17 @@ import { TestDatabasePool } from "../fixtures/test-database";
 import { waitFor } from "../../src/lib/wait-for";
 import { TaskSchemas } from "../../src/schemas";
 
+async function waitForCondition(
+	condition: () => boolean | Promise<boolean>,
+	timeoutMs = 5000,
+): Promise<void> {
+	const deadline = Date.now() + timeoutMs;
+	while (!(await condition())) {
+		if (Date.now() >= deadline) throw new Error("condition was not met before timeout");
+		await waitFor(50);
+	}
+}
+
 describe("Cron Scheduling", () => {
 	let pool: TestDatabasePool;
 
@@ -424,11 +435,13 @@ describe("Cron Scheduling", () => {
 			},
 		);
 
+		let unscheduled = false;
 		const unschedulerTask = conductor.createTask(
 			{ name: "dynamic-unscheduler" },
 			{ invocable: true },
 			async (_event, ctx) => {
 				await ctx.unschedule({ name: "dynamic-target" }, "reporting");
+				unscheduled = true;
 			},
 		);
 
@@ -448,7 +461,7 @@ describe("Cron Scheduling", () => {
 
 		const runsBeforeUnschedule = targetExecutions.mock.calls.length;
 		await conductor.invoke({ name: "dynamic-unscheduler" }, {});
-		await waitFor(2000);
+		await waitForCondition(() => unscheduled);
 
 		const futureSchedules = await db.sql<Array<{ id: string }>>`
 			SELECT id
@@ -558,18 +571,21 @@ describe("Cron Scheduling", () => {
 		// Should have at least attempted twice (fail + success)
 		expect(attemptCount).toBeGreaterThanOrEqual(2);
 
-		// Verify next cron execution is scheduled
-		const nextExecution = await db.sql<Array<{ run_at: Date; dedupe_key: string }>>`
-			SELECT run_at, dedupe_key
-			FROM pgconductor._private_executions
-			WHERE task_key = 'flaky-cron'
-				AND dedupe_key LIKE 'scheduled::%'
-				AND run_at > pgconductor._private_current_time()
-			ORDER BY run_at
-			LIMIT 1
-		`;
+		// Verify next cron execution is scheduled without sampling at a claim boundary.
+		let nextExecution: Array<{ run_at: Date; dedupe_key: string }> = [];
+		await waitForCondition(async () => {
+			nextExecution = await db.sql<Array<{ run_at: Date; dedupe_key: string }>>`
+				SELECT run_at, dedupe_key
+				FROM pgconductor._private_executions
+				WHERE task_key = 'flaky-cron'
+					AND dedupe_key LIKE 'scheduled::%'
+					AND run_at > pgconductor._private_current_time()
+				ORDER BY run_at
+				LIMIT 1
+			`;
+			return nextExecution.length === 1;
+		});
 
-		expect(nextExecution.length).toBe(1);
 		expect(nextExecution[0]?.dedupe_key).toMatch(/^scheduled::.*::\d+$/);
 
 		await orchestrator.stop();
