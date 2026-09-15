@@ -341,10 +341,15 @@ export class QueryBuilder {
 				where e.id = c.id and e.queue = ${queueName}::text and e.is_available = true
 				returning e.id, e.task_key, e.queue, e.payload, e.waiting_on_execution_id,
 					e.waiting_step_key, e.cancelled, e.last_error, e.dedupe_key, e.cron_expression,
-					e.locked_by, e."group", e.priority, e.run_at, e.created_at
+					e.locked_by, e."group", e.priority, e.run_at, e.created_at,
+					e.dead_letter_source_execution_id, e.dead_letter_source_queue,
+					e.dead_letter_source_task_key, e.dead_letter_error,
+					e.dead_letter_attempts, e.dead_letter_failed_at
 			)
 			select id, task_key, queue, payload, waiting_on_execution_id, waiting_step_key,
-				cancelled, last_error, dedupe_key, cron_expression, locked_by, "group"
+				cancelled, last_error, dedupe_key, cron_expression, locked_by, "group",
+				dead_letter_source_execution_id, dead_letter_source_queue,
+				dead_letter_source_task_key, dead_letter_error, dead_letter_attempts, dead_letter_failed_at
 			from claimed
 			order by priority asc, run_at asc, created_at asc, id asc
 		`;
@@ -386,7 +391,8 @@ export class QueryBuilder {
 			for update of e
 		)`);
 		ctes.push(this.sql`task_configs as (
-			select queue, key, max_attempts, remove_on_complete_days, remove_on_fail_days
+			select queue, key, max_attempts, remove_on_complete_days, remove_on_fail_days,
+				dead_letter_queue, dead_letter_task_key
 			from pgconductor._private_tasks
 			where queue = any(${this.sql.array(Array.from(new Set(allResults.map((r) => r.queue))))}::text[])
 		)`);
@@ -471,7 +477,10 @@ export class QueryBuilder {
 
 		ctes.push(this.sql`permanently_failed_children as materialized (
 			select r.execution_id, r.queue, r.task_key, r.orchestrator_id,
+				r.execution_cancelled,
 				coalesce(r.error, r.execution_last_error, 'unknown error') as child_error,
+				e."group" as execution_group,
+				e.attempts as execution_attempts,
 				tc.remove_on_fail_days = 0 as should_remove
 			from failed_results r
 			join pgconductor._private_executions e on e.id = r.execution_id and e.queue = r.queue
@@ -482,7 +491,10 @@ export class QueryBuilder {
 		)`);
 		ctes.push(this.sql`failed_parent_targets as materialized (
 			select p.execution_id as child_id, p.queue as child_queue, p.child_error,
+				p.execution_cancelled as child_cancelled,
 				parent.id as parent_id, parent.queue as parent_queue,
+				parent.task_key as parent_task_key, parent."group" as parent_group,
+				parent.payload as parent_payload, parent.attempts as parent_attempts,
 				pt.remove_on_fail_days = 0 as parent_should_remove
 			from permanently_failed_children p
 			join pgconductor._private_executions parent
@@ -491,6 +503,44 @@ export class QueryBuilder {
 				on pt.key = parent.task_key and pt.queue = parent.queue
 			where parent.completed_at is null and parent.failed_at is null and parent.locked_by is null
 			for update of parent
+		)`);
+		ctes.push(this.sql`terminal_failures as materialized (
+			select p.execution_id, p.queue, p.task_key, p.execution_group, e.payload,
+				p.child_error as failure_error, p.execution_attempts as failure_attempts,
+				p.execution_cancelled, tc.dead_letter_queue, tc.dead_letter_task_key
+			from permanently_failed_children p
+			join pgconductor._private_executions e
+				on e.id = p.execution_id and e.queue = p.queue
+			join task_configs tc on tc.key = p.task_key and tc.queue = p.queue
+			union all
+			select p.parent_id, p.parent_queue, p.parent_task_key, p.parent_group, p.parent_payload,
+				'Child execution failed: ' || p.child_error, p.parent_attempts, p.child_cancelled,
+				pt.dead_letter_queue, pt.dead_letter_task_key
+			from failed_parent_targets p
+			join pgconductor._private_tasks pt
+				on pt.key = p.parent_task_key and pt.queue = p.parent_queue
+		)`);
+		ctes.push(this.sql`dead_lettered as materialized (
+			insert into pgconductor._private_executions (
+				task_key, queue, payload, run_at, "group",
+				dead_letter_source_execution_id, dead_letter_source_queue,
+				dead_letter_source_task_key, dead_letter_error,
+				dead_letter_attempts, dead_letter_failed_at
+			)
+			select
+				coalesce(p.dead_letter_task_key, p.task_key),
+				coalesce(p.dead_letter_queue, p.queue),
+				p.payload, nt.ts, p.execution_group,
+				p.execution_id, p.queue, p.task_key, p.failure_error,
+				p.failure_attempts, nt.ts
+			from terminal_failures p
+			cross join now_ts nt
+			where p.dead_letter_queue is not null
+				and not p.execution_cancelled
+			on conflict (dead_letter_source_execution_id, queue, task_key)
+				where dead_letter_source_execution_id is not null
+				do update set dead_letter_source_execution_id = excluded.dead_letter_source_execution_id
+			returning id, dead_letter_source_execution_id
 		)`);
 		ctes.push(this.sql`failed_updates as (
 			select p.execution_id as target_id, p.queue, p.child_error, true as is_child
@@ -508,11 +558,19 @@ export class QueryBuilder {
 				where e.id = p.execution_id and e.queue = p.queue
 					and e.locked_by = p.orchestrator_id
 					and p.should_remove is true
+					and (
+						not exists (select 1 from task_configs tc where tc.key = p.task_key and tc.queue = p.queue and tc.dead_letter_queue is not null)
+						or exists (select 1 from dead_lettered d where d.dead_letter_source_execution_id = p.execution_id)
+					)
 			)
 			or exists (
 				select 1 from failed_parent_targets p
 				where e.id = p.parent_id and e.queue = p.parent_queue
 					and p.parent_should_remove is true
+					and (
+						not exists (select 1 from pgconductor._private_tasks pt where pt.key = p.parent_task_key and pt.queue = p.parent_queue and pt.dead_letter_queue is not null)
+						or exists (select 1 from dead_lettered d where d.dead_letter_source_execution_id = p.parent_id)
+					)
 			)
 			returning e.id
 		)`);
@@ -636,6 +694,8 @@ export class QueryBuilder {
 			window_end: spec.window?.[1] || null,
 			concurrency_limit: spec.concurrency || null,
 			group_concurrency_limit: spec.groupConcurrency || null,
+			dead_letter_queue: spec.deadLetterQueue || null,
+			dead_letter_task_key: spec.deadLetterTaskKey || null,
 		}));
 
 		const cronScheduleRows = cronSchedules.map((spec) => {

@@ -48,7 +48,18 @@ export interface TaskSpec {
 	window?: [string, string] | null;
 	concurrency?: number | null;
 	groupConcurrency?: number | null;
+	deadLetterQueue?: string | null;
+	deadLetterTaskKey?: string | null;
 }
+
+export type DeadLetterMetadata = {
+	sourceExecutionId: string;
+	sourceQueue: string;
+	sourceTaskKey: string;
+	error: string | null;
+	attempts: number;
+	failedAt: Date;
+};
 
 export interface Execution {
 	id: string;
@@ -63,6 +74,12 @@ export interface Execution {
 	dedupe_key?: string | null;
 	cron_expression?: string | null;
 	group?: string | null;
+	dead_letter_source_execution_id?: string | null;
+	dead_letter_source_queue?: string | null;
+	dead_letter_source_task_key?: string | null;
+	dead_letter_error?: string | null;
+	dead_letter_attempts?: number | null;
+	dead_letter_failed_at?: Date | null;
 }
 
 // todo: move all of this to query-builder too or create new types.ts file

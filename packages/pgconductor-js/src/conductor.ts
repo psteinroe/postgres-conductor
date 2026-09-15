@@ -8,6 +8,7 @@ import {
 	type ValidateTasksQueue,
 	type BatchConfig,
 	type ExecuteFunction,
+	type ValidateDeadLetterConfiguration,
 } from "./task";
 import type { TaskContext, BatchTaskContext } from "./task-context";
 import {
@@ -162,7 +163,7 @@ export class Conductor<
 		},
 		const TTriggers extends object | readonly object[],
 	>(
-		definition: TDef,
+		definition: TDef & ValidateDeadLetterConfiguration<TDef, ResolvedPayload<Tasks, TDef>>,
 		triggers: TTriggers & ValidateTriggers<Tasks, TDef["name"], TTriggers, ResolvedQueue<TDef>>,
 		fn: TDef extends { readonly batch: BatchConfig }
 			? ResolvedReturns<Tasks, TDef> extends void
@@ -198,7 +199,11 @@ export class Conductor<
 			TaskContext<Tasks, Events> & ExtraContext,
 			TaskEventFromTriggers<TTriggers, ResolvedPayload<Tasks, TDef>, Events, Database>
 		>(
-			definition as TaskConfiguration<TDef["name"], ResolvedQueue<TDef>>,
+			definition as TaskConfiguration<
+				TDef["name"],
+				ResolvedQueue<TDef>,
+				ResolvedPayload<Tasks, TDef>
+			>,
 			triggers as NonEmptyArray<Trigger> | Trigger,
 			fn as ExecuteFunction<
 				TaskEventFromTriggers<TTriggers, ResolvedPayload<Tasks, TDef>, Events, Database>,

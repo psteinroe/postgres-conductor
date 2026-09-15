@@ -60,6 +60,13 @@ interface StoredExecution {
 	parent_step_key: string | null;
 	created_at: Date;
 	updated_at: Date;
+	failed_at: Date | null;
+	dead_letter_source_execution_id: string | null;
+	dead_letter_source_queue: string | null;
+	dead_letter_source_task_key: string | null;
+	dead_letter_error: string | null;
+	dead_letter_attempts: number | null;
+	dead_letter_failed_at: Date | null;
 }
 
 interface StoredStep {
@@ -79,6 +86,8 @@ interface StoredTask {
 	window_end: string | null;
 	concurrency: number | null;
 	group_concurrency: number | null;
+	dead_letter_queue: string | null;
+	dead_letter_task_key: string | null;
 }
 
 interface StoredCronSchedule {
@@ -290,6 +299,8 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 				window_end: taskSpec.window?.[1] || null,
 				concurrency: taskSpec.concurrency || null,
 				group_concurrency: taskSpec.groupConcurrency || null,
+				dead_letter_queue: taskSpec.deadLetterQueue || null,
+				dead_letter_task_key: taskSpec.deadLetterTaskKey || null,
 			};
 			this.tasks.set(this.taskId(taskSpec.key, task.queue), task);
 		}
@@ -401,6 +412,12 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 				dedupe_key: exec.dedupe_key || undefined,
 				cron_expression: exec.cron_expression || undefined,
 				group: exec.group,
+				dead_letter_source_execution_id: exec.dead_letter_source_execution_id,
+				dead_letter_source_queue: exec.dead_letter_source_queue,
+				dead_letter_source_task_key: exec.dead_letter_source_task_key,
+				dead_letter_error: exec.dead_letter_error,
+				dead_letter_attempts: exec.dead_letter_attempts,
+				dead_letter_failed_at: exec.dead_letter_failed_at,
 				locked_by: exec.orchestrator_id || "",
 			});
 
@@ -483,8 +500,11 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 					if (exec.attempts >= maxAttempts) {
 						// Permanently failed
 						exec.state = "failed";
+						exec.failed_at = now;
+						if (!exec.cancelled) this.deliverToDeadLetterQueue(exec, task, result.error, now);
 
-						// Fail parent if waiting
+						// Fail parent if waiting. A force-failed parent is itself terminal and
+						// follows its own DLQ and retention policy.
 						if (exec.parent_execution_id) {
 							const parent = this.executions.get(exec.parent_execution_id);
 							if (parent && parent.waiting_on_execution_id === exec.id) {
@@ -492,7 +512,14 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 								parent.last_error = `Child execution failed: ${result.error}`;
 								parent.waiting_on_execution_id = null;
 								parent.waiting_step_key = null;
-								parent.waiting_timeout_at = null;
+								const parentTask = this.tasks.get(this.taskId(parent.task_key, parent.queue));
+								if (!exec.cancelled) {
+									this.deliverToDeadLetterQueue(parent, parentTask, parent.last_error, now);
+								}
+								if (parentTask?.remove_on_fail_days != null) {
+									this.executions.delete(parent.id);
+									this.steps.delete(parent.id);
+								}
 							}
 						}
 
@@ -531,10 +558,15 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 
 				case "permanently_failed": {
 					exec.state = "failed";
+					exec.failed_at = now;
 					exec.last_error = result.error;
+
+					const task = this.tasks.get(this.taskId(exec.task_key, exec.queue));
+					if (!exec.cancelled) this.deliverToDeadLetterQueue(exec, task, result.error, now);
 					exec.orchestrator_id = null;
 
-					// Fail parent if waiting
+					// Fail parent if waiting. A force-failed parent is itself terminal and
+					// follows its own DLQ and retention policy.
 					if (exec.parent_execution_id) {
 						const parent = this.executions.get(exec.parent_execution_id);
 						if (parent && parent.waiting_on_execution_id === exec.id) {
@@ -543,10 +575,17 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 							parent.waiting_on_execution_id = null;
 							parent.waiting_step_key = null;
 							parent.waiting_timeout_at = null;
+							const parentTask = this.tasks.get(this.taskId(parent.task_key, parent.queue));
+							if (!exec.cancelled) {
+								this.deliverToDeadLetterQueue(parent, parentTask, parent.last_error, now);
+							}
+							if (parentTask?.remove_on_fail_days != null) {
+								this.executions.delete(parent.id);
+								this.steps.delete(parent.id);
+							}
 						}
 					}
 
-					const task = this.tasks.get(this.taskId(exec.task_key, exec.queue));
 					if (task && task.remove_on_fail_days != null) {
 						this.executions.delete(exec.id);
 						this.steps.delete(exec.id);
@@ -696,6 +735,13 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 				parent_step_key: spec.parent_step_key || null,
 				created_at: now,
 				updated_at: now,
+				failed_at: null,
+				dead_letter_source_execution_id: null,
+				dead_letter_source_queue: null,
+				dead_letter_source_task_key: null,
+				dead_letter_error: null,
+				dead_letter_attempts: null,
+				dead_letter_failed_at: null,
 			};
 
 			this.executions.set(id, execution);
@@ -1063,6 +1109,57 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 	}
 
 	// ============================================================================
+	private deliverToDeadLetterQueue(
+		exec: StoredExecution,
+		task: StoredTask | undefined,
+		error: string,
+		now: Date,
+	): void {
+		if (!task?.dead_letter_queue || exec.cancelled) return;
+		const destinationTaskKey = task.dead_letter_task_key || exec.task_key;
+		const duplicate = Array.from(this.executions.values()).some(
+			(destination) =>
+				destination.dead_letter_source_execution_id === exec.id &&
+				destination.queue === task.dead_letter_queue &&
+				destination.task_key === destinationTaskKey,
+		);
+		if (duplicate) return;
+		const id = this.generateId();
+		this.executions.set(id, {
+			id,
+			task_key: destinationTaskKey,
+			queue: task.dead_letter_queue,
+			group: exec.group,
+			payload: structuredClone(exec.payload),
+			state: "pending",
+			run_at: now,
+			attempts: 0,
+			max_attempts: 3,
+			last_error: null,
+			result: null,
+			cancelled: false,
+			waiting_on_execution_id: null,
+			waiting_step_key: null,
+			waiting_timeout_at: null,
+			dedupe_key: null,
+			singleton_on: null,
+			cron_expression: null,
+			priority: 0,
+			orchestrator_id: null,
+			parent_execution_id: null,
+			parent_step_key: null,
+			created_at: now,
+			updated_at: now,
+			failed_at: null,
+			dead_letter_source_execution_id: exec.id,
+			dead_letter_source_queue: exec.queue,
+			dead_letter_source_task_key: exec.task_key,
+			dead_letter_error: error,
+			dead_letter_attempts: exec.attempts,
+			dead_letter_failed_at: now,
+		});
+	}
+
 	// Helpers
 	// ============================================================================
 
