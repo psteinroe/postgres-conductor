@@ -450,8 +450,18 @@ describe("Cron Scheduling", () => {
 
 		await orchestrator.start();
 		await conductor.invoke({ name: "dynamic-scheduler" }, {});
-		await waitFor(4000);
-		expect(targetExecutions.mock.calls.length).toBeGreaterThanOrEqual(1);
+		await waitForCondition(() => targetExecutions.mock.calls.length >= 1, 7000);
+		await waitForCondition(async () => {
+			const active = await db.sql<Array<{ count: number }>>`
+				SELECT count(*)::integer AS count
+				FROM pgconductor._private_executions
+				WHERE task_key = 'dynamic-target'
+					AND locked_at IS NOT NULL
+					AND completed_at IS NULL
+					AND failed_at IS NULL
+			`;
+			return (active[0]?.count ?? 0) === 0;
+		});
 
 		const runsBeforeUnschedule = targetExecutions.mock.calls.length;
 		await conductor.invoke({ name: "dynamic-unscheduler" }, {});
