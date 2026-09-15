@@ -11,7 +11,7 @@ import type {
 	ExecutionInvokeChild,
 } from "./database-client";
 import type { AnyTask, BatchConfig } from "./task";
-import type { TaskDefinition } from "./task-definition";
+import type { TaskDefinition, CustomEventTrigger, DatabaseEventTrigger } from "./task-definition";
 import { waitFor } from "./lib/wait-for";
 import { mapConcurrent } from "./lib/map-concurrent";
 import { Deferred } from "./lib/deferred";
@@ -381,13 +381,22 @@ export class Worker<
 		let total = 0;
 		while (!this.signal.aborted) {
 			try {
+				const resolvedBefore = await this.db.resolveEventWaits(
+					{ batchSize: EVENT_BATCH_SIZE },
+					{ signal: this.signal },
+				);
 				const processed = await this.db.processEvents(
 					{ batchSize: EVENT_BATCH_SIZE },
 					{ signal: this.signal },
 				);
-				total += processed;
-				if (runOnce && processed === 0) return total;
-				if (!runOnce && processed === 0) {
+				const resolvedAfter = await this.db.resolveEventWaits(
+					{ batchSize: EVENT_BATCH_SIZE },
+					{ signal: this.signal },
+				);
+				const didWork = resolvedBefore + processed + resolvedAfter;
+				total += didWork;
+				if (runOnce && didWork === 0) return total;
+				if (!runOnce && didWork === 0) {
 					await waitFor(this.pollIntervalMs, { signal: this.signal });
 				}
 			} catch (error) {
@@ -509,42 +518,49 @@ export class Worker<
 		);
 
 		const eventSubscriptions: EventSubscriptionSpec[] = allTasks.flatMap((task) => {
-			const customEvents = task.triggers
-				.filter((t) => "event" in t && typeof t.event === "string")
-				.map((trigger): EventSubscriptionSpec => {
-					const customTrigger = trigger as any;
-					return {
+			const customEvents = task.triggers.flatMap((trigger): EventSubscriptionSpec[] => {
+				if (!("event" in trigger) || "schema" in trigger || typeof trigger.event !== "string")
+					return [];
+				const customTrigger = trigger as CustomEventTrigger<
+					string,
+					string | undefined,
+					Record<string, import("./database-client").JsonValue[]> | undefined
+				>;
+				return [
+					{
 						task_key: task.name,
 						queue: this.queueName,
 						event_key: customTrigger.event,
 						schema_name: null,
 						table_name: null,
 						operation: null,
-						// Custom events use the safe equality filter language only.
 						when_clause: null,
-						payload_fields: customTrigger.fields?.split(",").map((f: string) => f.trim()) || null,
+						payload_fields: customTrigger.fields?.split(",").map((field) => field.trim()) || null,
 						column_names: null,
 						filter: customTrigger.filter || null,
-					};
-				});
+					},
+				];
+			});
 
-			const dbEvents = task.triggers
-				.filter((t) => "schema" in t && "table" in t && "operation" in t)
-				.map((trigger): EventSubscriptionSpec => {
-					const dbTrigger = trigger as any;
-					return {
+			const dbEvents = task.triggers.flatMap((trigger): EventSubscriptionSpec[] => {
+				if (!("schema" in trigger) || !("table" in trigger) || !("operation" in trigger)) return [];
+				const databaseTrigger = trigger as DatabaseEventTrigger;
+				return [
+					{
 						task_key: task.name,
 						queue: this.queueName,
 						event_key: null,
-						schema_name: dbTrigger.schema,
-						table_name: dbTrigger.table,
-						operation: dbTrigger.operation,
-						when_clause: dbTrigger.when || null,
+						schema_name: databaseTrigger.schema,
+						table_name: databaseTrigger.table,
+						operation: databaseTrigger.operation,
+						when_clause: databaseTrigger.when || null,
 						payload_fields: null,
-						column_names: dbTrigger.columns?.split(",").map((c: string) => c.trim()) || null,
+						column_names:
+							databaseTrigger.columns?.split(",").map((column) => column.trim()) || null,
 						filter: null,
-					};
-				});
+					},
+				];
+			});
 
 			return [...customEvents, ...dbEvents];
 		});
@@ -648,7 +664,10 @@ export class Worker<
 		for await (const result of mapConcurrent(
 			source,
 			this.concurrency,
-			async ({ taskKey, items: executions }): Promise<ExecutionResult | ExecutionResult[]> => {
+			async ({
+				taskKey,
+				items: executions,
+			}): Promise<ExecutionResult | ExecutionResult[] | null> => {
 				// Dispatch to correct task based on task_key
 				const task = this.tasks.get(taskKey);
 				if (!task) {
@@ -702,7 +721,9 @@ export class Worker<
 				return this.executeSingleTask(task, singleExec);
 			},
 		)) {
-			// Yield results (may be single or array)
+			// Waiting executions are released atomically by registerEventWait and
+			// therefore have no result to settle here.
+			if (result === null) continue;
 			if (Array.isArray(result)) {
 				for (const r of result) yield r;
 			} else {
@@ -717,7 +738,7 @@ export class Worker<
 	 * @param task - The task to execute
 	 * @param exec - The execution details
 	 */
-	private async executeSingleTask(task: AnyTask, exec: Execution): Promise<ExecutionResult> {
+	private async executeSingleTask(task: AnyTask, exec: Execution): Promise<ExecutionResult | null> {
 		const taskAbortController = createTaskSignal(this.signal);
 		this._runningTasks.set(exec.id, taskAbortController);
 
@@ -782,6 +803,8 @@ export class Worker<
 
 			if (isTaskAbortReason(output)) {
 				switch (output.reason) {
+					case "wait-for-event":
+						return null;
 					case "child-invocation":
 						return {
 							execution_id: exec.id,

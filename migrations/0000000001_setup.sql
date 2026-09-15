@@ -509,10 +509,12 @@ begin
       s.when_clause,
       s.payload_fields,
       s.column_names,
-      s.filter
+      s.filter,
+      'task_trigger' as kind
     from unnest(p_event_subscriptions) as s
   ) as source
   on (
+    target.kind = 'task_trigger' and
     target.queue = source.queue and
     target.task_key = source.task_key and
     coalesce(target.event_key, '') = coalesce(source.event_key, '') and
@@ -528,16 +530,18 @@ begin
   )
   when not matched then insert (
     task_key, queue, event_key, schema_name, table_name, operation,
-    when_clause, payload_fields, column_names, filter
+    when_clause, payload_fields, column_names, filter, kind
   ) values (
     source.task_key, source.queue, source.event_key,
     source.schema_name, source.table_name, source.operation,
-    source.when_clause, source.payload_fields, source.column_names, source.filter
+    source.when_clause, source.payload_fields, source.column_names, source.filter,
+    source.kind
   );
 
   -- step 6: delete old subscriptions for this queue not in new set
   delete from pgconductor._private_event_subscriptions target
   where target.queue = p_queue_name
+    and target.kind = 'task_trigger'
     and not exists (
       select 1 from unnest(p_event_subscriptions) source
       where target.task_key = source.task_key

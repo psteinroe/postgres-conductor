@@ -502,6 +502,18 @@ describe("Maintenance Task", () => {
 			returning id
 		`;
 		await db.client.processEvents({ batchSize: 10 });
+		const [waitingExecution] = await db.sql<{ id: string }[]>`
+			insert into pgconductor._private_executions
+				(task_key, queue, payload, run_at, waiting_step_key)
+			values ('maintenance-event-task', 'default', '{}', 'infinity'::timestamptz, 'retained-step')
+			returning id
+		`;
+		await db.sql`
+			insert into pgconductor._private_event_subscriptions
+				(task_key, queue, event_key, kind, execution_id, step_key, wait_after_event_position)
+			values ('maintenance-event-task', 'default', 'maintenance.event', 'execution_wait',
+				${waitingExecution!.id}::uuid, 'retained-step', 0)
+		`;
 
 		await db.client.setFakeTime({ date: base });
 		const [currentEvent] = await db.sql<{ id: string }[]>`
@@ -533,11 +545,21 @@ describe("Maintenance Task", () => {
 		const remainingById = new Map(remaining.map((row) => [row.id, row.deliveries]));
 		expect(remainingById).toEqual(
 			new Map([
+				[oldEvent!.id, "1"],
 				[currentEvent!.id, "1"],
 				[pendingEvent!.id, "0"],
 			]),
 		);
 		expect(subscription?.id).toBeString();
+		await db.sql`
+			delete from pgconductor._private_event_subscriptions
+			where execution_id = ${waitingExecution!.id}::uuid
+		`;
+		expect(await db.client.removeProcessedEvents({ before: base, batchSize: 10 })).toBe(false);
+		const oldRemaining = await db.sql`
+			select id from pgconductor._private_custom_events where id = ${oldEvent!.id}::uuid
+		`;
+		expect(oldRemaining).toHaveLength(0);
 		await db.client.clearFakeTime();
 	}, 30000);
 });

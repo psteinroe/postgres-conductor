@@ -525,10 +525,12 @@ begin
       s.when_clause,
       s.payload_fields,
       s.column_names,
-      s.filter
+      s.filter,
+      'task_trigger' as kind
     from unnest(p_event_subscriptions) as s
   ) as source
   on (
+    target.kind = 'task_trigger' and
     target.queue = source.queue and
     target.task_key = source.task_key and
     coalesce(target.event_key, '') = coalesce(source.event_key, '') and
@@ -544,16 +546,18 @@ begin
   )
   when not matched then insert (
     task_key, queue, event_key, schema_name, table_name, operation,
-    when_clause, payload_fields, column_names, filter
+    when_clause, payload_fields, column_names, filter, kind
   ) values (
     source.task_key, source.queue, source.event_key,
     source.schema_name, source.table_name, source.operation,
-    source.when_clause, source.payload_fields, source.column_names, source.filter
+    source.when_clause, source.payload_fields, source.column_names, source.filter,
+    source.kind
   );
 
   -- step 6: delete old subscriptions for this queue not in new set
   delete from pgconductor._private_event_subscriptions target
   where target.queue = p_queue_name
+    and target.kind = 'task_trigger'
     and not exists (
       select 1 from unnest(p_event_subscriptions) source
       where target.task_key = source.task_key
@@ -962,12 +966,15 @@ create unique index idx_executions_event_subscription
     on pgconductor._private_executions (event_created_at, event_id, subscription_id, queue)
     where event_id is not null and event_created_at is not null and subscription_id is not null;
 
--- Events are an append-only inbox. processed_at acknowledges successful fan-out;
--- a failed processor transaction leaves the event unprocessed automatically.
+-- Events are an append-only inbox. Fan-out and acknowledgement share one
+-- transaction, so a failed processor leaves the event unprocessed.
+create sequence pgconductor._private_event_position_seq as bigint;
+
 create table if not exists pgconductor._private_custom_events (
     id uuid default pgconductor._private_portable_uuidv7() not null,
     event_key text not null,
     payload jsonb not null default '{}'::jsonb,
+    event_position bigint not null default nextval('pgconductor._private_event_position_seq'),
     created_at timestamptz default pgconductor._private_current_time() not null,
     processed_at timestamptz,
     primary key (created_at, id)
@@ -977,8 +984,10 @@ create table if not exists pgconductor._private_custom_events_default
     partition of pgconductor._private_custom_events
     for values from (minvalue) to (maxvalue);
 
+create index if not exists idx_custom_events_wait_lookup
+    on pgconductor._private_custom_events (event_key, event_position, created_at, id);
 create index if not exists idx_custom_events_pending
-    on pgconductor._private_custom_events (event_key, created_at, id)
+    on pgconductor._private_custom_events (event_position, created_at, id)
     where processed_at is null;
 
 create table if not exists pgconductor._private_event_subscriptions (
@@ -994,21 +1003,43 @@ create table if not exists pgconductor._private_event_subscriptions (
     column_names text[],
     filter jsonb,
     kind text not null default 'task_trigger',
+    execution_id uuid,
+    step_key text,
+    expires_at timestamptz,
+    wait_after_event_position bigint,
     created_at timestamptz not null default pgconductor._private_current_time(),
     constraint chk_event_type check (
         (event_key is not null and schema_name is null and table_name is null and operation is null)
         or
         (event_key is null and schema_name is not null and table_name is not null and operation is not null)
     ),
-    constraint chk_event_subscription_kind check (kind in ('task_trigger', 'execution_wait'))
+    constraint chk_event_subscription_kind check (kind in ('task_trigger', 'execution_wait')),
+    constraint chk_event_subscription_shape check (
+        (kind = 'task_trigger' and execution_id is null and step_key is null
+            and expires_at is null and wait_after_event_position is null)
+        or
+        (kind = 'execution_wait' and execution_id is not null and step_key is not null
+            and event_key is not null)
+    ),
+    constraint fk_event_subscription_execution foreign key (execution_id, queue)
+        references pgconductor._private_executions(id, queue) on delete cascade
 );
 
 create index if not exists idx_event_subscriptions_custom
     on pgconductor._private_event_subscriptions (event_key)
-    where event_key is not null;
+    where event_key is not null and kind = 'task_trigger';
+create index if not exists idx_event_subscriptions_wait_custom
+    on pgconductor._private_event_subscriptions (event_key, wait_after_event_position, expires_at)
+    where event_key is not null and kind = 'execution_wait';
 create index if not exists idx_event_subscriptions_database
     on pgconductor._private_event_subscriptions (schema_name, table_name, operation)
     where schema_name is not null;
+create index if not exists idx_event_subscriptions_wait_execution
+    on pgconductor._private_event_subscriptions (execution_id, queue, step_key)
+    where kind = 'execution_wait';
+create unique index if not exists idx_event_subscriptions_execution_step
+    on pgconductor._private_event_subscriptions (execution_id, step_key)
+    where execution_id is not null;
 
 -- Compiled equality constraints are deliberately separate from event payloads.
 -- This keeps emission cheap while giving the set-wise matcher an indexed source.
@@ -1077,6 +1108,137 @@ returns jsonb language sql immutable set search_path to '' as $function$
     end;
 $function$;
 
+create or replace function pgconductor._private_resolve_event_waits(
+    p_batch_size integer default 100
+) returns integer language plpgsql volatile security definer set search_path to '' as $function$
+declare
+    v_now timestamptz;
+    v_wait record;
+    v_event record;
+    v_has_event boolean;
+    v_resolved integer := 0;
+begin
+    perform pg_advisory_xact_lock(hashtext('pgconductor:event-waits'));
+    v_now := pgconductor._private_current_time();
+
+    -- Select resolvable subscriptions before applying the batch limit. This keeps
+    -- unmatched indefinite waits (and executions waiting on children, which have
+    -- no event subscription) from starving waits that can make progress.
+    -- Lock executions before subscriptions. Cancellation updates executions first
+    -- and its cleanup trigger then removes subscriptions in the same order.
+    for v_wait in
+        with candidate_subscriptions as materialized (
+            select s.id subscription_id, s.execution_id, s.queue
+            from pgconductor._private_event_subscriptions s
+            join pgconductor._private_executions e
+              on e.id = s.execution_id and e.queue = s.queue
+             and e.waiting_step_key = s.step_key
+            where s.kind = 'execution_wait'
+              and e.completed_at is null and e.failed_at is null and e.cancelled = false
+              and (
+                  (s.expires_at is not null and s.expires_at <= v_now)
+                  or exists (
+                      select 1
+                      from pgconductor._private_custom_events event
+                      where event.event_key = s.event_key
+                        and event.event_position > coalesce(s.wait_after_event_position, 0)
+                        and (s.expires_at is null or event.created_at <= s.expires_at)
+                        and not exists (
+                            select 1
+                            from pgconductor._private_event_subscription_filters f
+                            where f.subscription_id = s.id
+                              and not exists (
+                                  select 1
+                                  from pgconductor._private_event_subscription_filters a
+                                  where a.subscription_id = f.subscription_id
+                                    and a.field_name = f.field_name
+                                    and (event.payload -> a.field_name) = a.value
+                              )
+                        )
+                  )
+              )
+            order by s.created_at, s.id
+            limit greatest(coalesce(p_batch_size, 0), 0)
+        ), locked_executions as materialized (
+            select e.id, e.queue, e.waiting_step_key
+            from pgconductor._private_executions e
+            join candidate_subscriptions c on c.execution_id = e.id and c.queue = e.queue
+            where e.waiting_step_key is not null
+              and e.completed_at is null and e.failed_at is null and e.cancelled = false
+            order by e.id
+            for update skip locked
+        ), locked_waits as materialized (
+            select e.id execution_id, e.queue, e.waiting_step_key step_key,
+                   s.id subscription_id, s.event_key, s.payload_fields,
+                   s.wait_after_event_position, s.expires_at
+            from locked_executions e
+            join pgconductor._private_event_subscriptions s
+              on s.execution_id = e.id and s.queue = e.queue
+             and s.step_key = e.waiting_step_key and s.kind = 'execution_wait'
+            for update of s
+        )
+        select * from locked_waits
+    loop
+        -- Look at persisted events regardless of processed status. This prevents
+        -- concurrent task-event processors from changing wait delivery order.
+        select e.event_key, e.payload, e.event_position, e.created_at
+        into v_event
+        from pgconductor._private_custom_events e
+        where e.event_key = v_wait.event_key
+          and e.event_position > coalesce(v_wait.wait_after_event_position, 0)
+          and (v_wait.expires_at is null or e.created_at <= v_wait.expires_at)
+          and not exists (
+              select 1
+              from pgconductor._private_event_subscription_filters f
+              where f.subscription_id = v_wait.subscription_id
+                and not exists (
+                    select 1
+                    from pgconductor._private_event_subscription_filters a
+                    where a.subscription_id = f.subscription_id
+                      and a.field_name = f.field_name
+                      and (e.payload -> a.field_name) = a.value
+                )
+          )
+        order by e.event_position, e.created_at, e.id
+        limit 1;
+
+        v_has_event := found;
+        -- A matching event wins even if resolution runs after its deadline.
+        if v_has_event or (v_wait.expires_at is not null and v_wait.expires_at <= v_now) then
+            delete from pgconductor._private_event_subscriptions
+            where id = v_wait.subscription_id;
+
+            if v_has_event then
+                insert into pgconductor._private_steps(execution_id, queue, key, result)
+                values (
+                    v_wait.execution_id, v_wait.queue, v_wait.step_key,
+                    jsonb_build_object('result', jsonb_build_object(
+                        'name', v_event.event_key,
+                        'payload', pgconductor._private_extract_event_payload(
+                            v_wait.payload_fields, v_event.payload
+                        )
+                    ))
+                )
+                on conflict (execution_id, key) do nothing;
+            else
+                insert into pgconductor._private_steps(execution_id, queue, key, result)
+                values (
+                    v_wait.execution_id, v_wait.queue, v_wait.step_key,
+                    jsonb_build_object('__pgconductor_wait_for_event_timeout', true)
+                )
+                on conflict (execution_id, key) do nothing;
+            end if;
+
+            update pgconductor._private_executions
+            set run_at = v_now, waiting_on_execution_id = null, waiting_step_key = null
+            where id = v_wait.execution_id and queue = v_wait.queue;
+            v_resolved := v_resolved + 1;
+        end if;
+    end loop;
+    return v_resolved;
+end;
+$function$;
+
 create or replace function pgconductor._private_process_custom_events(
     p_batch_size integer default 100
 ) returns integer language plpgsql volatile security definer set search_path to '' as $function$
@@ -1088,7 +1250,7 @@ begin
         select e.created_at, e.id, e.event_key, e.payload
         from pgconductor._private_custom_events e
         where e.processed_at is null
-        order by e.created_at, e.id
+        order by e.event_position, e.created_at, e.id
         limit greatest(coalesce(p_batch_size, 0), 0)
         for update skip locked
     ), matches as materialized (
@@ -1099,7 +1261,8 @@ begin
         from candidates c
         join pgconductor._private_event_subscriptions s on s.event_key = c.event_key
         join pgconductor._private_tasks t on t.key = s.task_key and t.queue = s.queue
-        where s.when_clause is null
+        where s.kind = 'task_trigger'
+          and s.when_clause is null
           and not exists (
               select 1
               from pgconductor._private_event_subscription_filters f
@@ -1148,11 +1311,38 @@ $function$;
 -- maintenance: active/retryable work is never removed.
 create or replace function pgconductor._private_remove_processed_events(p_before timestamptz, p_batch_size integer default 1000)
 returns integer language sql volatile security definer set search_path to '' as $function$
-    with candidates as (
-        select created_at, id
-        from pgconductor._private_custom_events
-        where processed_at is not null and processed_at < p_before
-        order by processed_at, created_at, id
+    with event_wait_lock as materialized (
+        select pg_advisory_xact_lock(hashtext('pgconductor:event-waits')) as locked
+    ), candidates as (
+        select e.created_at, e.id
+        from pgconductor._private_custom_events e
+        cross join event_wait_lock
+        where e.processed_at is not null and e.processed_at < p_before
+          and not exists (
+              select 1
+              from pgconductor._private_event_subscriptions s
+              join pgconductor._private_executions x
+                on x.id = s.execution_id and x.queue = s.queue
+               and x.waiting_step_key = s.step_key
+              where s.kind = 'execution_wait'
+                and x.completed_at is null and x.failed_at is null and x.cancelled = false
+                and s.event_key = e.event_key
+                and e.event_position > coalesce(s.wait_after_event_position, 0)
+                and (s.expires_at is null or e.created_at <= s.expires_at)
+                and not exists (
+                    select 1
+                    from pgconductor._private_event_subscription_filters f
+                    where f.subscription_id = s.id
+                      and not exists (
+                          select 1
+                          from pgconductor._private_event_subscription_filters a
+                          where a.subscription_id = f.subscription_id
+                            and a.field_name = f.field_name
+                            and (e.payload -> a.field_name) = a.value
+                      )
+                )
+          )
+        order by e.processed_at, e.created_at, e.id
         limit greatest(coalesce(p_batch_size, 0), 0)
         for update skip locked
     ), deleted as (
@@ -1167,10 +1357,15 @@ $function$;
 create or replace function pgconductor.emit_event(
     p_event_key text,
     p_payload jsonb default '{}'::jsonb
-) returns uuid language sql volatile set search_path to '' as $function$
+) returns uuid language plpgsql volatile security definer set search_path to '' as $function$
+declare v_id uuid;
+begin
+    perform pg_advisory_xact_lock(hashtext('pgconductor:event-waits'));
     insert into pgconductor._private_custom_events (event_key, payload)
     values (p_event_key, p_payload)
-    returning id;
+    returning id into v_id;
+    return v_id;
+end;
 $function$;
 
 create or replace function pgconductor._private_build_column_list(
@@ -1229,7 +1424,8 @@ begin
         select exists(
             select 1
             from pgconductor._private_event_subscriptions
-            where table_name = v_table_name
+            where kind = 'task_trigger'
+                and table_name = v_table_name
                 and schema_name = v_schema_name
                 and operation = v_op
         ) into v_has_subscriptions;
@@ -1265,7 +1461,8 @@ begin
                 ), e'\n')
                 from pgconductor._private_event_subscriptions as sub
                 join pgconductor._private_tasks as t on t.key = sub.task_key and t.queue = sub.queue
-                where sub.table_name = v_table_name
+                where sub.kind = 'task_trigger'
+                    and sub.table_name = v_table_name
                     and sub.schema_name = v_schema_name
                     and sub.operation = v_op
             );
@@ -1343,13 +1540,33 @@ create or replace function pgconductor.emit_event(
     p_payload jsonb default '{}'::jsonb
 )
     returns uuid
-    language sql
+    language plpgsql
     volatile
+    security definer
     set search_path to ''
 as $_$
+declare v_id uuid;
+begin
+    perform pg_advisory_xact_lock(hashtext('pgconductor:event-waits'));
     insert into pgconductor._private_custom_events (event_key, payload)
     values (p_event_key, p_payload)
-    returning id;
+    returning id into v_id;
+    return v_id;
+end;
 $_$;
+
+
+create or replace function pgconductor._private_cleanup_execution_wait()
+returns trigger language plpgsql security definer set search_path to '' as $function$
+begin
+    if new.cancelled or new.completed_at is not null or new.failed_at is not null then
+        delete from pgconductor._private_event_subscriptions
+        where execution_id = new.id and queue = new.queue and kind = 'execution_wait';
+    end if;
+    return new;
+end;
+$function$;
+create trigger cleanup_execution_wait after update of cancelled, completed_at, failed_at
+on pgconductor._private_executions for each row execute function pgconductor._private_cleanup_execution_wait();
 `,
 });

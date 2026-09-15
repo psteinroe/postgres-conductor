@@ -5,6 +5,7 @@ import type {
 	ExecutionSpec,
 	TaskSpec,
 	Payload,
+	JsonValue,
 	SetFakeTimeArgs,
 	// EventSubscriptionSpec,
 } from "../../src/database-client";
@@ -22,6 +23,7 @@ import type {
 	LoadStepArgs,
 	SaveStepArgs,
 	ClearWaitingStateArgs,
+	RegisterEventWaitArgs,
 	OrchestratorShutdownArgs,
 	// EmitEventArgs,
 } from "../../src/query-builder";
@@ -110,19 +112,43 @@ interface StoredEventSubscription {
 	task_key: string;
 	queue: string;
 	event_key: string | null;
-	filter: Record<string, unknown[]> | null;
+	filter: Record<string, JsonValue[]> | null;
 	execution_id?: string;
 	step_key?: string;
 	source?: "event" | "db";
 	timeout_at?: Date | null;
+	wait_after_event_position?: number;
 }
 
 interface StoredCustomEvent {
 	id: string;
 	event_key: string;
-	payload: Payload;
+	payload: JsonValue;
 	created_at: Date;
 	processed_at: Date | null;
+	event_position: number;
+}
+
+function isPayload(value: JsonValue): value is Payload {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function jsonEquals(left: JsonValue | undefined, right: JsonValue | undefined): boolean {
+	if (left === right) return true;
+	if (left === null || right === null || typeof left !== typeof right) return false;
+	if (Array.isArray(left) || Array.isArray(right)) {
+		if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) return false;
+		return left.every((value, index) => jsonEquals(value, right[index]));
+	}
+	if (typeof left === "object" && typeof right === "object") {
+		const leftKeys = Object.keys(left);
+		const rightKeys = Object.keys(right);
+		return (
+			leftKeys.length === rightKeys.length &&
+			leftKeys.every((key) => Object.hasOwn(right, key) && jsonEquals(left[key], right[key]))
+		);
+	}
+	return false;
 }
 
 interface SignalData {
@@ -146,6 +172,7 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 	private currentTime: Date;
 	private migrationNumber = -1;
 	private idCounter = 0;
+	private lastEventPosition = 0;
 
 	constructor(initialTime: Date = new Date()) {
 		this.currentTime = new Date(initialTime);
@@ -326,7 +353,7 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 				task_key: spec.task_key,
 				queue: spec.queue,
 				event_key: spec.event_key,
-				filter: spec.filter as Record<string, unknown[]> | null,
+				filter: spec.filter,
 			});
 		}
 
@@ -1074,6 +1101,50 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 		});
 	}
 
+	async registerEventWait(
+		args: RegisterEventWaitArgs,
+		_opts?: { signal?: AbortSignal },
+	): Promise<boolean> {
+		const exec = this.executions.get(args.executionId);
+		if (
+			!exec ||
+			exec.queue !== args.queue ||
+			exec.task_key !== args.taskKey ||
+			exec.orchestrator_id !== args.orchestratorId ||
+			exec.state !== "running" ||
+			exec.cancelled ||
+			exec.failed_at
+		)
+			return false;
+		const existing = [...this.eventSubscriptions.values()].find(
+			(subscription) =>
+				subscription.execution_id === args.executionId && subscription.step_key === args.stepKey,
+		);
+		if (existing) return false;
+		const id = this.generateId();
+		this.eventSubscriptions.set(id, {
+			id,
+			task_key: args.taskKey,
+			queue: args.queue,
+			event_key: args.eventKey,
+			filter: args.filter,
+			execution_id: args.executionId,
+			step_key: args.stepKey,
+			source: "event",
+			wait_after_event_position: this.lastEventPosition,
+			timeout_at:
+				args.timeoutMs == null ? null : new Date(this.getInternalTime().getTime() + args.timeoutMs),
+		});
+		exec.state = "pending";
+		exec.run_at = new Date(8640000000000000);
+		exec.waiting_on_execution_id = null;
+		exec.waiting_step_key = args.stepKey;
+		exec.waiting_timeout_at =
+			args.timeoutMs == null ? null : new Date(this.getInternalTime().getTime() + args.timeoutMs);
+		exec.orchestrator_id = null;
+		return true;
+	}
+
 	async clearWaitingState(
 		args: ClearWaitingStateArgs,
 		_opts?: { signal?: AbortSignal },
@@ -1129,26 +1200,99 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 		return this.generateId();
 	}
 
-	async emitEvent(args: { eventKey: string; payload?: unknown }): Promise<string> {
+	async emitEvent(args: { eventKey: string; payload?: JsonValue }): Promise<string> {
 		const id = this.generateId();
 		this.customEvents.set(id, {
 			id,
 			event_key: args.eventKey,
-			payload: (args.payload && typeof args.payload === "object" ? args.payload : {}) as Payload,
+			payload: args.payload ?? {},
 			created_at: this.getInternalTime(),
 			processed_at: null,
+			event_position: ++this.lastEventPosition,
 		});
 		return id;
 	}
 
+	async resolveEventWaits(args: { batchSize: number }): Promise<number> {
+		let count = 0;
+		const now = this.getInternalTime();
+		const candidates = [...this.eventSubscriptions.values()]
+			.filter((subscription) => subscription.execution_id)
+			.filter((subscription) => {
+				const exec = this.executions.get(subscription.execution_id!);
+				if (!exec || exec.waiting_step_key !== subscription.step_key) return false;
+				const hasEvent = [...this.customEvents.values()].some(
+					(candidate) =>
+						candidate.event_key === subscription.event_key &&
+						candidate.event_position > (subscription.wait_after_event_position ?? 0) &&
+						(!subscription.timeout_at || candidate.created_at <= subscription.timeout_at) &&
+						Object.entries(subscription.filter || {}).every(([field, values]) =>
+							values.some((value) =>
+								jsonEquals(
+									value,
+									isPayload(candidate.payload) ? candidate.payload[field] : undefined,
+								),
+							),
+						),
+				);
+				return hasEvent || Boolean(subscription.timeout_at && subscription.timeout_at <= now);
+			})
+			.sort((left, right) => left.id.localeCompare(right.id))
+			.slice(0, Math.max(args.batchSize || 0, 0));
+		for (const subscription of candidates) {
+			const exec = this.executions.get(subscription.execution_id!);
+			if (!exec || exec.waiting_step_key !== subscription.step_key) continue;
+			const event = [...this.customEvents.values()]
+				.filter((candidate) => candidate.event_key === subscription.event_key)
+				.filter(
+					(candidate) => candidate.event_position > (subscription.wait_after_event_position ?? 0),
+				)
+				.filter(
+					(candidate) =>
+						!subscription.timeout_at || candidate.created_at <= subscription.timeout_at,
+				)
+				.filter((candidate) =>
+					Object.entries(subscription.filter || {}).every(([field, values]) =>
+						values.some((value) =>
+							jsonEquals(
+								value,
+								isPayload(candidate.payload) ? candidate.payload[field] : undefined,
+							),
+						),
+					),
+				)
+				.sort((a, b) => a.event_position - b.event_position)[0];
+			if (!event && (!subscription.timeout_at || subscription.timeout_at > now)) continue;
+			this.saveWaitResult(
+				exec,
+				subscription.step_key!,
+				event
+					? {
+							result: { name: event.event_key, payload: structuredClone(event.payload) as Payload },
+						}
+					: { __pgconductor_wait_for_event_timeout: true },
+			);
+			exec.run_at = now;
+			exec.waiting_step_key = null;
+			exec.waiting_timeout_at = null;
+			this.eventSubscriptions.delete(subscription.id);
+			count++;
+		}
+		return count;
+	}
+
 	async processEvents(_args: { batchSize: number }): Promise<number> {
 		let count = 0;
-		for (const event of this.customEvents.values()) {
-			if (event.processed_at) continue;
-			for (const subscription of this.eventSubscriptions.values()) {
-				if (subscription.event_key !== event.event_key) continue;
+		const now = this.getInternalTime();
+		const events = [...this.customEvents.values()]
+			.filter((event) => !event.processed_at)
+			.sort((left, right) => left.event_position - right.event_position);
+		for (const event of events) {
+			const payload = isPayload(event.payload) ? event.payload : {};
+			for (const subscription of [...this.eventSubscriptions.values()]) {
+				if (subscription.execution_id || subscription.event_key !== event.event_key) continue;
 				const matches = Object.entries(subscription.filter || {}).every(([field, values]) =>
-					(values as unknown[]).some((value) => Object.is(value, event.payload[field])),
+					values.some((value) => jsonEquals(value, payload[field])),
 				);
 				if (!matches) continue;
 				const deliveryKey = `${event.id}:${subscription.id}`;
@@ -1157,16 +1301,27 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 				await this.invoke({
 					task_key: subscription.task_key,
 					queue: subscription.queue,
-					payload: {
-						event: event.event_key,
-						payload: structuredClone(event.payload),
-					},
+					payload: { event: event.event_key, payload: structuredClone(event.payload) as Payload },
 				});
 			}
-			event.processed_at = this.getInternalTime();
+			event.processed_at = now;
 			count++;
 		}
 		return count;
+	}
+
+	private saveWaitResult(exec: StoredExecution, stepKey: string, result: Payload): void {
+		let steps = this.steps.get(exec.id);
+		if (!steps) {
+			steps = new Map();
+			this.steps.set(exec.id, steps);
+		}
+		steps.set(stepKey, {
+			execution_id: exec.id,
+			step_key: stepKey,
+			result,
+			created_at: this.getInternalTime(),
+		});
 	}
 
 	async removeProcessedEvents(args: { before: Date; batchSize: number }): Promise<boolean> {
@@ -1313,6 +1468,7 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 		this.eventDeliveries.clear();
 		this.eventPartitions.clear();
 		this.idCounter = 0;
+		this.lastEventPosition = 0;
 	}
 
 	/**
