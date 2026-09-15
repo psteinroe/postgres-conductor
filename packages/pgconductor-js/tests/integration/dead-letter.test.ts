@@ -88,7 +88,6 @@ describe("dead-letter queues (Postgres integration)", () => {
 			defaultWorker: { pollIntervalMs: 10, flushIntervalMs: 10 },
 		});
 		await sourceOrchestrator.start();
-		const startedAt = new Date();
 		await conductor.invoke({ name: "charge" }, { value: "order-42" });
 		await eventually(async () => {
 			const rows = await db.sql<{ attempts: number }[]>`
@@ -97,7 +96,12 @@ describe("dead-letter queues (Postgres integration)", () => {
 			`;
 			return rows[0]?.attempts === 1;
 		});
-		await db.client.setFakeTime({ date: new Date(startedAt.getTime() + 16000) });
+		const [retry] = await db.sql<{ run_at: Date }[]>`
+			select run_at from pgconductor._private_executions
+			where task_key = 'charge'
+		`;
+		if (!retry) throw new Error("expected persisted retry");
+		await db.client.setFakeTime({ date: new Date(retry.run_at.getTime() + 1) });
 		await eventually(async () => {
 			const rows = await db.sql<{ count: string }[]>`
 				select count(*)::text as count from pgconductor._private_executions
