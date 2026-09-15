@@ -29,6 +29,7 @@ export class MockDatabaseClient implements IDatabaseClient {
 	loadStep = mock(async () => null);
 	saveStep = mock(async (_args) => {});
 	clearWaitingState = mock(async () => {});
+	registerEventWait = mock(async () => true);
 	cancelExecution = mock(async () => true);
 	getCurrentTime = mock(async () => new Date());
 	setFakeTime = mock(async () => {});
@@ -36,6 +37,7 @@ export class MockDatabaseClient implements IDatabaseClient {
 	subscribeEvent = mock(async () => "mock-subscription-id");
 	subscribeDbChange = mock(async () => "mock-subscription-id");
 	emitEvent = mock(async () => "mock-event-id");
+	resolveEventWaits = mock(async () => 0);
 	processEvents = mock(async () => 0);
 
 	constructor(overrides: Partial<IDatabaseClient> = {}) {

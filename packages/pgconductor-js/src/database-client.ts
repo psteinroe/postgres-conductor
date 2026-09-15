@@ -17,6 +17,7 @@ import {
 	type LoadStepArgs,
 	type SaveStepArgs,
 	type ClearWaitingStateArgs,
+	type RegisterEventWaitArgs,
 	type EmitEventArgs,
 } from "./query-builder";
 import { makeChildLogger, type Logger } from "./lib/logger";
@@ -584,11 +585,32 @@ export class DatabaseClient {
 		});
 	}
 
+	async registerEventWait(
+		args: RegisterEventWaitArgs,
+		opts?: QueryMethodOptions,
+	): Promise<boolean> {
+		const result = await this.query(() => this.builder.buildRegisterEventWait(args), {
+			label: "registerEventWait",
+			...opts,
+		});
+		return result[0]?.registered === true;
+	}
+
 	async clearWaitingState(args: ClearWaitingStateArgs, opts?: QueryMethodOptions): Promise<void> {
 		await this.query(() => this.builder.buildClearWaitingState(args), {
 			label: "clearWaitingState",
 			...opts,
 		});
+	}
+
+	async resolveEventWaits(args: { batchSize: number }, opts?: QueryMethodOptions): Promise<number> {
+		const result = await this.query(
+			() => this.sql<{ resolved: number }[]>`
+				select pgconductor._private_resolve_event_waits(${args.batchSize}::integer) as resolved
+			`,
+			{ label: "resolveEventWaits", ...opts },
+		);
+		return Number(result[0]?.resolved || 0);
 	}
 
 	async processEvents(args: { batchSize: number }, opts?: QueryMethodOptions): Promise<number> {

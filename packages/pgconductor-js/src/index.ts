@@ -4,3 +4,8 @@ export { Worker } from "./worker";
 export { Task } from "./task";
 export { SchemaManager } from "./schema-manager";
 export { MigrationStore } from "./migration-store";
+export { WaitForEventTimeoutError } from "./task-context";
+export type { EventDefinition, DefineEvent, FilterForEvent } from "./event-definition";
+export { defineEvent } from "./event-definition";
+export { parseDuration } from "./lib/duration";
+export type { DurationInput, DurationUnit } from "./lib/duration";

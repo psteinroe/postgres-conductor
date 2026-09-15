@@ -94,6 +94,17 @@ export type EmitEventArgs = {
 	payload?: JsonValue;
 };
 
+export type RegisterEventWaitArgs = {
+	executionId: string;
+	queue: string;
+	taskKey: string;
+	eventKey: string;
+	stepKey: string;
+	filter: Record<string, JsonValue[]> | null;
+	timeoutMs: number | null;
+	orchestratorId: string;
+};
+
 export class QueryBuilder {
 	constructor(private readonly sql: Sql) {}
 
@@ -969,6 +980,57 @@ export class QueryBuilder {
 			select e.id, e.queue, ${key}::text, ${this.sql.json(result)}::jsonb
 			from claimed_execution e
 			on conflict (execution_id, key) do nothing
+		`;
+	}
+
+	buildRegisterEventWait({
+		executionId,
+		queue,
+		taskKey,
+		eventKey,
+		stepKey,
+		filter,
+		timeoutMs,
+		orchestratorId,
+	}: RegisterEventWaitArgs): PendingQuery<RowList<{ registered: boolean }[]>> {
+		return this.sql<RowList<{ registered: boolean }[]>>`
+			with event_wait_lock as materialized (
+				select pg_advisory_xact_lock(hashtext('pgconductor:event-waits')) as locked
+			), claimed as materialized (
+				select e.id, e.queue
+				from pgconductor._private_executions e
+				cross join event_wait_lock
+				where e.id = ${executionId}::uuid and e.queue = ${queue}::text
+				  and e.task_key = ${taskKey}::text
+				  and e.locked_by = ${orchestratorId}::uuid
+				  and e.completed_at is null and e.failed_at is null and e.cancelled = false
+				for update
+			), event_position_state as materialized (
+				select case when sequence_state.is_called then sequence_state.last_value
+					else sequence_state.last_value - 1 end as position
+				from pgconductor._private_event_position_seq sequence_state
+				cross join event_wait_lock
+			), inserted as (
+				insert into pgconductor._private_event_subscriptions
+					(task_key, queue, event_key, filter, kind, execution_id, step_key, expires_at,
+					 wait_after_event_position)
+				select ${taskKey}::text, ${queue}::text, ${eventKey}::text,
+					${filter ? this.sql.json(filter) : null}::jsonb, 'execution_wait',
+					${executionId}::uuid, ${stepKey}::text,
+					case when ${timeoutMs}::bigint is null then null
+						else pgconductor._private_current_time() + (${timeoutMs}::bigint || ' milliseconds')::interval end,
+					event_position_state.position
+				from claimed cross join event_position_state
+				on conflict (execution_id, step_key) where execution_id is not null do nothing
+				returning id
+			)
+			update pgconductor._private_executions e
+			set waiting_on_execution_id = null, waiting_step_key = ${stepKey}::text,
+				run_at = 'infinity'::timestamptz,
+				locked_by = null, locked_at = null
+			from claimed c
+			where e.id = c.id and e.queue = c.queue and exists (select 1 from inserted)
+			returning exists (select 1 from inserted) as registered
 		`;
 	}
 

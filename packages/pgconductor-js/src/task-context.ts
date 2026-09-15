@@ -17,11 +17,13 @@ import type { TaskIdentifier } from "./task";
 import type { Logger } from "./lib/logger";
 import { WindowChecker } from "./lib/window-checker";
 import { TypedAbortController } from "./lib/typed-abort-controller";
+import { parseDuration, type DurationInput } from "./lib/duration";
 import type {
 	EventDefinition,
 	EventName,
 	FindEventByIdentifier,
 	InferEventPayload,
+	FilterForEvent,
 } from "./event-definition";
 
 export type TaskAbortReasons =
@@ -36,6 +38,7 @@ export type TaskAbortReasons =
 	  }
 	// the worker wants to shut down
 	| { reason: "parent-aborted"; __pgconductorTaskAborted: true }
+	| { reason: "wait-for-event"; step_key: string; __pgconductorTaskAborted: true }
 	// the task invoked a child
 	| {
 			reason: "child-invocation";
@@ -78,6 +81,14 @@ export function createTaskSignal(
 	}
 
 	return controller;
+}
+
+export class WaitForEventTimeoutError extends Error {
+	readonly code = "PGCONDUCTOR_WAIT_FOR_EVENT_TIMEOUT";
+	constructor(public readonly stepKey: string) {
+		super(`Timed out waiting for event at step "${stepKey}"`);
+		this.name = "WaitForEventTimeoutError";
+	}
 }
 
 export type TaskContextOptions = {
@@ -254,6 +265,65 @@ export class TaskContext<
 			reschedule_in_ms: ms,
 			step_key: id,
 		});
+	}
+
+	async waitForEvent<
+		TName extends EventName<Events>,
+		TDef extends FindEventByIdentifier<Events, TName> = FindEventByIdentifier<Events, TName>,
+	>(
+		stepKey: string,
+		options: {
+			event: TDef;
+			filter?: FilterForEvent<TDef>;
+			timeout?: DurationInput;
+		},
+	): Promise<{ name: TDef["name"]; payload: InferEventPayload<TDef> }> {
+		const cached = await this.opts.db.loadStep(
+			{
+				executionId: this.opts.execution.id,
+				queue: this.opts.execution.queue,
+				orchestratorId: this.opts.execution.locked_by,
+				key: stepKey,
+			},
+			{ signal: this.signal },
+		);
+		if (cached !== undefined) {
+			if ((cached as Record<string, unknown>).__pgconductor_wait_for_event_timeout === true)
+				throw new WaitForEventTimeoutError(stepKey);
+			return (cached as { result: { name: TDef["name"]; payload: InferEventPayload<TDef> } })
+				.result;
+		}
+
+		if (!stepKey) throw new Error("waitForEvent stepKey is required");
+		const timeoutMs = options.timeout === undefined ? null : parseDuration(options.timeout);
+		const allowed = new Set(options.event.filterable ?? []);
+		for (const [field, values] of Object.entries(options.filter ?? {})) {
+			if (!allowed.has(field))
+				throw new Error(
+					`Filter for event "${options.event.name}" contains undeclared field "${field}"`,
+				);
+			if (!Array.isArray(values) || values.length === 0)
+				throw new Error(
+					`Filter value for event "${options.event.name}" field "${field}" cannot be empty`,
+				);
+		}
+		const registered = await this.opts.db.registerEventWait(
+			{
+				executionId: this.opts.execution.id,
+				queue: this.opts.execution.queue,
+				taskKey: this.opts.execution.task_key,
+				eventKey: options.event.name,
+				stepKey,
+				filter: (options.filter as Record<string, JsonValue[]> | undefined) ?? null,
+				timeoutMs,
+				orchestratorId: this.opts.execution.locked_by,
+			},
+			{ signal: this.signal },
+		);
+		if (registered) return this.abortAndHangup({ reason: "wait-for-event", step_key: stepKey });
+		// Lost ownership between loading the step and registration: release rather
+		// than hanging a task that can no longer be resumed by this claim.
+		return this.abortAndHangup({ reason: "released", reschedule_in_ms: 0, step_key: stepKey });
 	}
 
 	async invoke<
