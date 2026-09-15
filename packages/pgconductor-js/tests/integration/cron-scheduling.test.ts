@@ -366,21 +366,23 @@ describe("Cron Scheduling", () => {
 
 		await orchestrator.start();
 		await conductor.invoke({ name: "dynamic-scheduler" }, {});
-		await waitFor(4000);
-		expect(targetExecutions.mock.calls.length).toBeGreaterThanOrEqual(1);
+		await waitForCondition(() => targetExecutions.mock.calls.length >= 1, 20_000);
 
-		const nextSchedules = await db.sql<Array<{ dedupe_key: string }>>`
-			SELECT dedupe_key
-			FROM pgconductor._private_executions
-			WHERE task_key = 'dynamic-target'
-				AND cron_expression IS NOT NULL
-				AND run_at > pgconductor._private_current_time()
-			ORDER BY run_at
-			LIMIT 1
-		`;
+		let nextSchedule: { dedupe_key: string } | undefined;
+		await waitForCondition(async () => {
+			[nextSchedule] = await db.sql<Array<{ dedupe_key: string }>>`
+				SELECT dedupe_key
+				FROM pgconductor._private_executions
+				WHERE task_key = 'dynamic-target'
+					AND cron_expression IS NOT NULL
+					AND run_at > pgconductor._private_current_time()
+				ORDER BY run_at
+				LIMIT 1
+			`;
+			return nextSchedule !== undefined;
+		}, 20_000);
 
-		expect(nextSchedules.length).toBe(1);
-		expect(nextSchedules[0]!.dedupe_key).toMatch(/^scheduled::reporting::\d+$/);
+		expect(nextSchedule?.dedupe_key).toMatch(/^scheduled::reporting::\d+$/);
 
 		await orchestrator.stop();
 		await db.destroy();
