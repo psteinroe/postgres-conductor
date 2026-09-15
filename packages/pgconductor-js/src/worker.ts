@@ -46,7 +46,31 @@ export type WorkerConfig = {
 /**
  * The default configuration for the Worker.
  */
-export const DEFAULT_WORKER_CONFIG: WorkerConfig = {
+export const EVENT_BATCH_SIZE = 100;
+
+const RETRYABLE_EVENT_ERROR_CODES = new Set([
+	"40001",
+	"40P01",
+	"55P03",
+	"57P01",
+	"57P02",
+	"57P03",
+	"53300",
+	"08000",
+	"08003",
+	"08006",
+	"08001",
+	"ECONNRESET",
+	"ECONNREFUSED",
+	"ETIMEDOUT",
+]);
+
+function isRetryableEventError(error: unknown): boolean {
+	const code = (error as { code?: string })?.code;
+	return code !== undefined && RETRYABLE_EVENT_ERROR_CODES.has(code);
+}
+
+const DEFAULT_WORKER_CONFIG: WorkerConfig = {
 	concurrency: 1,
 	flushBatchSize: 2,
 	fetchBatchSize: 2,
@@ -123,7 +147,11 @@ export class Worker<
 		any,
 		string
 	>[],
-	Events extends readonly EventDefinition<string, any>[] = readonly EventDefinition<string, any>[],
+	Events extends readonly EventDefinition<string, any, any>[] = readonly EventDefinition<
+		string,
+		any,
+		any
+	>[],
 > {
 	private orchestratorId: string | null = null;
 
@@ -138,7 +166,14 @@ export class Worker<
 	private _startDeferred: Deferred<void> | null = null;
 	private _stopDeferred: Deferred<void> | null = null;
 	private _abortController: AbortController | null = null;
+	private _drainDidWork = false;
 	private _runningTasks = new Map<string, TypedAbortController<TaskAbortReasons>>();
+	private eventProcessingGate: Promise<void> = Promise.resolve();
+
+	/** Used by Orchestrator to prevent local event fan-out before every worker registers. */
+	setEventProcessingGate(gate: Promise<void>): void {
+		this.eventProcessingGate = gate;
+	}
 
 	constructor(
 		public readonly queueName: string,
@@ -147,6 +182,7 @@ export class Worker<
 		private readonly logger: Logger,
 		config: Partial<WorkerConfig> = {},
 		private readonly extraContext: object = {},
+		private readonly eventDefinitions: readonly EventDefinition<string, any, any>[] = [],
 	) {
 		const maintenanceTask = createMaintenanceTask(this.queueName);
 		this.tasks = tasks.reduce(
@@ -180,6 +216,11 @@ export class Worker<
 	 */
 	get stopped(): Promise<void> {
 		return this._stopDeferred?.promise || Promise.resolve();
+	}
+
+	/** @internal Whether the last run-once pass observed any work. */
+	get drainDidWork(): boolean {
+		return this._drainDidWork;
 	}
 
 	/**
@@ -220,12 +261,30 @@ export class Worker<
 		}
 
 		this.orchestratorId = orchestratorId;
+		this._drainDidWork = false;
 		this._startDeferred = new Deferred<void>();
 		this._stopDeferred = new Deferred<void>();
 		this._abortController = new AbortController();
 
-		// Synchronous registration
-		await this.register();
+		// Synchronous registration. A failed registration rejects both lifecycle
+		// promises; callers must never observe a worker that started partially.
+		try {
+			await this.register();
+		} catch (error) {
+			// Registration is part of startup, not a running pipeline. Resolve the
+			// stop promise so callers that only await `start()` do not get an
+			// unhandled rejection, then discard every piece of this failed attempt.
+			const stopDeferred = this._stopDeferred;
+			this._abortController.abort();
+			// Reject `started` so an Orchestrator observes registration failure, but
+			// attach a noop handler because callers that only use start() do not
+			// necessarily observe this internal lifecycle promise.
+			this._startDeferred.promise.catch(() => {});
+			this._startDeferred.reject(error);
+			if (!stopDeferred.isSettled) stopDeferred.resolve();
+			this.resetLifecycle();
+			throw error;
+		}
 
 		// Worker is now started
 		this._startDeferred.resolve();
@@ -240,24 +299,105 @@ export class Worker<
 		}
 
 		const queue = new BatchingAsyncQueue<Execution>(this.fetchBatchSize * 2, batchConfigs);
-		void this.fetchExecutions(queue, { runOnce });
-
-		(async () => {
-			try {
-				// Consume from queue → execute → flush
-				await this.flushResults(this.executeTasks(queue));
-			} catch (err) {
-				this.logger.error("Worker pipeline error:", err);
-			} finally {
-				queue.close();
-				this._stopDeferred?.resolve();
-				this._startDeferred = null;
-				this._stopDeferred = null;
-				this._abortController = null;
-			}
-		})();
+		if (runOnce) {
+			void this.runDrainPipeline();
+		} else {
+			void this.fetchExecutions(queue, { runOnce });
+			void (async () => {
+				try {
+					await Promise.all([
+						this.flushResults(this.executeTasks(queue)),
+						this.runEventProcessor(),
+					]);
+				} catch (error) {
+					this.logger.error("Worker pipeline error:", error);
+					this._stopDeferred?.reject(error);
+				} finally {
+					queue.close();
+					if (this._stopDeferred && !this._stopDeferred.isSettled) this._stopDeferred.resolve();
+					this.resetLifecycle();
+				}
+			})();
+		}
 
 		return this._startDeferred.promise;
+	}
+
+	private async runEventProcessor(): Promise<void> {
+		await Promise.race([
+			this.eventProcessingGate,
+			new Promise<void>((resolve) =>
+				this.signal.addEventListener("abort", () => resolve(), { once: true }),
+			),
+		]);
+		await this.processEventBatches({ runOnce: false });
+	}
+
+	private async runDrainPipeline(): Promise<void> {
+		try {
+			while (!this.signal.aborted) {
+				await Promise.race([
+					this.eventProcessingGate,
+					new Promise<void>((resolve) =>
+						this.signal.addEventListener("abort", () => resolve(), {
+							once: true,
+						}),
+					),
+				]);
+				const events = await this.processEventBatches({ runOnce: true });
+				this._drainDidWork ||= events > 0;
+				const queue = new BatchingAsyncQueue<Execution>(
+					this.fetchBatchSize * 2,
+					new Map(
+						Array.from(this.tasks.entries()).flatMap(([key, task]) =>
+							task.batch ? [[key, task.batch] as const] : [],
+						),
+					),
+				);
+				const fetched = this.fetchExecutions(queue, { runOnce: true });
+				await this.flushResults(this.executeTasks(queue));
+				const executions = await fetched;
+				this._drainDidWork ||= executions > 0;
+				if (events === 0 && executions === 0) break;
+			}
+		} catch (error) {
+			this.logger.error("Worker pipeline error:", error);
+			this._stopDeferred?.reject(error);
+		} finally {
+			if (this._stopDeferred && !this._stopDeferred.isSettled) this._stopDeferred.resolve();
+			this.resetLifecycle();
+		}
+	}
+
+	private resetLifecycle(): void {
+		this._startDeferred = null;
+		this._stopDeferred = null;
+		this._abortController = null;
+		this.orchestratorId = null;
+		this.eventProcessingGate = Promise.resolve();
+	}
+
+	private async processEventBatches({ runOnce }: { runOnce: boolean }): Promise<number> {
+		let total = 0;
+		while (!this.signal.aborted) {
+			try {
+				const processed = await this.db.processEvents(
+					{ batchSize: EVENT_BATCH_SIZE },
+					{ signal: this.signal },
+				);
+				total += processed;
+				if (runOnce && processed === 0) return total;
+				if (!runOnce && processed === 0) {
+					await waitFor(this.pollIntervalMs, { signal: this.signal });
+				}
+			} catch (error) {
+				// Event fan-out is transactional. Non-retryable errors indicate a
+				// broken processor/schema and must fail the worker, not spin forever.
+				if (!isRetryableEventError(error)) throw error;
+				await waitFor(this.pollIntervalMs, { signal: this.signal });
+			}
+		}
+		return total;
 	}
 
 	/**
@@ -297,6 +437,37 @@ export class Worker<
 	}
 
 	private async register(): Promise<void> {
+		// Filters are an explicit event-definition allowlist. Validate again at
+		// registration so tasks assembled outside Conductor cannot bypass it.
+		for (const task of this.tasks.values()) {
+			for (const trigger of task.triggers) {
+				if (!("event" in trigger)) continue;
+				if ("when" in trigger) {
+					throw new Error(`Custom event "${trigger.event}" does not support a when clause`);
+				}
+				if (!("filter" in trigger) || !trigger.filter) continue;
+				const definition = this.eventDefinitions.find((event) => event.name === trigger.event);
+				if (!definition) {
+					throw new Error(`Filtered event "${trigger.event}" has no runtime event definition`);
+				}
+				const allowed = new Set<string>(definition.filterable ?? []);
+				for (const [field, values] of Object.entries(trigger.filter as Record<string, unknown>)) {
+					if (!allowed.has(field))
+						throw new Error(
+							`Filter for event "${trigger.event}" contains undeclared field "${field}"`,
+						);
+					if (!Array.isArray(values))
+						throw new Error(
+							`Filter value for event "${trigger.event}" field "${field}" must be an array`,
+						);
+					if (values.length === 0)
+						throw new Error(
+							`Filter value for event "${trigger.event}" field "${field}" cannot be empty`,
+						);
+				}
+			}
+		}
+
 		// Convert RetentionSettings to integer: null=keep, 0=delete now, N=delete after N days
 		const retentionToDays = (setting: boolean | { days: number } | undefined): number | null => {
 			if (setting === undefined || setting === false) return null;
@@ -349,9 +520,11 @@ export class Worker<
 						schema_name: null,
 						table_name: null,
 						operation: null,
-						when_clause: customTrigger.when || null,
+						// Custom events use the safe equality filter language only.
+						when_clause: null,
 						payload_fields: customTrigger.fields?.split(",").map((f: string) => f.trim()) || null,
 						column_names: null,
+						filter: customTrigger.filter || null,
 					};
 				});
 
@@ -369,6 +542,7 @@ export class Worker<
 						when_clause: dbTrigger.when || null,
 						payload_fields: null,
 						column_names: dbTrigger.columns?.split(",").map((c: string) => c.trim()) || null,
+						filter: null,
 					};
 				});
 
@@ -390,7 +564,8 @@ export class Worker<
 	private async fetchExecutions(
 		queue: BatchingAsyncQueue<Execution>,
 		{ runOnce = false }: { runOnce?: boolean },
-	) {
+	): Promise<number> {
+		let fetched = 0;
 		assert.ok(this.orchestratorId, "orchestratorId must be set when starting the pipeline");
 
 		// Pre-compute task metadata once
@@ -453,6 +628,7 @@ export class Worker<
 				}
 
 				for (const exec of executions) {
+					fetched++;
 					await queue.push(exec); // waits if full
 					if (this.signal.aborted) break;
 				}
@@ -462,6 +638,7 @@ export class Worker<
 		}
 
 		queue.close();
+		return fetched;
 	}
 
 	// --- Stage 2: Execute tasks concurrently ---

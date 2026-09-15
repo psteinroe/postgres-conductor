@@ -376,7 +376,8 @@ create type pgconductor.event_subscription_spec as (
     operation pgconductor._private_event_operation,
     when_clause text,
     payload_fields text[],
-    column_names text[]
+    column_names text[],
+    filter jsonb
 );
 
 create or replace function pgconductor._private_register_worker(
@@ -391,6 +392,23 @@ volatile
 set search_path to ''
 as $function$
 begin
+  -- Filter arrays are equality allowlists; an empty list is almost always a
+  -- configuration mistake and must not silently match nothing.
+  if exists (
+    select 1
+    from unnest(p_event_subscriptions) as spec
+    cross join lateral jsonb_each(coalesce(spec.filter, '{}'::jsonb)) as f
+    where jsonb_typeof(f.value) <> 'array' or jsonb_array_length(f.value) = 0
+  ) then
+    raise exception 'event subscription filters must contain non-empty arrays';
+  end if;
+  if exists (
+    select 1 from unnest(p_event_subscriptions) as spec
+    where spec.event_key is not null and spec.when_clause is not null
+  ) then
+    raise exception 'custom event subscriptions do not support when clauses';
+  end if;
+
   -- step 1: upsert queue (triggers partition creation)
   insert into pgconductor._private_queues (name)
   values (p_queue_name)
@@ -490,7 +508,8 @@ begin
       s.operation,
       s.when_clause,
       s.payload_fields,
-      s.column_names
+      s.column_names,
+      s.filter
     from unnest(p_event_subscriptions) as s
   ) as source
   on (
@@ -504,15 +523,16 @@ begin
     coalesce(array_to_string(target.payload_fields, ','), '') =
       coalesce(array_to_string(source.payload_fields, ','), '') and
     coalesce(array_to_string(target.column_names, ','), '') =
-      coalesce(array_to_string(source.column_names, ','), '')
+      coalesce(array_to_string(source.column_names, ','), '') and
+    target.filter is not distinct from source.filter
   )
   when not matched then insert (
     task_key, queue, event_key, schema_name, table_name, operation,
-    when_clause, payload_fields, column_names
+    when_clause, payload_fields, column_names, filter
   ) values (
     source.task_key, source.queue, source.event_key,
     source.schema_name, source.table_name, source.operation,
-    source.when_clause, source.payload_fields, source.column_names
+    source.when_clause, source.payload_fields, source.column_names, source.filter
   );
 
   -- step 6: delete old subscriptions for this queue not in new set
@@ -530,6 +550,7 @@ begin
           coalesce(array_to_string(source.payload_fields, ','), '')
         and coalesce(array_to_string(target.column_names, ','), '') =
           coalesce(array_to_string(source.column_names, ','), '')
+        and target.filter is not distinct from source.filter
     );
 end;
 $function$;

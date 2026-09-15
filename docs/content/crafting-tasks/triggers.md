@@ -109,6 +109,8 @@ await conductor.emit("user.created", {
 });
 ```
 
+Event fan-out and acknowledgement happen in one database transaction. If delivery fails, the event remains unprocessed and is retried automatically; successful delivery is acknowledged with `processed_at`.
+
 ### Field Selection
 
 For large events, you can select only specific fields to reduce payload size:

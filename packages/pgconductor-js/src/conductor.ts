@@ -20,6 +20,7 @@ import {
 	type TaskName,
 	type Trigger,
 	type ValidateTriggers,
+	type ValidateEventTriggers,
 } from "./task-definition";
 import { Worker, type WorkerConfig } from "./worker";
 import { DefaultLogger, type Logger } from "./lib/logger";
@@ -91,7 +92,8 @@ export class Conductor<
 	// Inferred types from schemas
 	Tasks extends readonly TaskDefinition<string, any, any, string>[] =
 		InferTasksFromSchema<TTaskSchemas>,
-	Events extends readonly EventDefinition<string, any>[] = InferEventsFromSchema<TEventSchemas>,
+	Events extends readonly EventDefinition<string, any, any>[] =
+		InferEventsFromSchema<TEventSchemas>,
 	Database extends GenericDatabase = InferDatabaseFromSchema<TDatabaseSchema>,
 > {
 	/**
@@ -164,7 +166,9 @@ export class Conductor<
 		const TTriggers extends object | readonly object[],
 	>(
 		definition: TDef & ValidateDeadLetterConfiguration<TDef, ResolvedPayload<Tasks, TDef>>,
-		triggers: TTriggers & ValidateTriggers<Tasks, TDef["name"], TTriggers, ResolvedQueue<TDef>>,
+		triggers: TTriggers &
+			ValidateTriggers<Tasks, TDef["name"], TTriggers, ResolvedQueue<TDef>> &
+			ValidateEventTriggers<Events, TTriggers>,
 		fn: TDef extends { readonly batch: BatchConfig }
 			? ResolvedReturns<Tasks, TDef> extends void
 				? (
@@ -191,6 +195,7 @@ export class Conductor<
 		TaskContext<Tasks, Events> & ExtraContext,
 		TaskEventFromTriggers<TTriggers, ResolvedPayload<Tasks, TDef>, Events, Database>
 	> {
+		this.validateEventFilters(triggers);
 		return Task.create<
 			TDef["name"],
 			ResolvedQueue<TDef>,
@@ -228,7 +233,40 @@ export class Conductor<
 			this.logger,
 			options.config,
 			this.options.context,
+			this.options.events?.definitions ?? [],
 		);
+	}
+
+	private validateEventFilters(triggers: object | readonly object[]): void {
+		const list = Array.isArray(triggers) ? triggers : [triggers];
+		for (const trigger of list) {
+			if (!("event" in trigger)) continue;
+			const eventName = (trigger as { event: string }).event;
+			if ("when" in trigger) {
+				throw new Error(`Custom event "${eventName}" does not support a when clause`);
+			}
+			if (!("filter" in trigger) || !trigger.filter) continue;
+			const definition = this.options.events?.definitions.find(
+				(candidate: EventDefinition<string, any, any>) => candidate.name === eventName,
+			);
+			if (!definition) {
+				throw new Error(`Filtered event "${eventName}" has no runtime event definition`);
+			}
+			const allowed = new Set(definition.filterable ?? []);
+			for (const [field, values] of Object.entries(trigger.filter as Record<string, unknown>)) {
+				if (!allowed.has(field)) {
+					throw new Error(`Filter for event "${eventName}" contains undeclared field "${field}"`);
+				}
+				if (!Array.isArray(values)) {
+					throw new Error(
+						`Filter value for event "${eventName}" field "${field}" must be an array`,
+					);
+				}
+				if (values.length === 0) {
+					throw new Error(`Filter value for event "${eventName}" field "${field}" cannot be empty`);
+				}
+			}
+		}
 	}
 
 	async invoke<const TTask extends { readonly name: string; readonly queue?: string }>(
@@ -298,6 +336,20 @@ export class Conductor<
 		TName extends EventName<Events>,
 		TDef extends FindEventByIdentifier<Events, TName> = FindEventByIdentifier<Events, TName>,
 	>(event: TName, payload: InferEventPayload<TDef>): Promise<string> {
+		// Runtime schemas are deliberately validated before the database call. This
+		// keeps emit a persistence boundary: an invalid event can never be queued.
+		const definition = this.options.events?.definitions.find(
+			(candidate: EventDefinition<string, any, any>) => candidate.name === event,
+		);
+		const standard = (definition?.payload as any)?.["~standard"];
+		if (standard?.validate) {
+			const result = await standard.validate(payload);
+			if (result && typeof result === "object" && "issues" in result && result.issues) {
+				throw new Error(`Invalid payload for event "${String(event)}"`);
+			}
+			payload = ((result as any)?.value ?? payload) as InferEventPayload<TDef>;
+		}
+
 		return this.db.emitEvent({
 			eventKey: event,
 			payload: payload as any,

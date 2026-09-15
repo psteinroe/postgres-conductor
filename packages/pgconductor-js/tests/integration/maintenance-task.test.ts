@@ -7,6 +7,7 @@ import { TestDatabasePool } from "../fixtures/test-database";
 import type { TestDatabase } from "../fixtures/test-database";
 import crypto from "crypto";
 import { TaskSchemas } from "../../src/schemas";
+import { createMaintenanceTask } from "../../src/maintenance-task";
 
 function hashToJitter(str: string): number {
 	const hash = crypto.createHash("sha256").update(str).digest();
@@ -477,5 +478,66 @@ describe("Maintenance Task", () => {
 			WHERE id = ${execId}
 		`;
 		expect(exec.length).toBe(1);
+	}, 30000);
+
+	test("removes old processed events and cascades deliveries only", async () => {
+		const db = await pool.child();
+		databases.push(db);
+		await Conductor.create({ sql: db.sql, context: {} }).ensureInstalled();
+		const base = new Date("2025-01-20T00:00:00Z");
+
+		await db.sql`
+			insert into pgconductor._private_tasks (key, queue)
+			values ('maintenance-event-task', 'default')
+		`;
+		const [subscription] = await db.sql<{ id: string }[]>`
+			insert into pgconductor._private_event_subscriptions (task_key, queue, event_key)
+			values ('maintenance-event-task', 'default', 'maintenance.event')
+			returning id
+		`;
+		await db.client.setFakeTime({ date: new Date(base.getTime() - 8 * 24 * 60 * 60 * 1000) });
+		const [oldEvent] = await db.sql<{ id: string }[]>`
+			insert into pgconductor._private_custom_events (event_key, payload)
+			values ('maintenance.event', '{}')
+			returning id
+		`;
+		await db.client.processEvents({ batchSize: 10 });
+
+		await db.client.setFakeTime({ date: base });
+		const [currentEvent] = await db.sql<{ id: string }[]>`
+			insert into pgconductor._private_custom_events (event_key, payload)
+			values ('maintenance.event', '{}')
+			returning id
+		`;
+		await db.client.processEvents({ batchSize: 10 });
+		const [pendingEvent] = await db.sql<{ id: string }[]>`
+			insert into pgconductor._private_custom_events (event_key, payload)
+			values ('maintenance.pending', '{}')
+			returning id
+		`;
+		const maintenance = createMaintenanceTask("default");
+		await maintenance.execute({ name: "pgconductor.maintenance" }, {
+			db: db.client,
+			tasks: new Map(),
+			signal: new AbortController().signal,
+		} as never);
+
+		const remaining = await db.sql<{ id: string; deliveries: string }[]>`
+			select e.id, count(d.subscription_id)::text as deliveries
+			from pgconductor._private_custom_events e
+			left join pgconductor._private_event_deliveries d
+				on d.event_created_at = e.created_at and d.event_id = e.id
+			where e.id = any(${[oldEvent!.id, currentEvent!.id, pendingEvent!.id]}::uuid[])
+			group by e.id
+		`;
+		const remainingById = new Map(remaining.map((row) => [row.id, row.deliveries]));
+		expect(remainingById).toEqual(
+			new Map([
+				[currentEvent!.id, "1"],
+				[pendingEvent!.id, "0"],
+			]),
+		);
+		expect(subscription?.id).toBeString();
+		await db.client.clearFakeTime();
 	}, 30000);
 });

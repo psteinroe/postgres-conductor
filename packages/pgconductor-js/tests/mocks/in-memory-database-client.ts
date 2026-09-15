@@ -107,15 +107,22 @@ interface StoredOrchestrator {
 
 interface StoredEventSubscription {
 	id: string;
-	execution_id: string;
-	step_key: string;
-	source: "event" | "db";
-	event_key?: string;
-	schema_name?: string;
-	table_name?: string;
-	operation?: string;
-	columns?: string[];
-	timeout_at: Date | null;
+	task_key: string;
+	queue: string;
+	event_key: string | null;
+	filter: Record<string, unknown[]> | null;
+	execution_id?: string;
+	step_key?: string;
+	source?: "event" | "db";
+	timeout_at?: Date | null;
+}
+
+interface StoredCustomEvent {
+	id: string;
+	event_key: string;
+	payload: Payload;
+	created_at: Date;
+	processed_at: Date | null;
 }
 
 interface SignalData {
@@ -133,6 +140,8 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 	private cronSchedules = new Map<string, StoredCronSchedule>();
 	private orchestrators = new Map<string, StoredOrchestrator>();
 	private eventSubscriptions = new Map<string, StoredEventSubscription>();
+	private customEvents = new Map<string, StoredCustomEvent>();
+	private eventDeliveries = new Set<string>();
 	private eventPartitions = new Set<string>();
 	private currentTime: Date;
 	private migrationNumber = -1;
@@ -303,6 +312,22 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 				dead_letter_task_key: taskSpec.deadLetterTaskKey || null,
 			};
 			this.tasks.set(this.taskId(taskSpec.key, task.queue), task);
+		}
+
+		// Registration is authoritative for this queue, just like PostgreSQL.
+		for (const id of [...this.eventSubscriptions.keys()]) {
+			if (this.eventSubscriptions.get(id)?.queue === args.queueName)
+				this.eventSubscriptions.delete(id);
+		}
+		for (const spec of args.eventSubscriptions || []) {
+			const id = this.generateId();
+			this.eventSubscriptions.set(id, {
+				id,
+				task_key: spec.task_key,
+				queue: spec.queue,
+				event_key: spec.event_key,
+				filter: spec.filter as Record<string, unknown[]> | null,
+			});
 		}
 
 		// Register cron schedules (ExecutionSpec[])
@@ -1104,8 +1129,52 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 		return this.generateId();
 	}
 
-	async emitEvent(): Promise<string> {
-		return this.generateId();
+	async emitEvent(args: { eventKey: string; payload?: unknown }): Promise<string> {
+		const id = this.generateId();
+		this.customEvents.set(id, {
+			id,
+			event_key: args.eventKey,
+			payload: (args.payload && typeof args.payload === "object" ? args.payload : {}) as Payload,
+			created_at: this.getInternalTime(),
+			processed_at: null,
+		});
+		return id;
+	}
+
+	async processEvents(_args: { batchSize: number }): Promise<number> {
+		let count = 0;
+		for (const event of this.customEvents.values()) {
+			if (event.processed_at) continue;
+			for (const subscription of this.eventSubscriptions.values()) {
+				if (subscription.event_key !== event.event_key) continue;
+				const matches = Object.entries(subscription.filter || {}).every(([field, values]) =>
+					(values as unknown[]).some((value) => Object.is(value, event.payload[field])),
+				);
+				if (!matches) continue;
+				const deliveryKey = `${event.id}:${subscription.id}`;
+				if (this.eventDeliveries.has(deliveryKey)) continue;
+				this.eventDeliveries.add(deliveryKey);
+				await this.invoke({
+					task_key: subscription.task_key,
+					queue: subscription.queue,
+					payload: {
+						event: event.event_key,
+						payload: structuredClone(event.payload),
+					},
+				});
+			}
+			event.processed_at = this.getInternalTime();
+			count++;
+		}
+		return count;
+	}
+
+	async removeProcessedEvents(args: { before: Date; batchSize: number }): Promise<boolean> {
+		const old = [...this.customEvents.values()]
+			.filter((event) => event.processed_at && event.processed_at < args.before)
+			.slice(0, args.batchSize);
+		for (const event of old) this.customEvents.delete(event.id);
+		return old.length >= args.batchSize;
 	}
 
 	// ============================================================================
@@ -1229,6 +1298,10 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 		return Array.from(this.eventSubscriptions.values());
 	}
 
+	getCustomEvents(): StoredCustomEvent[] {
+		return Array.from(this.customEvents.values());
+	}
+
 	clear(): void {
 		this.executions.clear();
 		this.steps.clear();
@@ -1236,6 +1309,8 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 		this.cronSchedules.clear();
 		this.orchestrators.clear();
 		this.eventSubscriptions.clear();
+		this.customEvents.clear();
+		this.eventDeliveries.clear();
 		this.eventPartitions.clear();
 		this.idCounter = 0;
 	}

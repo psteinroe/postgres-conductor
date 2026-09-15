@@ -102,7 +102,11 @@ export class TaskContext<
 		any,
 		string
 	>[],
-	Events extends readonly EventDefinition<string, any>[] = readonly EventDefinition<string, any>[],
+	Events extends readonly EventDefinition<string, any, any>[] = readonly EventDefinition<
+		string,
+		any,
+		any
+	>[],
 > {
 	private readonly windowChecker?: WindowChecker;
 
@@ -114,7 +118,7 @@ export class TaskContext<
 
 	static create<
 		Tasks extends readonly TaskDefinition<string, any, any, string>[],
-		Events extends readonly EventDefinition<string, any>[],
+		Events extends readonly EventDefinition<string, any, any>[],
 		Extra extends object,
 	>(opts: TaskContextOptions, extra?: Extra): TaskContext<Tasks, Events> & Extra {
 		const base = new TaskContext<Tasks, Events>(opts);

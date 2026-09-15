@@ -44,6 +44,11 @@ export type RemoveExecutionsArgs = {
 	batchSize: number;
 };
 
+export type RemoveProcessedEventsArgs = {
+	before: Date;
+	batchSize: number;
+};
+
 export type RegisterWorkerArgs = {
 	queueName: string;
 	taskSpecs: TaskSpec[];
@@ -678,6 +683,17 @@ export class QueryBuilder {
 		`;
 	}
 
+	buildRemoveProcessedEvents({
+		before,
+		batchSize,
+	}: RemoveProcessedEventsArgs): PendingQuery<[{ deleted_count: number }]> {
+		return this.sql<[{ deleted_count: number }]>`
+			select pgconductor._private_remove_processed_events(
+				${before.toISOString()}::timestamptz, ${batchSize}::integer
+			) as deleted_count
+		`;
+	}
+
 	buildRegisterWorker({
 		queueName,
 		taskSpecs,
@@ -723,6 +739,7 @@ export class QueryBuilder {
 			when_clause: spec.when_clause,
 			payload_fields: spec.payload_fields,
 			column_names: spec.column_names,
+			filter: spec.filter,
 		}));
 
 		return this.sql`

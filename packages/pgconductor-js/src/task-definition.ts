@@ -1,4 +1,5 @@
 import type { StandardSchemaV1 } from "@standard-schema/spec";
+import type { EventDefinition, FilterForEvent, FindEventByIdentifier } from "./event-definition";
 
 type ObjectSchema = StandardSchemaV1<unknown, object>;
 
@@ -124,10 +125,11 @@ export type CronTrigger = { cron: string; name: string; group?: string };
 export type CustomEventTrigger<
 	TName extends string = string,
 	TFields extends string | undefined = undefined,
+	TFilter extends Record<string, unknown> | undefined = undefined,
 > = {
 	event: TName;
-	when?: string;
 	fields?: TFields;
+	filter?: TFilter;
 };
 
 // Database event trigger - triggers on CDC events
@@ -145,6 +147,32 @@ export type DatabaseEventTrigger<
 };
 
 export type Trigger = InvocableTrigger | CronTrigger | CustomEventTrigger | DatabaseEventTrigger;
+
+type ValidateCustomEventTrigger<
+	Events extends readonly EventDefinition<string, any, any>[],
+	T,
+> = T extends { event: infer Name extends string }
+	? T extends { filter: infer Filter }
+		? Events extends readonly []
+			? T
+			: FindEventByIdentifier<Events, Name> extends infer Event
+				? [Event] extends [never]
+					? `Event "${Name}" is not defined in the conductor event catalog.`
+					: Filter extends FilterForEvent<Event>
+						? Exclude<keyof Filter, keyof FilterForEvent<Event>> extends never
+							? T
+							: `Filter for event "${Name}" contains undeclared fields.`
+						: `Filter for event "${Name}" contains undeclared or incorrectly typed fields.`
+				: T
+		: T
+	: T;
+
+export type ValidateEventTriggers<
+	Events extends readonly EventDefinition<string, any, any>[],
+	TTriggers,
+> = TTriggers extends readonly any[]
+	? { [K in keyof TTriggers]: ValidateCustomEventTrigger<Events, TTriggers[K]> }
+	: ValidateCustomEventTrigger<Events, TTriggers>;
 
 // Check if triggers include invocable
 export type HasInvocable<TTriggers> = TTriggers extends readonly any[]

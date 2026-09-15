@@ -10,6 +10,7 @@ import {
 	type CountActiveOrchestratorsBelowArgs,
 	type GetExecutionsArgs,
 	type RemoveExecutionsArgs,
+	type RemoveProcessedEventsArgs,
 	type RegisterWorkerArgs,
 	type ScheduleCronExecutionArgs,
 	type UnscheduleCronExecutionArgs,
@@ -162,6 +163,7 @@ export interface EventSubscriptionSpec {
 	when_clause: string | null;
 	payload_fields: string[] | null;
 	column_names: string[] | null;
+	filter: Record<string, JsonValue[]> | null;
 }
 
 const RETRYABLE_SQLSTATE_CODES = new Set([
@@ -505,6 +507,17 @@ export class DatabaseClient {
 		return deletedCount >= args.batchSize;
 	}
 
+	async removeProcessedEvents(
+		args: RemoveProcessedEventsArgs,
+		opts?: QueryMethodOptions,
+	): Promise<boolean> {
+		const result = await this.query(() => this.builder.buildRemoveProcessedEvents(args), {
+			label: "removeProcessedEvents",
+			...opts,
+		});
+		return Number(result[0]?.deleted_count || 0) >= args.batchSize;
+	}
+
 	async registerWorker(args: RegisterWorkerArgs, opts?: QueryMethodOptions): Promise<void> {
 		await this.query(() => this.builder.buildRegisterWorker(args), {
 			label: "registerWorker",
@@ -576,6 +589,16 @@ export class DatabaseClient {
 			label: "clearWaitingState",
 			...opts,
 		});
+	}
+
+	async processEvents(args: { batchSize: number }, opts?: QueryMethodOptions): Promise<number> {
+		const result = await this.query(
+			() => this.sql<{ processed: number }[]>`
+				select pgconductor._private_process_custom_events(${args.batchSize}::integer) as processed
+			`,
+			{ label: "processEvents", ...opts },
+		);
+		return Number(result[0]?.processed || 0);
 	}
 
 	async emitEvent(args: EmitEventArgs, opts?: QueryMethodOptions): Promise<string> {
