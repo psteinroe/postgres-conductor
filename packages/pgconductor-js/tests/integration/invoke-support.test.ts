@@ -6,6 +6,16 @@ import { defineTask } from "../../src/task-definition";
 import { TestDatabasePool } from "../fixtures/test-database";
 import type { TestDatabase } from "../fixtures/test-database";
 import { TaskSchemas } from "../../src/schemas";
+import { Deferred } from "../../src/lib/deferred";
+
+async function waitForCondition(check: () => Promise<boolean>, timeoutMs = 20_000): Promise<void> {
+	const deadline = Date.now() + timeoutMs;
+	while (Date.now() < deadline) {
+		if (await check()) return;
+		await new Promise((resolve) => setTimeout(resolve, 25));
+	}
+	throw new Error(`condition was not met within ${timeoutMs}ms`);
+}
 
 describe("Invoke Support", () => {
 	let pool: TestDatabasePool;
@@ -41,6 +51,7 @@ describe("Invoke Support", () => {
 		});
 
 		const childFn = mock((n: number) => n * 2);
+		const childCompleted = new Deferred<void>();
 
 		const conductor = Conductor.create({
 			sql: db.sql,
@@ -54,6 +65,7 @@ describe("Invoke Support", () => {
 			async (event, _ctx) => {
 				if (event.name === "pgconductor.invoke") {
 					const result = childFn(event.payload.input);
+					childCompleted.resolve();
 					return { output: result };
 				}
 				throw new Error("Unexpected event type");
@@ -85,9 +97,7 @@ describe("Invoke Support", () => {
 		await orchestrator.start();
 
 		await conductor.invoke({ name: "parent-task" }, { value: 5 });
-
-		await new Promise((r) => setTimeout(r, 300));
-
+		await childCompleted.promise;
 		await orchestrator.stop();
 
 		expect(childFn).toHaveBeenCalledTimes(1);
@@ -156,15 +166,24 @@ describe("Invoke Support", () => {
 		await orchestrator.start();
 
 		await conductor.invoke({ name: "timeout-parent" }, {});
-
-		await new Promise((r) => setTimeout(r, 300));
+		await waitForCondition(async () => {
+			const [child] = await db.sql<{ released: boolean; sleeping: boolean }[]>`
+				select
+					locked_by is null as released,
+					exists (
+						select 1 from pgconductor._private_steps s
+						where s.execution_id = e.id and s.key = 'long-sleep'
+					) as sleeping
+				from pgconductor._private_executions e
+				where task_key = 'slow-child'
+			`;
+			return child?.released === true && child.sleeping;
+		});
 
 		// Advance time past timeout (1 second) but before sleep completes (5 seconds)
 		const afterTimeout = new Date(startTime.getTime() + 1500);
 		await db.client.setFakeTime({ date: afterTimeout });
-
-		await new Promise((r) => setTimeout(r, 300));
-
+		await waitForCondition(async () => parentError.mock.calls.length === 1);
 		await orchestrator.stop();
 
 		await db.client.clearFakeTime();
@@ -172,7 +191,7 @@ describe("Invoke Support", () => {
 		expect(parentError).toHaveBeenCalledTimes(1);
 		const errorMsg = parentError.mock.results[0]?.value;
 		expect(errorMsg).toContain("timed out after 1000ms");
-	}, 5000);
+	}, 30000);
 
 	test("invoke() caches child result on retry", async () => {
 		const db = await pool.child();
@@ -191,6 +210,7 @@ describe("Invoke Support", () => {
 		});
 
 		const childFn = mock((n: number) => n * 3);
+		const parentCompleted = new Deferred<void>();
 
 		const conductor = Conductor.create({
 			sql: db.sql,
@@ -228,6 +248,7 @@ describe("Invoke Support", () => {
 						throw new Error("First attempt fails");
 					}
 
+					parentCompleted.resolve();
 					return { result: childResult.output };
 				}
 				throw new Error("Unexpected event type");
@@ -243,9 +264,7 @@ describe("Invoke Support", () => {
 		await orchestrator.start();
 
 		await conductor.invoke({ name: "retry-parent" }, { value: 7 });
-
-		await new Promise((r) => setTimeout(r, 500));
-
+		await parentCompleted.promise;
 		await orchestrator.stop();
 
 		expect(childFn).toHaveBeenCalledTimes(1);
@@ -269,6 +288,7 @@ describe("Invoke Support", () => {
 		});
 
 		const childFn = mock(() => "completed");
+		const childCompleted = new Deferred<void>();
 
 		const conductor = Conductor.create({
 			sql: db.sql,
@@ -282,6 +302,7 @@ describe("Invoke Support", () => {
 			async (_event, ctx) => {
 				await ctx.sleep("moderate-sleep", 2000);
 				const result = childFn();
+				childCompleted.resolve();
 				return { result };
 			},
 		);
@@ -304,9 +325,7 @@ describe("Invoke Support", () => {
 		await orchestrator.start();
 
 		await conductor.invoke({ name: "patient-parent" }, {});
-
-		await new Promise((r) => setTimeout(r, 2500));
-
+		await childCompleted.promise;
 		await orchestrator.stop();
 
 		expect(childFn).toHaveBeenCalledTimes(1);
@@ -372,17 +391,31 @@ describe("Invoke Support", () => {
 
 		await conductor.invoke({ name: "cascade-parent" }, {});
 
-		// Wait for first execution cycle: parent runs → invokes child → child fails
-		await new Promise((r) => setTimeout(r, 500));
+		await waitForCondition(async () => {
+			const [child] = await db.sql<{ attempts: number; released: boolean }[]>`
+				select attempts, locked_by is null as released
+				from pgconductor._private_executions
+				where task_key = 'failing-child'
+			`;
+			return child?.attempts === 1 && child.released;
+		});
 		expect(childFn).toHaveBeenCalledTimes(1);
 
-		// Advance fake time past first backoff (15 seconds)
-		const afterFirstBackoff = new Date(startTime.getTime() + 15000);
-		await db.client.setFakeTime({ date: afterFirstBackoff });
+		const [retry] = await db.sql<{ run_at: Date }[]>`
+			select run_at from pgconductor._private_executions
+			where task_key = 'failing-child'
+		`;
+		if (!retry) throw new Error("expected persisted child retry");
+		await db.client.setFakeTime({ date: new Date(retry.run_at.getTime() + 1) });
 
-		// Wait for second execution cycle: child retries and fails permanently
-		await new Promise((r) => setTimeout(r, 500));
-
+		await waitForCondition(async () => {
+			const [parent] = await db.sql<{ failed: boolean }[]>`
+				select failed_at is not null as failed
+				from pgconductor._private_executions
+				where task_key = 'cascade-parent'
+			`;
+			return parent?.failed === true;
+		});
 		await orchestrator.stop();
 
 		await db.client.clearFakeTime();
@@ -418,6 +451,7 @@ describe("Invoke Support", () => {
 		});
 
 		const childFn = mock((n: number) => n * 2);
+		const childCalled = new Deferred<void>();
 
 		const conductor = Conductor.create({
 			sql: db.sql,
@@ -452,6 +486,7 @@ describe("Invoke Support", () => {
 			async (event, _ctx) => {
 				if (event.name === "pgconductor.invoke") {
 					const result = childFn(event.payload.input);
+					childCalled.resolve();
 					return { output: result };
 				}
 				throw new Error("Unexpected event type");
@@ -472,9 +507,7 @@ describe("Invoke Support", () => {
 		await orchestrator.start();
 
 		await conductor.invoke({ queue: "parent-queue", name: "parent-task" }, { value: 5 });
-
-		await new Promise((r) => setTimeout(r, 4000));
-
+		await childCalled.promise;
 		await orchestrator.stop();
 
 		expect(childFn).toHaveBeenCalledTimes(1);
@@ -493,6 +526,7 @@ describe("Invoke Support", () => {
 
 		const childDefinition = defineTask({
 			name: "slow-child-2",
+			queue: "pending-child-queue",
 			payload: z.object({}),
 			returns: z.object({ completed: z.boolean() }),
 		});
@@ -503,32 +537,34 @@ describe("Invoke Support", () => {
 			context: {},
 		});
 
-		// Child that takes 5 seconds
-		const slowChildTask = conductor.createTask(
-			{ name: "slow-child-2" },
-			{ invocable: true },
-			async (_event, ctx) => {
-				await ctx.sleep("long-sleep", 5000);
-				return { completed: true };
-			},
-		);
-
 		// Parent with 1 second timeout - let error throw
 		const timeoutParentTask = conductor.createTask(
 			{ name: "timeout-parent-2" },
 			{ invocable: true },
 			async (_event, ctx) => {
-				await ctx.invoke("invoke-slow", { name: "slow-child-2" }, {}, 1000);
+				await ctx.invoke(
+					"invoke-slow",
+					{ name: "slow-child-2", queue: "pending-child-queue" },
+					{},
+					1000,
+				);
 				return { success: true };
 			},
 		);
+
+		await conductor.ensureInstalled();
+		await db.sql`
+			insert into pgconductor._private_queues (name)
+			values ('pending-child-queue')
+			on conflict (name) do nothing
+		`;
 
 		const startTime = new Date("2024-01-01T00:00:00Z");
 		await db.client.setFakeTime({ date: startTime });
 
 		const orchestrator = Orchestrator.create({
 			conductor,
-			tasks: [timeoutParentTask, slowChildTask],
+			tasks: [timeoutParentTask],
 			defaultWorker: {
 				pollIntervalMs: 50,
 				flushIntervalMs: 50,
@@ -539,16 +575,29 @@ describe("Invoke Support", () => {
 
 		await conductor.invoke({ name: "timeout-parent-2" }, {});
 
-		// Wait for parent to invoke child
-		await new Promise((r) => setTimeout(r, 200));
+		// Wait for the parent to persist the unclaimed child execution.
+		await waitForCondition(async () => {
+			const [child] = await db.sql<{ pending: boolean }[]>`
+				select locked_by is null as pending
+				from pgconductor._private_executions
+				where task_key = 'slow-child-2'
+					and queue = 'pending-child-queue'
+			`;
+			return child?.pending === true;
+		});
 
-		// Advance time past timeout (child still pending due to 50ms intervals)
+		// Advance time past timeout while the child is still pending.
 		const afterTimeout = new Date(startTime.getTime() + 1500);
 		await db.client.setFakeTime({ date: afterTimeout });
-
-		// Wait for timeout to be processed
-		await new Promise((r) => setTimeout(r, 500));
-
+		await waitForCondition(async () => {
+			const [child] = await db.sql<{ failed: boolean }[]>`
+				select failed_at is not null as failed
+				from pgconductor._private_executions
+				where task_key = 'slow-child-2'
+					and queue = 'pending-child-queue'
+			`;
+			return child?.failed === true;
+		});
 		await orchestrator.stop();
 		await db.client.clearFakeTime();
 
@@ -563,6 +612,7 @@ describe("Invoke Support", () => {
 			select cancelled, failed_at, last_error
 			from pgconductor._private_executions
 			where task_key = 'slow-child-2'
+				and queue = 'pending-child-queue'
 		`;
 
 		expect(children.length).toBe(1);
@@ -668,8 +718,14 @@ describe("Invoke Support", () => {
 			{ dedupe_key: "locked-key" },
 		);
 
-		// Wait for it to be locked
-		await new Promise((r) => setTimeout(r, 100));
+		await waitForCondition(async () => {
+			const [execution] = await db.sql<{ locked: boolean }[]>`
+				select locked_by is not null as locked
+				from pgconductor._private_executions
+				where id = ${id1}
+			`;
+			return execution?.locked === true;
+		});
 
 		// Second invocation while first is locked - should create NEW execution
 		const id2 = await conductor.invoke(
@@ -681,9 +737,14 @@ describe("Invoke Support", () => {
 		// Should be different IDs
 		expect(id2).not.toBe(id1);
 
-		// Wait for both executions to complete and flush (100ms + 500ms + 500ms + 50ms + margin)
-		await new Promise((r) => setTimeout(r, 1200));
-
+		await waitForCondition(async () => {
+			const [execution] = await db.sql<{ completed: boolean }[]>`
+				select completed_at is not null as completed
+				from pgconductor._private_executions
+				where id = ${id2}
+			`;
+			return execution?.completed === true;
+		});
 		await orchestrator.stop();
 
 		// First execution should be marked as failed (superseded)
@@ -755,6 +816,9 @@ describe("Invoke Support", () => {
 			},
 		);
 
+		const startTime = new Date("2024-01-01T00:00:00Z");
+		await db.client.setFakeTime({ date: startTime });
+
 		const orchestrator = Orchestrator.create({
 			defaultWorker: { pollIntervalMs: 50, flushIntervalMs: 50 },
 			conductor,
@@ -764,7 +828,7 @@ describe("Invoke Support", () => {
 		await orchestrator.start();
 
 		// Rapid invocations with same dedupe_key and delayed run_at
-		const futureTime = new Date(Date.now() + 1000);
+		const futureTime = new Date(startTime.getTime() + 1000);
 
 		const id1 = await conductor.invoke(
 			{ name: "debounce-task" },
@@ -772,15 +836,11 @@ describe("Invoke Support", () => {
 			{ dedupe_key: "debounce-1", run_at: futureTime },
 		);
 
-		await new Promise((r) => setTimeout(r, 50));
-
 		const id2 = await conductor.invoke(
 			{ name: "debounce-task" },
 			{ value: 2 },
 			{ dedupe_key: "debounce-1", run_at: futureTime },
 		);
-
-		await new Promise((r) => setTimeout(r, 50));
 
 		const id3 = await conductor.invoke(
 			{ name: "debounce-task" },
@@ -800,10 +860,10 @@ describe("Invoke Support", () => {
 		`;
 		expect(executions[0]?.count).toBe(1);
 
-		// Wait for execution
-		await new Promise((r) => setTimeout(r, 1500));
-
+		await db.client.setFakeTime({ date: futureTime });
+		await waitForCondition(async () => executionCount === 1);
 		await orchestrator.stop();
+		await db.client.clearFakeTime();
 
 		// Should have executed only once with the last value
 		expect(executionCount).toBe(1);
