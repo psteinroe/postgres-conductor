@@ -134,7 +134,6 @@ describe("Throttle and Debounce", () => {
 			queueName: "default",
 			batchSize: 100,
 			orchestratorId: "test-orch",
-			taskKeysWithConcurrency: [],
 			filterTaskKeys: [],
 		});
 

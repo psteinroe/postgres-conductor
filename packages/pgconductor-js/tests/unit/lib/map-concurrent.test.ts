@@ -1,6 +1,7 @@
 import { test, expect, describe } from "bun:test";
 import { mapConcurrent } from "../../../src/lib/map-concurrent";
-import type { PollableAsyncIterable } from "../../../src/lib/async-queue";
+import { AsyncQueue, type PollableAsyncIterable } from "../../../src/lib/async-queue";
+import { Deferred } from "../../../src/lib/deferred";
 
 class PollableGenerator<T> implements PollableAsyncIterable<T> {
 	private buffer: T[] = [];
@@ -55,6 +56,42 @@ describe("mapConcurrent", () => {
 
 		results.sort((a, b) => a - b); // Order may vary due to concurrency
 		expect(results).toEqual([0, 2, 4, 6, 8]);
+	});
+
+	test("starts items that arrive while another mapper is running", async () => {
+		const source = new AsyncQueue<number>(2);
+		const firstStarted = new Deferred<void>();
+		const secondStarted = new Deferred<void>();
+		const releaseFirst = new Deferred<void>();
+		const results: number[] = [];
+
+		const consume = async () => {
+			for await (const result of mapConcurrent(source, 2, async (value) => {
+				if (value === 1) {
+					firstStarted.resolve();
+					await releaseFirst.promise;
+				} else {
+					secondStarted.resolve();
+				}
+				return value;
+			})) {
+				results.push(result);
+			}
+		};
+
+		const consuming = consume();
+		try {
+			await source.push(1);
+			await firstStarted.promise;
+			await source.push(2);
+			await secondStarted.promise;
+		} finally {
+			releaseFirst.resolve();
+			source.close();
+		}
+		await consuming;
+
+		expect(new Set(results)).toEqual(new Set([1, 2]));
 	});
 
 	test("respects concurrency limit", async () => {
