@@ -10,7 +10,8 @@ Control the maximum number of concurrent executions for a specific task:
 const processVideo = conductor.createTask(
   {
     name: "process-video",
-    concurrency: 3, // Max 3 videos processing at once
+    concurrency: 3, // Soft max of 3 videos at once
+    groupConcurrency: 1, // Soft max of 1 per invocation group
   },
   { invocable: true },
   async (event, ctx) => {
@@ -20,21 +21,13 @@ const processVideo = conductor.createTask(
 );
 ```
 
-When the limit is reached, additional executions wait in the queue until a slot becomes available.
+When the limit is reached, additional executions remain queued until capacity becomes available.
 
 ## How It Works
 
-Postgres Conductor uses a slot-based system to enforce concurrency limits:
-
-1. **Slot allocation**: When a task has `concurrency: N`, Postgres creates N slots in the `_private_concurrency_slots` table
-2. **Claiming slots**: Workers claim available slots using `FOR UPDATE SKIP LOCKED`
-3. **Execution**: Task runs while holding the slot
-4. **Release**: Slot is released when execution completes or fails
+Postgres Conductor evaluates active executions when claiming work. Task and group limits are coordinated with `FOR UPDATE SKIP LOCKED`; limits are intentionally soft across concurrent workers. Grouped candidates whose group is full do not consume task-level capacity, so another available group can be claimed in the same batch.
 
 This happens entirely in Postgres - no external coordination needed.
-
-> [!WARNING]
-> Setting concurrency on any task in a queue reduces throughput by up to 50% for the entire queue, regardless of how many tasks have concurrency limits.
 
 ## Concurrency vs Worker Concurrency
 
@@ -50,8 +43,14 @@ This happens entirely in Postgres - no external coordination needed.
 - Set on worker/queue with `config: { concurrency }`
 - Independent per worker instance
 
+Child invocations use the group supplied to `ctx.invoke`. Dynamic cron schedules accept `group` alongside `cron`, and each subsequent cron execution preserves it.
+
 ## What's Next?
 
 - [Worker Configuration](../api/worker-config.md) - Configure worker-level concurrency
-- [Priority](priority.md) - Control execution order when waiting for slots
+- [Priority](priority.md) - Control execution order while work is queued
 - [Batching](batching.md) - Process multiple executions together
+
+## Group concurrency
+
+`group` may be supplied when invoking a task. `groupConcurrency` limits active executions within each `(queue, task, group)` scope; ungrouped invocations bypass that limit. Task and group limits compose and are intentionally soft across concurrent workers.
