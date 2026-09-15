@@ -394,38 +394,49 @@ describe("FIFO task execution", () => {
 			tasks: TaskSchemas.fromSchema([definition]),
 			context: {},
 		});
-		const starts: Deferred<void>[] = [new Deferred(), new Deferred()];
-		const secondWorkerRelease = new Deferred<void>();
+		const firstResumed = new Deferred<void>();
+		const firstRelease = new Deferred<void>();
 		const successorStarted = new Deferred<void>();
-		let startCount = 0;
 		const task = conductor.createTask(
 			{ name: "fifo-stale", fifo: true },
 			{ invocable: true },
 			async (event) => {
 				if (event.payload.id === 0) {
-					const index = startCount++;
-					starts[index]!.resolve();
-					if (index === 1) await secondWorkerRelease.promise;
+					firstResumed.resolve();
+					await firstRelease.promise;
 				} else successorStarted.resolve();
 			},
 		);
 		await conductor.ensureInstalled();
+		await db.client.registerWorker({
+			queueName: "default",
+			taskSpecs: [{ key: "fifo-stale", queue: "default", fifo: true }],
+			cronSchedules: [],
+			eventSubscriptions: [],
+		});
 		const first = await conductor.invoke({ name: "fifo-stale" }, { id: 0 });
 		const successor = await conductor.invoke({ name: "fifo-stale" }, { id: 1 });
-		const orchestrator1 = Orchestrator.create({
-			conductor,
-			tasks: [task],
-			defaultWorker: { concurrency: 2, pollIntervalMs: 10, flushIntervalMs: 10 },
+		const oldOrchestrator = crypto.randomUUID();
+		await db.client.orchestratorHeartbeat({
+			orchestratorId: oldOrchestrator,
+			version: "test",
+			migrationNumber: 1,
 		});
-		await orchestrator1.start();
-		await starts[0]!.promise;
-		const oldOrchestrator = (
-			await db.sql<
-				{ locked_by: string }[]
-			>`select locked_by from pgconductor._private_executions where id = ${first}::uuid`
-		)[0]!.locked_by;
-		await db.client.setFakeTime({ date: new Date("2027-01-01T00:00:00Z") });
-		await db.client.recoverStaleOrchestrators({ maxAge: "0 milliseconds" });
+		const oldClaim = (
+			await db.client.getExecutions({
+				orchestratorId: oldOrchestrator,
+				queueName: "default",
+				batchSize: 2,
+				filterTaskKeys: [],
+			})
+		)[0];
+		expect(oldClaim?.id).toBe(first);
+		await db.sql`
+			update pgconductor._private_orchestrators
+			set last_heartbeat_at = now() - interval '1 hour'
+			where id = ${oldOrchestrator}::uuid
+		`;
+		await db.client.recoverStaleOrchestrators({ maxAge: "1 second" });
 		expect(await owner(db, "fifo-stale")).toBe(first);
 		expect(
 			(
@@ -434,21 +445,19 @@ describe("FIFO task execution", () => {
 				>`select locked_by from pgconductor._private_executions where id = ${first}::uuid`
 			)[0]?.locked_by,
 		).toBeNull();
-		await orchestrator1.stop();
-		const orchestrator2 = Orchestrator.create({
+		const orchestrator = Orchestrator.create({
 			conductor,
 			tasks: [task],
 			defaultWorker: { concurrency: 2, pollIntervalMs: 10, flushIntervalMs: 10 },
 		});
-		await orchestrator2.start();
-		await starts[1]!.promise;
+		await orchestrator.start();
+		await firstResumed.promise;
 		expect(await owner(db, "fifo-stale")).toBe(first);
 		expect(successorStarted.isSettled).toBe(false);
-		expect(oldOrchestrator).toBeTruthy();
-		secondWorkerRelease.resolve();
+		firstRelease.resolve();
 		await successorStarted.promise;
 		expect(await owner(db, "fifo-stale")).toBe(successor);
-		await orchestrator2.stop();
+		await orchestrator.stop();
 	}, 30_000);
 
 	test("allows the same task key in different queues to proceed independently", async () => {
