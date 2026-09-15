@@ -6,6 +6,7 @@ import { defineTask } from "../../src/task-definition";
 import { TestDatabasePool } from "../fixtures/test-database";
 import type { TestDatabase } from "../fixtures/test-database";
 import { TaskSchemas } from "../../src/schemas";
+import { Deferred } from "../../src/lib/deferred";
 
 describe("Step Support", () => {
 	let pool: TestDatabasePool;
@@ -259,6 +260,7 @@ describe("Step Support", () => {
 
 		let transformedValue: string[] | undefined;
 		let countValue: number | undefined;
+		const completed = new Deferred<void>();
 
 		const conductor = Conductor.create({
 			sql: db.sql,
@@ -284,6 +286,7 @@ describe("Step Support", () => {
 						return transformed.length;
 					});
 
+					completed.resolve();
 					return { count };
 				}
 				throw new Error("Unexpected event type");
@@ -299,9 +302,7 @@ describe("Step Support", () => {
 		await orchestrator.start();
 
 		await conductor.invoke({ name: "step-unwrap-task" }, { items: ["apple", "banana", "cherry"] });
-
-		await new Promise((r) => setTimeout(r, 300));
-
+		await completed.promise;
 		await orchestrator.stop();
 
 		expect(transformedValue).toEqual(["APPLE", "BANANA", "CHERRY"]);
