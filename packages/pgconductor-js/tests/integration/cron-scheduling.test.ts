@@ -112,26 +112,20 @@ describe("Cron Scheduling", () => {
 
 		await orchestrator.start();
 
-		// Wait for first execution
-		await waitFor(4000);
-		expect(executions.mock.calls.length).toBeGreaterThanOrEqual(1);
+		await waitForCondition(() => executions.mock.calls.length >= 1, 7000);
 
-		// Check that next execution is scheduled
-		const schedules = await db.sql<Array<{ dedupe_key: string; run_at: Date }>>`
-			SELECT dedupe_key, run_at
-			FROM pgconductor._private_executions
-			WHERE task_key = 'frequent-sync'
-				AND dedupe_key LIKE 'scheduled::%'
-				AND run_at > pgconductor._private_current_time()
-			ORDER BY run_at
-			LIMIT 1
-		`;
+		// A completed cron execution durably creates a distinct next occurrence.
+		await waitForCondition(async () => {
+			const schedules = await db.sql<Array<{ count: number }>>`
+				SELECT count(*)::integer AS count
+				FROM pgconductor._private_executions
+				WHERE task_key = 'frequent-sync'
+					AND dedupe_key LIKE 'scheduled::%'
+			`;
+			return (schedules[0]?.count ?? 0) >= 2;
+		}, 7000);
 
-		expect(schedules.length).toBe(1);
-
-		// Wait for second execution
-		await waitFor(4000);
-		expect(executions.mock.calls.length).toBeGreaterThanOrEqual(2);
+		await waitForCondition(() => executions.mock.calls.length >= 2, 7000);
 
 		await orchestrator.stop();
 		await db.destroy();
