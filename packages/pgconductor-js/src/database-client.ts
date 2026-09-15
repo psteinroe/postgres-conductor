@@ -55,6 +55,7 @@ export interface Execution {
 	payload: Payload;
 	waiting_on_execution_id: string | null;
 	waiting_step_key: string | null;
+	locked_by: string;
 	cancelled: boolean;
 	last_error: string | null;
 	dedupe_key?: string | null;
@@ -73,6 +74,7 @@ export type ExecutionResult =
 
 export type GroupedExecutionResults = {
 	count: number;
+	orchestratorId: string;
 	completed: ExecutionCompleted[];
 	failed: (ExecutionFailed | ExecutionPermamentlyFailed)[];
 	released: ExecutionReleased[];
@@ -83,6 +85,7 @@ export type GroupedExecutionResults = {
 export interface ExecutionCompleted {
 	execution_id: string;
 	queue: string;
+	orchestrator_id: string;
 	task_key: string;
 	status: "completed";
 	result?: Payload;
@@ -92,6 +95,7 @@ export interface ExecutionCompleted {
 export interface ExecutionFailed {
 	execution_id: string;
 	queue: string;
+	orchestrator_id: string;
 	task_key: string;
 	status: "failed";
 	error: string;
@@ -101,6 +105,7 @@ export interface ExecutionFailed {
 export interface ExecutionReleased {
 	execution_id: string;
 	queue: string;
+	orchestrator_id: string;
 	task_key: string;
 	status: "released";
 	reschedule_in_ms?: number | "infinity";
@@ -111,6 +116,7 @@ export interface ExecutionReleased {
 export interface ExecutionPermamentlyFailed {
 	execution_id: string;
 	queue: string;
+	orchestrator_id: string;
 	task_key: string;
 	status: "permanently_failed";
 	error: string;
@@ -120,6 +126,7 @@ export interface ExecutionPermamentlyFailed {
 export interface ExecutionInvokeChild {
 	execution_id: string;
 	queue: string;
+	orchestrator_id: string;
 	task_key: string;
 	status: "invoke_child";
 	timeout_ms: number | "infinity";

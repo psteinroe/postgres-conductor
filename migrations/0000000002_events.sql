@@ -92,7 +92,7 @@ begin
                 sub.id
             ), e'\n')
             from pgconductor._private_event_subscriptions as sub
-            join pgconductor._private_tasks as t on t.key = sub.task_key
+            join pgconductor._private_tasks as t on t.key = sub.task_key and t.queue = sub.queue
             where sub.event_key is not null
         );
 
@@ -257,7 +257,7 @@ begin
                     sub.id
                 ), e'\n')
                 from pgconductor._private_event_subscriptions as sub
-                join pgconductor._private_tasks as t on t.key = sub.task_key
+                join pgconductor._private_tasks as t on t.key = sub.task_key and t.queue = sub.queue
                 where sub.table_name = v_table_name
                     and sub.schema_name = v_schema_name
                     and sub.operation = v_op
