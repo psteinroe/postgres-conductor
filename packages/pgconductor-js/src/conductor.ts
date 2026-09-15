@@ -25,6 +25,17 @@ import {
 import { Worker, type WorkerConfig } from "./worker";
 import { DefaultLogger, type Logger } from "./lib/logger";
 import { SchemaManager } from "./schema-manager";
+import {
+	carrierForContext,
+	contextForSpan,
+	endSpan,
+	messagingAttributes,
+	setSpanAttribute,
+	setSpanError,
+	startSpan,
+	runWithSpan,
+} from "./telemetry";
+import { SpanKind } from "@opentelemetry/api";
 import type {
 	EventDefinition,
 	GenericDatabase,
@@ -80,6 +91,8 @@ export type ConductorOptions<
 	context: ExtraContext;
 
 	logger?: Logger;
+	/** Disable OpenTelemetry instrumentation. The default is enabled and uses the global API provider. */
+	telemetry?: false;
 };
 
 // similar to inngest client
@@ -142,6 +155,7 @@ export class Conductor<
 			database?: TDatabaseSchema;
 			context: TExtraContext;
 			logger?: Logger;
+			telemetry?: false;
 		},
 	): Conductor<TTaskSchemas, TEventSchemas, TDatabaseSchema, TExtraContext> {
 		return new Conductor<TTaskSchemas, TEventSchemas, TDatabaseSchema, TExtraContext>(options);
@@ -234,6 +248,7 @@ export class Conductor<
 			options.config,
 			this.options.context,
 			this.options.events?.definitions ?? [],
+			this.options.telemetry !== false,
 		);
 	}
 
@@ -303,6 +318,15 @@ export class Conductor<
 		const queue = task.queue || "default";
 
 		if (Array.isArray(payloadOrItems)) {
+			const producer =
+				this.options.telemetry === false
+					? null
+					: startSpan(
+							`send ${queue}`,
+							SpanKind.PRODUCER,
+							messagingAttributes(taskName, queue, "send"),
+						);
+			const carrier = producer ? carrierForContext(contextForSpan(producer)) : null;
 			const specs = payloadOrItems.map((item) => ({
 				task_key: taskName,
 				queue,
@@ -314,16 +338,47 @@ export class Conductor<
 				cron_expression: item.cron_expression,
 				priority: item.priority,
 				group: item.group,
+				trace_context: carrier,
 			}));
-			return this.db.invokeBatch(specs);
+			try {
+				const ids = await runWithSpan(producer, () => this.db.invokeBatch(specs));
+				setSpanAttribute(producer, "messaging.batch.message_count", payloadOrItems.length);
+				return ids;
+			} catch (error) {
+				setSpanError(producer, error);
+				throw error;
+			} finally {
+				endSpan(producer);
+			}
 		}
 
-		return this.db.invoke({
-			task_key: taskName,
-			queue,
-			payload: payloadOrItems,
-			...opts,
-		});
+		const producer =
+			this.options.telemetry === false
+				? null
+				: startSpan(
+						`send ${queue}`,
+						SpanKind.PRODUCER,
+						messagingAttributes(taskName, queue, "send"),
+					);
+		const carrier = producer ? carrierForContext(contextForSpan(producer)) : null;
+		try {
+			const id = await runWithSpan(producer, () =>
+				this.db.invoke({
+					task_key: taskName,
+					queue,
+					payload: payloadOrItems,
+					...opts,
+					trace_context: carrier,
+				}),
+			);
+			if (id) setSpanAttribute(producer, "messaging.message.id", id);
+			return id;
+		} catch (error) {
+			setSpanError(producer, error);
+			throw error;
+		} finally {
+			endSpan(producer);
+		}
 	}
 
 	/**

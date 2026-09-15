@@ -1,5 +1,6 @@
 import type { PendingQuery, Row, RowList, Sql } from "postgres";
 import type { GroupedExecutionResults } from "./database-client";
+import { boundedCarrier } from "./telemetry";
 import * as assert from "./lib/assert";
 import type {
 	Execution,
@@ -357,15 +358,14 @@ export class QueryBuilder {
 				where e.id = c.id and e.queue = ${queueName}::text and e.is_available = true
 				returning e.id, e.task_key, e.queue, e.payload, e.waiting_on_execution_id,
 					e.waiting_step_key, e.cancelled, e.last_error, e.dedupe_key, e.cron_expression,
-					e.locked_by, e."group", e.priority, e.run_at, e.created_at,
-					e.dead_letter_source_execution_id, e.dead_letter_source_queue,
-					e.dead_letter_source_task_key, e.dead_letter_error,
-					e.dead_letter_attempts, e.dead_letter_failed_at
+					e.locked_by, e."group", e.trace_context, e.dead_letter_source_execution_id,
+					e.dead_letter_source_queue, e.dead_letter_source_task_key, e.dead_letter_error,
+					e.dead_letter_attempts, e.dead_letter_failed_at, e.priority, e.run_at, e.created_at
 			)
 			select id, task_key, queue, payload, waiting_on_execution_id, waiting_step_key,
-				cancelled, last_error, dedupe_key, cron_expression, locked_by, "group",
-				dead_letter_source_execution_id, dead_letter_source_queue,
-				dead_letter_source_task_key, dead_letter_error, dead_letter_attempts, dead_letter_failed_at
+				cancelled, last_error, dedupe_key, cron_expression, locked_by, "group", trace_context,
+				dead_letter_source_execution_id, dead_letter_source_queue, dead_letter_source_task_key,
+				dead_letter_error, dead_letter_attempts, dead_letter_failed_at
 			from claimed
 			order by priority asc, run_at asc, created_at asc, id asc
 		`;
@@ -796,6 +796,7 @@ export class QueryBuilder {
 				p_dedupe_next_slot := ${dedupe_next_slot}::boolean,
 				p_cron_expression := ${spec.cron_expression || null}::text,
 				p_priority := ${spec.priority || null}::integer,
+				p_trace_context := ${boundedCarrier(spec.trace_context) ? this.sql.json(boundedCarrier(spec.trace_context)) : null}::jsonb,
 				p_group := ${spec.group || null}::text
 			)
 		`;
@@ -902,6 +903,7 @@ export class QueryBuilder {
 				dedupe_seconds,
 				dedupe_next_slot,
 				cron_expression: spec.cron_expression || null,
+				trace_context: boundedCarrier(spec.trace_context),
 				priority: spec.priority,
 				group: spec.group || null,
 			};
@@ -910,7 +912,7 @@ export class QueryBuilder {
 		return this.sql<{ id: string }[]>`
 			select id from pgconductor.invoke_batch(
 				array(
-					select jsonb_populate_recordset(null::pgconductor.execution_spec, ${this.sql.json(specsArray)}::jsonb)
+					select jsonb_populate_recordset(null::pgconductor.execution_spec, ${this.sql.json(JSON.parse(JSON.stringify(specsArray)))}::jsonb)
 				)
 			)
 		`;
