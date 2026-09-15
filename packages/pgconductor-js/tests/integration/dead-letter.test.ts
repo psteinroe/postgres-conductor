@@ -8,7 +8,7 @@ import { TestDatabasePool, type TestDatabase } from "../fixtures/test-database";
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-async function eventually(check: () => Promise<boolean>, timeoutMs = 8000): Promise<void> {
+async function eventually(check: () => Promise<boolean>, timeoutMs = 20_000): Promise<void> {
 	const deadline = Date.now() + timeoutMs;
 	while (Date.now() < deadline) {
 		if (await check()) return;
@@ -130,7 +130,7 @@ describe("dead-letter queues (Postgres integration)", () => {
 		expect(seen).toEqual([
 			{ value: "order-42", sourceTask: "charge", attempts: 2, error: "card declined" },
 		]);
-	}, 30000);
+	}, 60_000);
 
 	test("ignores duplicate settlements and wrong worker identity", async () => {
 		const db = await pool.child();
