@@ -8,6 +8,15 @@ import type { TestDatabase } from "../fixtures/test-database";
 import { TaskSchemas } from "../../src/schemas";
 import { Deferred } from "../../src/lib/deferred";
 
+async function waitForCondition(check: () => Promise<boolean>, timeoutMs = 5000): Promise<void> {
+	const deadline = Date.now() + timeoutMs;
+	while (Date.now() < deadline) {
+		if (await check()) return;
+		await new Promise((resolve) => setTimeout(resolve, 25));
+	}
+	throw new Error(`condition was not met within ${timeoutMs}ms`);
+}
+
 describe("Invoke Support", () => {
 	let pool: TestDatabasePool;
 	const databases: TestDatabase[] = [];
@@ -494,6 +503,7 @@ describe("Invoke Support", () => {
 
 		const childDefinition = defineTask({
 			name: "slow-child-2",
+			queue: "pending-child-queue",
 			payload: z.object({}),
 			returns: z.object({ completed: z.boolean() }),
 		});
@@ -504,32 +514,34 @@ describe("Invoke Support", () => {
 			context: {},
 		});
 
-		// Child that takes 5 seconds
-		const slowChildTask = conductor.createTask(
-			{ name: "slow-child-2" },
-			{ invocable: true },
-			async (_event, ctx) => {
-				await ctx.sleep("long-sleep", 5000);
-				return { completed: true };
-			},
-		);
-
 		// Parent with 1 second timeout - let error throw
 		const timeoutParentTask = conductor.createTask(
 			{ name: "timeout-parent-2" },
 			{ invocable: true },
 			async (_event, ctx) => {
-				await ctx.invoke("invoke-slow", { name: "slow-child-2" }, {}, 1000);
+				await ctx.invoke(
+					"invoke-slow",
+					{ name: "slow-child-2", queue: "pending-child-queue" },
+					{},
+					1000,
+				);
 				return { success: true };
 			},
 		);
+
+		await conductor.ensureInstalled();
+		await db.sql`
+			insert into pgconductor._private_queues (name)
+			values ('pending-child-queue')
+			on conflict (name) do nothing
+		`;
 
 		const startTime = new Date("2024-01-01T00:00:00Z");
 		await db.client.setFakeTime({ date: startTime });
 
 		const orchestrator = Orchestrator.create({
 			conductor,
-			tasks: [timeoutParentTask, slowChildTask],
+			tasks: [timeoutParentTask],
 			defaultWorker: {
 				pollIntervalMs: 50,
 				flushIntervalMs: 50,
@@ -540,10 +552,18 @@ describe("Invoke Support", () => {
 
 		await conductor.invoke({ name: "timeout-parent-2" }, {});
 
-		// Wait for parent to invoke child
-		await new Promise((r) => setTimeout(r, 200));
+		// Wait for the parent to persist the unclaimed child execution.
+		await waitForCondition(async () => {
+			const [child] = await db.sql<{ pending: boolean }[]>`
+				select locked_by is null as pending
+				from pgconductor._private_executions
+				where task_key = 'slow-child-2'
+					and queue = 'pending-child-queue'
+			`;
+			return child?.pending === true;
+		});
 
-		// Advance time past timeout (child still pending due to 50ms intervals)
+		// Advance time past timeout while the child is still pending.
 		const afterTimeout = new Date(startTime.getTime() + 1500);
 		await db.client.setFakeTime({ date: afterTimeout });
 
@@ -564,6 +584,7 @@ describe("Invoke Support", () => {
 			select cancelled, failed_at, last_error
 			from pgconductor._private_executions
 			where task_key = 'slow-child-2'
+				and queue = 'pending-child-queue'
 		`;
 
 		expect(children.length).toBe(1);
