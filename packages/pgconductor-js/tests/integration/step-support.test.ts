@@ -36,6 +36,7 @@ describe("Step Support", () => {
 		});
 
 		const expensiveFn = mock((n: number) => n * 2);
+		const taskCompleted = new Deferred<void>();
 
 		const conductor = Conductor.create({
 			sql: db.sql,
@@ -52,6 +53,7 @@ describe("Step Support", () => {
 						return expensiveFn(event.payload.value);
 					});
 
+					taskCompleted.resolve();
 					return { result };
 				}
 				throw new Error("Unexpected event type");
@@ -67,9 +69,7 @@ describe("Step Support", () => {
 		await orchestrator.start();
 
 		await conductor.invoke({ name: "step-task" }, { value: 5 });
-
-		await new Promise((r) => setTimeout(r, 200));
-
+		await taskCompleted.promise;
 		await orchestrator.stop();
 
 		// Expensive function should only be called once
@@ -88,6 +88,8 @@ describe("Step Support", () => {
 		});
 
 		const executionSteps = mock((step: string) => step);
+		const sleepStarted = new Deferred<void>();
+		const sleepFinished = new Deferred<void>();
 
 		const conductor = Conductor.create({
 			sql: db.sql,
@@ -101,8 +103,10 @@ describe("Step Support", () => {
 			async (event, ctx) => {
 				if (event.name === "pgconductor.invoke") {
 					executionSteps("before-sleep");
+					sleepStarted.resolve();
 					await ctx.sleep("wait", event.payload.delay);
 					executionSteps("after-sleep");
+					sleepFinished.resolve();
 					return { completed: true };
 				}
 				throw new Error("Unexpected event type");
@@ -118,18 +122,12 @@ describe("Step Support", () => {
 		await orchestrator.start();
 
 		await conductor.invoke({ name: "sleep-task" }, { delay: 2000 });
+		await sleepStarted.promise;
 
-		// Wait for initial execution (should hit sleep and release)
-		await new Promise((r) => setTimeout(r, 200));
-
-		// At this point, should have seen "before-sleep" but not "after-sleep"
 		expect(executionSteps).toHaveBeenCalledWith("before-sleep");
 		expect(executionSteps).not.toHaveBeenCalledWith("after-sleep");
 
-		// Wait for sleep to complete and task to resume (2s sleep + buffer)
-		await new Promise((r) => setTimeout(r, 2200));
-
-		// Now should see "after-sleep"
+		await sleepFinished.promise;
 		expect(executionSteps).toHaveBeenCalledWith("after-sleep");
 
 		await orchestrator.stop();
@@ -146,6 +144,7 @@ describe("Step Support", () => {
 		});
 
 		const processedItems = mock((item: number) => item);
+		const checkpointCompleted = new Deferred<void>();
 
 		const conductor = Conductor.create({
 			sql: db.sql,
@@ -164,6 +163,7 @@ describe("Step Support", () => {
 						// Simulate some work
 						await new Promise((r) => setTimeout(r, 50));
 					}
+					checkpointCompleted.resolve();
 					return { processed: event.payload.items };
 				}
 				throw new Error("Unexpected event type");
@@ -179,10 +179,7 @@ describe("Step Support", () => {
 		await orchestrator.start();
 
 		await conductor.invoke({ name: "checkpoint-task" }, { items: 5 });
-
-		// Wait for task to complete
-		await new Promise((r) => setTimeout(r, 300));
-
+		await checkpointCompleted.promise;
 		await orchestrator.stop();
 
 		// Should have processed all items
@@ -202,6 +199,7 @@ describe("Step Support", () => {
 		const step1Fn = mock((n: number) => n + 1);
 		const step2Fn = mock((n: number) => n * 2);
 		const step3Fn = mock((n: number) => n - 3);
+		const stepsCompleted = new Deferred<void>();
 
 		const conductor = Conductor.create({
 			sql: db.sql,
@@ -217,6 +215,7 @@ describe("Step Support", () => {
 					const a = await ctx.step("step1", () => step1Fn(event.payload.x));
 					const b = await ctx.step("step2", () => step2Fn(a));
 					const c = await ctx.step("step3", () => step3Fn(b));
+					stepsCompleted.resolve();
 					return { result: c };
 				}
 				throw new Error("Unexpected event type");
@@ -232,9 +231,7 @@ describe("Step Support", () => {
 		await orchestrator.start();
 
 		await conductor.invoke({ name: "multi-step-task" }, { x: 5 });
-
-		await new Promise((r) => setTimeout(r, 200));
-
+		await stepsCompleted.promise;
 		await orchestrator.stop();
 
 		// All steps should execute once
