@@ -320,13 +320,14 @@ export class Worker<
 			removeOnFailDays: retentionToDays(task.removeOnFail),
 			window: task.window,
 			concurrency: task.concurrency,
+			groupConcurrency: task.groupConcurrency,
 		}));
 
 		const allTasks = Array.from(this.tasks.values());
 
 		const cronSchedules: ExecutionSpec[] = allTasks.flatMap((task) =>
 			task.triggers
-				.filter((t): t is { cron: string; name: string } => "cron" in t)
+				.filter((t): t is { cron: string; name: string; group?: string } => "cron" in t)
 				.map((trigger) => {
 					const nextTimestamp = nextCronOccurrence(trigger.cron, this.clock.now());
 					const timestampSeconds = Math.floor(nextTimestamp.getTime() / 1000);
@@ -336,6 +337,7 @@ export class Worker<
 						run_at: nextTimestamp,
 						dedupe_key: `scheduled::${trigger.name}::${timestampSeconds}`,
 						cron_expression: trigger.cron,
+						group: trigger.group || null,
 					};
 				}),
 		);
@@ -402,10 +404,6 @@ export class Worker<
 		for (const task of allTasks) {
 			taskMaxAttempts[task.name] = task.maxAttempts || 3;
 		}
-		const taskKeysWithConcurrency = allTasks
-			.filter((task) => task.concurrency != null)
-			.map((task) => task.name);
-
 		// Check if any tasks have windows - only then do we need time-based filtering
 		const tasksWithWindows = allTasks.filter((task) => task.window);
 
@@ -446,7 +444,6 @@ export class Worker<
 						queueName: this.queueName,
 						batchSize: this.fetchBatchSize,
 						filterTaskKeys: disallowedTaskKeys,
-						taskKeysWithConcurrency,
 					},
 					{ signal: this.signal },
 				);
@@ -490,7 +487,6 @@ export class Worker<
 						task_key: taskKey,
 						status: "failed",
 						error: `Task not found: ${taskKey}`,
-						slot_group_number: exec.slot_group_number,
 					})) as ExecutionResult[];
 				}
 
@@ -505,7 +501,6 @@ export class Worker<
 						task_key: taskKey,
 						status: "permanently_failed",
 						error: exec.last_error || "Execution was cancelled",
-						slot_group_number: exec.slot_group_number,
 					})) as ExecutionResult[];
 				}
 
@@ -628,7 +623,7 @@ export class Worker<
 							child_task_name: output.task.name,
 							child_task_queue: output.task.queue || "default",
 							child_payload: output.payload,
-							slot_group_number: exec.slot_group_number,
+							group: output.group,
 						} as const;
 					case "cancelled":
 						return {
@@ -638,7 +633,6 @@ export class Worker<
 							task_key: exec.task_key,
 							status: "permanently_failed",
 							error: exec.last_error || "Task was cancelled",
-							slot_group_number: exec.slot_group_number,
 						} as const;
 					case "released":
 					case "parent-aborted":
@@ -650,7 +644,6 @@ export class Worker<
 							step_key: output.reason === "released" ? output.step_key : undefined,
 							task_key: exec.task_key,
 							status: "released",
-							slot_group_number: exec.slot_group_number,
 						} as const;
 					default:
 						assert.never(output);
@@ -664,7 +657,6 @@ export class Worker<
 				task_key: exec.task_key,
 				status: "completed",
 				result: output,
-				slot_group_number: exec.slot_group_number,
 			} as const;
 		} catch (err) {
 			return {
@@ -674,7 +666,6 @@ export class Worker<
 				task_key: exec.task_key,
 				status: "failed",
 				error: coerceError(err).message,
-				slot_group_number: exec.slot_group_number,
 			} as const;
 		} finally {
 			// Clean up running task tracking
@@ -750,7 +741,6 @@ export class Worker<
 						status: "released" as const,
 						reschedule_in_ms: result.reschedule_in_ms,
 						step_key: result.step_key,
-						slot_group_number: exec.slot_group_number,
 					}));
 				}
 
@@ -762,7 +752,6 @@ export class Worker<
 					task_key: taskKey,
 					status: "failed" as const,
 					error: `Task aborted: ${result.reason}`,
-					slot_group_number: exec.slot_group_number,
 				}));
 			}
 
@@ -775,7 +764,6 @@ export class Worker<
 					task_key: taskKey,
 					status: "completed" as const,
 					result: undefined,
-					slot_group_number: exec.slot_group_number,
 				}));
 			}
 
@@ -798,7 +786,6 @@ export class Worker<
 				task_key: taskKey,
 				status: "completed" as const,
 				result: result[i],
-				slot_group_number: exec.slot_group_number,
 			}));
 		} catch (err) {
 			// Handler threw: all fail together
@@ -810,7 +797,6 @@ export class Worker<
 				task_key: taskKey,
 				status: "failed" as const,
 				error: errorMsg,
-				slot_group_number: exec.slot_group_number,
 			}));
 		}
 	}
@@ -842,6 +828,7 @@ export class Worker<
 				run_at: nextTimestamp,
 				dedupe_key: nextDedupeKey,
 				cron_expression: execution.cron_expression,
+				group: execution.group || null,
 			},
 			{ signal: this.signal },
 		);

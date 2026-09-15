@@ -51,7 +51,6 @@ describe("InMemoryDatabaseClient", () => {
 				orchestratorId: "test-orch",
 				queueName: "default",
 				batchSize: 10,
-				taskKeysWithConcurrency: [],
 				filterTaskKeys: [],
 			});
 
@@ -77,7 +76,6 @@ describe("InMemoryDatabaseClient", () => {
 				orchestratorId: "test-orch",
 				queueName: "default",
 				batchSize: 10,
-				taskKeysWithConcurrency: [],
 				filterTaskKeys: [],
 			});
 
@@ -124,7 +122,6 @@ describe("InMemoryDatabaseClient", () => {
 				orchestratorId: "test-orch",
 				queueName: "default",
 				batchSize: 10,
-				taskKeysWithConcurrency: [],
 				filterTaskKeys: [],
 			});
 
@@ -177,7 +174,6 @@ describe("InMemoryDatabaseClient", () => {
 				orchestratorId: "test-orch",
 				queueName: "default",
 				batchSize: 10,
-				taskKeysWithConcurrency: [],
 				filterTaskKeys: [],
 			});
 
@@ -201,7 +197,6 @@ describe("InMemoryDatabaseClient", () => {
 				orchestratorId: "test-orch",
 				queueName: "default",
 				batchSize: 10,
-				taskKeysWithConcurrency: [],
 				filterTaskKeys: [],
 			});
 
@@ -263,7 +258,6 @@ describe("InMemoryDatabaseClient", () => {
 				orchestratorId: "test-orch",
 				queueName: "default",
 				batchSize: 10,
-				taskKeysWithConcurrency: [],
 				filterTaskKeys: [],
 			});
 
@@ -349,7 +343,6 @@ describe("InMemoryDatabaseClient", () => {
 				orchestratorId: "test-orch",
 				queueName: "default",
 				batchSize: 10,
-				taskKeysWithConcurrency: [],
 				filterTaskKeys: [],
 			});
 
@@ -390,7 +383,6 @@ describe("InMemoryDatabaseClient", () => {
 				orchestratorId: "test-orch",
 				queueName: "default",
 				batchSize: 10,
-				taskKeysWithConcurrency: [],
 				filterTaskKeys: [],
 			});
 
@@ -449,7 +441,6 @@ describe("InMemoryDatabaseClient", () => {
 				orchestratorId: "test-orch",
 				queueName: "default",
 				batchSize: 10,
-				taskKeysWithConcurrency: [],
 				filterTaskKeys: [],
 			});
 
@@ -494,7 +485,6 @@ describe("InMemoryDatabaseClient", () => {
 				orchestratorId: "test-orch",
 				queueName: "default",
 				batchSize: 10,
-				taskKeysWithConcurrency: [],
 				filterTaskKeys: [],
 			});
 
@@ -542,7 +532,6 @@ describe("InMemoryDatabaseClient", () => {
 				orchestratorId: "test-orch",
 				queueName: "default",
 				batchSize: 10,
-				taskKeysWithConcurrency: [],
 				filterTaskKeys: [],
 			});
 
@@ -586,7 +575,6 @@ describe("InMemoryDatabaseClient", () => {
 				orchestratorId: "test-orch",
 				queueName: "default",
 				batchSize: 10,
-				taskKeysWithConcurrency: [],
 				filterTaskKeys: [],
 			});
 
@@ -612,7 +600,6 @@ describe("InMemoryDatabaseClient", () => {
 				orchestratorId: "test-orch",
 				queueName: "default",
 				batchSize: 10,
-				taskKeysWithConcurrency: [],
 				filterTaskKeys: [],
 			});
 
@@ -659,7 +646,6 @@ describe("InMemoryDatabaseClient", () => {
 				orchestratorId: "test-orch",
 				queueName: "default",
 				batchSize: 10,
-				taskKeysWithConcurrency: [],
 				filterTaskKeys: [],
 			});
 
@@ -685,7 +671,6 @@ describe("InMemoryDatabaseClient", () => {
 				orchestratorId: "test-orch",
 				queueName: "default",
 				batchSize: 10,
-				taskKeysWithConcurrency: [],
 				filterTaskKeys: [],
 			});
 
@@ -721,7 +706,6 @@ describe("InMemoryDatabaseClient", () => {
 					orchestratorId: "test-orch",
 					queueName: "default",
 					batchSize: 1,
-					taskKeysWithConcurrency: [],
 					filterTaskKeys: [],
 				})
 			)[0]!;
@@ -784,7 +768,6 @@ describe("InMemoryDatabaseClient", () => {
 				orchestratorId: "test-orch",
 				queueName: "default",
 				batchSize: 10,
-				taskKeysWithConcurrency: [],
 				filterTaskKeys: [],
 			});
 
@@ -798,7 +781,6 @@ describe("InMemoryDatabaseClient", () => {
 				orchestratorId: "test-orch",
 				queueName: "default",
 				batchSize: 10,
-				taskKeysWithConcurrency: [],
 				filterTaskKeys: [],
 			});
 
@@ -836,7 +818,6 @@ describe("InMemoryDatabaseClient", () => {
 				orchestratorId: "test-orch",
 				queueName: "default",
 				batchSize: 10,
-				taskKeysWithConcurrency: ["limited-task"],
 				filterTaskKeys: [],
 			});
 
@@ -847,7 +828,6 @@ describe("InMemoryDatabaseClient", () => {
 				orchestratorId: "test-orch",
 				queueName: "default",
 				batchSize: 10,
-				taskKeysWithConcurrency: ["limited-task"],
 				filterTaskKeys: [],
 			});
 
@@ -869,7 +849,6 @@ describe("InMemoryDatabaseClient", () => {
 				orchestratorId: "test-orch",
 				queueName: "default",
 				batchSize: 10,
-				taskKeysWithConcurrency: ["limited-task"],
 				filterTaskKeys: [],
 			});
 
@@ -916,7 +895,6 @@ describe("InMemoryDatabaseClient", () => {
 				orchestratorId: "test-orch",
 				queueName: "default",
 				batchSize: 10,
-				taskKeysWithConcurrency: [],
 				filterTaskKeys: [],
 			});
 
