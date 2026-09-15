@@ -1,9 +1,9 @@
 import type {
 	DatabaseClient,
-	JsonValue,
 	Execution,
 	Payload,
 	DeadLetterMetadata,
+	JsonValue,
 } from "./database-client";
 import { nextCronOccurrence } from "./lib/cron";
 import type { Clock } from "./lib/clock";
@@ -18,12 +18,15 @@ import type { TaskIdentifier } from "./task";
 import type { Logger } from "./lib/logger";
 import { WindowChecker } from "./lib/window-checker";
 import { TypedAbortController } from "./lib/typed-abort-controller";
+import { parseDuration, type DurationInput } from "./lib/duration";
 import type {
 	EventDefinition,
 	EventName,
 	FindEventByIdentifier,
 	InferEventPayload,
+	FilterForEvent,
 } from "./event-definition";
+import { compileEventFilter } from "./event-trigger-validation";
 
 export type TaskAbortReasons =
 	// if cancelled by a user
@@ -81,12 +84,60 @@ export function createTaskSignal(
 	return controller;
 }
 
+export class WaitForEventTimeoutError extends Error {
+	readonly code = "PGCONDUCTOR_WAIT_FOR_EVENT_TIMEOUT";
+	constructor(public readonly stepKey: string) {
+		super(`Timed out waiting for event at step "${stepKey}"`);
+		this.name = "WaitForEventTimeoutError";
+	}
+}
+
+type ResolvedEventWaitStepResult<TDef extends EventDefinition<string, any, any>> = {
+	status: "resolved";
+	event: { name: TDef["name"]; payload: InferEventPayload<TDef> };
+};
+
+type TimedOutEventWaitStepResult = { status: "timed_out" };
+
+function isJsonValue(value: unknown): value is JsonValue {
+	if (value === null || ["string", "number", "boolean"].includes(typeof value)) return true;
+	if (Array.isArray(value)) return value.every(isJsonValue);
+	return isPayload(value);
+}
+
+function isPayload(value: unknown): value is Payload {
+	return (
+		typeof value === "object" &&
+		value !== null &&
+		!Array.isArray(value) &&
+		Object.values(value).every(isJsonValue)
+	);
+}
+
+function isTimedOutEventWaitStepResult(value: unknown): value is TimedOutEventWaitStepResult {
+	return isPayload(value) && value.status === "timed_out";
+}
+
+function isResolvedEventWaitStepResult<TDef extends EventDefinition<string, any, any>>(
+	value: unknown,
+	event: TDef,
+): value is ResolvedEventWaitStepResult<TDef> {
+	return (
+		isPayload(value) &&
+		value.status === "resolved" &&
+		isPayload(value.event) &&
+		value.event.name === event.name &&
+		isPayload(value.event.payload)
+	);
+}
+
 export type TaskContextOptions = {
 	abortController: TypedAbortController<TaskAbortReasons>;
 	db: DatabaseClient;
 	clock: Clock;
 	execution: Execution;
 	logger: Logger;
+	eventDefinitions: readonly EventDefinition<string, any, any>[];
 	window?: [string, string];
 };
 
@@ -255,6 +306,62 @@ export class TaskContext<
 			reason: "released",
 			reschedule_in_ms: ms,
 			step_key: id,
+		});
+	}
+
+	async waitForEvent<
+		TName extends EventName<Events>,
+		TDef extends FindEventByIdentifier<Events, TName> = FindEventByIdentifier<Events, TName>,
+	>(
+		stepKey: string,
+		options: {
+			event: TDef;
+			filter?: FilterForEvent<TDef>;
+			timeout?: DurationInput;
+		},
+	): Promise<{ name: TDef["name"]; payload: InferEventPayload<TDef> }> {
+		if (!stepKey) throw new Error("waitForEvent stepKey is required");
+		const cached = await this.opts.db.loadStep(
+			{
+				executionId: this.opts.execution.id,
+				queue: this.opts.execution.queue,
+				orchestratorId: this.opts.execution.locked_by,
+				key: stepKey,
+			},
+			{ signal: this.signal },
+		);
+		if (cached !== undefined) {
+			if (isTimedOutEventWaitStepResult(cached)) throw new WaitForEventTimeoutError(stepKey);
+			if (isResolvedEventWaitStepResult(cached, options.event)) return cached.event;
+			throw new Error(`Invalid waitForEvent step result at "${stepKey}"`);
+		}
+
+		const compiled = compileEventFilter(
+			options.event.name,
+			options.filter,
+			this.opts.eventDefinitions,
+		);
+		const timeoutMs = options.timeout === undefined ? null : parseDuration(options.timeout);
+		const registration = await this.opts.db.registerEventWait(
+			{
+				executionId: this.opts.execution.id,
+				queue: this.opts.execution.queue,
+				taskKey: this.opts.execution.task_key,
+				eventKey: options.event.name,
+				stepKey,
+				requiredFieldCount: compiled.required_field_count,
+				terms: compiled.terms,
+				timeoutMs,
+				orchestratorId: this.opts.execution.locked_by,
+			},
+			{ signal: this.signal },
+		);
+		// A timeout wakes and reruns the execution. Registration then replaces the expired
+		// subscription with a timed-out step before reporting that outcome here.
+		if (registration.timedOut) throw new WaitForEventTimeoutError(stepKey);
+		return this.abortAndHangup({
+			reason: "released",
+			reschedule_in_ms: registration.timeoutMs ?? "infinity",
 		});
 	}
 

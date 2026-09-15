@@ -18,6 +18,7 @@ import {
 	type SaveStepArgs,
 	type ClearWaitingStateArgs,
 	type EmitEventArgs,
+	type RegisterEventWaitArgs,
 } from "./query-builder";
 import { makeChildLogger, type Logger } from "./lib/logger";
 
@@ -590,6 +591,21 @@ export class DatabaseClient {
 			label: "clearWaitingState",
 			...opts,
 		});
+	}
+
+	async registerEventWait(
+		args: RegisterEventWaitArgs,
+		opts?: QueryMethodOptions,
+	): Promise<{ timedOut: boolean; timeoutMs: number | null }> {
+		const rows = await this.query(() => this.builder.buildRegisterEventWait(args), {
+			label: "registerEventWait",
+			...opts,
+		});
+		const row = rows[0];
+		return {
+			timedOut: row?.timed_out ?? false,
+			timeoutMs: row?.timeout_ms == null ? null : Number(row.timeout_ms),
+		};
 	}
 
 	async dispatchCustomEvents(

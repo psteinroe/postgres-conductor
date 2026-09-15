@@ -600,6 +600,7 @@ export class Worker<
 								task_key: exec.task_key,
 								queue: exec.queue,
 							}),
+							eventDefinitions: task.eventDefinitions,
 							window: task.window,
 						},
 						extraContext,

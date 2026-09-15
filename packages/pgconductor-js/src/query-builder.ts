@@ -4,6 +4,7 @@ import * as assert from "./lib/assert";
 import type {
 	Execution,
 	ExecutionSpec,
+	EventFilterTerm,
 	EventSubscriptionSpec,
 	Payload,
 	TaskSpec,
@@ -91,6 +92,18 @@ export type ClearWaitingStateArgs = {
 export type EmitEventArgs = {
 	eventKey: string;
 	payload?: Payload;
+};
+
+export type RegisterEventWaitArgs = {
+	executionId: string;
+	queue: string;
+	taskKey: string;
+	eventKey: string;
+	stepKey: string;
+	requiredFieldCount: number;
+	terms: EventFilterTerm[];
+	timeoutMs: number | null;
+	orchestratorId: string;
 };
 
 export class QueryBuilder {
@@ -515,7 +528,7 @@ export class QueryBuilder {
 				and tc.key = r.task_key and tc.queue = r.queue
 				and (tc.remove_on_complete_days is null or tc.remove_on_complete_days != 0)
 				and not exists (select 1 from orphaned_children oc where oc.id = e.id)
-			returning e.id
+			returning e.id, e.queue
 		)`);
 
 		ctes.push(this.sql`permanently_failed_children as materialized (
@@ -630,7 +643,19 @@ export class QueryBuilder {
 				locked_by = null, locked_at = null
 			from now_ts nt, failed_updates f
 			where e.id = f.target_id and e.queue = f.queue
-			returning e.id
+			returning e.id, e.queue
+		)`);
+		ctes.push(this.sql`cleaned_terminal_event_waits as (
+			delete from pgconductor._private_custom_event_subscriptions subscription
+			using (
+				select id, queue from updated_completed
+				union all
+				select id, queue from updated_failed
+			) terminal
+			where subscription.kind = 'execution_wait'
+				and subscription.execution_id = terminal.id
+				and subscription.queue = terminal.queue
+			returning subscription.id
 		)`);
 		ctes.push(this.sql`retried as (
 			update pgconductor._private_executions e
@@ -998,6 +1023,35 @@ export class QueryBuilder {
 		`;
 	}
 
+	buildRegisterEventWait({
+		executionId,
+		queue,
+		taskKey,
+		eventKey,
+		stepKey,
+		requiredFieldCount,
+		terms,
+		timeoutMs,
+		orchestratorId,
+	}: RegisterEventWaitArgs): PendingQuery<
+		RowList<{ timed_out: boolean; timeout_ms: string | null }[]>
+	> {
+		return this.sql<RowList<{ timed_out: boolean; timeout_ms: string | null }[]>>`
+			select timed_out, timeout_ms::text
+			from pgconductor._private_register_event_wait(
+				${executionId}::uuid,
+				${queue}::text,
+				${taskKey}::text,
+				${orchestratorId}::uuid,
+				${eventKey}::text,
+				${stepKey}::text,
+				${requiredFieldCount}::smallint,
+				${this.sql.json(terms)}::jsonb,
+				${timeoutMs}::bigint
+			)
+		`;
+	}
+
 	buildClearWaitingState({
 		executionId,
 		queue,
@@ -1083,7 +1137,8 @@ export class QueryBuilder {
 				select
 					source.id as event_id,
 					source.payload ->> 'eventKey' as event_key,
-					source.payload -> 'payload' as event_payload
+					source.payload -> 'payload' as event_payload,
+					source.created_at
 				from pgconductor._private_executions source
 				where source.id = any(${this.sql.array(eventIds, 2951)}::uuid[])
 					and source.queue = 'pgconductor.internal'
@@ -1229,6 +1284,7 @@ export class QueryBuilder {
 				from matched_subscriptions matched
 				join pgconductor._private_custom_event_subscriptions subscription
 					on subscription.id = matched.subscription_id
+					and subscription.kind = 'task_trigger'
 				join pgconductor._private_tasks task
 					on task.key = subscription.task_key and task.queue = subscription.queue
 			), inserted_destinations as (
@@ -1258,6 +1314,68 @@ export class QueryBuilder {
 				on conflict (parent_execution_id, subscription_id, queue)
 				where subscription_id is not null
 				do nothing
+			), selected_waits as materialized (
+				select distinct on (subscription.id)
+					matched.event_id,
+					subscription.id as subscription_id,
+					subscription.execution_id,
+					subscription.queue,
+					subscription.step_key,
+					source.event_key,
+					source.event_payload
+				from matched_subscriptions matched
+				join pgconductor._private_custom_event_subscriptions subscription
+					on subscription.id = matched.subscription_id
+					and subscription.kind = 'execution_wait'
+				join sources source on source.event_id = matched.event_id
+				where source.created_at > subscription.created_at
+					and (
+						subscription.expires_at is null
+						or source.created_at <= subscription.expires_at
+					)
+				order by subscription.id, source.created_at, source.event_id
+			), locked_wait_executions as materialized (
+				select execution.id, execution.queue
+				from pgconductor._private_executions execution
+				join selected_waits wait
+					on wait.execution_id = execution.id and wait.queue = execution.queue
+				where execution.completed_at is null
+					and execution.failed_at is null
+					and not execution.cancelled
+					and execution.locked_by is null
+				order by execution.id
+				for update of execution skip locked
+			), inserted_wait_steps as (
+				insert into pgconductor._private_steps (execution_id, queue, key, result)
+				select wait.execution_id, wait.queue, wait.step_key,
+					jsonb_build_object(
+						'status', 'resolved',
+						'event', jsonb_build_object(
+							'name', wait.event_key,
+							'payload', wait.event_payload
+						)
+					)
+				from selected_waits wait
+				join locked_wait_executions execution
+					on execution.id = wait.execution_id and execution.queue = wait.queue
+				on conflict (execution_id, key) do nothing
+				returning execution_id, queue, key
+			), deleted_waits as (
+				delete from pgconductor._private_custom_event_subscriptions subscription
+				using inserted_wait_steps step
+				where subscription.kind = 'execution_wait'
+					and subscription.execution_id = step.execution_id
+					and subscription.queue = step.queue
+					and subscription.step_key = step.key
+				returning subscription.execution_id, subscription.queue
+			), woken_waits as (
+				update pgconductor._private_executions execution
+				set run_at = pgconductor._private_current_time(),
+					waiting_on_execution_id = null,
+					waiting_step_key = null
+				from deleted_waits wait
+				where execution.id = wait.execution_id and execution.queue = wait.queue
+				returning execution.id
 			)
 			select source.event_id
 			from sources source

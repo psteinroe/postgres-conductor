@@ -24,6 +24,7 @@ import type {
 	ClearWaitingStateArgs,
 	OrchestratorShutdownArgs,
 	EmitEventArgs,
+	RegisterEventWaitArgs,
 } from "../../src/query-builder";
 import type { Migration } from "../../src/migration-store";
 import type { Logger } from "../../src/lib/logger";
@@ -118,6 +119,11 @@ interface StoredEventSubscription {
 	payload_fields: string[] | null;
 	required_field_count: number;
 	terms: EventFilterTerm[];
+	kind: "task_trigger" | "execution_wait";
+	execution_id: string | null;
+	step_key: string | null;
+	expires_at: Date | null;
+	created_at: Date;
 }
 
 interface SignalData {
@@ -353,8 +359,10 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 
 		// Registration is authoritative for this queue, just like PostgreSQL.
 		for (const id of [...this.eventSubscriptions.keys()]) {
-			if (this.eventSubscriptions.get(id)?.queue === args.queueName)
+			const subscription = this.eventSubscriptions.get(id);
+			if (subscription?.queue === args.queueName && subscription.kind === "task_trigger") {
 				this.eventSubscriptions.delete(id);
+			}
 		}
 		for (const spec of args.eventSubscriptions || []) {
 			const id = this.generateId();
@@ -366,6 +374,11 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 				payload_fields: spec.payload_fields,
 				required_field_count: spec.required_field_count,
 				terms: structuredClone(spec.terms),
+				kind: "task_trigger",
+				execution_id: null,
+				step_key: null,
+				expires_at: null,
+				created_at: this.getInternalTime(),
 			});
 		}
 
@@ -492,6 +505,14 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 		return results;
 	}
 
+	private deleteExecutionWaits(executionId: string): void {
+		for (const [id, subscription] of this.eventSubscriptions) {
+			if (subscription.kind === "execution_wait" && subscription.execution_id === executionId) {
+				this.eventSubscriptions.delete(id);
+			}
+		}
+	}
+
 	async returnExecutions(
 		resultsOrGrouped:
 			| ExecutionResult[]
@@ -528,6 +549,7 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 					exec.state = "completed";
 					exec.result = result.result || null;
 					exec.orchestrator_id = null;
+					this.deleteExecutionWaits(exec.id);
 
 					// Event deliveries retain lineage without workflow-child behavior.
 					if (exec.parent_execution_id && exec.subscription_id === null) {
@@ -566,6 +588,7 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 						// Permanently failed
 						exec.state = "failed";
 						exec.failed_at = now;
+						this.deleteExecutionWaits(exec.id);
 						if (!exec.cancelled) this.deliverToDeadLetterQueue(exec, task, result.error, now);
 
 						// Fail a workflow parent only. Event delivery lineage is independent.
@@ -576,6 +599,7 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 								parent.last_error = `Child execution failed: ${result.error}`;
 								parent.waiting_on_execution_id = null;
 								parent.waiting_step_key = null;
+								this.deleteExecutionWaits(parent.id);
 								const parentTask = this.tasks.get(this.taskId(parent.task_key, parent.queue));
 								if (!exec.cancelled) {
 									this.deliverToDeadLetterQueue(parent, parentTask, parent.last_error, now);
@@ -609,6 +633,7 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 				case "released": {
 					exec.state = "pending";
 					exec.orchestrator_id = null;
+					exec.attempts = Math.max(exec.attempts - 1, 0);
 
 					if (result.reschedule_in_ms === "infinity") {
 						exec.run_at = new Date(8640000000000000); // Max date
@@ -624,6 +649,7 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 					exec.state = "failed";
 					exec.failed_at = now;
 					exec.last_error = result.error;
+					this.deleteExecutionWaits(exec.id);
 
 					const task = this.tasks.get(this.taskId(exec.task_key, exec.queue));
 					if (!exec.cancelled) this.deliverToDeadLetterQueue(exec, task, result.error, now);
@@ -638,6 +664,7 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 							parent.waiting_on_execution_id = null;
 							parent.waiting_step_key = null;
 							parent.waiting_timeout_at = null;
+							this.deleteExecutionWaits(parent.id);
 							const parentTask = this.tasks.get(this.taskId(parent.task_key, parent.queue));
 							if (!exec.cancelled) {
 								this.deliverToDeadLetterQueue(parent, parentTask, parent.last_error, now);
@@ -936,6 +963,7 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 		if (exec.state === "running") {
 			exec.cancelled = true;
 		}
+		this.deleteExecutionWaits(executionId);
 
 		return true;
 	}
@@ -1083,6 +1111,71 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 		exec.waiting_timeout_at = null;
 	}
 
+	async registerEventWait(
+		args: RegisterEventWaitArgs,
+		_opts?: { signal?: AbortSignal },
+	): Promise<{ timedOut: boolean; timeoutMs: number | null }> {
+		const execution = this.executions.get(args.executionId);
+		if (
+			!execution ||
+			execution.queue !== args.queue ||
+			execution.task_key !== args.taskKey ||
+			!this.ownsClaim(args) ||
+			execution.cancelled ||
+			execution.state !== "running"
+		) {
+			return { timedOut: false, timeoutMs: null };
+		}
+
+		const existing = Array.from(this.eventSubscriptions.values()).find(
+			(subscription) =>
+				subscription.kind === "execution_wait" &&
+				subscription.execution_id === args.executionId &&
+				subscription.step_key === args.stepKey,
+		);
+		const now = this.getInternalTime();
+		if (existing?.expires_at && existing.expires_at <= now) {
+			this.eventSubscriptions.delete(existing.id);
+			let executionSteps = this.steps.get(args.executionId);
+			if (!executionSteps) {
+				executionSteps = new Map();
+				this.steps.set(args.executionId, executionSteps);
+			}
+			executionSteps.set(args.stepKey, {
+				execution_id: args.executionId,
+				step_key: args.stepKey,
+				result: { status: "timed_out" },
+				created_at: now,
+			});
+			return { timedOut: true, timeoutMs: 0 };
+		}
+
+		let expiresAt = existing?.expires_at ?? null;
+		if (!existing) {
+			const id = this.generateId();
+			expiresAt = args.timeoutMs === null ? null : new Date(now.getTime() + args.timeoutMs);
+			this.eventSubscriptions.set(id, {
+				id,
+				task_key: args.taskKey,
+				queue: args.queue,
+				event_key: args.eventKey,
+				payload_fields: null,
+				required_field_count: args.requiredFieldCount,
+				terms: structuredClone(args.terms),
+				kind: "execution_wait",
+				execution_id: args.executionId,
+				step_key: args.stepKey,
+				expires_at: expiresAt,
+				created_at: now,
+			});
+		}
+
+		return {
+			timedOut: false,
+			timeoutMs: expiresAt ? Math.max(0, expiresAt.getTime() - now.getTime()) : null,
+		};
+	}
+
 	// ============================================================================
 	// Events
 	// ============================================================================
@@ -1103,7 +1196,7 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 		if (typeof payload !== "object" || payload === null || Array.isArray(payload)) {
 			throw new Error("Event payload must be a JSON object");
 		}
-		return this.createExecution(
+		const id = this.createExecution(
 			{
 				task_key: EVENT_DISPATCH_TASK,
 				queue: EVENT_DISPATCH_QUEUE,
@@ -1111,6 +1204,7 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 			},
 			this.getInternalTime(),
 		);
+		return id;
 	}
 
 	async dispatchCustomEvents(args: {
@@ -1138,6 +1232,7 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 				const destinations: Array<{ spec: ExecutionSpec; subscriptionId: string }> = [];
 				for (const subscription of this.eventSubscriptions.values()) {
 					if (
+						subscription.kind !== "task_trigger" ||
 						subscription.event_key !== eventKey ||
 						!this.tasks.has(this.taskId(subscription.task_key, subscription.queue))
 					) {
@@ -1180,6 +1275,50 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 					const destinationId = this.createExecution(destination.spec, now);
 					insertedIds.push(destinationId);
 					this.executions.get(destinationId)!.subscription_id = destination.subscriptionId;
+				}
+
+				for (const subscription of [...this.eventSubscriptions.values()]) {
+					if (
+						subscription.kind !== "execution_wait" ||
+						subscription.event_key !== eventKey ||
+						source.created_at <= subscription.created_at ||
+						(subscription.expires_at !== null && source.created_at > subscription.expires_at) ||
+						!eventFilterTermsMatch(payload, subscription.required_field_count, subscription.terms)
+					) {
+						continue;
+					}
+					const execution = subscription.execution_id
+						? this.executions.get(subscription.execution_id)
+						: undefined;
+					if (
+						!execution ||
+						execution.state !== "pending" ||
+						execution.orchestrator_id !== null ||
+						execution.cancelled ||
+						!subscription.step_key
+					) {
+						continue;
+					}
+					let executionSteps = this.steps.get(execution.id);
+					if (!executionSteps) {
+						executionSteps = new Map();
+						this.steps.set(execution.id, executionSteps);
+					}
+					if (!executionSteps.has(subscription.step_key)) {
+						executionSteps.set(subscription.step_key, {
+							execution_id: execution.id,
+							step_key: subscription.step_key,
+							result: {
+								status: "resolved",
+								event: { name: eventKey, payload: structuredClone(payload) },
+							},
+							created_at: now,
+						});
+					}
+					this.eventSubscriptions.delete(subscription.id);
+					execution.waiting_step_key = null;
+					execution.waiting_timeout_at = null;
+					execution.run_at = now;
 				}
 				dispatched.push(eventId);
 			}
