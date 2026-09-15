@@ -5,12 +5,18 @@ import {
 	SpanKind,
 	SpanStatusCode,
 	trace,
+	metrics,
+	type Counter,
+	type Histogram,
 	type Context,
 	type Link,
 	type Span,
 	type SpanContext,
 } from "@opentelemetry/api";
 import type { TraceContextCarrier } from "./internal-types";
+
+const meter = () =>
+	safe(() => metrics.getMeter(INSTRUMENTATION_NAME, INSTRUMENTATION_VERSION), null);
 
 export type { TraceContextCarrier } from "./internal-types";
 
@@ -27,6 +33,117 @@ const ZERO_SPAN_ID = "0000000000000000";
 
 type MessagingAttributes = Record<string, string | number | boolean>;
 
+let instruments: {
+	sent: Counter;
+	consumed: Counter;
+	processDuration: Histogram;
+	operationDuration: Histogram;
+	retry: Counter;
+	permanentFailure: Counter;
+	cancellation: Counter;
+	deadLetter: Counter;
+} | null = null;
+let instrumentProvider: unknown = null;
+
+function getInstruments() {
+	const provider = safe(() => metrics.getMeterProvider(), null);
+	// The API returns a no-op provider before an SDK is installed. Do not cache
+	// instruments created from it: applications commonly install their provider
+	// after constructing a Conductor.
+	if (instruments && instrumentProvider === provider) return instruments;
+	const m = meter();
+	if (!m) return null;
+	instrumentProvider = provider;
+	return (instruments = {
+		sent: m.createCounter("messaging.client.sent.messages", { unit: "{message}" }),
+		consumed: m.createCounter("messaging.client.consumed.messages", { unit: "{message}" }),
+		processDuration: m.createHistogram("messaging.process.duration", { unit: "s" }),
+		operationDuration: m.createHistogram("messaging.client.operation.duration", { unit: "s" }),
+		retry: m.createCounter("pgconductor.execution.retries", { unit: "{execution}" }),
+		permanentFailure: m.createCounter("pgconductor.execution.permanent_failures", {
+			unit: "{execution}",
+		}),
+		cancellation: m.createCounter("pgconductor.execution.cancellations", { unit: "{execution}" }),
+		deadLetter: m.createCounter("pgconductor.execution.dead_letters", { unit: "{execution}" }),
+	});
+}
+
+const OUTCOMES = new Set(["retry", "permanent_failure", "cancellation", "dead_letter"]);
+const boundedDimension = (value: string | undefined): string | undefined =>
+	value === undefined ? undefined : value.length <= 128 ? value : value.slice(0, 128);
+
+function metricAttributes(queue: string, task?: string, operation?: string, outcome?: string) {
+	return {
+		"messaging.system": "postgres_conductor",
+		"messaging.destination.name": boundedDimension(queue) || "unknown",
+		"messaging.operation.name": boundedDimension(operation) || "unknown",
+		"messaging.operation.type": boundedDimension(operation) || "unknown",
+		...(task === undefined || boundedDimension(task) === undefined
+			? {}
+			: { "pgconductor.task.name": boundedDimension(task)! }),
+		...(outcome !== undefined && OUTCOMES.has(outcome) ? { "pgconductor.outcome": outcome } : {}),
+	};
+}
+
+export function recordSent(queue: string, count = 1, task?: string): void {
+	safe(() => getInstruments()?.sent.add(count, metricAttributes(queue, task, "send")), undefined);
+}
+export function recordConsumed(queue: string, task?: string, count = 1): void {
+	safe(
+		() => getInstruments()?.consumed.add(count, metricAttributes(queue, task, "process")),
+		undefined,
+	);
+}
+export function recordProcessDuration(queue: string, durationMs: number, task?: string): void {
+	safe(
+		() =>
+			getInstruments()?.processDuration.record(
+				durationMs / 1000,
+				metricAttributes(queue, task, "process"),
+			),
+		undefined,
+	);
+}
+export function recordOperationDuration(
+	queue: string,
+	durationMs: number,
+	operation: string,
+	task?: string,
+): void {
+	safe(
+		() =>
+			getInstruments()?.operationDuration.record(
+				durationMs / 1000,
+				metricAttributes(queue, task, operation),
+			),
+		undefined,
+	);
+}
+export function recordLifecycle(
+	queue: string,
+	outcome: "retry" | "permanent_failure" | "cancellation" | "dead_letter",
+	task?: string,
+	count = 1,
+): void {
+	safe(() => {
+		const i = getInstruments();
+		const counter =
+			outcome === "retry"
+				? i?.retry
+				: outcome === "permanent_failure"
+					? i?.permanentFailure
+					: outcome === "cancellation"
+						? i?.cancellation
+						: i?.deadLetter;
+		counter?.add(count, metricAttributes(queue, task, "settle", outcome));
+	}, undefined);
+}
+
+export function resetMetricsForTests(): void {
+	instruments = null;
+	instrumentProvider = null;
+}
+
 type MessagingOperation = "send" | "process" | "settle";
 
 export const messagingAttributes = (
@@ -35,6 +152,7 @@ export const messagingAttributes = (
 	operation: MessagingOperation,
 	messageId?: string,
 	batchMessageCount?: number,
+	eventKey?: string,
 ): MessagingAttributes => ({
 	"messaging.system": "postgres_conductor",
 	"messaging.destination.name": queue,
@@ -45,6 +163,7 @@ export const messagingAttributes = (
 	...(batchMessageCount === undefined
 		? {}
 		: { "messaging.batch.message_count": batchMessageCount }),
+	...(eventKey === undefined ? {} : { "pgconductor.event.name": boundedDimension(eventKey) }),
 	"pgconductor.queue": queue,
 });
 
@@ -185,6 +304,15 @@ export function linkContext(ctx: Context | null): Link | null {
 		: null;
 }
 
+export function linkFromCarrier(value: unknown): Link | null {
+	return linkContext(extractCarrier(value));
+}
+
+export function linksFromCarrier(value: unknown): Link[] {
+	const link = linkFromCarrier(value);
+	return link ? [link] : [];
+}
+
 export function spanContext(span: Span | null): SpanContext | null {
 	if (!span) return null;
 	return safe(() => {
@@ -195,6 +323,10 @@ export function spanContext(span: Span | null): SpanContext | null {
 
 export function contextForSpan(span: Span | null, parent: Context = context.active()): Context {
 	return span ? safe(() => trace.setSpan(parent, span), parent) : parent;
+}
+
+export function contextForSpanContext(value: SpanContext | null): Context {
+	return value ? safe(() => trace.setSpanContext(ROOT_CONTEXT, value), ROOT_CONTEXT) : ROOT_CONTEXT;
 }
 
 export function runWithSpan<T>(span: Span | null, fn: () => T): T {

@@ -7,15 +7,7 @@ import { TestDatabasePool } from "../fixtures/test-database";
 import type { TestDatabase } from "../fixtures/test-database";
 import { TaskSchemas } from "../../src/schemas";
 import { Deferred } from "../../src/lib/deferred";
-
-async function waitForCondition(check: () => Promise<boolean>, timeoutMs = 20_000): Promise<void> {
-	const deadline = Date.now() + timeoutMs;
-	while (Date.now() < deadline) {
-		if (await check()) return;
-		await new Promise((resolve) => setTimeout(resolve, 25));
-	}
-	throw new Error(`condition was not met within ${timeoutMs}ms`);
-}
+import { waitForCondition } from "../test-utils";
 
 describe("Invoke Support", () => {
 	let pool: TestDatabasePool;

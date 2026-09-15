@@ -79,6 +79,7 @@ nav = [
     { "Batching" = "task-execution/batching.md" },
   ]},
   { "Operations" = [
+    { "OpenTelemetry" = "operations/opentelemetry.md" },
     { "Horizontal Scaling" = "scaling/horizontal.md" },
     { "Live Migrations" = "scaling/live-migrations.md" },
     { "Maintenance Task" = "scaling/maintenance.md" },

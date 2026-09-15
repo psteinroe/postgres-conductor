@@ -5,17 +5,7 @@ import { Orchestrator } from "../../src/orchestrator";
 import { TaskSchemas } from "../../src/schemas";
 import { defineTask } from "../../src/task-definition";
 import { TestDatabasePool, type TestDatabase } from "../fixtures/test-database";
-
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-
-async function eventually(check: () => Promise<boolean>, timeoutMs = 20_000): Promise<void> {
-	const deadline = Date.now() + timeoutMs;
-	while (Date.now() < deadline) {
-		if (await check()) return;
-		await sleep(25);
-	}
-	throw new Error(`condition was not met within ${timeoutMs}ms`);
-}
+import { waitForCondition } from "../test-utils";
 
 describe("dead-letter queues (Postgres integration)", () => {
 	let pool: TestDatabasePool;
@@ -89,7 +79,7 @@ describe("dead-letter queues (Postgres integration)", () => {
 		});
 		await sourceOrchestrator.start();
 		await conductor.invoke({ name: "charge" }, { value: "order-42" });
-		await eventually(async () => {
+		await waitForCondition(async () => {
 			const rows = await db.sql<{ attempts: number; released: boolean }[]>`
 				select attempts, locked_by is null as released
 				from pgconductor._private_executions
@@ -103,7 +93,7 @@ describe("dead-letter queues (Postgres integration)", () => {
 		`;
 		if (!retry) throw new Error("expected persisted retry");
 		await db.client.setFakeTime({ date: new Date(retry.run_at.getTime() + 1) });
-		await eventually(async () => {
+		await waitForCondition(async () => {
 			const rows = await db.sql<{ count: string }[]>`
 				select count(*)::text as count from pgconductor._private_executions
 				where queue = 'dlq'
@@ -130,7 +120,7 @@ describe("dead-letter queues (Postgres integration)", () => {
 			],
 		});
 		await destinationOrchestrator.start();
-		await eventually(async () => seen.length === 1);
+		await waitForCondition(async () => seen.length === 1);
 		await destinationOrchestrator.stop();
 		expect(seen).toEqual([
 			{ value: "order-42", sourceTask: "charge", attempts: 2, error: "card declined" },
@@ -186,6 +176,7 @@ describe("dead-letter queues (Postgres integration)", () => {
 			queue: execution.queue,
 			task_key: execution.task_key,
 			status: "permanently_failed" as const,
+			cancelled: false,
 			orchestrator_id: execution.locked_by,
 			error: "settlement failure",
 		};
@@ -311,7 +302,7 @@ describe("dead-letter queues (Postgres integration)", () => {
 				cronSchedules: [],
 				eventSubscriptions: [],
 			}),
-		).resolves.toBeUndefined();
+		).resolves.toEqual([]);
 	}, 15000);
 
 	test("rolls back the source settlement when destination insertion fails", async () => {
@@ -370,6 +361,7 @@ describe("dead-letter queues (Postgres integration)", () => {
 			queue: execution.queue,
 			task_key: execution.task_key,
 			status: "permanently_failed" as const,
+			cancelled: false,
 			orchestrator_id: lockedBy,
 			error: "rollback failure",
 		};

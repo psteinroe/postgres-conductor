@@ -1,5 +1,5 @@
 import { Task, type AnyTask } from "./task";
-import type { DatabaseClient } from "./database-client";
+import type { DatabaseClientLike } from "./database-client";
 import crypto from "crypto";
 import type { TaskContext } from "./task-context";
 
@@ -24,7 +24,7 @@ export const createMaintenanceTask = <Queue extends string = "default">(queue: Q
 		Queue,
 		object,
 		void,
-		{ db: DatabaseClient; tasks: Map<string, AnyTask> } & TaskContext,
+		{ db: DatabaseClientLike; tasks: Map<string, AnyTask> } & TaskContext,
 		{ name: "pgconductor.maintenance" }
 	>(
 		{

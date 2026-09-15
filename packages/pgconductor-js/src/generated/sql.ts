@@ -109,6 +109,7 @@ create table pgconductor._private_executions (
     completed_at timestamptz,
     payload jsonb,
     trace_context jsonb,
+    trace_link_context jsonb,
     run_at timestamptz default pgconductor._private_current_time() not null,
     locked_at timestamptz,
     locked_by uuid,
@@ -404,11 +405,13 @@ create or replace function pgconductor._private_register_worker(
     p_cron_schedules pgconductor.execution_spec[],
     p_event_subscriptions pgconductor.event_subscription_spec[] default array[]::pgconductor.event_subscription_spec[]
 )
-returns void
+returns jsonb
 language plpgsql
 volatile
 set search_path to ''
 as $function$
+declare
+  v_cron_rows jsonb;
 begin
   -- Filter arrays are equality allowlists; an empty list is almost always a
   -- configuration mistake and must not silently match nothing.
@@ -468,22 +471,24 @@ begin
     dead_letter_task_key = excluded.dead_letter_task_key;
 
   -- step 3: insert scheduled cron executions
-  insert into pgconductor._private_executions (task_key, queue, payload, run_at, dedupe_key, cron_expression, "group")
-  select
-    spec.task_key,
-    coalesce(spec.queue, 'default'),
-    coalesce(spec.payload, '{}'::jsonb),
-    coalesce(spec.run_at, pgconductor._private_current_time()),
-    spec.dedupe_key,
-    spec.cron_expression,
-    spec."group"
-  from unnest(p_cron_schedules) as spec
-  where spec.dedupe_key is not null
-  on conflict (task_key, dedupe_key, queue) do update set
-    payload = excluded.payload,
-    run_at = excluded.run_at,
-    cron_expression = excluded.cron_expression,
-    "group" = excluded."group";
+  with inserted as (
+    insert into pgconductor._private_executions (task_key, queue, payload, run_at, dedupe_key, cron_expression, "group", trace_context)
+    select spec.task_key, coalesce(spec.queue, 'default'), coalesce(spec.payload, '{}'::jsonb),
+      coalesce(spec.run_at, pgconductor._private_current_time()), spec.dedupe_key,
+      spec.cron_expression, spec."group", spec.trace_context
+    from unnest(p_cron_schedules) as spec
+    where spec.dedupe_key is not null
+    on conflict (task_key, dedupe_key, queue) do update set
+      payload = excluded.payload, run_at = excluded.run_at,
+      cron_expression = excluded.cron_expression, "group" = excluded."group",
+      trace_context = coalesce(excluded.trace_context, pgconductor._private_executions.trace_context)
+    returning id, task_key, queue, true as inserted
+  )
+  select coalesce(jsonb_agg(jsonb_build_object(
+    'id', id, 'task_key', task_key, 'queue', queue,
+    'is_maintenance', task_key = 'pgconductor.maintenance',
+    'inserted', inserted, 'authoritative', true
+  )), '[]'::jsonb) into v_cron_rows from inserted;
 
   -- step 4: clean up stale schedules for this queue
   -- delete future executions for schedules that no longer exist
@@ -574,6 +579,7 @@ begin
           coalesce(array_to_string(source.column_names, ','), '')
         and target.filter is not distinct from source.filter
     );
+  return v_cron_rows;
 end;
 $function$;
 
@@ -987,6 +993,7 @@ create table if not exists pgconductor._private_custom_events (
     id uuid default pgconductor._private_portable_uuidv7() not null,
     event_key text not null,
     payload jsonb not null default '{}'::jsonb,
+    trace_context jsonb,
     event_position bigint not null default nextval('pgconductor._private_event_position_seq'),
     created_at timestamptz default pgconductor._private_current_time() not null,
     processed_at timestamptz,
@@ -1194,7 +1201,7 @@ begin
     loop
         -- Look at persisted events regardless of processed status. This prevents
         -- concurrent task-event processors from changing wait delivery order.
-        select e.event_key, e.payload, e.event_position, e.created_at
+        select e.id, e.event_key, e.payload, e.trace_context, e.event_position, e.created_at
         into v_event
         from pgconductor._private_custom_events e
         where e.event_key = v_wait.event_key
@@ -1243,7 +1250,8 @@ begin
             end if;
 
             update pgconductor._private_executions
-            set run_at = v_now, waiting_on_execution_id = null, waiting_step_key = null
+            set run_at = v_now, waiting_on_execution_id = null, waiting_step_key = null,
+                trace_link_context = case when v_has_event then v_event.trace_context else null end
             where id = v_wait.execution_id and queue = v_wait.queue;
             v_resolved := v_resolved + 1;
         end if;
@@ -1260,7 +1268,7 @@ declare
     v_now timestamptz := pgconductor._private_current_time();
 begin
     with candidates as materialized (
-        select e.created_at, e.id, e.event_key, e.payload
+        select e.created_at, e.id, e.event_key, e.payload, e.trace_context
         from pgconductor._private_custom_events e
         where e.processed_at is null
         order by e.event_position, e.created_at, e.id
@@ -1270,7 +1278,7 @@ begin
         select c.created_at as event_created_at, c.id as event_id,
                s.id as subscription_id, s.task_key, s.queue,
                pgconductor._private_extract_event_payload(s.payload_fields, c.payload) as selected_payload,
-               c.event_key
+               c.event_key, c.trace_context
         from candidates c
         join pgconductor._private_event_subscriptions s on s.event_key = c.event_key
         join pgconductor._private_tasks t on t.key = s.task_key and t.queue = s.queue
@@ -1296,11 +1304,11 @@ begin
         returning event_created_at, event_id, subscription_id
     ), inserted_executions as (
         insert into pgconductor._private_executions(
-            task_key, queue, payload, event_created_at, event_id, subscription_id
+            task_key, queue, payload, trace_context, event_created_at, event_id, subscription_id
         )
         select m.task_key, m.queue,
                jsonb_build_object('event', m.event_key, 'payload', m.selected_payload),
-               d.event_created_at, d.event_id, d.subscription_id
+               m.trace_context, d.event_created_at, d.event_id, d.subscription_id
         from inserted_deliveries d
         join matches m using (event_created_at, event_id, subscription_id)
         on conflict (event_created_at, event_id, subscription_id, queue)
@@ -1369,13 +1377,14 @@ $function$;
 
 create or replace function pgconductor.emit_event(
     p_event_key text,
-    p_payload jsonb default '{}'::jsonb
+    p_payload jsonb default '{}'::jsonb,
+    p_trace_context jsonb default null
 ) returns uuid language plpgsql volatile security definer set search_path to '' as $function$
 declare v_id uuid;
 begin
     perform pg_advisory_xact_lock(hashtext('pgconductor:event-waits'));
-    insert into pgconductor._private_custom_events (event_key, payload)
-    values (p_event_key, p_payload)
+    insert into pgconductor._private_custom_events (event_key, payload, trace_context)
+    values (p_event_key, p_payload, p_trace_context)
     returning id into v_id;
     return v_id;
 end;
@@ -1550,7 +1559,8 @@ create trigger sync_database_trigger
 
 create or replace function pgconductor.emit_event(
     p_event_key text,
-    p_payload jsonb default '{}'::jsonb
+    p_payload jsonb default '{}'::jsonb,
+    p_trace_context jsonb default null
 )
     returns uuid
     language plpgsql
@@ -1561,8 +1571,8 @@ as $_$
 declare v_id uuid;
 begin
     perform pg_advisory_xact_lock(hashtext('pgconductor:event-waits'));
-    insert into pgconductor._private_custom_events (event_key, payload)
-    values (p_event_key, p_payload)
+    insert into pgconductor._private_custom_events (event_key, payload, trace_context)
+    values (p_event_key, p_payload, p_trace_context)
     returning id into v_id;
     return v_id;
 end;

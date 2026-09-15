@@ -9,6 +9,7 @@ import { defineTask } from "../../src/task-definition";
 import { EventSchemas, TaskSchemas } from "../../src/schemas";
 import { TestDatabasePool } from "../fixtures/test-database";
 import type { TestDatabase } from "../fixtures/test-database";
+import { waitForCondition } from "../test-utils";
 import postgres from "postgres";
 
 describe("event pipeline", () => {
@@ -33,15 +34,6 @@ describe("event pipeline", () => {
 		databases.push(db);
 		await Conductor.create({ sql: db.sql, context: {} }).ensureInstalled();
 		return db;
-	}
-
-	async function waitUntil(check: () => Promise<boolean>, timeout = 5000): Promise<void> {
-		const deadline = Date.now() + timeout;
-		while (Date.now() < deadline) {
-			if (await check()) return;
-			await Bun.sleep(10);
-		}
-		throw new Error("condition was not met before timeout");
 	}
 
 	async function subscription(
@@ -95,7 +87,7 @@ describe("event pipeline", () => {
 			await conductor.emit("pipeline.order", { status: "trial", region: "us" });
 			await conductor.emit("pipeline.order", { status: "paid", region: "eu" });
 			await conductor.emit("pipeline.order", { status: "cancelled", region: "us" });
-			await waitUntil(async () => received.length === 2);
+			await waitForCondition(async () => received.length === 2);
 			expect(received.sort()).toEqual(["paid", "trial"]);
 		} finally {
 			await orchestrator.stop();
