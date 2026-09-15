@@ -21,6 +21,7 @@ import {
 	type EmitEventArgs,
 } from "./query-builder";
 import { makeChildLogger, type Logger } from "./lib/logger";
+import type { TraceContextCarrier } from "./internal-types";
 
 export type JsonValue = string | number | boolean | null | Payload | JsonValue[];
 export type Payload = { [key: string]: JsonValue };
@@ -39,6 +40,7 @@ export interface ExecutionSpec {
 	parent_execution_id?: string | null;
 	parent_step_key?: string | null;
 	parent_timeout_ms?: number | null;
+	trace_context?: TraceContextCarrier | null;
 }
 
 export interface TaskSpec {
@@ -82,6 +84,7 @@ export interface Execution {
 	dead_letter_error?: string | null;
 	dead_letter_attempts?: number | null;
 	dead_letter_failed_at?: Date | null;
+	trace_context?: TraceContextCarrier | null;
 }
 
 // todo: move all of this to query-builder too or create new types.ts file

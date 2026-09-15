@@ -31,6 +31,18 @@ import { makeChildLogger, type Logger } from "./lib/logger";
 import type { EventDefinition } from "./event-definition";
 import { coerceError } from "./lib/coerce-error";
 import type { TypedAbortController } from "./lib/typed-abort-controller";
+import { ROOT_CONTEXT, SpanKind, type SpanContext } from "@opentelemetry/api";
+import {
+	endSpan,
+	extractCarrier,
+	linkContext,
+	messagingAttributes,
+	runWithSpan,
+	setSpanAttribute,
+	setSpanError,
+	spanContext,
+	startSpan,
+} from "./telemetry";
 
 /**
  * The configuration options for the Worker.
@@ -169,6 +181,7 @@ export class Worker<
 	private _drainDidWork = false;
 	private _runningTasks = new Map<string, TypedAbortController<TaskAbortReasons>>();
 	private eventProcessingGate: Promise<void> = Promise.resolve();
+	private readonly processSpanContexts = new Map<string, SpanContext>();
 
 	/** Used by Orchestrator to prevent local event fan-out before every worker registers. */
 	setEventProcessingGate(gate: Promise<void>): void {
@@ -183,6 +196,7 @@ export class Worker<
 		config: Partial<WorkerConfig> = {},
 		private readonly extraContext: object = {},
 		private readonly eventDefinitions: readonly EventDefinition<string, any, any>[] = [],
+		private readonly telemetry = true,
 	) {
 		const maintenanceTask = createMaintenanceTask(this.queueName);
 		this.tasks = tasks.reduce(
@@ -375,6 +389,7 @@ export class Worker<
 		this._abortController = null;
 		this.orchestratorId = null;
 		this.eventProcessingGate = Promise.resolve();
+		this.processSpanContexts.clear();
 	}
 
 	private async processEventBatches({ runOnce }: { runOnce: boolean }): Promise<number> {
@@ -747,6 +762,16 @@ export class Worker<
 				resolve(taskAbortController.signal.reason);
 			});
 		});
+		const consumer = this.telemetry
+			? startSpan(
+					`process ${exec.queue}`,
+					SpanKind.CONSUMER,
+					messagingAttributes(exec.task_key, exec.queue, "process", exec.id),
+					extractCarrier(exec.trace_context) || ROOT_CONTEXT,
+				)
+			: null;
+		const consumerContext = spanContext(consumer);
+		if (consumerContext) this.processSpanContexts.set(exec.id, consumerContext);
 
 		try {
 			await this.scheduleNextExecution(exec);
@@ -779,31 +804,35 @@ export class Worker<
 					? { ...this.extraContext, db: this.db, tasks: this.tasks }
 					: this.extraContext;
 
-			const output = await Promise.race([
-				task.execute(
-					taskEvent,
-					TaskContext.create<Tasks, Events, typeof extraContext>(
-						{
-							db: this.db,
-							abortController: taskAbortController,
-							execution: exec,
-							logger: makeChildLogger(this.logger, {
-								execution_id: exec.id,
-								orchestrator_id: exec.locked_by,
-								task_key: exec.task_key,
-								queue: exec.queue,
-							}),
-							window: task.window,
-						},
-						extraContext,
+			const output = await runWithSpan(consumer, () =>
+				Promise.race([
+					task.execute(
+						taskEvent,
+						TaskContext.create<Tasks, Events, typeof extraContext>(
+							{
+								db: this.db,
+								abortController: taskAbortController,
+								execution: exec,
+								logger: makeChildLogger(this.logger, {
+									execution_id: exec.id,
+									orchestrator_id: exec.locked_by,
+									task_key: exec.task_key,
+									queue: exec.queue,
+								}),
+								window: task.window,
+								telemetry: this.telemetry ? undefined : false,
+							},
+							extraContext,
+						),
 					),
-				),
-				abortPromise,
-			]);
+					abortPromise,
+				]),
+			);
 
 			if (isTaskAbortReason(output)) {
 				switch (output.reason) {
 					case "wait-for-event":
+						this.processSpanContexts.delete(exec.id);
 						return null;
 					case "child-invocation":
 						return {
@@ -853,6 +882,7 @@ export class Worker<
 				result: output,
 			} as const;
 		} catch (err) {
+			setSpanError(consumer, err);
 			return {
 				execution_id: exec.id,
 				orchestrator_id: exec.locked_by,
@@ -862,6 +892,7 @@ export class Worker<
 				error: coerceError(err).message,
 			} as const;
 		} finally {
+			endSpan(consumer);
 			// Clean up running task tracking
 			this._runningTasks.delete(exec.id);
 		}
@@ -879,6 +910,22 @@ export class Worker<
 		taskKey: string,
 		executions: Execution[],
 	): Promise<ExecutionResult[]> {
+		const links = this.telemetry
+			? executions.flatMap((exec) => linkContext(extractCarrier(exec.trace_context)) || [])
+			: [];
+		const consumer = this.telemetry
+			? startSpan(
+					`process ${this.queueName}`,
+					SpanKind.CONSUMER,
+					messagingAttributes(taskKey, this.queueName, "process", undefined, executions.length),
+					ROOT_CONTEXT,
+					links,
+				)
+			: null;
+		const processContext = spanContext(consumer);
+		if (processContext)
+			for (const execution of executions)
+				this.processSpanContexts.set(execution.id, processContext);
 		// Build event array
 		const events = executions.map((exec) => {
 			if (exec.cron_expression) {
@@ -921,7 +968,9 @@ export class Worker<
 			// Schedule next executions for cron tasks
 			await Promise.all(executions.map((exec) => this.scheduleNextExecution(exec)));
 
-			const result = await Promise.race([task.execute(events, batchContext), abortPromise]);
+			const result = await runWithSpan(consumer, () =>
+				Promise.race([task.execute(events, batchContext), abortPromise]),
+			);
 
 			// Handle abort reasons
 			if (isTaskAbortReason(result)) {
@@ -982,6 +1031,7 @@ export class Worker<
 				result: result[i],
 			}));
 		} catch (err) {
+			setSpanError(consumer, err);
 			// Handler threw: all fail together
 			const errorMsg = coerceError(err).message;
 			return executions.map((exec) => ({
@@ -992,6 +1042,8 @@ export class Worker<
 				status: "failed" as const,
 				error: errorMsg,
 			}));
+		} finally {
+			endSpan(consumer);
 		}
 	}
 
@@ -1032,7 +1084,7 @@ export class Worker<
 	// --- Stage 3: Flush results to database ---
 	private async flushResults(source: AsyncIterable<ExecutionResult>): Promise<void> {
 		let buffer = new BufferState();
-		let flushTimer: Timer | null = null;
+		let flushTimer: ReturnType<typeof setTimeout> | null = null;
 
 		const flushNow = async (isCleanup = false) => {
 			if (buffer.count === 0) return;
@@ -1045,14 +1097,47 @@ export class Worker<
 				flushTimer = null;
 			}
 
+			const links = this.telemetry
+				? Array.from(
+						new Set(
+							[...batch.completed, ...batch.failed, ...batch.released, ...batch.invokeChild]
+								.map((result) => this.processSpanContexts.get(result.execution_id))
+								.filter((value): value is SpanContext => value !== undefined),
+						),
+					).map((context) => ({ context }))
+				: [];
+			const settle =
+				this.telemetry && links.length
+					? startSpan(
+							`settle ${this.queueName}`,
+							SpanKind.CLIENT,
+							messagingAttributes(undefined, this.queueName, "settle", undefined, batch.count),
+							ROOT_CONTEXT,
+							links,
+						)
+					: null;
+			let settled = false;
 			try {
 				batch.orchestratorId = this.orchestratorId || batch.orchestratorId;
-				await this.db.returnExecutions(batch, { signal: this.signal });
+				await runWithSpan(settle, () => this.db.returnExecutions(batch, { signal: this.signal }));
+				settled = true;
+				setSpanAttribute(settle, "pgconductor.db.commit.status", "success");
 			} catch (err) {
+				setSpanError(settle, err);
 				this.logger.error("Error flushing results:", err);
 				if (!isCleanup) {
 					buffer.restore(batch);
 				}
+			} finally {
+				endSpan(settle);
+				if (settled || isCleanup)
+					for (const result of [
+						...batch.completed,
+						...batch.failed,
+						...batch.released,
+						...batch.invokeChild,
+					])
+						this.processSpanContexts.delete(result.execution_id);
 			}
 		};
 

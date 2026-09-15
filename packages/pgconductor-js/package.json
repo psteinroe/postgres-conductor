@@ -33,7 +33,7 @@
 		"provenance": true
 	},
 	"scripts": {
-		"build": "bun build src/index.ts --outdir dist --target node && bun build cli/index.ts --outdir dist/cli --target node",
+		"build": "bun build src/index.ts --outdir dist --target node --external @opentelemetry/api && bun build cli/index.ts --outdir dist/cli --target node --external @opentelemetry/api",
 		"test": "bun test",
 		"test:unit": "bun test tests/unit",
 		"test:integration": "bun test tests/integration",
@@ -41,12 +41,15 @@
 		"perf": "bun perf/run.ts"
 	},
 	"devDependencies": {
+		"@opentelemetry/api": "catalog:",
+		"@opentelemetry/sdk-trace-base": "catalog:",
 		"@testcontainers/postgresql": "catalog:",
 		"@types/bun": "catalog:",
 		"expect-type": "catalog:",
 		"zod": "catalog:",
 	},
 	"peerDependencies": {
+		"@opentelemetry/api": ">=1.4 <2",
 		"typescript": "catalog:"
 	},
 	"dependencies": {
