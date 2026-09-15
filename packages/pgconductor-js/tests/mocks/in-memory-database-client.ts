@@ -39,6 +39,7 @@ interface StoredExecution {
 	id: string;
 	task_key: string;
 	queue: string;
+	group: string | null;
 	payload: Payload;
 	state: "pending" | "running" | "completed" | "failed";
 	run_at: Date;
@@ -57,7 +58,6 @@ interface StoredExecution {
 	orchestrator_id: string | null;
 	parent_execution_id: string | null;
 	parent_step_key: string | null;
-	slot_group_number: number | null;
 	created_at: Date;
 	updated_at: Date;
 }
@@ -78,6 +78,7 @@ interface StoredTask {
 	window_start: string | null;
 	window_end: string | null;
 	concurrency: number | null;
+	group_concurrency: number | null;
 }
 
 interface StoredCronSchedule {
@@ -202,11 +203,14 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 				// Release executions claimed by stale orchestrator
 				for (const exec of this.executions.values()) {
 					if (exec.orchestrator_id === orchestrator.id && exec.state === "running") {
-						exec.state = "pending";
+						exec.state = exec.cancelled ? "failed" : "pending";
+						exec.last_error = exec.cancelled
+							? exec.last_error || "Task was cancelled"
+							: exec.last_error;
 						exec.orchestrator_id = null;
-						exec.slot_group_number = null;
 					}
 				}
+				this.orchestrators.delete(orchestrator.id);
 			}
 		}
 	}
@@ -242,6 +246,12 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 		_opts?: { signal?: AbortSignal },
 	): Promise<void> {
 		this.orchestrators.delete(args.orchestratorId);
+		for (const exec of this.executions.values()) {
+			if (exec.orchestrator_id !== args.orchestratorId || exec.state !== "running") continue;
+			exec.state = exec.cancelled ? "failed" : "pending";
+			exec.last_error = exec.cancelled ? exec.last_error || "Task was cancelled" : exec.last_error;
+			exec.orchestrator_id = null;
+		}
 	}
 
 	// ============================================================================
@@ -279,6 +289,7 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 				window_start: taskSpec.window?.[0] || null,
 				window_end: taskSpec.window?.[1] || null,
 				concurrency: taskSpec.concurrency || null,
+				group_concurrency: taskSpec.groupConcurrency || null,
 			};
 			this.tasks.set(this.taskId(taskSpec.key, task.queue), task);
 		}
@@ -308,14 +319,17 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 	): Promise<Execution[]> {
 		const results: Execution[] = [];
 		const now = this.getInternalTime();
-		const taskKeysWithConcurrency = new Set(args.taskKeysWithConcurrency || []);
 		const filterTaskKeys = new Set(args.filterTaskKeys || []);
 		const concurrencyCount = new Map<string, number>();
 
-		// Count running executions per task for concurrency limits
+		// Count running executions per task for concurrency limits.
 		for (const exec of this.executions.values()) {
-			if (exec.state === "running" && taskKeysWithConcurrency.has(exec.task_key)) {
-				concurrencyCount.set(exec.task_key, (concurrencyCount.get(exec.task_key) || 0) + 1);
+			const task = this.tasks.get(this.taskId(exec.task_key, exec.queue));
+			if (exec.state === "running" && task?.concurrency != null) {
+				concurrencyCount.set(
+					this.taskId(exec.task_key, exec.queue),
+					(concurrencyCount.get(this.taskId(exec.task_key, exec.queue)) || 0) + 1,
+				);
 			}
 		}
 
@@ -345,41 +359,34 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 				if (parent && parent.state !== "completed") continue;
 			}
 
-			// Check concurrency limit
-			if (taskKeysWithConcurrency.has(exec.task_key)) {
-				const task = this.tasks.get(this.taskId(exec.task_key, exec.queue));
-				const limit = task?.concurrency || 1;
-				const current = concurrencyCount.get(exec.task_key) || 0;
-				if (current >= limit) continue;
+			const task = this.tasks.get(this.taskId(exec.task_key, exec.queue));
+			// Check concurrency limit.
+			if (task?.concurrency != null) {
+				const current = concurrencyCount.get(this.taskId(exec.task_key, exec.queue)) || 0;
+				if (current >= task.concurrency) continue;
+			}
+			if (task?.group_concurrency && exec.group) {
+				const activeGroup = Array.from(this.executions.values()).filter(
+					(other) =>
+						other.queue === exec.queue &&
+						other.task_key === exec.task_key &&
+						other.group === exec.group &&
+						other.state === "running",
+				).length;
+				if (activeGroup >= task.group_concurrency) continue;
 			}
 
-			// Claim execution with a fresh fencing token and persist slot ownership.
+			// Claim execution.
 			exec.state = "running";
 			exec.attempts += 1;
 			exec.orchestrator_id = args.orchestratorId;
-			if (taskKeysWithConcurrency.has(exec.task_key)) {
-				const used = new Set(
-					Array.from(this.executions.values())
-						.filter(
-							(other) =>
-								other.queue === exec.queue &&
-								other.task_key === exec.task_key &&
-								other.state === "running",
-						)
-						.map((other) => other.slot_group_number),
-				);
-				const limit = this.tasks.get(this.taskId(exec.task_key, exec.queue))?.concurrency || 1;
-				for (let slot = 1; slot <= limit; slot++) {
-					if (!used.has(slot)) {
-						exec.slot_group_number = slot;
-						break;
-					}
-				}
-			}
 
 			// Update concurrency count
-			if (taskKeysWithConcurrency.has(exec.task_key)) {
-				concurrencyCount.set(exec.task_key, (concurrencyCount.get(exec.task_key) || 0) + 1);
+			if (task?.concurrency != null) {
+				concurrencyCount.set(
+					this.taskId(exec.task_key, exec.queue),
+					(concurrencyCount.get(this.taskId(exec.task_key, exec.queue)) || 0) + 1,
+				);
 			}
 
 			results.push({
@@ -393,8 +400,8 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 				last_error: exec.last_error,
 				dedupe_key: exec.dedupe_key || undefined,
 				cron_expression: exec.cron_expression || undefined,
+				group: exec.group,
 				locked_by: exec.orchestrator_id || "",
-				slot_group_number: exec.slot_group_number || undefined,
 			});
 
 			if (results.length >= args.batchSize) break;
@@ -439,7 +446,6 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 					exec.state = "completed";
 					exec.result = result.result || null;
 					exec.orchestrator_id = null;
-					exec.slot_group_number = null;
 
 					// Wake up parent if waiting
 					if (exec.parent_execution_id) {
@@ -470,7 +476,6 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 				case "failed": {
 					exec.last_error = result.error;
 					exec.orchestrator_id = null;
-					exec.slot_group_number = null;
 
 					const task = this.tasks.get(this.taskId(exec.task_key, exec.queue));
 					const maxAttempts = task?.max_attempts || 3;
@@ -513,7 +518,6 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 				case "released": {
 					exec.state = "pending";
 					exec.orchestrator_id = null;
-					exec.slot_group_number = null;
 
 					if (result.reschedule_in_ms === "infinity") {
 						exec.run_at = new Date(8640000000000000); // Max date
@@ -529,7 +533,6 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 					exec.state = "failed";
 					exec.last_error = result.error;
 					exec.orchestrator_id = null;
-					exec.slot_group_number = null;
 
 					// Fail parent if waiting
 					if (exec.parent_execution_id) {
@@ -557,6 +560,7 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 						task_key: result.child_task_name,
 						queue: result.child_task_queue,
 						payload: result.child_payload || {},
+						group: result.group,
 						parent_execution_id: exec.id,
 						parent_step_key: result.step_key,
 					});
@@ -566,7 +570,6 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 					exec.waiting_on_execution_id = childId;
 					exec.waiting_step_key = result.step_key;
 					exec.orchestrator_id = null;
-					exec.slot_group_number = null;
 
 					if (result.timeout_ms === "infinity") {
 						exec.waiting_timeout_at = new Date(8640000000000000);
@@ -594,7 +597,6 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 				// 	exec.state = "pending";
 				// 	exec.run_at = new Date(8640000000000000); // Wait indefinitely
 				// 	exec.orchestrator_id = null;
-				// 	exec.slot_group_number = null;
 				// 	break;
 				// }
 
@@ -619,7 +621,6 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 				// 	exec.state = "pending";
 				// 	exec.run_at = new Date(8640000000000000); // Wait indefinitely
 				// 	exec.orchestrator_id = null;
-				// exec.slot_group_number = null;
 				// 	break;
 				// }
 			}
@@ -674,6 +675,7 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 				id,
 				task_key: spec.task_key,
 				queue: spec.queue,
+				group: spec.group || null,
 				payload: spec.payload || {},
 				state: "pending",
 				run_at: spec.run_at || now,
@@ -692,7 +694,6 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 				orchestrator_id: null,
 				parent_execution_id: spec.parent_execution_id || null,
 				parent_step_key: spec.parent_step_key || null,
-				slot_group_number: null,
 				created_at: now,
 				updated_at: now,
 			};
@@ -771,7 +772,6 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 						exec.last_error = "superseded by reinvoke";
 						exec.dedupe_key = null;
 						exec.orchestrator_id = null;
-						exec.slot_group_number = null;
 						// Will create new execution below
 					} else {
 						// Unlocked execution - update it with new values (replace behavior)
@@ -957,6 +957,7 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 			run_at: nextRun,
 			dedupe_key: dedupeKey,
 			cron_expression: exec.cron_expression,
+			group: exec.group,
 		});
 	}
 

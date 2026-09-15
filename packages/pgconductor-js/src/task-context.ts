@@ -37,6 +37,7 @@ export type TaskAbortReasons =
 			step_key: string;
 			task: TaskIdentifier<string, string>;
 			payload: Payload | null;
+			group?: string | null;
 			__pgconductorTaskAborted: true;
 	  };
 
@@ -84,6 +85,7 @@ export type TaskContextOptions = {
 type ScheduleOptions = {
 	cron: string;
 	priority?: number;
+	group?: string;
 };
 
 // second argument for tasks
@@ -235,6 +237,7 @@ export class TaskContext<
 		task: TaskIdentifier<TName, TQueue>,
 		payload: InferPayload<TDef> = {} as InferPayload<TDef>,
 		timeout?: number,
+		group?: string,
 	): Promise<InferReturns<TDef>> {
 		const cached = await this.opts.db.loadStep(
 			{
@@ -275,6 +278,7 @@ export class TaskContext<
 			task,
 			step_key: key,
 			payload,
+			group,
 		});
 	}
 
@@ -317,6 +321,7 @@ export class TaskContext<
 					run_at: nextTimestamp,
 					cron_expression: options.cron,
 					priority: options.priority || null,
+					group: options.group || null,
 				},
 				scheduleName,
 			},

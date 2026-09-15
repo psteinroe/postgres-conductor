@@ -95,7 +95,7 @@ create table pgconductor._private_executions (
     run_at timestamptz default pgconductor._private_current_time() not null,
     locked_at timestamptz,
     locked_by uuid,
-    slot_group_number integer,
+    "group" text,
     is_available boolean generated always as (locked_at is null and failed_at is null and completed_at is null) stored not null,
     attempts integer default 0 not null,
     last_error text,
@@ -143,24 +143,17 @@ create table pgconductor._private_tasks (
         )
     ),
 
-    -- concurrency control: maximum number of concurrent executions across all workers
+    -- concurrency controls are intentionally soft and coordinated at claim time
     -- NULL means no limit (unlimited concurrency)
     concurrency_limit integer,
+    group_concurrency_limit integer,
+    constraint positive_concurrency_limits check (
+        (concurrency_limit is null or concurrency_limit > 0) and
+        (group_concurrency_limit is null or group_concurrency_limit > 0)
+    ),
 
     primary key (queue, key)
 );
-
-create table pgconductor._private_concurrency_slots (
-    task_key text not null,
-    queue text not null,
-    slot_group_number integer not null,
-    capacity integer not null,
-    used integer default 0 not null,
-    primary key (queue, task_key, slot_group_number)
-);
-
-create index idx_slots_claim
-    on pgconductor._private_concurrency_slots (queue, task_key, capacity, used);
 
 create table pgconductor._private_steps (
     id uuid default pgconductor._private_portable_uuidv7() primary key,
@@ -254,6 +247,19 @@ begin
       v_partition_name
     );
 
+    -- indexes used to count active executions for soft concurrency limits
+    execute format(
+      'create index if not exists %I on pgconductor.%I (task_key) where locked_at is not null and failed_at is null and completed_at is null',
+      'idx_' || v_partition_name || '_active_task',
+      v_partition_name
+    );
+
+    execute format(
+      'create index if not exists %I on pgconductor.%I (task_key, "group") where "group" is not null and locked_at is not null and failed_at is null and completed_at is null',
+      'idx_' || v_partition_name || '_active_task_group',
+      v_partition_name
+    );
+
     RETURN NEW;
 
   elsif tg_op = 'UPDATE' then
@@ -316,7 +322,8 @@ create type pgconductor.execution_spec as (
     dedupe_seconds integer,
     dedupe_next_slot boolean,
     cron_expression text,
-    priority integer
+    priority integer,
+    "group" text
 );
 
 create type pgconductor.task_spec as (
@@ -327,7 +334,8 @@ create type pgconductor.task_spec as (
     remove_on_fail_days integer,
     window_start timetz,
     window_end timetz,
-    concurrency_limit integer
+    concurrency_limit integer,
+    group_concurrency_limit integer
 );
 
 create type pgconductor._private_event_operation as enum (
@@ -366,7 +374,7 @@ begin
   on conflict (name) do nothing;
 
   -- step 2: register/update tasks
-  insert into pgconductor._private_tasks (key, queue, max_attempts, remove_on_complete_days, remove_on_fail_days, window_start, window_end, concurrency_limit)
+  insert into pgconductor._private_tasks (key, queue, max_attempts, remove_on_complete_days, remove_on_fail_days, window_start, window_end, concurrency_limit, group_concurrency_limit)
   select
     spec.key,
     coalesce(spec.queue, 'default'),
@@ -375,7 +383,8 @@ begin
     spec.remove_on_fail_days,
     spec.window_start,
     spec.window_end,
-    spec.concurrency_limit
+    spec.concurrency_limit,
+    spec.group_concurrency_limit
   from unnest(p_task_specs) as spec
   on conflict (queue, key)
   do update set
@@ -385,56 +394,26 @@ begin
     remove_on_fail_days = excluded.remove_on_fail_days,
     window_start = excluded.window_start,
     window_end = excluded.window_end,
-    concurrency_limit = excluded.concurrency_limit;
+    concurrency_limit = excluded.concurrency_limit,
+    group_concurrency_limit = excluded.group_concurrency_limit;
 
-  -- step 2a: manage concurrency slots
-  -- create one row per slot (capacity=1 each)
-  insert into pgconductor._private_concurrency_slots (task_key, queue, slot_group_number, capacity, used)
-  select
-    spec.key,
-    coalesce(spec.queue, p_queue_name),
-    slot_num,
-    1 as capacity,
-    0 as used
-  from unnest(p_task_specs) as spec
-  cross join lateral generate_series(1, spec.concurrency_limit) as slot_num
-  where spec.concurrency_limit is not null
-  on conflict (queue, task_key, slot_group_number)
-  do update set
-    capacity = excluded.capacity,
-    used = least(pgconductor._private_concurrency_slots.used, excluded.capacity);
-
-  -- clean up orphaned slots (tasks removed or concurrency_limit set to null)
-  delete from pgconductor._private_concurrency_slots
-  where queue = p_queue_name
-    and used = 0
-    and (task_key, queue) not in (
-      select key, queue from pgconductor._private_tasks
-      where concurrency_limit is not null
-    );
-
-  -- clean up excess slots when concurrency decreased
-  delete from pgconductor._private_concurrency_slots cs
-  where cs.queue = p_queue_name
-    and cs.used = 0
-    and cs.slot_group_number > (
-      select concurrency_limit
-      from pgconductor._private_tasks t
-      where t.key = cs.task_key and t.queue = cs.queue
-    );
-
-  -- step 3: insert scheduled cron executions (on conflict do nothing)
-  insert into pgconductor._private_executions (task_key, queue, payload, run_at, dedupe_key, cron_expression)
+  -- step 3: insert scheduled cron executions
+  insert into pgconductor._private_executions (task_key, queue, payload, run_at, dedupe_key, cron_expression, "group")
   select
     spec.task_key,
     coalesce(spec.queue, 'default'),
     coalesce(spec.payload, '{}'::jsonb),
     coalesce(spec.run_at, pgconductor._private_current_time()),
     spec.dedupe_key,
-    spec.cron_expression
+    spec.cron_expression,
+    spec."group"
   from unnest(p_cron_schedules) as spec
   where spec.dedupe_key is not null
-  on conflict (task_key, dedupe_key, queue) do nothing;
+  on conflict (task_key, dedupe_key, queue) do update set
+    payload = excluded.payload,
+    run_at = excluded.run_at,
+    cron_expression = excluded.cron_expression,
+    "group" = excluded."group";
 
   -- step 4: clean up stale schedules for this queue
   -- delete future executions for schedules that no longer exist
@@ -536,7 +515,7 @@ begin
 
     -- clear locked dedupe keys before batch insert
     with superseded as (
-        select e.id, e.queue, e.task_key, e.slot_group_number
+        select e.id, e.queue, e.task_key
         from pgconductor._private_executions as e
         cross join unnest(specs) as spec
         where e.dedupe_key = spec.dedupe_key
@@ -545,15 +524,6 @@ begin
             and e.locked_at is not null
             and spec.dedupe_key is not null
         for update of e
-    ),
-    released_slots as (
-        update pgconductor._private_concurrency_slots cs
-        set used = 0
-        from superseded s
-        where cs.queue = s.queue
-            and cs.task_key = s.task_key
-            and cs.slot_group_number = s.slot_group_number
-            and s.slot_group_number is not null
     )
     update pgconductor._private_executions e
     set
@@ -561,8 +531,7 @@ begin
         locked_by = null,
         locked_at = null,
         failed_at = v_now,
-        last_error = 'superseded by reinvoke',
-        slot_group_number = null
+        last_error = 'superseded by reinvoke'
     from superseded s
     where e.id = s.id;
 
@@ -579,7 +548,8 @@ begin
         dedupe_key,
         singleton_on,
         cron_expression,
-        priority
+        priority,
+        "group"
     )
     select
         pgconductor._private_portable_uuidv7(),
@@ -598,14 +568,16 @@ begin
             else null
         end,
         spec.cron_expression,
-        coalesce(spec.priority, 0)
+        coalesce(spec.priority, 0),
+        spec."group"
     from unnest(specs) as spec
     on conflict (task_key, dedupe_key, queue) do update set
         payload = excluded.payload,
         run_at = excluded.run_at,
         priority = excluded.priority,
         cron_expression = excluded.cron_expression,
-        singleton_on = excluded.singleton_on
+        singleton_on = excluded.singleton_on,
+        "group" = excluded."group"
     returning pgconductor._private_executions.id;
 end;
 $function$
@@ -620,7 +592,8 @@ create or replace function pgconductor.invoke(
     p_dedupe_seconds integer default null,
     p_dedupe_next_slot boolean default false,
     p_cron_expression text default null,
-    p_priority integer default null
+    p_priority integer default null,
+    p_group text default null
 )
  returns table(id uuid)
  language plpgsql
@@ -640,22 +613,13 @@ begin
   -- clear locked dedupe key before insert (supersede pattern)
   if p_dedupe_key is not null then
       with superseded as (
-          select e.id, e.queue, e.task_key, e.slot_group_number
+          select e.id, e.queue, e.task_key
           from pgconductor._private_executions e
           where e.dedupe_key = p_dedupe_key
               and e.task_key = p_task_key
               and e.queue = p_queue
               and e.locked_at is not null
           for update of e
-      ),
-      released_slots as (
-          update pgconductor._private_concurrency_slots cs
-          set used = 0
-          from superseded s
-          where cs.queue = s.queue
-              and cs.task_key = s.task_key
-              and cs.slot_group_number = s.slot_group_number
-              and s.slot_group_number is not null
       )
       update pgconductor._private_executions e
       set
@@ -663,9 +627,8 @@ begin
           locked_by = null,
           locked_at = null,
           failed_at = v_now,
-          last_error = 'superseded by reinvoke',
-          slot_group_number = null
-      from superseded s
+          last_error = 'superseded by reinvoke'
+        from superseded s
       where e.id = s.id;
   end if;
 
@@ -690,7 +653,8 @@ begin
               dedupe_key,
               singleton_on,
               cron_expression,
-              priority
+              priority,
+              "group"
           ) values (
               pgconductor._private_portable_uuidv7(),
               p_task_key,
@@ -700,7 +664,8 @@ begin
               p_dedupe_key,
               v_singleton_on,
               p_cron_expression,
-              coalesce(p_priority, 0)
+              coalesce(p_priority, 0),
+              p_group
           )
           on conflict (task_key, singleton_on, coalesce(dedupe_key, ''), queue)
           where singleton_on is not null and completed_at is null and failed_at is null and cancelled = false
@@ -721,7 +686,8 @@ begin
               dedupe_key,
               singleton_on,
               cron_expression,
-              priority
+              priority,
+              "group"
           ) values (
               pgconductor._private_portable_uuidv7(),
               p_task_key,
@@ -731,14 +697,17 @@ begin
               p_dedupe_key,
               v_next_singleton_on,
               p_cron_expression,
-              coalesce(p_priority, 0)
+              coalesce(p_priority, 0),
+              p_group
           )
           on conflict (task_key, singleton_on, coalesce(dedupe_key, ''), queue)
           where singleton_on is not null and completed_at is null and failed_at is null and cancelled = false
           do update set
               payload = excluded.payload,
               run_at = excluded.run_at,
-              priority = excluded.priority
+              priority = excluded.priority,
+              cron_expression = excluded.cron_expression,
+              "group" = excluded."group"
           returning _private_executions.id;
           return;
       end if;
@@ -753,7 +722,8 @@ begin
     run_at,
     dedupe_key,
     cron_expression,
-    priority
+    priority,
+    "group"
   ) values (
     pgconductor._private_portable_uuidv7(),
     p_task_key,
@@ -762,13 +732,15 @@ begin
     v_run_at,
     p_dedupe_key,
     p_cron_expression,
-    coalesce(p_priority, 0)
+    coalesce(p_priority, 0),
+    p_group
   )
   on conflict (task_key, dedupe_key, queue) do update set
     payload = excluded.payload,
     run_at = excluded.run_at,
     priority = excluded.priority,
-    cron_expression = excluded.cron_expression
+    cron_expression = excluded.cron_expression,
+    "group" = excluded."group"
   returning e.id;
 end;
 $function$
