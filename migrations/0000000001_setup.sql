@@ -93,6 +93,7 @@ create table pgconductor._private_executions (
     completed_at timestamptz,
     payload jsonb,
     trace_context jsonb,
+    trace_link_context jsonb,
     run_at timestamptz default pgconductor._private_current_time() not null,
     locked_at timestamptz,
     locked_by uuid,
@@ -388,11 +389,13 @@ create or replace function pgconductor._private_register_worker(
     p_cron_schedules pgconductor.execution_spec[],
     p_event_subscriptions pgconductor.event_subscription_spec[] default array[]::pgconductor.event_subscription_spec[]
 )
-returns void
+returns jsonb
 language plpgsql
 volatile
 set search_path to ''
 as $function$
+declare
+  v_cron_rows jsonb;
 begin
   -- Filter arrays are equality allowlists; an empty list is almost always a
   -- configuration mistake and must not silently match nothing.
@@ -452,22 +455,24 @@ begin
     dead_letter_task_key = excluded.dead_letter_task_key;
 
   -- step 3: insert scheduled cron executions
-  insert into pgconductor._private_executions (task_key, queue, payload, run_at, dedupe_key, cron_expression, "group")
-  select
-    spec.task_key,
-    coalesce(spec.queue, 'default'),
-    coalesce(spec.payload, '{}'::jsonb),
-    coalesce(spec.run_at, pgconductor._private_current_time()),
-    spec.dedupe_key,
-    spec.cron_expression,
-    spec."group"
-  from unnest(p_cron_schedules) as spec
-  where spec.dedupe_key is not null
-  on conflict (task_key, dedupe_key, queue) do update set
-    payload = excluded.payload,
-    run_at = excluded.run_at,
-    cron_expression = excluded.cron_expression,
-    "group" = excluded."group";
+  with inserted as (
+    insert into pgconductor._private_executions (task_key, queue, payload, run_at, dedupe_key, cron_expression, "group", trace_context)
+    select spec.task_key, coalesce(spec.queue, 'default'), coalesce(spec.payload, '{}'::jsonb),
+      coalesce(spec.run_at, pgconductor._private_current_time()), spec.dedupe_key,
+      spec.cron_expression, spec."group", spec.trace_context
+    from unnest(p_cron_schedules) as spec
+    where spec.dedupe_key is not null
+    on conflict (task_key, dedupe_key, queue) do update set
+      payload = excluded.payload, run_at = excluded.run_at,
+      cron_expression = excluded.cron_expression, "group" = excluded."group",
+      trace_context = coalesce(excluded.trace_context, pgconductor._private_executions.trace_context)
+    returning id, task_key, queue, true as inserted
+  )
+  select coalesce(jsonb_agg(jsonb_build_object(
+    'id', id, 'task_key', task_key, 'queue', queue,
+    'is_maintenance', task_key = 'pgconductor.maintenance',
+    'inserted', inserted, 'authoritative', true
+  )), '[]'::jsonb) into v_cron_rows from inserted;
 
   -- step 4: clean up stale schedules for this queue
   -- delete future executions for schedules that no longer exist
@@ -558,6 +563,7 @@ begin
           coalesce(array_to_string(source.column_names, ','), '')
         and target.filter is not distinct from source.filter
     );
+  return v_cron_rows;
 end;
 $function$;
 

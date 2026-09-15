@@ -1,5 +1,7 @@
 import type {
+	CronRegistration,
 	DatabaseClient,
+	DeadLetterDelivery,
 	Execution,
 	ExecutionResult,
 	ExecutionSpec,
@@ -7,6 +9,7 @@ import type {
 	Payload,
 	JsonValue,
 	SetFakeTimeArgs,
+	SettlementOutcome,
 	// EventSubscriptionSpec,
 } from "../../src/database-client";
 import { DatabaseClient as RealDatabaseClient } from "../../src/database-client";
@@ -25,7 +28,7 @@ import type {
 	ClearWaitingStateArgs,
 	RegisterEventWaitArgs,
 	OrchestratorShutdownArgs,
-	// EmitEventArgs,
+	EmitEventArgs,
 } from "../../src/query-builder";
 import type { Migration } from "../../src/migration-store";
 import type { Logger } from "../../src/lib/logger";
@@ -70,6 +73,7 @@ interface StoredExecution {
 	dead_letter_attempts: number | null;
 	dead_letter_failed_at: Date | null;
 	trace_context: Execution["trace_context"];
+	trace_link_context: Execution["trace_link_context"];
 }
 
 interface StoredStep {
@@ -125,6 +129,7 @@ interface StoredCustomEvent {
 	id: string;
 	event_key: string;
 	payload: JsonValue;
+	trace_context: Execution["trace_context"];
 	created_at: Date;
 	processed_at: Date | null;
 	event_position: number;
@@ -323,7 +328,10 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 	// Worker Registration
 	// ============================================================================
 
-	async registerWorker(args: RegisterWorkerArgs, _opts?: { signal?: AbortSignal }): Promise<void> {
+	async registerWorker(
+		args: RegisterWorkerArgs,
+		_opts?: { signal?: AbortSignal },
+	): Promise<CronRegistration[]> {
 		// Register tasks
 		for (const taskSpec of args.taskSpecs) {
 			const task: StoredTask = {
@@ -344,8 +352,10 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 
 		// Registration is authoritative for this queue, just like PostgreSQL.
 		for (const id of [...this.eventSubscriptions.keys()]) {
-			if (this.eventSubscriptions.get(id)?.queue === args.queueName)
+			const subscription = this.eventSubscriptions.get(id);
+			if (subscription?.queue === args.queueName && !subscription.execution_id) {
 				this.eventSubscriptions.delete(id);
+			}
 		}
 		for (const spec of args.eventSubscriptions || []) {
 			const id = this.generateId();
@@ -358,19 +368,35 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 			});
 		}
 
-		// Register cron schedules (ExecutionSpec[])
+		const registrations: CronRegistration[] = [];
 		for (const cronSpec of args.cronSchedules || []) {
-			if (cronSpec.cron_expression) {
-				const key = `${cronSpec.task_key}:${cronSpec.cron_expression}`;
-				this.cronSchedules.set(key, {
-					task_key: cronSpec.task_key,
-					queue: cronSpec.queue,
-					schedule_name: cronSpec.cron_expression,
-					cron_expression: cronSpec.cron_expression,
-					last_execution_id: null,
-				});
-			}
+			if (!cronSpec.cron_expression || !cronSpec.dedupe_key) continue;
+			const key = `${cronSpec.task_key}:${cronSpec.cron_expression}`;
+			this.cronSchedules.set(key, {
+				task_key: cronSpec.task_key,
+				queue: cronSpec.queue,
+				schedule_name: cronSpec.cron_expression,
+				cron_expression: cronSpec.cron_expression,
+				last_execution_id: null,
+			});
+			const existing = [...this.executions.values()].find(
+				(execution) =>
+					execution.task_key === cronSpec.task_key &&
+					execution.queue === cronSpec.queue &&
+					execution.dedupe_key === cronSpec.dedupe_key,
+			);
+			const id = existing?.id ?? (await this.invoke(cronSpec));
+			if (!id) continue;
+			registrations.push({
+				id,
+				task_key: cronSpec.task_key,
+				queue: cronSpec.queue,
+				is_maintenance: cronSpec.task_key === "pgconductor.maintenance",
+				inserted: !existing,
+				authoritative: !existing,
+			});
 		}
+		return registrations;
 	}
 
 	// ============================================================================
@@ -440,10 +466,12 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 				if (activeGroup >= task.group_concurrency) continue;
 			}
 
-			// Claim execution.
+			// Claim execution and consume any one-shot event link.
+			const traceLinkContext = exec.trace_link_context;
 			exec.state = "running";
 			exec.attempts += 1;
 			exec.orchestrator_id = args.orchestratorId;
+			exec.trace_link_context = null;
 
 			// Update concurrency count
 			if (task?.concurrency != null) {
@@ -453,6 +481,12 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 				);
 			}
 
+			const parent = exec.parent_execution_id
+				? this.executions.get(exec.parent_execution_id)
+				: undefined;
+			const parentTask = parent
+				? this.tasks.get(this.taskId(parent.task_key, parent.queue))
+				: undefined;
 			results.push({
 				id: exec.id,
 				task_key: exec.task_key,
@@ -460,6 +494,7 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 				payload: exec.payload,
 				waiting_on_execution_id: exec.waiting_on_execution_id,
 				waiting_step_key: exec.waiting_step_key,
+				attempts: exec.attempts,
 				cancelled: exec.cancelled,
 				last_error: exec.last_error,
 				dedupe_key: exec.dedupe_key || undefined,
@@ -472,6 +507,12 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 				dead_letter_attempts: exec.dead_letter_attempts,
 				dead_letter_failed_at: exec.dead_letter_failed_at,
 				trace_context: exec.trace_context,
+				trace_link_context: traceLinkContext,
+				parent_execution_id: exec.parent_execution_id,
+				parent_queue: parent?.queue,
+				parent_task_key: parent?.task_key,
+				parent_dead_letter_queue: parentTask?.dead_letter_queue,
+				parent_dead_letter_task_key: parentTask?.dead_letter_task_key,
 				locked_by: exec.orchestrator_id || "",
 			});
 
@@ -486,7 +527,7 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 			| ExecutionResult[]
 			| import("../../src/database-client").GroupedExecutionResults,
 		_opts?: { signal?: AbortSignal },
-	): Promise<void> {
+	): Promise<import("../../src/database-client").ReturnExecutionsResult> {
 		// Handle both old array format (for testing) and new grouped format
 		const results: ExecutionResult[] = Array.isArray(resultsOrGrouped)
 			? resultsOrGrouped
@@ -499,6 +540,10 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 					// ...resultsOrGrouped.waitForDbEvent,
 				];
 		const now = this.getInternalTime();
+		const deliveries: DeadLetterDelivery[] = [];
+		const outcomes: SettlementOutcome[] = [];
+		const recordOutcome = (execution: StoredExecution, outcome: SettlementOutcome["outcome"]) =>
+			outcomes.push({ queue: execution.queue, task_key: execution.task_key, outcome, count: 1 });
 
 		for (const result of results) {
 			const exec = this.executions.get(result.execution_id);
@@ -522,6 +567,9 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 					if (exec.parent_execution_id) {
 						const parent = this.executions.get(exec.parent_execution_id);
 						if (parent && parent.waiting_on_execution_id === exec.id) {
+							if (exec.parent_step_key) {
+								this.saveWaitResult(parent, exec.parent_step_key, result.result || {});
+							}
 							parent.waiting_on_execution_id = null;
 							parent.waiting_step_key = null;
 							parent.waiting_timeout_at = null;
@@ -553,22 +601,46 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 
 					if (exec.attempts >= maxAttempts) {
 						// Permanently failed
+						recordOutcome(exec, exec.cancelled ? "cancellation" : "permanent_failure");
 						exec.state = "failed";
 						exec.failed_at = now;
-						if (!exec.cancelled) this.deliverToDeadLetterQueue(exec, task, result.error, now);
+						if (!exec.cancelled) {
+							const delivery = this.deliverToDeadLetterQueue(
+								exec,
+								task,
+								result.error,
+								now,
+								result.dead_letter_trace_contexts?.[exec.id],
+							);
+							if (delivery) {
+								deliveries.push(delivery);
+								recordOutcome(exec, "dead_letter");
+							}
+						}
 
 						// Fail parent if waiting. A force-failed parent is itself terminal and
 						// follows its own DLQ and retention policy.
 						if (exec.parent_execution_id) {
 							const parent = this.executions.get(exec.parent_execution_id);
 							if (parent && parent.waiting_on_execution_id === exec.id) {
+								recordOutcome(parent, exec.cancelled ? "cancellation" : "permanent_failure");
 								parent.state = "failed";
 								parent.last_error = `Child execution failed: ${result.error}`;
 								parent.waiting_on_execution_id = null;
 								parent.waiting_step_key = null;
 								const parentTask = this.tasks.get(this.taskId(parent.task_key, parent.queue));
 								if (!exec.cancelled) {
-									this.deliverToDeadLetterQueue(parent, parentTask, parent.last_error, now);
+									const delivery = this.deliverToDeadLetterQueue(
+										parent,
+										parentTask,
+										parent.last_error,
+										now,
+										result.dead_letter_trace_contexts?.[parent.id],
+									);
+									if (delivery) {
+										deliveries.push(delivery);
+										recordOutcome(parent, "dead_letter");
+									}
 								}
 								if (parentTask?.remove_on_fail_days != null) {
 									this.executions.delete(parent.id);
@@ -584,6 +656,7 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 						}
 					} else {
 						// Retry with backoff
+						recordOutcome(exec, "retry");
 						exec.state = "pending";
 						const backoffSeconds = this.calculateBackoff(exec.attempts);
 						exec.run_at = new Date(now.getTime() + backoffSeconds * 1000);
@@ -611,12 +684,25 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 				}
 
 				case "permanently_failed": {
+					recordOutcome(exec, exec.cancelled ? "cancellation" : "permanent_failure");
 					exec.state = "failed";
 					exec.failed_at = now;
 					exec.last_error = result.error;
 
 					const task = this.tasks.get(this.taskId(exec.task_key, exec.queue));
-					if (!exec.cancelled) this.deliverToDeadLetterQueue(exec, task, result.error, now);
+					if (!exec.cancelled) {
+						const delivery = this.deliverToDeadLetterQueue(
+							exec,
+							task,
+							result.error,
+							now,
+							result.dead_letter_trace_contexts?.[exec.id],
+						);
+						if (delivery) {
+							deliveries.push(delivery);
+							recordOutcome(exec, "dead_letter");
+						}
+					}
 					exec.orchestrator_id = null;
 
 					// Fail parent if waiting. A force-failed parent is itself terminal and
@@ -624,6 +710,7 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 					if (exec.parent_execution_id) {
 						const parent = this.executions.get(exec.parent_execution_id);
 						if (parent && parent.waiting_on_execution_id === exec.id) {
+							recordOutcome(parent, exec.cancelled ? "cancellation" : "permanent_failure");
 							parent.state = "failed";
 							parent.last_error = `Child execution failed: ${result.error}`;
 							parent.waiting_on_execution_id = null;
@@ -631,7 +718,17 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 							parent.waiting_timeout_at = null;
 							const parentTask = this.tasks.get(this.taskId(parent.task_key, parent.queue));
 							if (!exec.cancelled) {
-								this.deliverToDeadLetterQueue(parent, parentTask, parent.last_error, now);
+								const delivery = this.deliverToDeadLetterQueue(
+									parent,
+									parentTask,
+									parent.last_error,
+									now,
+									result.dead_letter_trace_contexts?.[parent.id],
+								);
+								if (delivery) {
+									deliveries.push(delivery);
+									recordOutcome(parent, "dead_letter");
+								}
 							}
 							if (parentTask?.remove_on_fail_days != null) {
 								this.executions.delete(parent.id);
@@ -656,6 +753,7 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 						group: result.group,
 						parent_execution_id: exec.id,
 						parent_step_key: result.step_key,
+						trace_context: result.trace_context,
 					});
 
 					// Set parent to wait
@@ -720,6 +818,7 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 
 			exec.updated_at = now;
 		}
+		return { outcomes, deliveries };
 	}
 
 	async removeExecutions(
@@ -797,6 +896,7 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 				dead_letter_attempts: null,
 				dead_letter_failed_at: null,
 				trace_context: spec.trace_context || null,
+				trace_link_context: null,
 			};
 
 			this.executions.set(id, execution);
@@ -880,6 +980,7 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 						exec.run_at = spec.run_at || now;
 						exec.priority = spec.priority || 0;
 						exec.cron_expression = spec.cron_expression || null;
+						exec.trace_context = spec.trace_context || null;
 						exec.updated_at = now;
 						return exec.id;
 					}
@@ -935,6 +1036,7 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 						exec.priority = spec.priority || 0;
 						exec.singleton_on = singletonOn;
 						exec.cron_expression = spec.cron_expression || null;
+						exec.trace_context = spec.trace_context || null;
 						exec.updated_at = now;
 						ids.push(exec.id);
 						foundExisting = true;
@@ -1139,6 +1241,7 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 				args.timeoutMs == null ? null : new Date(this.getInternalTime().getTime() + args.timeoutMs),
 		});
 		exec.state = "pending";
+		exec.attempts = Math.max(0, exec.attempts - 1);
 		exec.run_at = new Date(8640000000000000);
 		exec.waiting_on_execution_id = null;
 		exec.waiting_step_key = args.stepKey;
@@ -1203,12 +1306,13 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 		return this.generateId();
 	}
 
-	async emitEvent(args: { eventKey: string; payload?: JsonValue }): Promise<string> {
+	async emitEvent(args: EmitEventArgs): Promise<string> {
 		const id = this.generateId();
 		this.customEvents.set(id, {
 			id,
 			event_key: args.eventKey,
 			payload: args.payload ?? {},
+			trace_context: args.trace_context ?? null,
 			created_at: this.getInternalTime(),
 			processed_at: null,
 			event_position: ++this.lastEventPosition,
@@ -1278,6 +1382,7 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 			exec.run_at = now;
 			exec.waiting_step_key = null;
 			exec.waiting_timeout_at = null;
+			exec.trace_link_context = event?.trace_context ?? null;
 			this.eventSubscriptions.delete(subscription.id);
 			count++;
 		}
@@ -1305,6 +1410,7 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 					task_key: subscription.task_key,
 					queue: subscription.queue,
 					payload: { event: event.event_key, payload: structuredClone(event.payload) as Payload },
+					trace_context: event.trace_context,
 				});
 			}
 			event.processed_at = now;
@@ -1341,8 +1447,9 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 		task: StoredTask | undefined,
 		error: string,
 		now: Date,
-	): void {
-		if (!task?.dead_letter_queue || exec.cancelled) return;
+		traceContext?: Execution["trace_context"],
+	): DeadLetterDelivery | null {
+		if (!task?.dead_letter_queue || exec.cancelled) return null;
 		const destinationTaskKey = task.dead_letter_task_key || exec.task_key;
 		const duplicate = Array.from(this.executions.values()).some(
 			(destination) =>
@@ -1350,7 +1457,7 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 				destination.queue === task.dead_letter_queue &&
 				destination.task_key === destinationTaskKey,
 		);
-		if (duplicate) return;
+		if (duplicate) return null;
 		const id = this.generateId();
 		this.executions.set(id, {
 			id,
@@ -1384,8 +1491,15 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 			dead_letter_error: error,
 			dead_letter_attempts: exec.attempts,
 			dead_letter_failed_at: now,
-			trace_context: null,
+			trace_context: traceContext || null,
+			trace_link_context: null,
 		});
+		return {
+			sourceExecutionId: exec.id,
+			destinationExecutionId: id,
+			destinationQueue: task.dead_letter_queue,
+			destinationTaskKey,
+		};
 	}
 
 	// Helpers

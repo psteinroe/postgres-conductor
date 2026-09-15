@@ -15,6 +15,7 @@ create table if not exists pgconductor._private_custom_events (
     id uuid default pgconductor._private_portable_uuidv7() not null,
     event_key text not null,
     payload jsonb not null default '{}'::jsonb,
+    trace_context jsonb,
     event_position bigint not null default nextval('pgconductor._private_event_position_seq'),
     created_at timestamptz default pgconductor._private_current_time() not null,
     processed_at timestamptz,
@@ -222,7 +223,7 @@ begin
     loop
         -- Look at persisted events regardless of processed status. This prevents
         -- concurrent task-event processors from changing wait delivery order.
-        select e.event_key, e.payload, e.event_position, e.created_at
+        select e.id, e.event_key, e.payload, e.trace_context, e.event_position, e.created_at
         into v_event
         from pgconductor._private_custom_events e
         where e.event_key = v_wait.event_key
@@ -271,7 +272,8 @@ begin
             end if;
 
             update pgconductor._private_executions
-            set run_at = v_now, waiting_on_execution_id = null, waiting_step_key = null
+            set run_at = v_now, waiting_on_execution_id = null, waiting_step_key = null,
+                trace_link_context = case when v_has_event then v_event.trace_context else null end
             where id = v_wait.execution_id and queue = v_wait.queue;
             v_resolved := v_resolved + 1;
         end if;
@@ -288,7 +290,7 @@ declare
     v_now timestamptz := pgconductor._private_current_time();
 begin
     with candidates as materialized (
-        select e.created_at, e.id, e.event_key, e.payload
+        select e.created_at, e.id, e.event_key, e.payload, e.trace_context
         from pgconductor._private_custom_events e
         where e.processed_at is null
         order by e.event_position, e.created_at, e.id
@@ -298,7 +300,7 @@ begin
         select c.created_at as event_created_at, c.id as event_id,
                s.id as subscription_id, s.task_key, s.queue,
                pgconductor._private_extract_event_payload(s.payload_fields, c.payload) as selected_payload,
-               c.event_key
+               c.event_key, c.trace_context
         from candidates c
         join pgconductor._private_event_subscriptions s on s.event_key = c.event_key
         join pgconductor._private_tasks t on t.key = s.task_key and t.queue = s.queue
@@ -324,11 +326,11 @@ begin
         returning event_created_at, event_id, subscription_id
     ), inserted_executions as (
         insert into pgconductor._private_executions(
-            task_key, queue, payload, event_created_at, event_id, subscription_id
+            task_key, queue, payload, trace_context, event_created_at, event_id, subscription_id
         )
         select m.task_key, m.queue,
                jsonb_build_object('event', m.event_key, 'payload', m.selected_payload),
-               d.event_created_at, d.event_id, d.subscription_id
+               m.trace_context, d.event_created_at, d.event_id, d.subscription_id
         from inserted_deliveries d
         join matches m using (event_created_at, event_id, subscription_id)
         on conflict (event_created_at, event_id, subscription_id, queue)
@@ -397,13 +399,14 @@ $function$;
 
 create or replace function pgconductor.emit_event(
     p_event_key text,
-    p_payload jsonb default '{}'::jsonb
+    p_payload jsonb default '{}'::jsonb,
+    p_trace_context jsonb default null
 ) returns uuid language plpgsql volatile security definer set search_path to '' as $function$
 declare v_id uuid;
 begin
     perform pg_advisory_xact_lock(hashtext('pgconductor:event-waits'));
-    insert into pgconductor._private_custom_events (event_key, payload)
-    values (p_event_key, p_payload)
+    insert into pgconductor._private_custom_events (event_key, payload, trace_context)
+    values (p_event_key, p_payload, p_trace_context)
     returning id into v_id;
     return v_id;
 end;
@@ -578,7 +581,8 @@ create trigger sync_database_trigger
 
 create or replace function pgconductor.emit_event(
     p_event_key text,
-    p_payload jsonb default '{}'::jsonb
+    p_payload jsonb default '{}'::jsonb,
+    p_trace_context jsonb default null
 )
     returns uuid
     language plpgsql
@@ -589,8 +593,8 @@ as $_$
 declare v_id uuid;
 begin
     perform pg_advisory_xact_lock(hashtext('pgconductor:event-waits'));
-    insert into pgconductor._private_custom_events (event_key, payload)
-    values (p_event_key, p_payload)
+    insert into pgconductor._private_custom_events (event_key, payload, trace_context)
+    values (p_event_key, p_payload, p_trace_context)
     returning id into v_id;
     return v_id;
 end;

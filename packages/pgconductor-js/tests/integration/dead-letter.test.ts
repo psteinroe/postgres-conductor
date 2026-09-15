@@ -186,6 +186,7 @@ describe("dead-letter queues (Postgres integration)", () => {
 			queue: execution.queue,
 			task_key: execution.task_key,
 			status: "permanently_failed" as const,
+			cancelled: false,
 			orchestrator_id: execution.locked_by,
 			error: "settlement failure",
 		};
@@ -311,7 +312,7 @@ describe("dead-letter queues (Postgres integration)", () => {
 				cronSchedules: [],
 				eventSubscriptions: [],
 			}),
-		).resolves.toBeUndefined();
+		).resolves.toEqual([]);
 	}, 15000);
 
 	test("rolls back the source settlement when destination insertion fails", async () => {
@@ -370,6 +371,7 @@ describe("dead-letter queues (Postgres integration)", () => {
 			queue: execution.queue,
 			task_key: execution.task_key,
 			status: "permanently_failed" as const,
+			cancelled: false,
 			orchestrator_id: lockedBy,
 			error: "rollback failure",
 		};

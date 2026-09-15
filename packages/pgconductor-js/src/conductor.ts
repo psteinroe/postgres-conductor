@@ -34,6 +34,8 @@ import {
 	setSpanError,
 	startSpan,
 	runWithSpan,
+	recordSent,
+	recordOperationDuration,
 } from "./telemetry";
 import { SpanKind } from "@opentelemetry/api";
 import type {
@@ -324,7 +326,7 @@ export class Conductor<
 					: startSpan(
 							`send ${queue}`,
 							SpanKind.PRODUCER,
-							messagingAttributes(taskName, queue, "send"),
+							messagingAttributes(taskName, queue, "send", undefined, payloadOrItems.length),
 						);
 			const carrier = producer ? carrierForContext(contextForSpan(producer)) : null;
 			const specs = payloadOrItems.map((item) => ({
@@ -341,7 +343,12 @@ export class Conductor<
 				trace_context: carrier,
 			}));
 			try {
+				const started = performance.now();
 				const ids = await runWithSpan(producer, () => this.db.invokeBatch(specs));
+				if (this.options.telemetry !== false && ids.length > 0) {
+					recordSent(queue, ids.length, taskName);
+					recordOperationDuration(queue, performance.now() - started, "send", taskName);
+				}
 				setSpanAttribute(producer, "messaging.batch.message_count", payloadOrItems.length);
 				return ids;
 			} catch (error) {
@@ -361,6 +368,7 @@ export class Conductor<
 						messagingAttributes(taskName, queue, "send"),
 					);
 		const carrier = producer ? carrierForContext(contextForSpan(producer)) : null;
+		const started = performance.now();
 		try {
 			const id = await runWithSpan(producer, () =>
 				this.db.invoke({
@@ -371,7 +379,12 @@ export class Conductor<
 					trace_context: carrier,
 				}),
 			);
-			if (id) setSpanAttribute(producer, "messaging.message.id", id);
+			if (id) {
+				if (this.options.telemetry !== false) recordSent(queue, 1, taskName);
+				setSpanAttribute(producer, "messaging.message.id", id);
+			}
+			if (this.options.telemetry !== false && id)
+				recordOperationDuration(queue, performance.now() - started, "send", taskName);
 			return id;
 		} catch (error) {
 			setSpanError(producer, error);
@@ -405,10 +418,42 @@ export class Conductor<
 			payload = ((result as any)?.value ?? payload) as InferEventPayload<TDef>;
 		}
 
-		return this.db.emitEvent({
-			eventKey: event,
-			payload: payload as any,
-		});
+		const started = performance.now();
+		const producer =
+			this.options.telemetry === false
+				? null
+				: startSpan(
+						`send event ${String(event)}`,
+						SpanKind.PRODUCER,
+						messagingAttributes(
+							undefined,
+							String(event),
+							"send",
+							undefined,
+							undefined,
+							String(event),
+						),
+					);
+		try {
+			const id = await runWithSpan(producer, () =>
+				this.db.emitEvent({
+					eventKey: event,
+					payload: payload as any,
+					trace_context: producer ? carrierForContext(contextForSpan(producer)) : null,
+				}),
+			);
+			if (this.options.telemetry !== false) {
+				recordSent(String(event), 1);
+				recordOperationDuration(String(event), performance.now() - started, "send");
+			}
+			setSpanAttribute(producer, "messaging.message.id", id);
+			return id;
+		} catch (error) {
+			setSpanError(producer, error);
+			throw error;
+		} finally {
+			endSpan(producer);
+		}
 	}
 
 	async cancel(executionId: string, options?: { reason?: string }): Promise<boolean> {

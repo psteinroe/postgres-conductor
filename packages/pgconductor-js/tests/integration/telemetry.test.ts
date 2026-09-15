@@ -23,7 +23,6 @@ import { Task } from "../../src/task";
 import { Worker } from "../../src/worker";
 import { DefaultLogger } from "../../src/lib/logger";
 import { InMemoryDatabaseClient } from "../mocks/in-memory-database-client";
-import type { DatabaseClient } from "../../src/database-client";
 import {
 	boundedCarrier,
 	carrierForContext,
@@ -100,7 +99,7 @@ function makeWorker(db: InMemoryDatabaseClient, task: any, telemetry = true) {
 	return new Worker(
 		"default",
 		[task],
-		db as unknown as DatabaseClient,
+		db,
 		logger,
 		{ pollIntervalMs: 1, flushIntervalMs: 1, fetchBatchSize: 10, flushBatchSize: 10 },
 		{},
@@ -307,7 +306,7 @@ describe.serial("OpenTelemetry instrumentation", () => {
 		const eventWorker = new Worker(
 			"default",
 			[makeTask("root-cron", async () => undefined), makeTask("root-event", async () => undefined)],
-			db as unknown as DatabaseClient,
+			db,
 			logger,
 			{ pollIntervalMs: 1, flushIntervalMs: 1 },
 			{},

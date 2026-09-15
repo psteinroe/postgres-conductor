@@ -41,6 +41,7 @@ export interface ExecutionSpec {
 	parent_step_key?: string | null;
 	parent_timeout_ms?: number | null;
 	trace_context?: TraceContextCarrier | null;
+	trace_link_context?: TraceContextCarrier | null;
 }
 
 export interface TaskSpec {
@@ -73,6 +74,7 @@ export interface Execution {
 	waiting_on_execution_id: string | null;
 	waiting_step_key: string | null;
 	locked_by: string;
+	attempts?: number;
 	cancelled: boolean;
 	last_error: string | null;
 	dedupe_key?: string | null;
@@ -85,6 +87,13 @@ export interface Execution {
 	dead_letter_attempts?: number | null;
 	dead_letter_failed_at?: Date | null;
 	trace_context?: TraceContextCarrier | null;
+	/** A bounded event carrier linked when a durable wait resumes. */
+	trace_link_context?: TraceContextCarrier | null;
+	parent_execution_id?: string | null;
+	parent_queue?: string | null;
+	parent_task_key?: string | null;
+	parent_dead_letter_queue?: string | null;
+	parent_dead_letter_task_key?: string | null;
 }
 
 // todo: move all of this to query-builder too or create new types.ts file
@@ -96,6 +105,13 @@ export type ExecutionResult =
 	| ExecutionPermamentlyFailed
 	| ExecutionInvokeChild;
 
+export type SettlementOutcome = {
+	queue: string;
+	task_key: string;
+	outcome: "retry" | "permanent_failure" | "cancellation" | "dead_letter";
+	count: number;
+};
+
 export type GroupedExecutionResults = {
 	count: number;
 	orchestratorId: string;
@@ -104,6 +120,38 @@ export type GroupedExecutionResults = {
 	released: ExecutionReleased[];
 	invokeChild: ExecutionInvokeChild[];
 	taskKeys: Set<string>;
+};
+
+export type DeadLetterDelivery = {
+	sourceExecutionId: string;
+	destinationExecutionId: string;
+	destinationQueue: string;
+	destinationTaskKey: string;
+};
+
+export type ReturnExecutionsRow = {
+	queue: string | null;
+	task_key: string | null;
+	outcome: SettlementOutcome["outcome"] | null;
+	count: number | null;
+	source_execution_id: string | null;
+	destination_execution_id: string | null;
+	destination_queue: string | null;
+	destination_task_key: string | null;
+};
+
+export type ReturnExecutionsResult = {
+	outcomes: SettlementOutcome[];
+	deliveries: DeadLetterDelivery[];
+};
+
+export type CronRegistration = {
+	id: string;
+	task_key: string;
+	queue: string;
+	is_maintenance: boolean;
+	inserted: boolean;
+	authoritative: boolean;
 };
 
 export interface ExecutionCompleted {
@@ -116,6 +164,11 @@ export interface ExecutionCompleted {
 }
 
 export interface ExecutionFailed {
+	/** Failed executions are retryable and therefore cannot be cancellations. */
+	cancelled: false;
+	/** Carrier for the failed process / DLQ producer span. */
+	trace_context?: TraceContextCarrier | null;
+	dead_letter_trace_contexts?: Record<string, TraceContextCarrier>;
 	execution_id: string;
 	queue: string;
 	orchestrator_id: string;
@@ -135,6 +188,12 @@ export interface ExecutionReleased {
 }
 
 export interface ExecutionPermamentlyFailed {
+	/** True when this terminal result was caused by cancellation. */
+	cancelled: boolean;
+	/** Carrier for each terminal DLQ producer span, keyed by source execution ID. */
+	dead_letter_trace_contexts?: Record<string, TraceContextCarrier>;
+	/** Carrier for the failed process / DLQ producer span. */
+	trace_context?: TraceContextCarrier | null;
 	execution_id: string;
 	queue: string;
 	orchestrator_id: string;
@@ -144,6 +203,8 @@ export interface ExecutionPermamentlyFailed {
 }
 
 export interface ExecutionInvokeChild {
+	/** Carrier for the producer span created when the child is inserted. */
+	trace_context?: TraceContextCarrier | null;
 	group?: string | null;
 	execution_id: string;
 	queue: string;
@@ -491,14 +552,33 @@ export class DatabaseClient {
 	async returnExecutions(
 		grouped: GroupedExecutionResults,
 		opts?: QueryMethodOptions,
-	): Promise<void> {
+	): Promise<ReturnExecutionsResult> {
 		const query = this.builder.buildReturnExecutions(grouped);
 
-		if (!query) {
-			return;
-		}
+		if (!query) return { outcomes: [], deliveries: [] };
 
-		await this.query(() => query, { label: "returnExecutions", ...opts });
+		const rows = await this.query(() => query, { label: "returnExecutions", ...opts });
+		const outcomes = rows.flatMap((row): SettlementOutcome[] =>
+			row.outcome !== null && row.queue !== null && row.task_key !== null && row.count !== null
+				? [{ queue: row.queue, task_key: row.task_key, outcome: row.outcome, count: row.count }]
+				: [],
+		);
+		const deliveries = rows.flatMap((row): DeadLetterDelivery[] =>
+			row.source_execution_id !== null &&
+			row.destination_execution_id !== null &&
+			row.destination_queue !== null &&
+			row.destination_task_key !== null
+				? [
+						{
+							sourceExecutionId: row.source_execution_id,
+							destinationExecutionId: row.destination_execution_id,
+							destinationQueue: row.destination_queue,
+							destinationTaskKey: row.destination_task_key,
+						},
+					]
+				: [],
+		);
+		return { outcomes, deliveries };
 	}
 
 	async removeExecutions(args: RemoveExecutionsArgs, opts?: QueryMethodOptions): Promise<boolean> {
@@ -522,11 +602,15 @@ export class DatabaseClient {
 		return Number(result[0]?.deleted_count || 0) >= args.batchSize;
 	}
 
-	async registerWorker(args: RegisterWorkerArgs, opts?: QueryMethodOptions): Promise<void> {
-		await this.query(() => this.builder.buildRegisterWorker(args), {
+	async registerWorker(
+		args: RegisterWorkerArgs,
+		opts?: QueryMethodOptions,
+	): Promise<CronRegistration[]> {
+		const result = await this.query(() => this.builder.buildRegisterWorker(args), {
 			label: "registerWorker",
 			...opts,
 		});
+		return result[0]?.cron_rows ?? [];
 	}
 
 	async scheduleCronExecution(
@@ -661,3 +745,7 @@ export class DatabaseClient {
 		});
 	}
 }
+
+export type DatabaseClientLike = {
+	[K in keyof DatabaseClient as DatabaseClient[K] extends Function ? K : never]: DatabaseClient[K];
+};

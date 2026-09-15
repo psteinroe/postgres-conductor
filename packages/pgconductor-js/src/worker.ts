@@ -1,5 +1,6 @@
 import type {
-	DatabaseClient,
+	CronRegistration,
+	DatabaseClientLike,
 	EventSubscriptionSpec,
 	Execution,
 	ExecutionResult,
@@ -31,17 +32,25 @@ import { makeChildLogger, type Logger } from "./lib/logger";
 import type { EventDefinition } from "./event-definition";
 import { coerceError } from "./lib/coerce-error";
 import type { TypedAbortController } from "./lib/typed-abort-controller";
-import { ROOT_CONTEXT, SpanKind, type SpanContext } from "@opentelemetry/api";
+import { ROOT_CONTEXT, SpanKind, type Span, type SpanContext } from "@opentelemetry/api";
 import {
 	endSpan,
 	extractCarrier,
-	linkContext,
+	linksFromCarrier,
+	carrierForContext,
+	contextForSpan,
+	contextForSpanContext,
 	messagingAttributes,
 	runWithSpan,
 	setSpanAttribute,
 	setSpanError,
 	spanContext,
 	startSpan,
+	recordConsumed,
+	recordProcessDuration,
+	recordOperationDuration,
+	recordLifecycle,
+	recordSent,
 } from "./telemetry";
 
 /**
@@ -81,6 +90,8 @@ function isRetryableEventError(error: unknown): boolean {
 	const code = (error as { code?: string })?.code;
 	return code !== undefined && RETRYABLE_EVENT_ERROR_CODES.has(code);
 }
+
+const MAINTENANCE_TASK_NAME = "pgconductor.maintenance";
 
 const DEFAULT_WORKER_CONFIG: WorkerConfig = {
 	concurrency: 1,
@@ -182,6 +193,13 @@ export class Worker<
 	private _runningTasks = new Map<string, TypedAbortController<TaskAbortReasons>>();
 	private eventProcessingGate: Promise<void> = Promise.resolve();
 	private readonly processSpanContexts = new Map<string, SpanContext>();
+	private readonly pendingDurableProducers = new Map<string, Span>();
+	private readonly parentDeadLetterTargets = new Map<
+		string,
+		{ sourceExecutionId: string; queue: string; task: string }
+	>();
+	private flushInFlight: Promise<void> = Promise.resolve();
+	private hasRegisteredCronSchedules = false;
 
 	/** Used by Orchestrator to prevent local event fan-out before every worker registers. */
 	setEventProcessingGate(gate: Promise<void>): void {
@@ -191,7 +209,7 @@ export class Worker<
 	constructor(
 		public readonly queueName: string,
 		tasks: readonly AnyTask[],
-		private readonly db: DatabaseClient,
+		private readonly db: DatabaseClientLike,
 		private readonly logger: Logger,
 		config: Partial<WorkerConfig> = {},
 		private readonly extraContext: object = {},
@@ -328,6 +346,7 @@ export class Worker<
 					this._stopDeferred?.reject(error);
 				} finally {
 					queue.close();
+					await this.flushInFlight;
 					if (this._stopDeferred && !this._stopDeferred.isSettled) this._stopDeferred.resolve();
 					this.resetLifecycle();
 				}
@@ -378,6 +397,7 @@ export class Worker<
 			this.logger.error("Worker pipeline error:", error);
 			this._stopDeferred?.reject(error);
 		} finally {
+			await this.flushInFlight;
 			if (this._stopDeferred && !this._stopDeferred.isSettled) this._stopDeferred.resolve();
 			this.resetLifecycle();
 		}
@@ -390,6 +410,8 @@ export class Worker<
 		this.orchestratorId = null;
 		this.eventProcessingGate = Promise.resolve();
 		this.processSpanContexts.clear();
+		this.pendingDurableProducers.clear();
+		this.parentDeadLetterTargets.clear();
 	}
 
 	private async processEventBatches({ runOnce }: { runOnce: boolean }): Promise<number> {
@@ -514,11 +536,12 @@ export class Worker<
 
 		const allTasks = Array.from(this.tasks.values());
 
+		const currentTime = await this.db.getCurrentTime({ signal: this.signal });
 		const cronSchedules: ExecutionSpec[] = allTasks.flatMap((task) =>
 			task.triggers
 				.filter((t): t is { cron: string; name: string; group?: string } => "cron" in t)
 				.map((trigger) => {
-					const interval = CronExpressionParser.parse(trigger.cron);
+					const interval = CronExpressionParser.parse(trigger.cron, { currentDate: currentTime });
 					const nextTimestamp = interval.next().toDate();
 					const timestampSeconds = Math.floor(nextTimestamp.getTime() / 1000);
 					return {
@@ -580,15 +603,48 @@ export class Worker<
 			return [...customEvents, ...dbEvents];
 		});
 
-		await this.db.registerWorker(
-			{
-				queueName: this.queueName,
-				taskSpecs,
-				cronSchedules,
-				eventSubscriptions,
-			},
-			{ signal: this.signal },
+		const userCronSchedules = cronSchedules.filter(
+			(schedule) => schedule.task_key !== MAINTENANCE_TASK_NAME,
 		);
+		const cronProducer =
+			this.telemetry && userCronSchedules.length && !this.hasRegisteredCronSchedules
+				? startSpan(
+						`send ${this.queueName}`,
+						SpanKind.PRODUCER,
+						messagingAttributes(
+							userCronSchedules.length === 1 ? userCronSchedules[0]?.task_key : undefined,
+							this.queueName,
+							"send",
+							undefined,
+							userCronSchedules.length,
+						),
+					)
+				: null;
+		const cronCarrier = cronProducer ? carrierForContext(contextForSpan(cronProducer)) : null;
+		for (const schedule of userCronSchedules) schedule.trace_context = cronCarrier;
+		const registrationStarted = performance.now();
+		try {
+			const registrations: CronRegistration[] = await runWithSpan(cronProducer, () =>
+				this.db.registerWorker(
+					{ queueName: this.queueName, taskSpecs, cronSchedules, eventSubscriptions },
+					{ signal: this.signal },
+				),
+			);
+			const authoritativeUserRows = registrations.filter(
+				(row) => row.authoritative && !row.is_maintenance,
+			);
+			setSpanAttribute(cronProducer, "messaging.batch.message_count", authoritativeUserRows.length);
+			if (cronProducer && authoritativeUserRows.length > 0 && this.telemetry) {
+				recordSent(this.queueName, authoritativeUserRows.length);
+				recordOperationDuration(this.queueName, performance.now() - registrationStarted, "send");
+			}
+			this.hasRegisteredCronSchedules = true;
+		} catch (error) {
+			setSpanError(cronProducer, error);
+			throw error;
+		} finally {
+			endSpan(cronProducer);
+		}
 	}
 
 	// --- Stage 1: Fetch executions from database ---
@@ -599,12 +655,7 @@ export class Worker<
 		let fetched = 0;
 		assert.ok(this.orchestratorId, "orchestratorId must be set when starting the pipeline");
 
-		// Pre-compute task metadata once
 		const allTasks = Array.from(this.tasks.values());
-		const taskMaxAttempts: Record<string, number> = {};
-		for (const task of allTasks) {
-			taskMaxAttempts[task.name] = task.maxAttempts || 3;
-		}
 		// Check if any tasks have windows - only then do we need time-based filtering
 		const tasksWithWindows = allTasks.filter((task) => task.window);
 
@@ -692,23 +743,23 @@ export class Worker<
 						orchestrator_id: exec.locked_by,
 						task_key: taskKey,
 						status: "failed",
+						cancelled: false,
 						error: `Task not found: ${taskKey}`,
 					})) as ExecutionResult[];
 				}
 
 				// Safety check: don't execute already-cancelled tasks
 				const cancelledExecs = executions.filter((e) => e.cancelled);
-				if (cancelledExecs.length === executions.length) {
-					// All cancelled - return failures for all
-					return executions.map((exec) => ({
-						execution_id: exec.id,
-						orchestrator_id: exec.locked_by,
-						queue: exec.queue,
-						task_key: taskKey,
-						status: "permanently_failed",
-						error: exec.last_error || "Execution was cancelled",
-					})) as ExecutionResult[];
-				}
+				const cancelledResults = cancelledExecs.map((exec) => ({
+					execution_id: exec.id,
+					orchestrator_id: exec.locked_by,
+					queue: exec.queue,
+					task_key: taskKey,
+					status: "permanently_failed" as const,
+					cancelled: true as const,
+					error: exec.last_error || "Execution was cancelled",
+				}));
+				if (cancelledExecs.length === executions.length) return cancelledResults;
 
 				// Note: We intentionally do NOT check this.signal.aborted here.
 				// When shutdown occurs, fetchExecutions closes the queue which flushes
@@ -727,13 +778,19 @@ export class Worker<
 
 				// If task has batch config, always use batch execution (even for single items)
 				if (task.batch) {
-					return this.executeBatchTask(task, taskKey, activeExecs);
+					return [
+						...cancelledResults,
+						...(await this.executeBatchTask(task, taskKey, activeExecs)),
+					];
 				}
 
 				// Execute single (non-batched tasks)
 				const singleExec = activeExecs[0];
 				assert.ok(singleExec, "activeExecs must have at least one item");
-				return this.executeSingleTask(task, singleExec);
+				const activeResult = await this.executeSingleTask(task, singleExec);
+				return cancelledResults.length && activeResult
+					? [...cancelledResults, activeResult]
+					: activeResult;
 			},
 		)) {
 			// Waiting executions are released atomically by registerEventWait and
@@ -762,19 +819,28 @@ export class Worker<
 				resolve(taskAbortController.signal.reason);
 			});
 		});
-		const consumer = this.telemetry
+		const processTelemetry = this.telemetry && exec.task_key !== MAINTENANCE_TASK_NAME;
+		if (exec.parent_execution_id && exec.parent_dead_letter_queue)
+			this.parentDeadLetterTargets.set(exec.id, {
+				sourceExecutionId: exec.parent_execution_id,
+				queue: exec.parent_dead_letter_queue,
+				task: exec.parent_dead_letter_task_key || exec.parent_task_key || exec.task_key,
+			});
+		const processStarted = performance.now();
+		const consumer = processTelemetry
 			? startSpan(
 					`process ${exec.queue}`,
 					SpanKind.CONSUMER,
 					messagingAttributes(exec.task_key, exec.queue, "process", exec.id),
 					extractCarrier(exec.trace_context) || ROOT_CONTEXT,
+					linksFromCarrier(exec.trace_link_context),
 				)
 			: null;
 		const consumerContext = spanContext(consumer);
 		if (consumerContext) this.processSpanContexts.set(exec.id, consumerContext);
 
 		try {
-			await this.scheduleNextExecution(exec);
+			await this.scheduleNextExecution(exec, consumer, processTelemetry);
 
 			// Determine event type based on execution data
 			let taskEvent: any;
@@ -820,7 +886,7 @@ export class Worker<
 									queue: exec.queue,
 								}),
 								window: task.window,
-								telemetry: this.telemetry ? undefined : false,
+								telemetry: processTelemetry ? undefined : false,
 							},
 							extraContext,
 						),
@@ -855,6 +921,7 @@ export class Worker<
 							queue: exec.queue,
 							task_key: exec.task_key,
 							status: "permanently_failed",
+							cancelled: true,
 							error: exec.last_error || "Task was cancelled",
 						} as const;
 					case "released":
@@ -888,10 +955,18 @@ export class Worker<
 				orchestrator_id: exec.locked_by,
 				queue: exec.queue,
 				task_key: exec.task_key,
-				status: "failed",
+				status:
+					exec.attempts !== undefined && exec.attempts >= (task.maxAttempts ?? 3)
+						? "permanently_failed"
+						: "failed",
+				cancelled: false,
 				error: coerceError(err).message,
 			} as const;
 		} finally {
+			if (processTelemetry) {
+				recordConsumed(exec.queue, exec.task_key);
+				recordProcessDuration(exec.queue, performance.now() - processStarted, exec.task_key);
+			}
 			endSpan(consumer);
 			// Clean up running task tracking
 			this._runningTasks.delete(exec.id);
@@ -910,10 +985,21 @@ export class Worker<
 		taskKey: string,
 		executions: Execution[],
 	): Promise<ExecutionResult[]> {
-		const links = this.telemetry
-			? executions.flatMap((exec) => linkContext(extractCarrier(exec.trace_context)) || [])
+		const processTelemetry = this.telemetry && taskKey !== MAINTENANCE_TASK_NAME;
+		for (const exec of executions)
+			if (exec.parent_execution_id && exec.parent_dead_letter_queue)
+				this.parentDeadLetterTargets.set(exec.id, {
+					sourceExecutionId: exec.parent_execution_id,
+					queue: exec.parent_dead_letter_queue,
+					task: exec.parent_dead_letter_task_key || exec.parent_task_key || exec.task_key,
+				});
+		const links = processTelemetry
+			? executions.flatMap((exec) => [
+					...linksFromCarrier(exec.trace_context),
+					...linksFromCarrier(exec.trace_link_context),
+				])
 			: [];
-		const consumer = this.telemetry
+		const consumer = processTelemetry
 			? startSpan(
 					`process ${this.queueName}`,
 					SpanKind.CONSUMER,
@@ -964,9 +1050,12 @@ export class Worker<
 			});
 		});
 
+		const processStarted = performance.now();
 		try {
 			// Schedule next executions for cron tasks
-			await Promise.all(executions.map((exec) => this.scheduleNextExecution(exec)));
+			await Promise.all(
+				executions.map((exec) => this.scheduleNextExecution(exec, consumer, processTelemetry)),
+			);
 
 			const result = await runWithSpan(consumer, () =>
 				Promise.race([task.execute(events, batchContext), abortPromise]),
@@ -994,6 +1083,7 @@ export class Worker<
 					queue: exec.queue,
 					task_key: taskKey,
 					status: "failed" as const,
+					cancelled: false,
 					error: `Task aborted: ${result.reason}`,
 				}));
 			}
@@ -1040,14 +1130,23 @@ export class Worker<
 				queue: exec.queue,
 				task_key: taskKey,
 				status: "failed" as const,
+				cancelled: false,
 				error: errorMsg,
 			}));
 		} finally {
+			if (processTelemetry) {
+				recordConsumed(this.queueName, taskKey, executions.length);
+				recordProcessDuration(this.queueName, performance.now() - processStarted, taskKey);
+			}
 			endSpan(consumer);
 		}
 	}
 
-	private async scheduleNextExecution(execution: Execution): Promise<void> {
+	private async scheduleNextExecution(
+		execution: Execution,
+		parent: Span | null = null,
+		telemetry = this.telemetry,
+	): Promise<void> {
 		if (!execution.cron_expression) {
 			return;
 		}
@@ -1063,22 +1162,57 @@ export class Worker<
 		}
 
 		const scheduleName = parts[1];
-		const interval = CronExpressionParser.parse(execution.cron_expression);
+		const currentTime = await this.db.getCurrentTime({ signal: this.signal });
+		const interval = CronExpressionParser.parse(execution.cron_expression, {
+			currentDate: currentTime,
+		});
 		const nextTimestamp = interval.next().toDate();
 		const timestampSeconds = Math.floor(nextTimestamp.getTime() / 1000);
 		const nextDedupeKey = `scheduled::${scheduleName}::${timestampSeconds}`;
 
-		await this.db.invoke(
-			{
-				task_key: execution.task_key,
-				queue: execution.queue,
-				run_at: nextTimestamp,
-				dedupe_key: nextDedupeKey,
-				cron_expression: execution.cron_expression,
-				group: execution.group || null,
-			},
-			{ signal: this.signal },
-		);
+		const producer = telemetry
+			? startSpan(
+					`send ${execution.queue}`,
+					SpanKind.PRODUCER,
+					messagingAttributes(execution.task_key, execution.queue, "send"),
+					parent ? contextForSpanContext(spanContext(parent)) : ROOT_CONTEXT,
+				)
+			: null;
+		const started = performance.now();
+		try {
+			const id = await runWithSpan(producer, () =>
+				this.db.invoke(
+					{
+						task_key: execution.task_key,
+						queue: execution.queue,
+						run_at: nextTimestamp,
+						dedupe_key: nextDedupeKey,
+						cron_expression: execution.cron_expression,
+						group: execution.group || null,
+						trace_context: producer
+							? carrierForContext(contextForSpanContext(spanContext(producer)))
+							: null,
+					},
+					{ signal: this.signal },
+				),
+			);
+			if (id) {
+				setSpanAttribute(producer, "messaging.message.id", id);
+				if (telemetry) recordSent(execution.queue, 1, execution.task_key);
+				if (telemetry)
+					recordOperationDuration(
+						execution.queue,
+						performance.now() - started,
+						"send",
+						execution.task_key,
+					);
+			}
+		} catch (error) {
+			setSpanError(producer, error);
+			throw error;
+		} finally {
+			endSpan(producer);
+		}
 	}
 
 	// --- Stage 3: Flush results to database ---
@@ -1097,6 +1231,70 @@ export class Worker<
 				flushTimer = null;
 			}
 
+			if (this.telemetry) {
+				for (const result of [
+					...batch.invokeChild,
+					...batch.failed.filter((item) => {
+						if (item.status !== "permanently_failed") return false;
+						const task = this.tasks.get(item.task_key);
+						return Boolean(task?.deadLetter?.queue && !item.cancelled);
+					}),
+				]) {
+					const existing = this.pendingDurableProducers.get(result.execution_id);
+					const parent = this.processSpanContexts.get(result.execution_id);
+					const deadLetter =
+						result.status === "invoke_child"
+							? null
+							: this.tasks.get(result.task_key)?.deadLetter || null;
+					const targets =
+						result.status === "invoke_child"
+							? [
+									{
+										sourceExecutionId: result.execution_id,
+										queue: result.child_task_queue,
+										task: result.child_task_name,
+									},
+								]
+							: [
+									...(deadLetter?.queue && !result.cancelled
+										? [
+												{
+													sourceExecutionId: result.execution_id,
+													queue: deadLetter.queue,
+													task: deadLetter.task?.name || result.task_key,
+												},
+											]
+										: []),
+									...(result.status === "permanently_failed" && !result.cancelled
+										? (() => {
+												const target = this.parentDeadLetterTargets.get(result.execution_id);
+												return target ? [target] : [];
+											})()
+										: []),
+								];
+					for (const target of targets) {
+						const producer =
+							(target.sourceExecutionId === result.execution_id ? existing : undefined) ||
+							startSpan(
+								`send ${target.queue}`,
+								SpanKind.PRODUCER,
+								messagingAttributes(target.task, target.queue, "send"),
+								parent ? contextForSpanContext(parent) : ROOT_CONTEXT,
+							);
+						if (producer) {
+							this.pendingDurableProducers.set(target.sourceExecutionId, producer);
+							const carrier = carrierForContext(contextForSpanContext(spanContext(producer)));
+							if (carrier) {
+								if (result.status === "invoke_child") result.trace_context = carrier;
+								else {
+									result.dead_letter_trace_contexts ||= {};
+									result.dead_letter_trace_contexts[target.sourceExecutionId] = carrier;
+								}
+							}
+						}
+					}
+				}
+			}
 			const links = this.telemetry
 				? Array.from(
 						new Set(
@@ -1117,9 +1315,39 @@ export class Worker<
 						)
 					: null;
 			let settled = false;
+			const settleStarted = performance.now();
 			try {
 				batch.orchestratorId = this.orchestratorId || batch.orchestratorId;
-				await runWithSpan(settle, () => this.db.returnExecutions(batch, { signal: this.signal }));
+				const committed = await runWithSpan(settle, () =>
+					this.db.returnExecutions(batch, { signal: this.signal }),
+				);
+				const hasUserResults = Array.from(batch.taskKeys).some(
+					(key) => key !== MAINTENANCE_TASK_NAME,
+				);
+				if (this.telemetry) {
+					for (const delivery of committed?.deliveries || []) {
+						const producer = this.pendingDurableProducers.get(delivery.sourceExecutionId);
+						setSpanAttribute(
+							producer || null,
+							"messaging.message.id",
+							delivery.destinationExecutionId,
+						);
+						endSpan(producer || null);
+						this.pendingDurableProducers.delete(delivery.sourceExecutionId);
+					}
+				}
+				if (this.telemetry && hasUserResults) {
+					recordOperationDuration(this.queueName, performance.now() - settleStarted, "settle");
+					for (const outcome of committed?.outcomes || []) {
+						if (outcome.task_key === MAINTENANCE_TASK_NAME) continue;
+						recordLifecycle(
+							outcome.queue,
+							outcome.outcome,
+							outcome.task_key,
+							Number(outcome.count),
+						);
+					}
+				}
 				settled = true;
 				setSpanAttribute(settle, "pgconductor.db.commit.status", "success");
 			} catch (err) {
@@ -1129,22 +1357,46 @@ export class Worker<
 					buffer.restore(batch);
 				}
 			} finally {
+				if (settled || isCleanup) {
+					const pending = isCleanup
+						? [...this.pendingDurableProducers.entries()]
+						: [...batch.completed, ...batch.failed, ...batch.released, ...batch.invokeChild].map(
+								(result) =>
+									[
+										result.execution_id,
+										this.pendingDurableProducers.get(result.execution_id),
+									] as const,
+							);
+					for (const [executionId, producer] of pending) {
+						endSpan(producer || null);
+						this.pendingDurableProducers.delete(executionId);
+					}
+				}
 				endSpan(settle);
-				if (settled || isCleanup)
+				if (settled || isCleanup) {
 					for (const result of [
 						...batch.completed,
 						...batch.failed,
 						...batch.released,
 						...batch.invokeChild,
-					])
+					]) {
 						this.processSpanContexts.delete(result.execution_id);
+						this.parentDeadLetterTargets.delete(result.execution_id);
+					}
+				}
 			}
+		};
+
+		const runFlush = (isCleanup = false): Promise<void> => {
+			const next = this.flushInFlight.then(() => flushNow(isCleanup));
+			this.flushInFlight = next.catch(() => {});
+			return next;
 		};
 
 		const scheduleFlush = () => {
 			if (flushTimer) clearTimeout(flushTimer);
-			flushTimer = setTimeout(async () => {
-				await flushNow();
+			flushTimer = setTimeout(() => {
+				void runFlush();
 			}, this.flushIntervalMs);
 		};
 
@@ -1156,13 +1408,13 @@ export class Worker<
 				if (!flushTimer) scheduleFlush();
 
 				if (buffer.count >= this.flushBatchSize) {
-					await flushNow();
+					await runFlush();
 					scheduleFlush();
 				}
 			}
 		} finally {
 			if (flushTimer) clearTimeout(flushTimer);
-			await flushNow(true);
+			await runFlush(true);
 		}
 	}
 

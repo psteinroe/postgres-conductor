@@ -1,11 +1,11 @@
 import { mock } from "bun:test";
-import type { DatabaseClient } from "../../src/database-client";
+import type {
+	CronRegistration,
+	DatabaseClientLike,
+	ReturnExecutionsResult,
+} from "../../src/database-client";
 
-type PublicMethodsOf<T> = {
-	[K in keyof T as T[K] extends Function ? K : never]: T[K];
-};
-
-type IDatabaseClient = PublicMethodsOf<DatabaseClient>;
+type IDatabaseClient = DatabaseClientLike;
 
 export class MockDatabaseClient implements IDatabaseClient {
 	close = mock(async () => {});
@@ -17,10 +17,21 @@ export class MockDatabaseClient implements IDatabaseClient {
 	countActiveOrchestratorsBelow = mock(async () => 0);
 	orchestratorShutdown = mock(async () => {});
 	getExecutions = mock(async () => []);
-	returnExecutions = mock(async (_results) => {});
+	returnExecutions = mock(
+		async (
+			_results: Parameters<DatabaseClientLike["returnExecutions"]>[0],
+		): Promise<ReturnExecutionsResult> => ({
+			outcomes: [],
+			deliveries: [],
+		}),
+	);
 	removeExecutions = mock(async () => false);
 	removeProcessedEvents = mock(async () => false);
-	registerWorker = mock(async () => {});
+	registerWorker = mock(
+		async (
+			_args: Parameters<DatabaseClientLike["registerWorker"]>[0],
+		): Promise<CronRegistration[]> => [],
+	);
 	scheduleCronExecution = mock(async () => "mock-cron-id");
 	unscheduleCronExecution = mock(async () => {});
 	invoke = mock(async () => "mock-id");

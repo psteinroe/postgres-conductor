@@ -1,6 +1,6 @@
 import CronExpressionParser from "cron-parser";
 import type {
-	DatabaseClient,
+	DatabaseClientLike,
 	JsonValue,
 	Execution,
 	Payload,
@@ -19,7 +19,19 @@ import { WindowChecker } from "./lib/window-checker";
 import { TypedAbortController } from "./lib/typed-abort-controller";
 import { parseDuration, type DurationInput } from "./lib/duration";
 import { SpanKind } from "@opentelemetry/api";
-import { endSpan, stepAttributes, runWithSpan, setSpanError, startSpan } from "./telemetry";
+import {
+	endSpan,
+	stepAttributes,
+	runWithSpan,
+	setSpanError,
+	startSpan,
+	carrierForContext,
+	contextForSpan,
+	messagingAttributes,
+	setSpanAttribute,
+	recordOperationDuration,
+	recordSent,
+} from "./telemetry";
 import type {
 	EventDefinition,
 	EventName,
@@ -95,7 +107,7 @@ export class WaitForEventTimeoutError extends Error {
 
 export type TaskContextOptions = {
 	abortController: TypedAbortController<TaskAbortReasons>;
-	db: DatabaseClient;
+	db: DatabaseClientLike;
 	execution: Execution;
 	logger: Logger;
 	window?: [string, string];
@@ -433,21 +445,45 @@ export class TaskContext<
 		const nextTimestamp = interval.next().toDate();
 		const queue = task.queue || "default";
 
-		await this.opts.db.scheduleCronExecution(
-			{
-				spec: {
-					task_key: task.name,
-					queue,
-					payload,
-					run_at: nextTimestamp,
-					cron_expression: options.cron,
-					priority: options.priority || null,
-					group: options.group || null,
-				},
-				scheduleName,
-			},
-			{ signal: this.signal },
-		);
+		const producer =
+			this.opts.telemetry === false
+				? null
+				: startSpan(
+						`send ${queue}`,
+						SpanKind.PRODUCER,
+						messagingAttributes(task.name, queue, "send"),
+					);
+		const started = performance.now();
+		try {
+			const id = await runWithSpan(producer, () =>
+				this.opts.db.scheduleCronExecution(
+					{
+						spec: {
+							task_key: task.name,
+							queue,
+							payload,
+							run_at: nextTimestamp,
+							cron_expression: options.cron,
+							priority: options.priority || null,
+							group: options.group || null,
+							trace_context: producer ? carrierForContext(contextForSpan(producer)) : null,
+						},
+						scheduleName,
+					},
+					{ signal: this.signal },
+				),
+			);
+			if (id && producer) {
+				setSpanAttribute(producer, "messaging.message.id", id);
+				recordSent(queue, 1, task.name);
+				recordOperationDuration(queue, performance.now() - started, "send", task.name);
+			}
+		} catch (error) {
+			setSpanError(producer, error);
+			throw error;
+		} finally {
+			endSpan(producer);
+		}
 	}
 
 	async unschedule<TName extends TaskName<Tasks>, TQueue extends string = "default">(
@@ -497,13 +533,40 @@ export class TaskContext<
 		TName extends EventName<Events>,
 		TDef extends FindEventByIdentifier<Events, TName> = FindEventByIdentifier<Events, TName>,
 	>(event: TName, payload: InferEventPayload<TDef>): Promise<string> {
-		return this.opts.db.emitEvent(
-			{
-				eventKey: event,
-				payload: payload as any,
-			},
-			{ signal: this.signal },
-		);
+		const producer =
+			this.opts.telemetry === false
+				? null
+				: startSpan(`send event ${String(event)}`, SpanKind.PRODUCER, {
+						"messaging.system": "postgres_conductor",
+						"messaging.destination.name": String(event),
+						"messaging.operation.name": "send",
+						"messaging.operation.type": "send",
+						"pgconductor.event.name": String(event),
+					});
+		const started = performance.now();
+		try {
+			const id = await runWithSpan(producer, () =>
+				this.opts.db.emitEvent(
+					{
+						eventKey: event,
+						payload: payload as any,
+						trace_context: producer ? carrierForContext(contextForSpan(producer)) : null,
+					},
+					{ signal: this.signal },
+				),
+			);
+			setSpanAttribute(producer, "messaging.message.id", id);
+			if (producer) {
+				recordSent(String(event), 1);
+				recordOperationDuration(String(event), performance.now() - started, "send");
+			}
+			return id;
+		} catch (error) {
+			setSpanError(producer, error);
+			throw error;
+		} finally {
+			endSpan(producer);
+		}
 	}
 
 	/**
