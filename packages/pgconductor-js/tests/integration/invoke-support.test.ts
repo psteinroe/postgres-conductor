@@ -6,6 +6,7 @@ import { defineTask } from "../../src/task-definition";
 import { TestDatabasePool } from "../fixtures/test-database";
 import type { TestDatabase } from "../fixtures/test-database";
 import { TaskSchemas } from "../../src/schemas";
+import { Deferred } from "../../src/lib/deferred";
 
 describe("Invoke Support", () => {
 	let pool: TestDatabasePool;
@@ -418,6 +419,7 @@ describe("Invoke Support", () => {
 		});
 
 		const childFn = mock((n: number) => n * 2);
+		const childCalled = new Deferred<void>();
 
 		const conductor = Conductor.create({
 			sql: db.sql,
@@ -452,6 +454,7 @@ describe("Invoke Support", () => {
 			async (event, _ctx) => {
 				if (event.name === "pgconductor.invoke") {
 					const result = childFn(event.payload.input);
+					childCalled.resolve();
 					return { output: result };
 				}
 				throw new Error("Unexpected event type");
@@ -472,9 +475,7 @@ describe("Invoke Support", () => {
 		await orchestrator.start();
 
 		await conductor.invoke({ queue: "parent-queue", name: "parent-task" }, { value: 5 });
-
-		await new Promise((r) => setTimeout(r, 4000));
-
+		await childCalled.promise;
 		await orchestrator.stop();
 
 		expect(childFn).toHaveBeenCalledTimes(1);
