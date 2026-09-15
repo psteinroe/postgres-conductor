@@ -32,6 +32,7 @@ import { makeChildLogger, type Logger } from "./lib/logger";
 import type { EventDefinition } from "./event-definition";
 import { coerceError } from "./lib/coerce-error";
 import type { TypedAbortController } from "./lib/typed-abort-controller";
+import { Telemetry } from "./telemetry";
 
 /**
  * The configuration options for the Worker.
@@ -111,6 +112,24 @@ class BufferState {
 	}
 }
 
+function taskEventFor(execution: Execution): { name: string; payload?: unknown } {
+	if (execution.cron_expression) {
+		return { name: execution.dedupe_key?.split("::")[1] || "unknown" };
+	}
+	if (
+		execution.subscription_id != null &&
+		execution.payload &&
+		typeof execution.payload === "object" &&
+		"event" in execution.payload
+	) {
+		return {
+			name: execution.payload.event as string,
+			payload: execution.payload.payload,
+		};
+	}
+	return { name: "pgconductor.invoke", payload: execution.payload };
+}
+
 /**
  * Worker implemented as async pipeline: fetch → execute → flush.
  * Uses async iterators for clean composition and natural backpressure.
@@ -153,6 +172,8 @@ export class Worker<
 		private readonly logger: Logger,
 		config: Partial<WorkerConfig> = {},
 		private readonly extraContext: object = {},
+		private readonly eventDefinitions: readonly EventDefinition<string, any, any>[] = [],
+		private readonly telemetry = new Telemetry(),
 	) {
 		const maintenanceTask = createMaintenanceTask(this.queueName);
 		this.tasks = tasks.reduce(
@@ -553,124 +574,110 @@ export class Worker<
 				resolve(taskAbortController.signal.reason);
 			});
 		});
+		const taskEvent = taskEventFor(exec);
 
-		try {
-			await this.scheduleNextExecution(exec);
+		// Pass db and tasks as extra context to maintenance task
+		const extraContext =
+			task.name === "pgconductor.maintenance"
+				? { ...this.extraContext, db: this.db, tasks: this.tasks }
+				: this.extraContext;
 
-			// Determine event type based on execution data
-			let taskEvent: any;
-			if (exec.cron_expression) {
-				// Extract schedule name from dedupe_key (format: scheduled::{name}::{timestamp})
-				const scheduleName = exec.dedupe_key?.split("::")[1] || "unknown";
-				taskEvent = { name: scheduleName };
-			} else if (
-				exec.subscription_id != null &&
-				exec.payload &&
-				typeof exec.payload === "object" &&
-				"event" in exec.payload
-			) {
-				// Event-triggered executions carry dedicated database identity.
-				taskEvent = {
-					name: exec.payload.event,
-					payload: exec.payload.payload,
-				};
-			} else {
-				// Direct invoke
-				taskEvent = { name: "pgconductor.invoke", payload: exec.payload };
-			}
+		return this.scheduleNextExecution(exec)
+			.then(async () => {
+				const output = await this.telemetry.process({
+					taskKey: exec.task_key,
+					queue: exec.queue,
+					messageId: exec.id,
+					traceContexts: [exec.trace_context],
+					run: () =>
+						Promise.race([
+							task.execute(
+								taskEvent,
+								TaskContext.create<Tasks, Events, typeof extraContext>(
+									{
+										db: this.db,
+										clock: this.clock,
+										abortController: taskAbortController,
+										execution: exec,
+										logger: makeChildLogger(this.logger, {
+											execution_id: exec.id,
+											orchestrator_id: exec.locked_by,
+											task_key: exec.task_key,
+											queue: exec.queue,
+										}),
+										eventDefinitions: task.eventDefinitions,
+										window: task.window,
+										telemetry: this.telemetry,
+									},
+									extraContext,
+								),
+							),
+							abortPromise,
+						]),
+				});
 
-			// Pass db and tasks as extra context to maintenance task
-			const extraContext =
-				task.name === "pgconductor.maintenance"
-					? { ...this.extraContext, db: this.db, tasks: this.tasks }
-					: this.extraContext;
-
-			const output = await Promise.race([
-				task.execute(
-					taskEvent,
-					TaskContext.create<Tasks, Events, typeof extraContext>(
-						{
-							db: this.db,
-							clock: this.clock,
-							abortController: taskAbortController,
-							execution: exec,
-							logger: makeChildLogger(this.logger, {
+				if (isTaskAbortReason(output)) {
+					switch (output.reason) {
+						case "child-invocation":
+							return {
 								execution_id: exec.id,
 								orchestrator_id: exec.locked_by,
-								task_key: exec.task_key,
 								queue: exec.queue,
-							}),
-							eventDefinitions: task.eventDefinitions,
-							window: task.window,
-						},
-						extraContext,
-					),
-				),
-				abortPromise,
-			]);
-
-			if (isTaskAbortReason(output)) {
-				switch (output.reason) {
-					case "child-invocation":
-						return {
-							execution_id: exec.id,
-							orchestrator_id: exec.locked_by,
-							queue: exec.queue,
-							task_key: exec.task_key,
-							status: "invoke_child",
-							timeout_ms: output.timeout_ms,
-							step_key: output.step_key,
-							child_task_name: output.task.name,
-							child_task_queue: output.task.queue || "default",
-							child_payload: output.payload,
-							group: output.group,
-						} as const;
-					case "cancelled":
-						return {
-							execution_id: exec.id,
-							orchestrator_id: exec.locked_by,
-							queue: exec.queue,
-							task_key: exec.task_key,
-							status: "permanently_failed",
-							error: exec.last_error || "Task was cancelled",
-						} as const;
-					case "released":
-					case "parent-aborted":
-						return {
-							execution_id: exec.id,
-							orchestrator_id: exec.locked_by,
-							queue: exec.queue,
-							reschedule_in_ms: output.reason === "released" ? output.reschedule_in_ms : undefined,
-							step_key: output.reason === "released" ? output.step_key : undefined,
-							task_key: exec.task_key,
-							status: "released",
-						} as const;
-					default:
-						assert.never(output);
+								task_key: exec.task_key,
+								status: "invoke_child",
+								timeout_ms: output.timeout_ms,
+								step_key: output.step_key,
+								child_task_name: output.task.name,
+								child_task_queue: output.task.queue || "default",
+								child_payload: output.payload,
+								group: output.group,
+							} as const;
+						case "cancelled":
+							return {
+								execution_id: exec.id,
+								orchestrator_id: exec.locked_by,
+								queue: exec.queue,
+								task_key: exec.task_key,
+								status: "permanently_failed",
+								error: exec.last_error || "Task was cancelled",
+							} as const;
+						case "released":
+						case "parent-aborted":
+							return {
+								execution_id: exec.id,
+								orchestrator_id: exec.locked_by,
+								queue: exec.queue,
+								reschedule_in_ms:
+									output.reason === "released" ? output.reschedule_in_ms : undefined,
+								step_key: output.reason === "released" ? output.step_key : undefined,
+								task_key: exec.task_key,
+								status: "released",
+							} as const;
+						default:
+							assert.never(output);
+					}
 				}
-			}
 
-			return {
-				execution_id: exec.id,
-				orchestrator_id: exec.locked_by,
-				queue: exec.queue,
-				task_key: exec.task_key,
-				status: "completed",
-				result: output,
-			} as const;
-		} catch (err) {
-			return {
-				execution_id: exec.id,
-				orchestrator_id: exec.locked_by,
-				queue: exec.queue,
-				task_key: exec.task_key,
-				status: "failed",
-				error: coerceError(err).message,
-			} as const;
-		} finally {
-			// Clean up running task tracking
-			this._runningTasks.delete(exec.id);
-		}
+				return {
+					execution_id: exec.id,
+					orchestrator_id: exec.locked_by,
+					queue: exec.queue,
+					task_key: exec.task_key,
+					status: "completed",
+					result: output,
+				} as const;
+			})
+			.catch(
+				(err): ExecutionResult => ({
+					execution_id: exec.id,
+					orchestrator_id: exec.locked_by,
+					queue: exec.queue,
+					task_key: exec.task_key,
+					status: "failed",
+					error: coerceError(err).message,
+				}),
+			)
+			.finally(() => this._runningTasks.delete(exec.id));
 	}
 
 	/**
@@ -685,24 +692,9 @@ export class Worker<
 		taskKey: string,
 		executions: Execution[],
 	): Promise<ExecutionResult[]> {
-		// Build event array
 		const events = executions.map((exec) => {
-			let event;
-			if (exec.cron_expression) {
-				const scheduleName = exec.dedupe_key?.split("::")[1] || "unknown";
-				event = { name: scheduleName };
-			} else if (
-				exec.subscription_id != null &&
-				exec.payload &&
-				typeof exec.payload === "object" &&
-				"event" in exec.payload
-			) {
-				event = { name: exec.payload.event, payload: exec.payload.payload };
-			} else {
-				event = { name: "pgconductor.invoke", payload: exec.payload };
-			}
 			return {
-				...event,
+				...taskEventFor(exec),
 				execution: {
 					id: exec.id,
 					queue: exec.queue,
@@ -730,82 +722,91 @@ export class Worker<
 			});
 		});
 
-		try {
-			// Schedule next executions for cron tasks
-			await Promise.all(executions.map((exec) => this.scheduleNextExecution(exec)));
+		// Schedule recurring executions before passing the batch to the application handler.
+		return Promise.all(executions.map((exec) => this.scheduleNextExecution(exec)))
+			.then(() =>
+				this.telemetry.process({
+					taskKey,
+					queue: this.queueName,
+					batchMessageCount: executions.length,
+					traceContexts: executions.map((exec) => exec.trace_context),
+					run: async () => {
+						const result = await Promise.race([task.execute(events, batchContext), abortPromise]);
+						if (!isTaskAbortReason(result) && result !== undefined) {
+							if (!Array.isArray(result)) {
+								throw new Error("Batch handler must return array matching input length");
+							}
+							if (result.length !== executions.length) {
+								throw new Error(
+									`Batch handler returned ${result.length} results but received ${executions.length} executions`,
+								);
+							}
+						}
+						return result;
+					},
+				}),
+			)
+			.then((result) => {
+				// Handle abort reasons
+				if (isTaskAbortReason(result)) {
+					if (result.reason === "released") {
+						// Batch sleep - reschedule all
+						return executions.map((exec) => ({
+							execution_id: exec.id,
+							orchestrator_id: exec.locked_by,
+							queue: exec.queue,
+							task_key: taskKey,
+							status: "released" as const,
+							reschedule_in_ms: result.reschedule_in_ms,
+							step_key: result.step_key,
+						}));
+					}
 
-			const result = await Promise.race([task.execute(events, batchContext), abortPromise]);
-
-			// Handle abort reasons
-			if (isTaskAbortReason(result)) {
-				if (result.reason === "released") {
-					// Batch sleep - reschedule all
+					// Other abort reasons
 					return executions.map((exec) => ({
 						execution_id: exec.id,
 						orchestrator_id: exec.locked_by,
 						queue: exec.queue,
 						task_key: taskKey,
-						status: "released" as const,
-						reschedule_in_ms: result.reschedule_in_ms,
-						step_key: result.step_key,
+						status: "failed" as const,
+						error: `Task aborted: ${result.reason}`,
 					}));
 				}
 
-				// Other abort reasons
+				// Void tasks: all succeed
+				if (result === undefined) {
+					return executions.map((exec) => ({
+						execution_id: exec.id,
+						orchestrator_id: exec.locked_by,
+						queue: exec.queue,
+						task_key: taskKey,
+						status: "completed" as const,
+						result: undefined,
+					}));
+				}
+
+				// Individual results
+				return executions.map((exec, i) => ({
+					execution_id: exec.id,
+					orchestrator_id: exec.locked_by,
+					queue: exec.queue,
+					task_key: taskKey,
+					status: "completed" as const,
+					result: result[i],
+				}));
+			})
+			.catch((err) => {
+				// Handler threw: all fail together
+				const error = coerceError(err).message;
 				return executions.map((exec) => ({
 					execution_id: exec.id,
 					orchestrator_id: exec.locked_by,
 					queue: exec.queue,
 					task_key: taskKey,
 					status: "failed" as const,
-					error: `Task aborted: ${result.reason}`,
+					error,
 				}));
-			}
-
-			// Void tasks: all succeed
-			if (result === undefined) {
-				return executions.map((exec) => ({
-					execution_id: exec.id,
-					orchestrator_id: exec.locked_by,
-					queue: exec.queue,
-					task_key: taskKey,
-					status: "completed" as const,
-					result: undefined,
-				}));
-			}
-
-			// Tasks with returns: validate array length
-			if (!Array.isArray(result)) {
-				throw new Error("Batch handler must return array matching input length");
-			}
-
-			if (result.length !== executions.length) {
-				throw new Error(
-					`Batch handler returned ${result.length} results but received ${executions.length} executions`,
-				);
-			}
-
-			// Individual results
-			return executions.map((exec, i) => ({
-				execution_id: exec.id,
-				orchestrator_id: exec.locked_by,
-				queue: exec.queue,
-				task_key: taskKey,
-				status: "completed" as const,
-				result: result[i],
-			}));
-		} catch (err) {
-			// Handler threw: all fail together
-			const errorMsg = coerceError(err).message;
-			return executions.map((exec) => ({
-				execution_id: exec.id,
-				orchestrator_id: exec.locked_by,
-				queue: exec.queue,
-				task_key: taskKey,
-				status: "failed" as const,
-				error: errorMsg,
-			}));
-		}
+			});
 	}
 
 	private async scheduleNextExecution(execution: Execution): Promise<void> {
@@ -844,7 +845,7 @@ export class Worker<
 	// --- Stage 3: Flush results to database ---
 	private async flushResults(source: AsyncIterable<ExecutionResult>): Promise<void> {
 		let buffer = new BufferState();
-		let flushTimer: Timer | null = null;
+		let flushTimer: ReturnType<typeof setTimeout> | null = null;
 
 		const flushNow = async (isCleanup = false) => {
 			if (buffer.count === 0) return;
@@ -857,15 +858,17 @@ export class Worker<
 				flushTimer = null;
 			}
 
-			try {
-				batch.orchestratorId = this.orchestratorId || batch.orchestratorId;
-				await this.db.returnExecutions(batch, { signal: this.signal });
-			} catch (err) {
-				this.logger.error("Error flushing results:", err);
-				if (!isCleanup) {
-					buffer.restore(batch);
-				}
-			}
+			batch.orchestratorId = this.orchestratorId || batch.orchestratorId;
+			await this.telemetry
+				.settle({
+					queue: this.queueName,
+					batchMessageCount: batch.count,
+					run: () => this.db.returnExecutions(batch, { signal: this.signal }),
+				})
+				.catch((err) => {
+					this.logger.error("Error flushing results:", err);
+					if (!isCleanup) buffer.restore(batch);
+				});
 		};
 
 		const scheduleFlush = () => {

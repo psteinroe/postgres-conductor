@@ -26,6 +26,8 @@ import { EVENT_DISPATCH_QUEUE } from "./event-dispatch-task";
 import { Worker, type WorkerConfig } from "./worker";
 import { DefaultLogger, type Logger } from "./lib/logger";
 import { SchemaManager } from "./schema-manager";
+import { Telemetry } from "./telemetry";
+import { SpanKind } from "@opentelemetry/api";
 import type {
 	EventDefinition,
 	EventName,
@@ -89,6 +91,8 @@ export type ConductorOptions<
 	context: ExtraContext;
 
 	logger?: Logger;
+	/** Disable OpenTelemetry instrumentation. The default is enabled and uses the global API provider. */
+	telemetry?: false;
 };
 
 // similar to inngest client
@@ -115,10 +119,14 @@ export class Conductor<
 	 */
 	readonly logger: Logger;
 
+	/** @internal */
+	readonly telemetry: Telemetry;
+
 	private constructor(
 		public readonly options: ConductorOptions<TTaskSchemas, TEventSchemas, ExtraContext>,
 	) {
 		this.logger = options.logger || new DefaultLogger();
+		this.telemetry = new Telemetry(options.telemetry !== false);
 
 		if ("sql" in options && options.sql) {
 			this.db = new DatabaseClient({ sql: options.sql, logger: this.logger });
@@ -142,6 +150,7 @@ export class Conductor<
 			events?: TEventSchemas;
 			context: TExtraContext;
 			logger?: Logger;
+			telemetry?: false;
 		},
 	): Conductor<TTaskSchemas, TEventSchemas, TExtraContext> {
 		return new Conductor<TTaskSchemas, TEventSchemas, TExtraContext>(options);
@@ -232,6 +241,8 @@ export class Conductor<
 			this.logger,
 			options.config,
 			this.options.context,
+			this.options.events?.definitions ?? [],
+			this.telemetry,
 		);
 	}
 
@@ -269,26 +280,51 @@ export class Conductor<
 		const queue = task.queue || "default";
 
 		if (Array.isArray(payloadOrItems)) {
-			const specs = payloadOrItems.map((item) => ({
-				task_key: taskName,
+			return this.telemetry.message({
+				name: `send ${queue}`,
+				kind: SpanKind.PRODUCER,
+				taskKey: taskName,
 				queue,
-				payload: item.payload,
-				run_at: item.run_at,
-				dedupe_key: item.dedupe_key,
-				throttle: item.throttle,
-				debounce: item.debounce,
-				cron_expression: item.cron_expression,
-				priority: item.priority,
-				group: item.group,
-			}));
-			return this.db.invokeBatch(specs);
+				operation: "send",
+				batchMessageCount: payloadOrItems.length,
+				run: async (span) => {
+					const traceContext = span.traceContext();
+					return this.db.invokeBatch(
+						payloadOrItems.map((item) => ({
+							task_key: taskName,
+							queue,
+							payload: item.payload,
+							run_at: item.run_at,
+							dedupe_key: item.dedupe_key,
+							throttle: item.throttle,
+							debounce: item.debounce,
+							cron_expression: item.cron_expression,
+							priority: item.priority,
+							group: item.group,
+							trace_context: traceContext,
+						})),
+					);
+				},
+			});
 		}
 
-		return this.db.invoke({
-			task_key: taskName,
+		return this.telemetry.message({
+			name: `send ${queue}`,
+			kind: SpanKind.PRODUCER,
+			taskKey: taskName,
 			queue,
-			payload: payloadOrItems,
-			...opts,
+			operation: "send",
+			run: async (span) => {
+				const id = await this.db.invoke({
+					task_key: taskName,
+					queue,
+					payload: payloadOrItems,
+					...opts,
+					trace_context: span.traceContext(),
+				});
+				if (id) span.setAttribute("messaging.message.id", id);
+				return id;
+			},
 		});
 	}
 

@@ -73,6 +73,7 @@ interface StoredExecution {
 	dead_letter_error: string | null;
 	dead_letter_attempts: number | null;
 	dead_letter_failed_at: Date | null;
+	trace_context: Execution["trace_context"];
 }
 
 interface StoredStep {
@@ -207,6 +208,7 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 			dead_letter_error: null,
 			dead_letter_attempts: null,
 			dead_letter_failed_at: null,
+			trace_context: spec.trace_context || null,
 		});
 		return id;
 	}
@@ -496,6 +498,7 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 				dead_letter_error: exec.dead_letter_error,
 				dead_letter_attempts: exec.dead_letter_attempts,
 				dead_letter_failed_at: exec.dead_letter_failed_at,
+				trace_context: exec.trace_context,
 				locked_by: exec.orchestrator_id || "",
 			});
 
@@ -1379,6 +1382,7 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 			dead_letter_error: error,
 			dead_letter_attempts: exec.attempts,
 			dead_letter_failed_at: now,
+			trace_context: null,
 		});
 	}
 

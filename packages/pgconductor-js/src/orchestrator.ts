@@ -45,7 +45,7 @@ export class Orchestrator {
 	private readonly schemaManager: SchemaManager;
 	private readonly logger: Logger;
 
-	private heartbeatTimer: Timer | null = null;
+	private heartbeatTimer: ReturnType<typeof setTimeout> | null = null;
 	private _stopDeferred: Deferred<void> | null = null;
 	private _startDeferred: Deferred<void> | null = null;
 	private _abortController: AbortController | null = null;
@@ -70,6 +70,8 @@ export class Orchestrator {
 				this.logger,
 				options.defaultWorker,
 				options.conductor.options.context,
+				options.conductor.options.events?.definitions ?? [],
+				options.conductor.telemetry,
 			);
 			this.workers.push(worker);
 		}
@@ -92,13 +94,22 @@ export class Orchestrator {
 		}
 
 		this.workers.push(
-			new Worker(EVENT_DISPATCH_QUEUE, [createEventDispatchTask(this.db)], this.db, this.logger, {
-				concurrency: 1,
-				fetchBatchSize: 10,
-				flushBatchSize: 10,
-				pollIntervalMs: options.defaultWorker?.pollIntervalMs || 1000,
-				flushIntervalMs: options.defaultWorker?.flushIntervalMs || 2000,
-			}),
+			new Worker(
+				EVENT_DISPATCH_QUEUE,
+				[createEventDispatchTask(this.db)],
+				this.db,
+				this.logger,
+				{
+					concurrency: 1,
+					fetchBatchSize: 10,
+					flushBatchSize: 10,
+					pollIntervalMs: options.defaultWorker?.pollIntervalMs || 1000,
+					flushIntervalMs: options.defaultWorker?.flushIntervalMs || 2000,
+				},
+				options.conductor.options.context,
+				options.conductor.options.events?.definitions ?? [],
+				options.conductor.telemetry,
+			),
 		);
 	}
 
