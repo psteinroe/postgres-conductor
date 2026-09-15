@@ -90,11 +90,12 @@ describe("dead-letter queues (Postgres integration)", () => {
 		await sourceOrchestrator.start();
 		await conductor.invoke({ name: "charge" }, { value: "order-42" });
 		await eventually(async () => {
-			const rows = await db.sql<{ attempts: number }[]>`
-				select attempts from pgconductor._private_executions
+			const rows = await db.sql<{ attempts: number; released: boolean }[]>`
+				select attempts, locked_by is null as released
+				from pgconductor._private_executions
 				where task_key = 'charge'
 			`;
-			return rows[0]?.attempts === 1;
+			return rows[0]?.attempts === 1 && rows[0].released;
 		});
 		const [retry] = await db.sql<{ run_at: Date }[]>`
 			select run_at from pgconductor._private_executions
