@@ -6,6 +6,7 @@ import { defineTask } from "../../src/task-definition";
 import { TestDatabasePool } from "../fixtures/test-database";
 import { waitFor } from "../../src/lib/wait-for";
 import { TaskSchemas } from "../../src/schemas";
+import { waitForCondition } from "../test-utils";
 
 describe("Cron Scheduling", () => {
 	let pool: TestDatabasePool;
@@ -101,26 +102,20 @@ describe("Cron Scheduling", () => {
 
 		await orchestrator.start();
 
-		// Wait for first execution
-		await waitFor(4000);
-		expect(executions.mock.calls.length).toBeGreaterThanOrEqual(1);
+		await waitForCondition(() => executions.mock.calls.length >= 1, 7000);
 
-		// Check that next execution is scheduled
-		const schedules = await db.sql<Array<{ dedupe_key: string; run_at: Date }>>`
-			SELECT dedupe_key, run_at
-			FROM pgconductor._private_executions
-			WHERE task_key = 'frequent-sync'
-				AND dedupe_key LIKE 'scheduled::%'
-				AND run_at > pgconductor._private_current_time()
-			ORDER BY run_at
-			LIMIT 1
-		`;
+		// A completed cron execution durably creates a distinct next occurrence.
+		await waitForCondition(async () => {
+			const schedules = await db.sql<Array<{ count: number }>>`
+				SELECT count(*)::integer AS count
+				FROM pgconductor._private_executions
+				WHERE task_key = 'frequent-sync'
+					AND dedupe_key LIKE 'scheduled::%'
+			`;
+			return (schedules[0]?.count ?? 0) >= 2;
+		}, 7000);
 
-		expect(schedules.length).toBe(1);
-
-		// Wait for second execution
-		await waitFor(4000);
-		expect(executions.mock.calls.length).toBeGreaterThanOrEqual(2);
+		await waitForCondition(() => executions.mock.calls.length >= 2, 7000);
 
 		await orchestrator.stop();
 		await db.destroy();
@@ -361,21 +356,23 @@ describe("Cron Scheduling", () => {
 
 		await orchestrator.start();
 		await conductor.invoke({ name: "dynamic-scheduler" }, {});
-		await waitFor(4000);
-		expect(targetExecutions.mock.calls.length).toBeGreaterThanOrEqual(1);
+		await waitForCondition(() => targetExecutions.mock.calls.length >= 1, 20_000);
 
-		const nextSchedules = await db.sql<Array<{ dedupe_key: string }>>`
-			SELECT dedupe_key
-			FROM pgconductor._private_executions
-			WHERE task_key = 'dynamic-target'
-				AND cron_expression IS NOT NULL
-				AND run_at > pgconductor._private_current_time()
-			ORDER BY run_at
-			LIMIT 1
-		`;
+		let nextSchedule: { dedupe_key: string } | undefined;
+		await waitForCondition(async () => {
+			[nextSchedule] = await db.sql<Array<{ dedupe_key: string }>>`
+				SELECT dedupe_key
+				FROM pgconductor._private_executions
+				WHERE task_key = 'dynamic-target'
+					AND cron_expression IS NOT NULL
+					AND run_at > pgconductor._private_current_time()
+				ORDER BY run_at
+				LIMIT 1
+			`;
+			return nextSchedule !== undefined;
+		}, 20_000);
 
-		expect(nextSchedules.length).toBe(1);
-		expect(nextSchedules[0]!.dedupe_key).toMatch(/^scheduled::reporting::\d+$/);
+		expect(nextSchedule?.dedupe_key).toMatch(/^scheduled::reporting::\d+$/);
 
 		await orchestrator.stop();
 		await db.destroy();
@@ -424,11 +421,13 @@ describe("Cron Scheduling", () => {
 			},
 		);
 
+		let unscheduled = false;
 		const unschedulerTask = conductor.createTask(
 			{ name: "dynamic-unscheduler" },
 			{ invocable: true },
 			async (_event, ctx) => {
 				await ctx.unschedule({ name: "dynamic-target" }, "reporting");
+				unscheduled = true;
 			},
 		);
 
@@ -443,12 +442,22 @@ describe("Cron Scheduling", () => {
 
 		await orchestrator.start();
 		await conductor.invoke({ name: "dynamic-scheduler" }, {});
-		await waitFor(4000);
-		expect(targetExecutions.mock.calls.length).toBeGreaterThanOrEqual(1);
+		await waitForCondition(() => targetExecutions.mock.calls.length >= 1, 7000);
+		await waitForCondition(async () => {
+			const active = await db.sql<Array<{ count: number }>>`
+				SELECT count(*)::integer AS count
+				FROM pgconductor._private_executions
+				WHERE task_key = 'dynamic-target'
+					AND locked_at IS NOT NULL
+					AND completed_at IS NULL
+					AND failed_at IS NULL
+			`;
+			return (active[0]?.count ?? 0) === 0;
+		});
 
 		const runsBeforeUnschedule = targetExecutions.mock.calls.length;
 		await conductor.invoke({ name: "dynamic-unscheduler" }, {});
-		await waitFor(2000);
+		await waitForCondition(() => unscheduled);
 
 		const futureSchedules = await db.sql<Array<{ id: string }>>`
 			SELECT id
@@ -558,18 +567,21 @@ describe("Cron Scheduling", () => {
 		// Should have at least attempted twice (fail + success)
 		expect(attemptCount).toBeGreaterThanOrEqual(2);
 
-		// Verify next cron execution is scheduled
-		const nextExecution = await db.sql<Array<{ run_at: Date; dedupe_key: string }>>`
-			SELECT run_at, dedupe_key
-			FROM pgconductor._private_executions
-			WHERE task_key = 'flaky-cron'
-				AND dedupe_key LIKE 'scheduled::%'
-				AND run_at > pgconductor._private_current_time()
-			ORDER BY run_at
-			LIMIT 1
-		`;
+		// Verify next cron execution is scheduled without sampling at a claim boundary.
+		let nextExecution: Array<{ run_at: Date; dedupe_key: string }> = [];
+		await waitForCondition(async () => {
+			nextExecution = await db.sql<Array<{ run_at: Date; dedupe_key: string }>>`
+				SELECT run_at, dedupe_key
+				FROM pgconductor._private_executions
+				WHERE task_key = 'flaky-cron'
+					AND dedupe_key LIKE 'scheduled::%'
+					AND run_at > pgconductor._private_current_time()
+				ORDER BY run_at
+				LIMIT 1
+			`;
+			return nextExecution.length === 1;
+		});
 
-		expect(nextExecution.length).toBe(1);
 		expect(nextExecution[0]?.dedupe_key).toMatch(/^scheduled::.*::\d+$/);
 
 		await orchestrator.stop();
