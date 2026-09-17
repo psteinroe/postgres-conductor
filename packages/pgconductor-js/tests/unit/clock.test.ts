@@ -18,22 +18,22 @@ describe("Clock", () => {
 
 	test("corrects positive and negative local clock skew", async () => {
 		let now = 1_000;
-		const positive = new Clock(
-			async () => date(2_000),
+		const positive = new Clock({
+			sampleDatabaseTime: async () => date(2_000),
 			logger,
-			() => date(now),
-		);
+			localClock: () => date(now),
+		});
 
 		await positive.refresh();
 		now = 1_100;
 		expect(positive.now()).toEqual(date(2_100));
 
 		now = 1_000;
-		const negative = new Clock(
-			async () => date(0),
+		const negative = new Clock({
+			sampleDatabaseTime: async () => date(0),
 			logger,
-			() => date(now),
-		);
+			localClock: () => date(now),
+		});
 
 		await negative.refresh();
 		now = 1_100;
@@ -42,15 +42,15 @@ describe("Clock", () => {
 
 	test("uses the request midpoint to account for latency", async () => {
 		const localTimes = [date(1_000), date(1_300)];
-		const clock = new Clock(
-			async () => date(1_100),
+		const clock = new Clock({
+			sampleDatabaseTime: async () => date(1_100),
 			logger,
-			() => {
+			localClock: () => {
 				const value = localTimes.shift();
 				if (!value) throw new Error("local clock exhausted");
 				return value;
 			},
-		);
+		});
 
 		await clock.refresh();
 		expect(clock.offset).toBe(-50);
@@ -58,16 +58,16 @@ describe("Clock", () => {
 
 	test("gives skewed workers the same cron slot", async () => {
 		const databaseNow = date(Date.UTC(2025, 0, 1, 12, 0, 0));
-		const positive = new Clock(
-			async () => databaseNow,
+		const positive = new Clock({
+			sampleDatabaseTime: async () => databaseNow,
 			logger,
-			() => date(databaseNow.getTime() - 5 * 60 * 1000),
-		);
-		const negative = new Clock(
-			async () => databaseNow,
+			localClock: () => date(databaseNow.getTime() - 5 * 60 * 1000),
+		});
+		const negative = new Clock({
+			sampleDatabaseTime: async () => databaseNow,
 			logger,
-			() => date(databaseNow.getTime() + 5 * 60 * 1000),
-		);
+			localClock: () => date(databaseNow.getTime() + 5 * 60 * 1000),
+		});
 
 		await positive.refresh();
 		await negative.refresh();
@@ -78,13 +78,13 @@ describe("Clock", () => {
 	});
 
 	test("retains the local clock when the initial sample fails", async () => {
-		const clock = new Clock(
-			async () => {
+		const clock = new Clock({
+			sampleDatabaseTime: async () => {
 				throw new Error("database unavailable");
 			},
 			logger,
-			() => date(1_000),
-		);
+			localClock: () => date(1_000),
+		});
 
 		await clock.start();
 		clock.stop();
@@ -98,14 +98,14 @@ describe("Clock", () => {
 
 	test("retains the previous offset when a refresh fails", async () => {
 		let fail = false;
-		const clock = new Clock(
-			async () => {
+		const clock = new Clock({
+			sampleDatabaseTime: async () => {
 				if (fail) throw new Error("database unavailable");
 				return date(2_000);
 			},
 			logger,
-			() => date(1_000),
-		);
+			localClock: () => date(1_000),
+		});
 
 		await clock.refresh();
 		fail = true;
@@ -122,8 +122,8 @@ describe("Clock", () => {
 		let samples = 0;
 		let inFlight = 0;
 		let maxInFlight = 0;
-		const clock = new Clock(
-			async () => {
+		const clock = new Clock({
+			sampleDatabaseTime: async () => {
 				samples++;
 				inFlight++;
 				maxInFlight = Math.max(maxInFlight, inFlight);
@@ -132,9 +132,9 @@ describe("Clock", () => {
 				return date(1_000 + samples);
 			},
 			logger,
-			() => date(0),
-			1,
-		);
+			localClock: () => date(0),
+			refreshIntervalMs: 1,
+		});
 
 		await clock.start();
 		await new Promise((resolve) => setTimeout(resolve, 25));

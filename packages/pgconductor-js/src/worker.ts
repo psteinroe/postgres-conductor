@@ -163,7 +163,10 @@ export class Worker<
 		this.flushIntervalMs = fullConfig.flushIntervalMs;
 		this.fetchBatchSize = fullConfig.fetchBatchSize;
 		this.flushBatchSize = fullConfig.flushBatchSize;
-		this.clock = new Clock((signal) => this.db.getDatabaseTime({ signal }), this.logger);
+		this.clock = new Clock({
+			sampleDatabaseTime: (signal) => this.db.getDatabaseTime({ signal }),
+			logger: this.logger,
+		});
 	}
 
 	/**
