@@ -1,6 +1,6 @@
 import type { DatabaseClient, JsonValue, Execution, Payload } from "./database-client";
 import { nextCronOccurrence } from "./lib/cron";
-import type { WorkerClock } from "./lib/clock-skew";
+import type { Clock } from "./lib/clock";
 import type {
 	TaskDefinition,
 	TaskName,
@@ -77,7 +77,7 @@ export function createTaskSignal(
 export type TaskContextOptions = {
 	abortController: TypedAbortController<TaskAbortReasons>;
 	db: DatabaseClient;
-	clock: WorkerClock;
+	clock: Clock;
 	execution: Execution;
 	logger: Logger;
 	window?: [string, string];

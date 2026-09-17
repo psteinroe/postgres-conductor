@@ -1,29 +1,20 @@
 import type { Logger } from "./logger";
 
-export type LocalClock = () => Date;
-export type DatabaseTimeSampler = (signal?: AbortSignal) => Promise<Date>;
-
-export type WorkerClock = {
-	now(): Date;
-	start(signal?: AbortSignal): Promise<void>;
-	stop(): void;
-};
-
-export const DATABASE_CLOCK_REFRESH_INTERVAL_MS = 10 * 60 * 1000;
+const DATABASE_CLOCK_REFRESH_INTERVAL_MS = 10 * 60 * 1000;
 
 /**
  * A worker-local clock corrected to the database server's clock.
  * The offset is database time minus the midpoint of the local request times.
  */
-export class DatabaseClockOffset implements WorkerClock {
+export class Clock {
 	private offsetMs = 0;
 	private refreshTimer: ReturnType<typeof setTimeout> | null = null;
 	private running = false;
 
 	constructor(
-		private readonly sampleDatabaseTime: DatabaseTimeSampler,
+		private readonly sampleDatabaseTime: (signal?: AbortSignal) => Promise<Date>,
 		private readonly logger: Logger,
-		private readonly localClock: LocalClock = () => new Date(),
+		private readonly localClock: () => Date = () => new Date(),
 		private readonly refreshIntervalMs = DATABASE_CLOCK_REFRESH_INTERVAL_MS,
 	) {}
 

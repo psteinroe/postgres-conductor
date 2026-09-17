@@ -189,13 +189,13 @@ export class Orchestrator {
 				// Start heartbeat loop
 				this.startHeartbeatLoop();
 
-				// Startup is observed through worker.started below; consume the run promise
-				// as well so the same startup error is not reported as unhandled.
-				for (const worker of this.workers) {
-					const running = runOnce
-						? worker.drain(this.orchestratorId)
-						: worker.run(this.orchestratorId);
-					running.catch(noop);
+				// Kick off all workers (don't await yet!)
+				if (runOnce) {
+					// Drain mode: workers will process and stop
+					this.workers.forEach((w) => void w.drain(this.orchestratorId));
+				} else {
+					// Normal mode: workers will run continuously
+					this.workers.forEach((w) => void w.run(this.orchestratorId));
 				}
 
 				// Wait for ALL workers to finish starting (register() complete)

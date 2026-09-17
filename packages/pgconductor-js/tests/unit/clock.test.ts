@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, mock, test } from "bun:test";
-import { DatabaseClockOffset } from "../../src/lib/clock-skew";
+import { Clock } from "../../src/lib/clock";
 import { nextCronOccurrence } from "../../src/lib/cron";
 
 const logger = {
@@ -11,14 +11,14 @@ const logger = {
 
 const date = (ms: number): Date => new Date(ms);
 
-describe("DatabaseClockOffset", () => {
+describe("Clock", () => {
 	beforeEach(() => {
 		logger.warn.mockClear();
 	});
 
 	test("corrects positive and negative local clock skew", async () => {
 		let now = 1_000;
-		const positive = new DatabaseClockOffset(
+		const positive = new Clock(
 			async () => date(2_000),
 			logger,
 			() => date(now),
@@ -29,7 +29,7 @@ describe("DatabaseClockOffset", () => {
 		expect(positive.now()).toEqual(date(2_100));
 
 		now = 1_000;
-		const negative = new DatabaseClockOffset(
+		const negative = new Clock(
 			async () => date(0),
 			logger,
 			() => date(now),
@@ -42,7 +42,7 @@ describe("DatabaseClockOffset", () => {
 
 	test("uses the request midpoint to account for latency", async () => {
 		const localTimes = [date(1_000), date(1_300)];
-		const clock = new DatabaseClockOffset(
+		const clock = new Clock(
 			async () => date(1_100),
 			logger,
 			() => {
@@ -58,12 +58,12 @@ describe("DatabaseClockOffset", () => {
 
 	test("gives skewed workers the same cron slot", async () => {
 		const databaseNow = date(Date.UTC(2025, 0, 1, 12, 0, 0));
-		const positive = new DatabaseClockOffset(
+		const positive = new Clock(
 			async () => databaseNow,
 			logger,
 			() => date(databaseNow.getTime() - 5 * 60 * 1000),
 		);
-		const negative = new DatabaseClockOffset(
+		const negative = new Clock(
 			async () => databaseNow,
 			logger,
 			() => date(databaseNow.getTime() + 5 * 60 * 1000),
@@ -78,7 +78,7 @@ describe("DatabaseClockOffset", () => {
 	});
 
 	test("retains the local clock when the initial sample fails", async () => {
-		const clock = new DatabaseClockOffset(
+		const clock = new Clock(
 			async () => {
 				throw new Error("database unavailable");
 			},
@@ -98,7 +98,7 @@ describe("DatabaseClockOffset", () => {
 
 	test("retains the previous offset when a refresh fails", async () => {
 		let fail = false;
-		const clock = new DatabaseClockOffset(
+		const clock = new Clock(
 			async () => {
 				if (fail) throw new Error("database unavailable");
 				return date(2_000);
@@ -122,7 +122,7 @@ describe("DatabaseClockOffset", () => {
 		let samples = 0;
 		let inFlight = 0;
 		let maxInFlight = 0;
-		const clock = new DatabaseClockOffset(
+		const clock = new Clock(
 			async () => {
 				samples++;
 				inFlight++;

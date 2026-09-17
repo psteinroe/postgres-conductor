@@ -18,7 +18,7 @@ import { Deferred } from "./lib/deferred";
 import { type PollableAsyncIterable } from "./lib/async-queue";
 import { BatchingAsyncQueue, type BatchGroup } from "./lib/batching-async-queue";
 import { nextCronOccurrence } from "./lib/cron";
-import { DatabaseClockOffset, type WorkerClock } from "./lib/clock-skew";
+import { Clock } from "./lib/clock";
 import {
 	createTaskSignal,
 	isTaskAbortReason,
@@ -38,7 +38,6 @@ import type { TypedAbortController } from "./lib/typed-abort-controller";
  */
 export type WorkerConfig = {
 	concurrency: number;
-	clock?: WorkerClock;
 	flushBatchSize: number;
 	fetchBatchSize: number;
 	pollIntervalMs: number;
@@ -133,7 +132,7 @@ export class Worker<
 	private readonly flushBatchSize: number;
 	private readonly flushIntervalMs: number;
 	private readonly pollIntervalMs: number;
-	private readonly clock: WorkerClock;
+	private readonly clock: Clock;
 
 	private _startDeferred: Deferred<void> | null = null;
 	private _stopDeferred: Deferred<void> | null = null;
@@ -164,9 +163,7 @@ export class Worker<
 		this.flushIntervalMs = fullConfig.flushIntervalMs;
 		this.fetchBatchSize = fullConfig.fetchBatchSize;
 		this.flushBatchSize = fullConfig.flushBatchSize;
-		this.clock =
-			fullConfig.clock ||
-			new DatabaseClockOffset((signal) => this.db.getDatabaseTime({ signal }), this.logger);
+		this.clock = new Clock((signal) => this.db.getDatabaseTime({ signal }), this.logger);
 	}
 
 	/**
