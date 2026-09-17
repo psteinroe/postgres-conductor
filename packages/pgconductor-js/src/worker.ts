@@ -17,7 +17,8 @@ import { mapConcurrent } from "./lib/map-concurrent";
 import { Deferred } from "./lib/deferred";
 import { type PollableAsyncIterable } from "./lib/async-queue";
 import { BatchingAsyncQueue, type BatchGroup } from "./lib/batching-async-queue";
-import CronExpressionParser from "cron-parser";
+import { nextCronOccurrence } from "./lib/cron";
+import { Clock } from "./lib/clock";
 import {
 	createTaskSignal,
 	isTaskAbortReason,
@@ -131,6 +132,7 @@ export class Worker<
 	private readonly flushBatchSize: number;
 	private readonly flushIntervalMs: number;
 	private readonly pollIntervalMs: number;
+	private readonly clock: Clock;
 
 	private _startDeferred: Deferred<void> | null = null;
 	private _stopDeferred: Deferred<void> | null = null;
@@ -161,6 +163,10 @@ export class Worker<
 		this.flushIntervalMs = fullConfig.flushIntervalMs;
 		this.fetchBatchSize = fullConfig.fetchBatchSize;
 		this.flushBatchSize = fullConfig.flushBatchSize;
+		this.clock = new Clock({
+			sampleDatabaseTime: (signal) => this.db.getDatabaseTime({ signal }),
+			logger: this.logger,
+		});
 	}
 
 	/**
@@ -221,7 +227,8 @@ export class Worker<
 		this._stopDeferred = new Deferred<void>();
 		this._abortController = new AbortController();
 
-		// Synchronous registration
+		// Sample before calculating or registering cron schedules.
+		await this.clock.start(this.abortController.signal);
 		await this.register();
 
 		// Worker is now started
@@ -247,6 +254,7 @@ export class Worker<
 				this.logger.error("Worker pipeline error:", err);
 			} finally {
 				queue.close();
+				this.clock.stop();
 				this._stopDeferred?.resolve();
 				this._startDeferred = null;
 				this._stopDeferred = null;
@@ -317,8 +325,7 @@ export class Worker<
 			task.triggers
 				.filter((t): t is { cron: string; name: string } => "cron" in t)
 				.map((trigger) => {
-					const interval = CronExpressionParser.parse(trigger.cron);
-					const nextTimestamp = interval.next().toDate();
+					const nextTimestamp = nextCronOccurrence(trigger.cron, this.clock.now());
 					const timestampSeconds = Math.floor(nextTimestamp.getTime() / 1000);
 					return {
 						task_key: task.name,
@@ -585,6 +592,7 @@ export class Worker<
 					TaskContext.create<Tasks, Events, typeof extraContext>(
 						{
 							db: this.db,
+							clock: this.clock,
 							abortController: taskAbortController,
 							execution: exec,
 							logger: makeChildLogger(this.logger, {
@@ -807,8 +815,7 @@ export class Worker<
 		}
 
 		const scheduleName = parts[1];
-		const interval = CronExpressionParser.parse(execution.cron_expression);
-		const nextTimestamp = interval.next().toDate();
+		const nextTimestamp = nextCronOccurrence(execution.cron_expression, this.clock.now());
 		const timestampSeconds = Math.floor(nextTimestamp.getTime() / 1000);
 		const nextDedupeKey = `scheduled::${scheduleName}::${timestampSeconds}`;
 

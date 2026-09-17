@@ -158,8 +158,12 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 		return this.getInternalTime();
 	}
 
-	// Async method matching DatabaseClient interface
+	// Async methods matching DatabaseClient interface
 	async getCurrentTime(): Promise<Date> {
+		return this.getInternalTime();
+	}
+
+	async getDatabaseTime(): Promise<Date> {
 		return this.getInternalTime();
 	}
 
