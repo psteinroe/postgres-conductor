@@ -223,27 +223,16 @@ export class Worker<
 		}
 
 		this.orchestratorId = orchestratorId;
-		const started = (this._startDeferred = new Deferred<void>());
-		const stopped = (this._stopDeferred = new Deferred<void>());
-		const controller = (this._abortController = new AbortController());
+		this._startDeferred = new Deferred<void>();
+		this._stopDeferred = new Deferred<void>();
+		this._abortController = new AbortController();
 
-		try {
-			// Sample before calculating or registering cron schedules.
-			await this.clock.start(controller.signal);
-			await this.register();
-		} catch (error) {
-			this.clock.stop();
-			controller.abort();
-			started.reject(error);
-			stopped.resolve();
-			this._startDeferred = null;
-			this._stopDeferred = null;
-			this._abortController = null;
-			throw error;
-		}
+		// Sample before calculating or registering cron schedules.
+		await this.clock.start(this.abortController.signal);
+		await this.register();
 
 		// Worker is now started
-		started.resolve();
+		this._startDeferred.resolve();
 
 		// Run pipeline in background
 		// Build batch configs map
@@ -273,7 +262,7 @@ export class Worker<
 			}
 		})();
 
-		return started.promise;
+		return this._startDeferred.promise;
 	}
 
 	/**

@@ -1,10 +1,8 @@
-import { afterAll, afterEach, beforeAll, test, expect, mock } from "bun:test";
+import { afterAll, afterEach, beforeAll, test, expect } from "bun:test";
 import { TestDatabasePool } from "../fixtures/test-database";
 import type { TestDatabase } from "../fixtures/test-database";
 import { Conductor } from "../../src/conductor";
 import { Orchestrator } from "../../src/orchestrator";
-import { defineTask } from "../../src/task-definition";
-import { TaskSchemas } from "../../src/schemas";
 
 let pool: TestDatabasePool;
 const databases: TestDatabase[] = [];
@@ -44,36 +42,6 @@ test("gracefully shuts down on stop()", async () => {
 
 	expect(orch.isStopped).toBe(true);
 });
-
-test("reports a database clock startup failure", async () => {
-	const db = await pool.child();
-	databases.push(db);
-	const taskDefinition = defineTask({ name: "clock-startup" });
-	const conductor = Conductor.create({
-		sql: db.sql,
-		tasks: TaskSchemas.fromSchema([taskDefinition]),
-		context: {},
-	});
-	await conductor.ensureInstalled();
-
-	const clock = {
-		now: () => new Date(),
-		start: mock(async () => {
-			throw new Error("clock unavailable");
-		}),
-		stop: mock(() => {}),
-	};
-	const task = conductor.createTask({ name: "clock-startup" }, { invocable: true }, async () => {});
-	const orchestrator = Orchestrator.create({
-		conductor,
-		tasks: [task],
-		defaultWorker: { clock },
-	});
-
-	await expect(orchestrator.start()).rejects.toThrow("clock unavailable");
-	await orchestrator.stopped.catch(() => {});
-	expect(clock.stop).toHaveBeenCalled();
-}, 30_000);
 
 test("stop() can be called multiple times safely", async () => {
 	const db = await pool.child();

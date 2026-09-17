@@ -77,7 +77,7 @@ describe("DatabaseClockOffset", () => {
 		);
 	});
 
-	test("fails startup when the initial sample fails", async () => {
+	test("retains the local clock when the initial sample fails", async () => {
 		const clock = new DatabaseClockOffset(
 			async () => {
 				throw new Error("database unavailable");
@@ -86,7 +86,14 @@ describe("DatabaseClockOffset", () => {
 			() => date(1_000),
 		);
 
-		await expect(clock.start()).rejects.toThrow("database unavailable");
+		await clock.start();
+		clock.stop();
+
+		expect(clock.now()).toEqual(date(1_000));
+		expect(logger.warn).toHaveBeenCalledWith(
+			"Database clock offset refresh failed; retaining previous offset",
+			expect.any(Error),
+		);
 	});
 
 	test("retains the previous offset when a refresh fails", async () => {

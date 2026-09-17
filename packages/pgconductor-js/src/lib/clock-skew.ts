@@ -38,13 +38,8 @@ export class DatabaseClockOffset implements WorkerClock {
 	async start(signal?: AbortSignal): Promise<void> {
 		this.stop();
 		this.running = true;
-		try {
-			await this.refreshOffset(signal, true);
-			if (this.running) this.scheduleRefresh();
-		} catch (error) {
-			this.stop();
-			throw error;
-		}
+		await this.refreshOffset(signal);
+		if (this.running) this.scheduleRefresh();
 	}
 
 	stop(): void {
@@ -56,10 +51,10 @@ export class DatabaseClockOffset implements WorkerClock {
 	}
 
 	async refresh(signal?: AbortSignal): Promise<void> {
-		await this.refreshOffset(signal, false);
+		await this.refreshOffset(signal);
 	}
 
-	private async refreshOffset(signal: AbortSignal | undefined, initial: boolean): Promise<void> {
+	private async refreshOffset(signal?: AbortSignal): Promise<void> {
 		try {
 			const requestStart = this.localClock();
 			const databaseTime = await this.sampleDatabaseTime(signal);
@@ -67,7 +62,6 @@ export class DatabaseClockOffset implements WorkerClock {
 			const midpoint = (requestStart.getTime() + responseEnd.getTime()) / 2;
 			this.offsetMs = databaseTime.getTime() - midpoint;
 		} catch (error) {
-			if (initial) throw error;
 			this.logger.warn("Database clock offset refresh failed; retaining previous offset", error);
 		}
 	}
