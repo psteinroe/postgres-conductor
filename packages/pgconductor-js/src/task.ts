@@ -25,6 +25,15 @@ export type TaskIdentifier<TName extends string = string, TQueue extends string 
 	readonly queue?: TQueue;
 };
 
+type QualifiedTaskIdentifier = Required<TaskIdentifier<string, string>>;
+
+function hasSameTaskIdentity(
+	left: QualifiedTaskIdentifier,
+	right: QualifiedTaskIdentifier,
+): boolean {
+	return left.queue === right.queue && left.name === right.name;
+}
+
 export type BatchConfig = {
 	size: number;
 	timeoutMs: number;
@@ -252,24 +261,14 @@ export class Task<
 		this.groupConcurrency = assert.positiveInteger(config.groupConcurrency, "groupConcurrency");
 		this.batch = config.batch;
 		this.deadLetter = config.deadLetter;
-		if (this.deadLetter) {
-			if (typeof this.deadLetter.queue !== "string") {
-				throw new Error("deadLetter.queue must be a string");
-			}
-			if (this.deadLetter.task !== undefined) {
-				if (!(this.deadLetter.task instanceof Task)) {
-					throw new Error("deadLetter.task must be a Task");
-				}
-				if (this.deadLetter.task.queue !== this.deadLetter.queue) {
-					throw new Error("deadLetter.queue must match deadLetter.task.queue");
-				}
-			}
-			if (
-				this.deadLetter.queue === this.queue &&
-				(this.deadLetter.task?.name || this.name) === this.name
-			) {
-				throw new Error("A task cannot dead-letter directly to itself");
-			}
+		if (
+			this.deadLetter &&
+			hasSameTaskIdentity(this, {
+				queue: this.deadLetter.queue,
+				name: this.deadLetter.task?.name ?? this.name,
+			})
+		) {
+			throw new Error("A task cannot dead-letter directly to itself");
 		}
 
 		this.triggers = Array.isArray(triggers) ? triggers : [triggers];
