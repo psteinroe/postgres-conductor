@@ -270,6 +270,7 @@ export class Conductor<
 				debounce: item.debounce,
 				cron_expression: item.cron_expression,
 				priority: item.priority,
+				group: item.group,
 			}));
 			return this.db.invokeBatch(specs);
 		}

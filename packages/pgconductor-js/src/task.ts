@@ -18,6 +18,7 @@ import type {
 	RowType,
 } from "./event-definition";
 import type { SelectedRow } from "./select-columns";
+import * as assert from "./lib/assert";
 
 export type TaskIdentifier<TName extends string = string, TQueue extends string = "default"> = {
 	readonly name: TName;
@@ -38,6 +39,7 @@ export type TaskConfiguration<
 	removeOnComplete?: RetentionSettings;
 	removeOnFail?: RetentionSettings;
 	concurrency?: number;
+	groupConcurrency?: number;
 	batch?: BatchConfig;
 };
 
@@ -192,6 +194,7 @@ export class Task<
 	public readonly removeOnComplete: RetentionSettings;
 	public readonly removeOnFail: RetentionSettings;
 	public readonly concurrency?: number;
+	public readonly groupConcurrency?: number;
 	public readonly batch?: BatchConfig;
 
 	public readonly triggers: NonEmptyArray<Trigger>;
@@ -209,7 +212,8 @@ export class Task<
 		this.window = config.window;
 		this.removeOnComplete = config.removeOnComplete ?? false;
 		this.removeOnFail = config.removeOnFail ?? false;
-		this.concurrency = config.concurrency;
+		this.concurrency = assert.positiveInteger(config.concurrency, "concurrency");
+		this.groupConcurrency = assert.positiveInteger(config.groupConcurrency, "groupConcurrency");
 		this.batch = config.batch;
 
 		this.triggers = Array.isArray(triggers) ? triggers : [triggers];

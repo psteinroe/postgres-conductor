@@ -13,3 +13,10 @@ export function equal<T>(actual: T, expected: T, message?: string): void {
 export function never(x: never): never {
 	throw new Error(`Unhandled case: ${x}`);
 }
+
+export function positiveInteger(value: number | undefined, name: string): number | undefined {
+	if (value !== undefined) {
+		ok(Number.isInteger(value) && value > 0, `${name} must be a positive integer`);
+	}
+	return value;
+}

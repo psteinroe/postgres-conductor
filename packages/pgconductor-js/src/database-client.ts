@@ -33,6 +33,7 @@ export interface ExecutionSpec {
 	debounce?: { seconds: number } | null;
 	cron_expression?: string | null;
 	priority?: number | null;
+	group?: string | null;
 	parent_execution_id?: string | null;
 	parent_step_key?: string | null;
 	parent_timeout_ms?: number | null;
@@ -46,6 +47,7 @@ export interface TaskSpec {
 	removeOnFailDays?: number | null;
 	window?: [string, string] | null;
 	concurrency?: number | null;
+	groupConcurrency?: number | null;
 }
 
 export interface Execution {
@@ -60,7 +62,7 @@ export interface Execution {
 	last_error: string | null;
 	dedupe_key?: string | null;
 	cron_expression?: string | null;
-	slot_group_number?: number | null;
+	group?: string | null;
 }
 
 // todo: move all of this to query-builder too or create new types.ts file
@@ -89,7 +91,6 @@ export interface ExecutionCompleted {
 	task_key: string;
 	status: "completed";
 	result?: Payload;
-	slot_group_number?: number | null;
 }
 
 export interface ExecutionFailed {
@@ -99,7 +100,6 @@ export interface ExecutionFailed {
 	task_key: string;
 	status: "failed";
 	error: string;
-	slot_group_number?: number | null;
 }
 
 export interface ExecutionReleased {
@@ -110,7 +110,6 @@ export interface ExecutionReleased {
 	status: "released";
 	reschedule_in_ms?: number | "infinity";
 	step_key?: string;
-	slot_group_number?: number | null;
 }
 
 export interface ExecutionPermamentlyFailed {
@@ -120,10 +119,10 @@ export interface ExecutionPermamentlyFailed {
 	task_key: string;
 	status: "permanently_failed";
 	error: string;
-	slot_group_number?: number | null;
 }
 
 export interface ExecutionInvokeChild {
+	group?: string | null;
 	execution_id: string;
 	queue: string;
 	orchestrator_id: string;
@@ -134,7 +133,6 @@ export interface ExecutionInvokeChild {
 	child_task_name: string;
 	child_task_queue: string;
 	child_payload: Payload | null;
-	slot_group_number?: number | null;
 }
 
 export interface EventSubscriptionSpec {
