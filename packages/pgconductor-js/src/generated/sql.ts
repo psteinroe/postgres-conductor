@@ -263,16 +263,10 @@ begin
       v_partition_name
     );
 
-    -- indexes used to count active executions for soft concurrency limits
+    -- covering index used to count active executions for soft task and group limits
     execute format(
-      'create index if not exists %I on pgconductor.%I (task_key) where locked_at is not null and failed_at is null and completed_at is null',
-      'idx_' || v_partition_name || '_active_task',
-      v_partition_name
-    );
-
-    execute format(
-      'create index if not exists %I on pgconductor.%I (task_key, "group") where "group" is not null and locked_at is not null and failed_at is null and completed_at is null',
-      'idx_' || v_partition_name || '_active_task_group',
+      'create index if not exists %I on pgconductor.%I (task_key, "group") where locked_at is not null and failed_at is null and completed_at is null',
+      'idx_' || v_partition_name || '_active_concurrency',
       v_partition_name
     );
 

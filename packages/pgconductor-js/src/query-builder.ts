@@ -258,24 +258,57 @@ export class QueryBuilder {
 		filterTaskKeys,
 	}: GetExecutionsArgs): PendingQuery<Execution[]> {
 		return this.sql<Execution[]>`
-			with active_tasks as (
-				select e.task_key, count(*)::integer as active_count
+			-- Read limit mode from the database so rolling workers cannot bypass new limits.
+			with task_limits as materialized (
+				select exists (
+					select 1
+					from pgconductor._private_tasks t
+					where t.queue = ${queueName}::text
+						and (t.concurrency_limit is not null or t.group_concurrency_limit is not null)
+				) as enabled
+			), unconstrained_candidates as (
+				select e.id
 				from pgconductor._private_executions e
-				where e.queue = ${queueName}::text
+				where not (select enabled from task_limits)
+					and e.queue = ${queueName}::text
+					and e.run_at <= pgconductor._private_current_time()
+					and e.is_available = true
+					${filterTaskKeys?.length ? this.sql`and not (e.task_key = any(${this.sql.array(filterTaskKeys)}::text[]))` : this.sql``}
+				order by e.priority asc, e.run_at asc, e.created_at asc, e.id asc
+				limit ${batchSize}::integer
+				for update of e skip locked
+			), active_executions as materialized (
+				select e.task_key, e."group"
+				from pgconductor._private_executions e
+				where (select enabled from task_limits)
+					and e.queue = ${queueName}::text
 					and e.locked_at is not null
 					and e.failed_at is null
 					and e.completed_at is null
+			), active_tasks as (
+				select e.task_key, count(*)::integer as active_count
+				from active_executions e
 				group by e.task_key
 			), active_groups as (
 				select e.task_key, e."group", count(*)::integer as active_count
-				from pgconductor._private_executions e
-				where e.queue = ${queueName}::text
-					and e."group" is not null
-					and e.locked_at is not null
-					and e.failed_at is null
-					and e.completed_at is null
+				from active_executions e
+				where e."group" is not null
 				group by e.task_key, e."group"
-			), ranked as (
+			),
+			-- A full task makes the candidate branch a no-op instead of scanning its backlog.
+			available_tasks as materialized (
+				select
+					t.key,
+					t.queue,
+					t.concurrency_limit,
+					t.group_concurrency_limit,
+					coalesce(at.active_count, 0) as active_task_count
+				from pgconductor._private_tasks t
+				left join active_tasks at on at.task_key = t.key
+				where t.queue = ${queueName}::text
+					and (t.concurrency_limit is null
+						or coalesce(at.active_count, 0) < t.concurrency_limit)
+			), candidates as (
 				select
 					e.id,
 					e.task_key,
@@ -286,58 +319,57 @@ export class QueryBuilder {
 					e."group",
 					t.concurrency_limit,
 					t.group_concurrency_limit,
-					coalesce(at.active_count, 0) as active_task_count,
-					coalesce(ag.active_count, 0) as active_group_count,
-					row_number() over (
-						partition by e.task_key
-						order by e.priority asc, e.run_at asc, e.created_at asc, e.id asc
-					) as task_rank,
-					row_number() over (
-						partition by e.task_key, e."group"
-						order by e.priority asc, e.run_at asc, e.created_at asc, e.id asc
-					) as group_rank
+					t.active_task_count,
+					coalesce(ag.active_count, 0) as active_group_count
 				from pgconductor._private_executions e
-				left join pgconductor._private_tasks t
-					on t.key = e.task_key and t.queue = e.queue
-				left join active_tasks at on at.task_key = e.task_key
+				join available_tasks t on t.key = e.task_key and t.queue = e.queue
 				left join active_groups ag on ag.task_key = e.task_key and ag."group" = e."group"
-				where e.queue = ${queueName}::text
+				where (select enabled from task_limits)
+					and (select exists (select 1 from available_tasks))
+					and e.queue = ${queueName}::text
 					and e.run_at <= pgconductor._private_current_time()
 					and e.is_available = true
+					and (t.group_concurrency_limit is null
+						or e."group" is null
+						or coalesce(ag.active_count, 0) < t.group_concurrency_limit)
 					${filterTaskKeys?.length ? this.sql`and not (e.task_key = any(${this.sql.array(filterTaskKeys)}::text[]))` : this.sql``}
+				-- Bound both window functions to one locked candidate batch.
+				order by e.priority asc, e.run_at asc, e.created_at asc, e.id asc
+				limit ${batchSize}::integer
+				for update of e skip locked
+			), group_ranked as (
+				select c.*,
+					row_number() over (
+						partition by c.task_key, c."group"
+						order by c.priority asc, c.run_at asc, c.created_at asc, c.id asc
+					) as group_rank
+				from candidates c
 			), group_eligible as (
 				select r.*,
 					row_number() over (
 						partition by r.task_key
 						order by r.priority asc, r.run_at asc, r.created_at asc, r.id asc
-					) as available_task_rank
-				from ranked r
+					) as task_rank
+				from group_ranked r
 				where r.group_concurrency_limit is null
 					or r."group" is null
 					or r.active_group_count + r.group_rank <= r.group_concurrency_limit
 			), eligible as (
-				select r.id, r.priority, r.run_at, r.created_at
+				select r.id
 				from group_eligible r
 				where r.concurrency_limit is null
-					or r.active_task_count + r.available_task_rank <= r.concurrency_limit
-				order by r.priority asc, r.run_at asc, r.created_at asc, r.id asc
-				-- Keep a bounded candidate pool so SKIP LOCKED can backfill a batch.
-				limit greatest(${batchSize}::integer * 4, ${batchSize}::integer)
-			), locked_candidates as (
-				select e.id
-				from pgconductor._private_executions e
-				join eligible c on c.id = e.id
-				where e.queue = ${queueName}::text
-				order by c.priority asc, c.run_at asc, c.created_at asc, c.id asc
-				limit ${batchSize}::integer
-				for update of e skip locked
+					or r.active_task_count + r.task_rank <= r.concurrency_limit
+			), claimable as (
+				select id from unconstrained_candidates
+				union all
+				select id from eligible
 			), claimed as (
 				update pgconductor._private_executions e
 				set
 					attempts = e.attempts + 1,
 					locked_by = ${orchestratorId}::uuid,
 					locked_at = pgconductor._private_current_time()
-				from locked_candidates c
+				from claimable c
 				where e.id = c.id and e.queue = ${queueName}::text and e.is_available = true
 				returning e.id, e.task_key, e.queue, e.payload, e.waiting_on_execution_id,
 					e.waiting_step_key, e.cancelled, e.last_error, e.dedupe_key, e.cron_expression,
