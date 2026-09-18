@@ -1,6 +1,8 @@
 import { test, expect, describe } from "bun:test";
 import { mapConcurrent } from "../../../src/lib/map-concurrent";
-import type { PollableAsyncIterable } from "../../../src/lib/async-queue";
+import { AsyncQueue, type PollableAsyncIterable } from "../../../src/lib/async-queue";
+import { BatchingAsyncQueue } from "../../../src/lib/batching-async-queue";
+import { Deferred } from "../../../src/lib/deferred";
 
 class PollableGenerator<T> implements PollableAsyncIterable<T> {
 	private buffer: T[] = [];
@@ -55,6 +57,78 @@ describe("mapConcurrent", () => {
 
 		results.sort((a, b) => a - b); // Order may vary due to concurrency
 		expect(results).toEqual([0, 2, 4, 6, 8]);
+	});
+
+	test("starts items that arrive while another mapper is running", async () => {
+		const source = new AsyncQueue<number>(2);
+		const firstStarted = new Deferred<void>();
+		const secondStarted = new Deferred<void>();
+		const releaseFirst = new Deferred<void>();
+
+		const consuming = (async () => {
+			for await (const _ of mapConcurrent(source, 2, async (value) => {
+				if (value === 1) {
+					firstStarted.resolve();
+					await releaseFirst.promise;
+				} else {
+					secondStarted.resolve();
+				}
+				return value;
+			})) {
+				// Consume all results.
+			}
+		})();
+
+		try {
+			await source.push(1);
+			await firstStarted.promise;
+			await source.push(2);
+
+			const startedBeforeFirstCompleted = await Promise.race([
+				secondStarted.promise.then(() => true),
+				Bun.sleep(100).then(() => false),
+			]);
+			expect(startedBeforeFirstCompleted).toBe(true);
+		} finally {
+			releaseFirst.resolve();
+			source.close();
+			await consuming;
+		}
+	});
+
+	test("leaves the source usable when the consumer exits early", async () => {
+		const source = new AsyncQueue<number>(2);
+		await source.push(1);
+
+		for await (const result of mapConcurrent(source, 2, async (value) => value)) {
+			expect(result).toBe(1);
+			break;
+		}
+
+		await source.push(2);
+		expect(await source.next()).toEqual({ value: 2, done: false });
+		source.close();
+	});
+
+	test("preserves pending batches when the consumer exits early", async () => {
+		const source = new BatchingAsyncQueue<{ task_key: string; id: number }>(
+			2,
+			new Map([["batched", { size: 2, timeoutMs: 60_000 }]]),
+		);
+		await source.push({ task_key: "immediate", id: 1 });
+		await source.push({ task_key: "batched", id: 2 });
+
+		for await (const result of mapConcurrent(source, 1, async (group) => group)) {
+			expect(result.items.map((item) => item.id)).toEqual([1]);
+			break;
+		}
+
+		await source.push({ task_key: "batched", id: 3 });
+		const pendingBatch = await source.next();
+		expect(pendingBatch.done).toBe(false);
+		if (pendingBatch.done) throw new Error("Expected a pending batch");
+		expect(pendingBatch.value.items.map((item) => item.id)).toEqual([2, 3]);
+		source.close();
 	});
 
 	test("respects concurrency limit", async () => {

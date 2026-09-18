@@ -1,11 +1,13 @@
 export interface PollableAsyncIterable<T> extends AsyncIterable<T> {
 	tryNext(): T | undefined;
+	onNextItemAvailable?(listener: () => void): () => void;
 }
 
 export class AsyncQueue<T> implements PollableAsyncIterable<T> {
 	private queue: T[] = [];
 	private resolvers: ((value: IteratorResult<T>) => void)[] = [];
 	private pushResolvers: (() => void)[] = [];
+	private itemAvailableListeners = new Set<() => void>();
 	private closed = false;
 
 	constructor(private readonly capacity: number) {}
@@ -30,6 +32,7 @@ export class AsyncQueue<T> implements PollableAsyncIterable<T> {
 			// No consumer waiting, add to queue for later
 			this.queue.push(item);
 		}
+		this.notifyItemAvailable();
 	}
 
 	tryNext(): T | undefined {
@@ -49,6 +52,21 @@ export class AsyncQueue<T> implements PollableAsyncIterable<T> {
 		}
 		if (this.closed) return { value: undefined as any, done: true };
 		return new Promise((resolve) => this.resolvers.push(resolve));
+	}
+
+	onNextItemAvailable(listener: () => void): () => void {
+		if (this.queue.length > 0) {
+			listener();
+			return () => {};
+		}
+		this.itemAvailableListeners.add(listener);
+		return () => this.itemAvailableListeners.delete(listener);
+	}
+
+	private notifyItemAvailable() {
+		const listeners = [...this.itemAvailableListeners];
+		this.itemAvailableListeners.clear();
+		for (const listener of listeners) listener();
 	}
 
 	private notifyPusher() {
