@@ -25,14 +25,29 @@ export type TaskIdentifier<TName extends string = string, TQueue extends string 
 	readonly queue?: TQueue;
 };
 
+type QualifiedTaskIdentifier = Required<TaskIdentifier<string, string>>;
+
+function hasSameTaskIdentity(
+	left: QualifiedTaskIdentifier,
+	right: QualifiedTaskIdentifier,
+): boolean {
+	return left.queue === right.queue && left.name === right.name;
+}
+
 export type BatchConfig = {
 	size: number;
 	timeoutMs: number;
 };
 
+export type DeadLetterConfiguration<TPayload extends object = object> = {
+	readonly queue: string;
+	readonly task?: Task<string, string, TPayload, object | void, object, unknown>;
+};
+
 export type TaskConfiguration<
 	TName extends string = string,
 	TQueue extends string = "default",
+	TPayload extends object = object,
 > = TaskIdentifier<TName, TQueue> & {
 	maxAttempts?: number;
 	window?: [string, string];
@@ -41,7 +56,36 @@ export type TaskConfiguration<
 	concurrency?: number;
 	groupConcurrency?: number;
 	batch?: BatchConfig;
+	deadLetter?: DeadLetterConfiguration<TPayload>;
 };
+
+/** Type-level validation for a dead-letter destination. */
+type ExactType<TLeft, TRight> = [TLeft] extends [TRight]
+	? [TRight] extends [TLeft]
+		? true
+		: false
+	: false;
+
+type ValidateDeadLetterTarget<TTarget, TPayload extends object, TQueue> =
+	TTarget extends Task<any, infer TTargetQueue, infer TTargetPayload, any, any, any>
+		? TPayload extends TTargetPayload
+			? ExactType<TQueue, TTargetQueue> extends true
+				? unknown
+				: "deadLetter.queue must match deadLetter.task.queue"
+			: "deadLetter.task must accept the source task payload"
+		: "deadLetter.task must be a Task";
+
+export type ValidateDeadLetterConfiguration<T, TPayload extends object> = T extends {
+	readonly deadLetter: infer TDeadLetter;
+}
+	? TDeadLetter extends { readonly queue: infer TQueue }
+		? TQueue extends string
+			? TDeadLetter extends { readonly task: infer TTarget }
+				? ValidateDeadLetterTarget<TTarget, TPayload, TQueue>
+				: unknown
+			: "deadLetter.queue must be a string"
+		: "deadLetter must include a queue string"
+	: unknown;
 
 export type RetentionSettings = boolean | { days: number };
 
@@ -196,11 +240,12 @@ export class Task<
 	public readonly concurrency?: number;
 	public readonly groupConcurrency?: number;
 	public readonly batch?: BatchConfig;
+	public readonly deadLetter?: DeadLetterConfiguration<Payload>;
 
 	public readonly triggers: NonEmptyArray<Trigger>;
 
 	constructor(
-		definition: TaskConfiguration<Key, Queue>,
+		definition: TaskConfiguration<Key, Queue, Payload>,
 		triggers: NonEmptyArray<Trigger> | Trigger,
 		public readonly execute: ExecuteFunction<EventType, Returns, Context>,
 	) {
@@ -215,6 +260,16 @@ export class Task<
 		this.concurrency = assert.positiveInteger(config.concurrency, "concurrency");
 		this.groupConcurrency = assert.positiveInteger(config.groupConcurrency, "groupConcurrency");
 		this.batch = config.batch;
+		this.deadLetter = config.deadLetter;
+		if (
+			this.deadLetter &&
+			hasSameTaskIdentity(this, {
+				queue: this.deadLetter.queue,
+				name: this.deadLetter.task?.name ?? this.name,
+			})
+		) {
+			throw new Error("A task cannot dead-letter directly to itself");
+		}
 
 		this.triggers = Array.isArray(triggers) ? triggers : [triggers];
 	}
@@ -227,7 +282,7 @@ export class Task<
 		Context extends object,
 		EventType,
 	>(
-		definition: TaskConfiguration<Key, Queue>,
+		definition: TaskConfiguration<Key, Queue, Payload>,
 		triggers: NonEmptyArray<Trigger> | Trigger,
 		execute: ExecuteFunction<EventType, Returns, Context>,
 	): Task<Key, Queue, Payload, Returns, Context, EventType> {

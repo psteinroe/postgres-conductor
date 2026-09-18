@@ -321,6 +321,8 @@ export class Worker<
 			window: task.window,
 			concurrency: task.concurrency,
 			groupConcurrency: task.groupConcurrency,
+			deadLetterQueue: task.deadLetter?.queue,
+			deadLetterTaskKey: task.deadLetter?.task?.name,
 		}));
 
 		const allTasks = Array.from(this.tasks.values());
