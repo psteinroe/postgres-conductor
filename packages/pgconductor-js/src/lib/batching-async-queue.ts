@@ -20,6 +20,7 @@ export class BatchingAsyncQueue<T extends { task_key: string }> implements Polla
 > {
 	private queue: BatchGroup<T>[] = [];
 	private resolvers: ((value: IteratorResult<BatchGroup<T>>) => void)[] = [];
+	private itemAvailableListeners = new Set<() => void>();
 	private closed = false;
 
 	// Track batches per task
@@ -117,6 +118,7 @@ export class BatchingAsyncQueue<T extends { task_key: string }> implements Polla
 			// Backpressure is managed at push() level, not here
 			this.queue.push(group);
 		}
+		this.notifyItemAvailable();
 	}
 
 	tryNext(): BatchGroup<T> | undefined {
@@ -134,6 +136,21 @@ export class BatchingAsyncQueue<T extends { task_key: string }> implements Polla
 		}
 		if (this.closed) return { value: undefined as any, done: true };
 		return new Promise((resolve) => this.resolvers.push(resolve));
+	}
+
+	onNextItemAvailable(listener: () => void): () => void {
+		if (this.queue.length > 0) {
+			listener();
+			return () => {};
+		}
+		this.itemAvailableListeners.add(listener);
+		return () => this.itemAvailableListeners.delete(listener);
+	}
+
+	private notifyItemAvailable() {
+		const listeners = [...this.itemAvailableListeners];
+		this.itemAvailableListeners.clear();
+		for (const listener of listeners) listener();
 	}
 
 	close(): void {

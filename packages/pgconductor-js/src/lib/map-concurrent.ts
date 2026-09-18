@@ -8,13 +8,16 @@ export async function* mapConcurrent<T, R>(
 	limit: number,
 	mapper: (item: T) => Promise<R>,
 ): AsyncGenerator<R> {
-	const it = source[Symbol.asyncIterator]();
-	let sourceDone = false;
-	let nextId = 0;
-
-	// Track promises with unique IDs
 	type Task = { id: number; promise: Promise<R> };
+	type RaceResult = { id: number; result: R } | { id: null };
+	type ItemWait = { promise: Promise<RaceResult>; cancel(): void };
+
+	const it = source[Symbol.asyncIterator]();
+	const onNextItemAvailable = source.onNextItemAvailable?.bind(source);
 	const active = new Map<number, Task>();
+	let sourceDone = false;
+	let itemWait: ItemWait | null = null;
+	let nextId = 0;
 
 	const nextItem = async (): Promise<T | null> => {
 		if (sourceDone) return null;
@@ -52,30 +55,39 @@ export async function* mapConcurrent<T, R>(
 
 	await fillSlots();
 
-	while (active.size > 0) {
-		// Wrap each promise to include its ID
-		const wrappedPromises = Array.from(active.values()).map(async (task) => ({
-			id: task.id,
-			result: await task.promise,
-		}));
+	try {
+		while (active.size > 0) {
+			if (!sourceDone && active.size < limit && !itemWait && onNextItemAvailable) {
+				let cancel = () => {};
+				const promise = new Promise<void>((resolve) => {
+					cancel = onNextItemAvailable(resolve);
+				}).then(() => ({ id: null }) as const);
+				itemWait = { promise, cancel: () => cancel() };
+			}
 
-		// Race to get first completed task
-		const { id, result } = await Promise.race(wrappedPromises);
+			const wrappedPromises: Promise<RaceResult>[] = Array.from(active.values()).map(
+				async (task) => ({ id: task.id, result: await task.promise }),
+			);
+			if (itemWait) wrappedPromises.push(itemWait.promise);
 
-		// Remove the completed task
-		active.delete(id);
+			// Race to get completed work or newly available input
+			const event = await Promise.race(wrappedPromises);
 
-		yield result;
+			if (event.id === null) {
+				itemWait = null;
+				await fillSlots();
+				continue;
+			}
 
-		// Refill slots
-		await fillSlots();
-	}
+			// Remove the completed task
+			active.delete(event.id);
 
-	if (typeof it.return === "function") {
-		try {
-			await it.return();
-		} catch {
-			// ignore
+			yield event.result;
+
+			// Refill slots
+			await fillSlots();
 		}
+	} finally {
+		itemWait?.cancel();
 	}
 }
