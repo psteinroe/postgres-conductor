@@ -422,11 +422,13 @@ export class QueryBuilder {
 				and e.locked_by = r.orchestrator_id
 			for update of e
 		)`);
-		ctes.push(this.sql`task_configs as (
-			select queue, key, max_attempts, remove_on_complete_days, remove_on_fail_days,
-				dead_letter_queue, dead_letter_task_key
-			from pgconductor._private_tasks
-			where queue = any(${this.sql.array(Array.from(new Set(allResults.map((r) => r.queue))))}::text[])
+		ctes.push(this.sql`task_configs as materialized (
+			select t.queue, t.key, t.max_attempts, t.remove_on_complete_days, t.remove_on_fail_days,
+				t.dead_letter_queue, t.dead_letter_task_key
+			from (
+				select distinct queue, task_key from valid_results
+			) r
+			join pgconductor._private_tasks t on t.queue = r.queue and t.key = r.task_key
 		)`);
 		ctes.push(this.sql`completed_results as (
 			select * from valid_results where status = 'completed' and not execution_cancelled
@@ -512,8 +514,10 @@ export class QueryBuilder {
 				r.execution_cancelled,
 				coalesce(r.error, r.execution_last_error, 'unknown error') as child_error,
 				e."group" as execution_group,
+				e.payload as execution_payload,
 				e.attempts as execution_attempts,
-				tc.remove_on_fail_days = 0 as should_remove
+				tc.remove_on_fail_days = 0 as should_remove,
+				tc.dead_letter_queue, tc.dead_letter_task_key
 			from failed_results r
 			join pgconductor._private_executions e on e.id = r.execution_id and e.queue = r.queue
 			join task_configs tc on tc.key = r.task_key and tc.queue = r.queue
@@ -527,7 +531,9 @@ export class QueryBuilder {
 				parent.id as parent_id, parent.queue as parent_queue,
 				parent.task_key as parent_task_key, parent."group" as parent_group,
 				parent.payload as parent_payload, parent.attempts as parent_attempts,
-				pt.remove_on_fail_days = 0 as parent_should_remove
+				pt.remove_on_fail_days = 0 as parent_should_remove,
+				pt.dead_letter_queue as parent_dead_letter_queue,
+				pt.dead_letter_task_key as parent_dead_letter_task_key
 			from permanently_failed_children p
 			join pgconductor._private_executions parent
 				on parent.waiting_on_execution_id = p.execution_id
@@ -537,20 +543,15 @@ export class QueryBuilder {
 			for update of parent
 		)`);
 		ctes.push(this.sql`terminal_failures as materialized (
-			select p.execution_id, p.queue, p.task_key, p.execution_group, e.payload,
+			select p.execution_id, p.queue, p.task_key, p.execution_group, p.execution_payload as payload,
 				p.child_error as failure_error, p.execution_attempts as failure_attempts,
-				p.execution_cancelled, tc.dead_letter_queue, tc.dead_letter_task_key
+				p.execution_cancelled, p.dead_letter_queue, p.dead_letter_task_key
 			from permanently_failed_children p
-			join pgconductor._private_executions e
-				on e.id = p.execution_id and e.queue = p.queue
-			join task_configs tc on tc.key = p.task_key and tc.queue = p.queue
 			union all
 			select p.parent_id, p.parent_queue, p.parent_task_key, p.parent_group, p.parent_payload,
 				'Child execution failed: ' || p.child_error, p.parent_attempts, p.child_cancelled,
-				pt.dead_letter_queue, pt.dead_letter_task_key
+				p.parent_dead_letter_queue, p.parent_dead_letter_task_key
 			from failed_parent_targets p
-			join pgconductor._private_tasks pt
-				on pt.key = p.parent_task_key and pt.queue = p.parent_queue
 		)`);
 		ctes.push(this.sql`dead_lettered as materialized (
 			insert into pgconductor._private_executions (
@@ -583,27 +584,30 @@ export class QueryBuilder {
 			from failed_parent_targets p
 			where p.parent_should_remove is not true
 		)`);
+		ctes.push(this.sql`failed_delete_targets as materialized (
+			select p.execution_id as target_id, p.queue, p.orchestrator_id as expected_locked_by
+			from permanently_failed_children p
+			where p.should_remove is true
+				and (
+					p.execution_cancelled
+					or p.dead_letter_queue is null
+					or exists (select 1 from dead_lettered d where d.dead_letter_source_execution_id = p.execution_id)
+				)
+			union all
+			select p.parent_id, p.parent_queue, null::uuid
+			from failed_parent_targets p
+			where p.parent_should_remove is true
+				and (
+					p.child_cancelled
+					or p.parent_dead_letter_queue is null
+					or exists (select 1 from dead_lettered d where d.dead_letter_source_execution_id = p.parent_id)
+				)
+		)`);
 		ctes.push(this.sql`deleted_failed as (
 			delete from pgconductor._private_executions e
-			where exists (
-				select 1 from permanently_failed_children p
-				where e.id = p.execution_id and e.queue = p.queue
-					and e.locked_by = p.orchestrator_id
-					and p.should_remove is true
-					and (
-						not exists (select 1 from task_configs tc where tc.key = p.task_key and tc.queue = p.queue and tc.dead_letter_queue is not null)
-						or exists (select 1 from dead_lettered d where d.dead_letter_source_execution_id = p.execution_id)
-					)
-			)
-			or exists (
-				select 1 from failed_parent_targets p
-				where e.id = p.parent_id and e.queue = p.parent_queue
-					and p.parent_should_remove is true
-					and (
-						not exists (select 1 from pgconductor._private_tasks pt where pt.key = p.parent_task_key and pt.queue = p.parent_queue and pt.dead_letter_queue is not null)
-						or exists (select 1 from dead_lettered d where d.dead_letter_source_execution_id = p.parent_id)
-					)
-			)
+			using failed_delete_targets f
+			where e.id = f.target_id and e.queue = f.queue
+				and e.locked_by is not distinct from f.expected_locked_by
 			returning e.id
 		)`);
 		ctes.push(this.sql`updated_failed as (

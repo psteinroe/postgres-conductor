@@ -265,6 +265,182 @@ describe("dead-letter queues (Postgres integration)", () => {
 		expect(destinationRows[0]?.count).toBe("0");
 	}, 15000);
 
+	test("removes a claimed cancellation without delivering to the DLQ", async () => {
+		const db = await pool.child();
+		databases.push(db);
+		const conductor = Conductor.create({ sql: db.sql, context: {} });
+		await conductor.ensureInstalled();
+		await db.client.registerWorker({
+			queueName: "default",
+			taskSpecs: [
+				{
+					key: "cancelled-running-source",
+					queue: "default",
+					maxAttempts: 1,
+					removeOnFailDays: 0,
+					deadLetterQueue: "dlq",
+					deadLetterTaskKey: "cancelled-running-destination",
+				},
+			],
+			cronSchedules: [],
+			eventSubscriptions: [],
+		});
+		const executionId = await db.client.invoke({
+			task_key: "cancelled-running-source",
+			queue: "default",
+			payload: {},
+		});
+		const orchestratorId = crypto.randomUUID();
+		await db.client.orchestratorHeartbeat({
+			orchestratorId,
+			version: "test",
+			migrationNumber: 1,
+		});
+		const [execution] = await db.client.getExecutions({
+			orchestratorId,
+			queueName: "default",
+			batchSize: 1,
+			filterTaskKeys: [],
+		});
+		if (!execution || !executionId) throw new Error("expected claimed execution");
+
+		expect(await db.client.cancelExecution(executionId)).toBe(true);
+		await db.client.returnExecutions({
+			count: 1,
+			orchestratorId,
+			completed: [],
+			failed: [
+				{
+					execution_id: execution.id,
+					queue: execution.queue,
+					task_key: execution.task_key,
+					orchestrator_id: execution.locked_by,
+					status: "permanently_failed",
+					error: "Task was cancelled",
+				},
+			],
+			released: [],
+			invokeChild: [],
+			taskKeys: new Set([execution.task_key]),
+		});
+
+		const [counts] = await db.sql<{ source: string; destination: string }[]>`
+			select
+				count(*) filter (where queue = 'default')::text as source,
+				count(*) filter (where queue = 'dlq')::text as destination
+			from pgconductor._private_executions
+		`;
+		expect(counts).toEqual({ source: "0", destination: "0" });
+	}, 15000);
+
+	test("removes a parent failed by a claimed child cancellation without delivering to the DLQ", async () => {
+		const db = await pool.child();
+		databases.push(db);
+		const conductor = Conductor.create({ sql: db.sql, context: {} });
+		await conductor.ensureInstalled();
+		await db.client.registerWorker({
+			queueName: "default",
+			taskSpecs: [
+				{
+					key: "cancelled-child-parent",
+					queue: "default",
+					removeOnFailDays: 0,
+					deadLetterQueue: "dlq",
+					deadLetterTaskKey: "cancelled-parent-destination",
+				},
+				{
+					key: "cancelled-child",
+					queue: "default",
+					maxAttempts: 1,
+					removeOnFailDays: 0,
+				},
+			],
+			cronSchedules: [],
+			eventSubscriptions: [],
+		});
+		const parentId = await db.client.invoke({
+			task_key: "cancelled-child-parent",
+			queue: "default",
+			payload: {},
+		});
+		const parent = (
+			await db.client.getExecutions({
+				orchestratorId: crypto.randomUUID(),
+				queueName: "default",
+				batchSize: 1,
+				filterTaskKeys: [],
+			})
+		)[0];
+		if (!parent || !parentId) throw new Error("expected claimed parent execution");
+
+		await db.client.returnExecutions({
+			count: 1,
+			orchestratorId: parent.locked_by,
+			completed: [],
+			failed: [],
+			released: [],
+			invokeChild: [
+				{
+					execution_id: parent.id,
+					queue: parent.queue,
+					task_key: parent.task_key,
+					orchestrator_id: parent.locked_by,
+					status: "invoke_child",
+					timeout_ms: "infinity",
+					step_key: "child-step",
+					child_task_name: "cancelled-child",
+					child_task_queue: "default",
+					child_payload: {},
+				},
+			],
+			taskKeys: new Set([parent.task_key]),
+		});
+		const childOrchestratorId = crypto.randomUUID();
+		await db.client.orchestratorHeartbeat({
+			orchestratorId: childOrchestratorId,
+			version: "test",
+			migrationNumber: 1,
+		});
+		const child = (
+			await db.client.getExecutions({
+				orchestratorId: childOrchestratorId,
+				queueName: "default",
+				batchSize: 1,
+				filterTaskKeys: [],
+			})
+		)[0];
+		if (!child) throw new Error("expected claimed child execution");
+
+		expect(await db.client.cancelExecution(child.id)).toBe(true);
+		await db.client.returnExecutions({
+			count: 1,
+			orchestratorId: childOrchestratorId,
+			completed: [],
+			failed: [
+				{
+					execution_id: child.id,
+					queue: child.queue,
+					task_key: child.task_key,
+					orchestrator_id: child.locked_by,
+					status: "permanently_failed",
+					error: "Task was cancelled",
+				},
+			],
+			released: [],
+			invokeChild: [],
+			taskKeys: new Set([child.task_key]),
+		});
+
+		const [counts] = await db.sql<{ source: string; destination: string }[]>`
+			select
+				count(*) filter (where queue = 'default')::text as source,
+				count(*) filter (where queue = 'dlq')::text as destination
+			from pgconductor._private_executions
+			where id = ${parentId}::uuid or queue = 'dlq'
+		`;
+		expect(counts).toEqual({ source: "0", destination: "0" });
+	}, 15000);
+
 	test("rejects direct self-targets in the database but permits cross-queue identity", async () => {
 		const db = await pool.child();
 		databases.push(db);
