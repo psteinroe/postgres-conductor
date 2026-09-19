@@ -19,6 +19,7 @@ export class MockDatabaseClient implements IDatabaseClient {
 	getExecutions = mock(async () => []);
 	returnExecutions = mock(async (_results) => {});
 	removeExecutions = mock(async () => false);
+	removeCustomEvents = mock(async (..._args: any[]) => false);
 	registerWorker = mock(async () => {});
 	scheduleCronExecution = mock(async () => "mock-cron-id");
 	unscheduleCronExecution = mock(async () => {});
@@ -33,9 +34,8 @@ export class MockDatabaseClient implements IDatabaseClient {
 	getDatabaseTime = mock(async () => new Date());
 	setFakeTime = mock(async () => {});
 	clearFakeTime = mock(async () => {});
-	subscribeEvent = mock(async () => "mock-subscription-id");
-	subscribeDbChange = mock(async () => "mock-subscription-id");
 	emitEvent = mock(async () => "mock-event-id");
+	dispatchCustomEvents = mock(async ({ eventIds }: { eventIds: string[] }) => eventIds);
 
 	constructor(overrides: Partial<IDatabaseClient> = {}) {
 		Object.assign(this, overrides);

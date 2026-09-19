@@ -2,10 +2,9 @@ import { test, expect, describe } from "bun:test";
 import { expectTypeOf } from "expect-type";
 import { Conductor } from "../../src/conductor";
 import { defineTask } from "../../src/task-definition";
-import { defineEvent } from "../../src/event-definition";
-import { TaskSchemas, EventSchemas, DatabaseSchema } from "../../src/schemas";
+import { defineEvent, type DefineEvent } from "../../src/event-definition";
+import { TaskSchemas, EventSchemas } from "../../src/schemas";
 import { z } from "zod";
-import type { Database } from "../database.types";
 
 describe("event triggers", () => {
 	test("task with custom event trigger receives typed event", () => {
@@ -36,41 +35,6 @@ describe("event triggers", () => {
 		});
 	});
 
-	test("task with database event trigger receives typed payload", () => {
-		const taskDef = defineTask({
-			name: "on-contact-insert",
-			payload: z.object({}),
-		});
-
-		const conductor = Conductor.create({
-			sql: {} as any,
-			tasks: TaskSchemas.fromSchema([taskDef]),
-			database: DatabaseSchema.fromGeneratedTypes<Database>(),
-			context: {},
-		});
-
-		// Task triggered by database insert - not invocable
-		conductor.createTask(
-			{ name: "on-contact-insert" },
-			{
-				schema: "public",
-				table: "contact",
-				operation: "insert",
-				columns: "id,email,first_name",
-			},
-			async (event) => {
-				// Event should have database event payload with schema.table.op format
-				expectTypeOf(event.name).toEqualTypeOf<"public.contact.insert">();
-				expectTypeOf(event.payload.tg_op).toEqualTypeOf<"INSERT">();
-				expectTypeOf(event.payload.old).toEqualTypeOf<null>();
-				// new should have selected contact columns
-				expectTypeOf(event.payload.new.id).toEqualTypeOf<string>();
-				expectTypeOf(event.payload.new.email).toEqualTypeOf<string | null>();
-				expectTypeOf(event.payload.new.first_name).toEqualTypeOf<string>();
-			},
-		);
-	});
-
 	test("task with multiple triggers including event trigger", () => {
 		const userCreated = defineEvent({
 			name: "user.created",
@@ -99,44 +63,6 @@ describe("event triggers", () => {
 					expectTypeOf(event.payload).toEqualTypeOf<{ data: string }>();
 				} else if (event.name === "user.created") {
 					expectTypeOf(event.payload).toEqualTypeOf<{ userId: string }>();
-				}
-			},
-		);
-	});
-
-	test("task with cron and event triggers", () => {
-		const taskDef = defineTask({
-			name: "cron-and-event",
-			payload: z.object({}),
-		});
-
-		const conductor = Conductor.create({
-			sql: {} as any,
-			tasks: TaskSchemas.fromSchema([taskDef]),
-			database: DatabaseSchema.fromGeneratedTypes<Database>(),
-			context: {},
-		});
-
-		// Task with cron and database event trigger - neither is invocable
-		conductor.createTask(
-			{ name: "cron-and-event" },
-			[
-				{ cron: "0 * * * *", name: "hourly" },
-				{
-					schema: "public",
-					table: "contact",
-					operation: "update",
-					columns: "id,email",
-				},
-			],
-			async (event) => {
-				// Event should be union of cron and database event
-				if (event.name === "hourly") {
-					// Cron event has no payload
-					expectTypeOf(event).toEqualTypeOf<{ name: "hourly" }>();
-				} else if (event.name === "public.contact.update") {
-					// Database update event
-					expectTypeOf(event.payload.tg_op).toEqualTypeOf<"UPDATE">();
 				}
 			},
 		);
@@ -193,7 +119,108 @@ describe("event triggers", () => {
 		);
 	});
 
-	test("custom event trigger with when clause", () => {
+	test("custom event triggers validate event names and projected fields", () => {
+		const userCreated = defineEvent({
+			name: "user.created",
+			payload: z.object({ userId: z.string(), email: z.string() }),
+		});
+		const taskDef = defineTask({ name: "on-user-created", payload: z.object({}) });
+		const conductor = Conductor.create({
+			sql: {} as any,
+			tasks: TaskSchemas.fromSchema([taskDef]),
+			events: EventSchemas.fromSchema([userCreated]),
+			context: {},
+		});
+
+		if (false) {
+			conductor.createTask(
+				{ name: "on-user-created" },
+				// @ts-expect-error The event is not in the conductor catalog.
+				{ event: "user.typo" },
+				async () => {},
+			);
+			conductor.createTask(
+				{ name: "on-user-created" },
+				// @ts-expect-error The selected field is not in the event payload.
+				{ event: "user.created", fields: "userId,missing" },
+				async () => {},
+			);
+			conductor.createTask(
+				{ name: "on-user-created" },
+				// @ts-expect-error Selected event fields must be unique.
+				{ event: "user.created", fields: "userId,userId" },
+				async () => {},
+			);
+			conductor.createTask(
+				{ name: "on-user-created" },
+				// @ts-expect-error Event field names use unquoted identifier syntax.
+				{ event: "user.created", fields: '"userId"' },
+				async () => {},
+			);
+		}
+
+		expect(() =>
+			conductor.createTask(
+				{ name: "on-user-created" },
+				{ event: "user.typo" } as any,
+				async () => {},
+			),
+		).toThrow('Event "user.typo" is not defined in the conductor event catalog');
+		expect(() =>
+			conductor.createTask(
+				{ name: "on-user-created" },
+				{ event: "user.created", fields: "userId,userId" } as any,
+				async () => {},
+			),
+		).toThrow('Fields for event "user.created" cannot contain duplicate names');
+		expect(() =>
+			conductor.createTask(
+				{ name: "on-user-created" },
+				{ event: "user.created", fields: '"userId"' } as any,
+				async () => {},
+			),
+		).toThrow('Fields for event "user.created" contains invalid field');
+	});
+
+	test("type-only events remain valid beside runtime event definitions", () => {
+		type ExternalEvent = DefineEvent<{
+			name: "external.received";
+			payload: { externalId: string };
+			filterable: ["externalId"];
+		}>;
+		const runtimeEvent = defineEvent({
+			name: "user.created",
+			payload: z.object({ userId: z.string() }),
+		});
+		const taskDef = defineTask({ name: "external-task", payload: z.object({}) });
+		const conductor = Conductor.create({
+			sql: {} as any,
+			tasks: TaskSchemas.fromSchema([taskDef]),
+			events: EventSchemas.fromSchema([runtimeEvent]).fromUnion<ExternalEvent>(),
+			context: {},
+		});
+
+		expect(() =>
+			conductor.createTask(
+				{ name: "external-task" },
+				{ event: "external.received", filter: { externalId: ["external-1"] } },
+				async () => {},
+			),
+		).not.toThrow();
+	});
+
+	test("filterable event fields must contain scalar values", () => {
+		if (false) {
+			// @ts-expect-error Object-valued payload fields cannot be filterable.
+			defineEvent({
+				name: "user.metadata",
+				payload: z.object({ userId: z.string(), metadata: z.object({ source: z.string() }) }),
+				filterable: ["metadata"],
+			});
+		}
+	});
+
+	test("custom event trigger rejects a when clause", () => {
 		const orderPlaced = defineEvent({
 			name: "order.placed",
 			payload: z.object({ orderId: z.string(), total: z.number() }),
@@ -211,165 +238,35 @@ describe("event triggers", () => {
 			context: {},
 		});
 
-		// Task with when clause - still receives full payload
-		conductor.createTask(
-			{ name: "on-large-order" },
-			{ event: "order.placed", when: "new.payload->>'total'::numeric > 1000" },
-			async (event) => {
-				expectTypeOf(event.payload).toEqualTypeOf<{
-					orderId: string;
-					total: number;
-				}>();
-			},
-		);
-	});
-
-	test("database trigger with column selection", () => {
-		const taskDef = defineTask({
-			name: "on-contact-update-columns",
-			payload: z.object({}),
-		});
-
-		const conductor = Conductor.create({
-			sql: {} as any,
-			tasks: TaskSchemas.fromSchema([taskDef]),
-			database: DatabaseSchema.fromGeneratedTypes<Database>(),
-			context: {},
-		});
-
-		// Task with column selection - should only receive selected columns
-		conductor.createTask(
-			{ name: "on-contact-update-columns" },
-			{
-				schema: "public",
-				table: "contact",
-				operation: "update",
-				columns: "id,email",
-			},
-			async (event) => {
-				expectTypeOf(event.name).toEqualTypeOf<"public.contact.update">();
-				expectTypeOf(event.payload.tg_op).toEqualTypeOf<"UPDATE">();
-
-				// OLD and NEW should only have selected columns
-				if (event.payload.old) {
-					expectTypeOf(event.payload.old).toEqualTypeOf<{
-						id: string;
-						email: string | null;
+		expect(() =>
+			conductor.createTask(
+				{ name: "on-large-order" },
+				{ event: "order.placed", when: "new.payload->>'total'::numeric > 1000" },
+				async (event) => {
+					expectTypeOf(event.payload).toEqualTypeOf<{
+						orderId: string;
+						total: number;
 					}>();
-
-					// @ts-expect-error - name was not selected
-					event.payload.old.name;
-				}
-
-				if (event.payload.new) {
-					expectTypeOf(event.payload.new).toEqualTypeOf<{
-						id: string;
-						email: string | null;
-					}>();
-
-					// @ts-expect-error - name was not selected
-					event.payload.new.name;
-				}
-			},
-		);
+				},
+			),
+		).toThrow("does not support a when clause");
 	});
 
-	test("database trigger with when clause", () => {
-		const taskDef = defineTask({
-			name: "on-contact-active",
-			payload: z.object({}),
-		});
-
+	test("managed database trigger configuration is not exposed", () => {
+		const taskDef = defineTask({ name: "database-change", payload: z.object({}) });
 		const conductor = Conductor.create({
 			sql: {} as any,
 			tasks: TaskSchemas.fromSchema([taskDef]),
-			database: DatabaseSchema.fromGeneratedTypes<Database>(),
 			context: {},
-		});
-
-		// Task with when clause - still receives selected columns
-		conductor.createTask(
-			{ name: "on-contact-active" },
-			{
-				schema: "public",
-				table: "contact",
-				operation: "insert",
-				when: "NEW.active = true",
-				columns: "id,email,first_name",
-			},
-			async (event) => {
-				if (event.payload.new) {
-					expectTypeOf(event.payload.new.id).toEqualTypeOf<string>();
-					expectTypeOf(event.payload.new.email).toEqualTypeOf<string | null>();
-					expectTypeOf(event.payload.new.first_name).toEqualTypeOf<string>();
-				}
-			},
-		);
-	});
-
-	test("database trigger DELETE operation has correct OLD/NEW types", () => {
-		const taskDef = defineTask({
-			name: "on-contact-delete",
-			payload: z.object({}),
-		});
-
-		const conductor = Conductor.create({
-			sql: {} as any,
-			tasks: TaskSchemas.fromSchema([taskDef]),
-			database: DatabaseSchema.fromGeneratedTypes<Database>(),
-			context: {},
+			// @ts-expect-error Database schemas are not a Conductor option.
+			database: {},
 		});
 
 		conductor.createTask(
-			{ name: "on-contact-delete" },
-			{
-				schema: "public",
-				table: "contact",
-				operation: "delete",
-				columns: "id",
-			},
-			async (event) => {
-				expectTypeOf(event.payload.tg_op).toEqualTypeOf<"DELETE">();
-				// DELETE has OLD but not NEW
-				expectTypeOf(event.payload.new).toEqualTypeOf<null>();
-				if (event.payload.old) {
-					expectTypeOf(event.payload.old.id).toEqualTypeOf<string>();
-				}
-			},
-		);
-	});
-
-	test("database trigger UPDATE operation has both OLD and NEW", () => {
-		const taskDef = defineTask({
-			name: "on-contact-update",
-			payload: z.object({}),
-		});
-
-		const conductor = Conductor.create({
-			sql: {} as any,
-			tasks: TaskSchemas.fromSchema([taskDef]),
-			database: DatabaseSchema.fromGeneratedTypes<Database>(),
-			context: {},
-		});
-
-		conductor.createTask(
-			{ name: "on-contact-update" },
-			{
-				schema: "public",
-				table: "contact",
-				operation: "update",
-				columns: "id",
-			},
-			async (event) => {
-				expectTypeOf(event.payload.tg_op).toEqualTypeOf<"UPDATE">();
-				// UPDATE has both OLD and NEW
-				if (event.payload.old) {
-					expectTypeOf(event.payload.old.id).toEqualTypeOf<string>();
-				}
-				if (event.payload.new) {
-					expectTypeOf(event.payload.new.id).toEqualTypeOf<string>();
-				}
-			},
+			{ name: "database-change" },
+			// @ts-expect-error Applications own database triggers and emit custom events from them.
+			{ schema: "public", table: "contact", operation: "insert", columns: "id" },
+			async () => {},
 		);
 	});
 });

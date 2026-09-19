@@ -20,24 +20,23 @@ import {
 	type TaskName,
 	type Trigger,
 	type ValidateTriggers,
+	type ValidateEventTriggers,
 } from "./task-definition";
-import { Worker, type WorkerConfig } from "./worker";
+import { EVENT_DISPATCH_QUEUE, Worker, type WorkerConfig } from "./worker";
 import { DefaultLogger, type Logger } from "./lib/logger";
 import { SchemaManager } from "./schema-manager";
 import type {
 	EventDefinition,
-	GenericDatabase,
 	EventName,
 	FindEventByIdentifier,
 	InferEventPayload,
 } from "./event-definition";
+import { validateEventTriggers } from "./event-trigger-validation";
 import {
 	TaskSchemas,
 	EventSchemas,
-	DatabaseSchema,
 	type InferTasksFromSchema,
 	type InferEventsFromSchema,
-	type InferDatabaseFromSchema,
 } from "./schemas";
 
 type ConnectionOptions =
@@ -67,14 +66,11 @@ type ResolvedReturns<
 export type ConductorOptions<
 	TTaskSchemas extends TaskSchemas<any> | undefined,
 	TEventSchemas extends EventSchemas<any> | undefined,
-	TDatabaseSchema extends DatabaseSchema<any> | undefined,
 	ExtraContext extends object,
 > = ConnectionOptions & {
 	tasks?: TTaskSchemas;
 
 	events?: TEventSchemas;
-
-	database?: TDatabaseSchema;
 
 	context: ExtraContext;
 
@@ -86,13 +82,12 @@ export type ConductorOptions<
 export class Conductor<
 	TTaskSchemas extends TaskSchemas<any> | undefined = undefined,
 	TEventSchemas extends EventSchemas<any> | undefined = undefined,
-	TDatabaseSchema extends DatabaseSchema<any> | undefined = undefined,
 	ExtraContext extends object = {},
 	// Inferred types from schemas
 	Tasks extends readonly TaskDefinition<string, any, any, string>[] =
 		InferTasksFromSchema<TTaskSchemas>,
-	Events extends readonly EventDefinition<string, any>[] = InferEventsFromSchema<TEventSchemas>,
-	Database extends GenericDatabase = InferDatabaseFromSchema<TDatabaseSchema>,
+	Events extends readonly EventDefinition<string, any, any>[] =
+		InferEventsFromSchema<TEventSchemas>,
 > {
 	/**
 	 * @internal
@@ -107,12 +102,7 @@ export class Conductor<
 	readonly logger: Logger;
 
 	private constructor(
-		public readonly options: ConductorOptions<
-			TTaskSchemas,
-			TEventSchemas,
-			TDatabaseSchema,
-			ExtraContext
-		>,
+		public readonly options: ConductorOptions<TTaskSchemas, TEventSchemas, ExtraContext>,
 	) {
 		this.logger = options.logger || new DefaultLogger();
 
@@ -131,18 +121,16 @@ export class Conductor<
 	static create<
 		TTaskSchemas extends TaskSchemas<any> | undefined = undefined,
 		TEventSchemas extends EventSchemas<any> | undefined = undefined,
-		TDatabaseSchema extends DatabaseSchema<any> | undefined = undefined,
 		TExtraContext extends object = {},
 	>(
 		options: ConnectionOptions & {
 			tasks?: TTaskSchemas;
 			events?: TEventSchemas;
-			database?: TDatabaseSchema;
 			context: TExtraContext;
 			logger?: Logger;
 		},
-	): Conductor<TTaskSchemas, TEventSchemas, TDatabaseSchema, TExtraContext> {
-		return new Conductor<TTaskSchemas, TEventSchemas, TDatabaseSchema, TExtraContext>(options);
+	): Conductor<TTaskSchemas, TEventSchemas, TExtraContext> {
+		return new Conductor<TTaskSchemas, TEventSchemas, TExtraContext>(options);
 	}
 
 	/**
@@ -164,23 +152,21 @@ export class Conductor<
 		const TTriggers extends object | readonly object[],
 	>(
 		definition: TDef & ValidateDeadLetterConfiguration<TDef, ResolvedPayload<Tasks, TDef>>,
-		triggers: TTriggers & ValidateTriggers<Tasks, TDef["name"], TTriggers, ResolvedQueue<TDef>>,
+		triggers: TTriggers &
+			ValidateTriggers<Tasks, TDef["name"], TTriggers, ResolvedQueue<TDef>> &
+			ValidateEventTriggers<Events, TTriggers>,
 		fn: TDef extends { readonly batch: BatchConfig }
 			? ResolvedReturns<Tasks, TDef> extends void
 				? (
-						events: Array<
-							TaskEventFromTriggers<TTriggers, ResolvedPayload<Tasks, TDef>, Events, Database>
-						>,
+						events: Array<TaskEventFromTriggers<TTriggers, ResolvedPayload<Tasks, TDef>, Events>>,
 						ctx: BatchTaskContext,
 					) => Promise<void>
 				: (
-						events: Array<
-							TaskEventFromTriggers<TTriggers, ResolvedPayload<Tasks, TDef>, Events, Database>
-						>,
+						events: Array<TaskEventFromTriggers<TTriggers, ResolvedPayload<Tasks, TDef>, Events>>,
 						ctx: BatchTaskContext,
 					) => Promise<Array<ResolvedReturns<Tasks, TDef>>>
 			: (
-					event: TaskEventFromTriggers<TTriggers, ResolvedPayload<Tasks, TDef>, Events, Database>,
+					event: TaskEventFromTriggers<TTriggers, ResolvedPayload<Tasks, TDef>, Events>,
 					ctx: TaskContext<Tasks, Events> & ExtraContext,
 				) => Promise<ResolvedReturns<Tasks, TDef>>,
 	): Task<
@@ -189,15 +175,20 @@ export class Conductor<
 		ResolvedPayload<Tasks, TDef>,
 		ResolvedReturns<Tasks, TDef>,
 		TaskContext<Tasks, Events> & ExtraContext,
-		TaskEventFromTriggers<TTriggers, ResolvedPayload<Tasks, TDef>, Events, Database>
+		TaskEventFromTriggers<TTriggers, ResolvedPayload<Tasks, TDef>, Events>
 	> {
+		validateEventTriggers(
+			triggers,
+			this.options.events?.definitions ?? [],
+			this.options.events?.hasTypeOnlyDefinitions ?? false,
+		);
 		return Task.create<
 			TDef["name"],
 			ResolvedQueue<TDef>,
 			ResolvedPayload<Tasks, TDef>,
 			ResolvedReturns<Tasks, TDef>,
 			TaskContext<Tasks, Events> & ExtraContext,
-			TaskEventFromTriggers<TTriggers, ResolvedPayload<Tasks, TDef>, Events, Database>
+			TaskEventFromTriggers<TTriggers, ResolvedPayload<Tasks, TDef>, Events>
 		>(
 			definition as TaskConfiguration<
 				TDef["name"],
@@ -206,7 +197,7 @@ export class Conductor<
 			>,
 			triggers as NonEmptyArray<Trigger> | Trigger,
 			fn as ExecuteFunction<
-				TaskEventFromTriggers<TTriggers, ResolvedPayload<Tasks, TDef>, Events, Database>,
+				TaskEventFromTriggers<TTriggers, ResolvedPayload<Tasks, TDef>, Events>,
 				ResolvedReturns<Tasks, TDef>,
 				TaskContext<Tasks, Events> & ExtraContext
 			>,
@@ -221,6 +212,9 @@ export class Conductor<
 		tasks: ValidateTasksQueue<TQueue, TTasks>;
 		config?: Partial<WorkerConfig>;
 	}): Worker<Tasks> {
+		if (options.queue === EVENT_DISPATCH_QUEUE) {
+			throw new Error(`Queue "${EVENT_DISPATCH_QUEUE}" is reserved for internal use`);
+		}
 		return new Worker<Tasks>(
 			options.queue,
 			options.tasks as AnyTask[],
@@ -228,6 +222,9 @@ export class Conductor<
 			this.logger,
 			options.config,
 			this.options.context,
+			this.options.events?.definitions ?? [],
+			true,
+			this.options.events?.hasTypeOnlyDefinitions ?? false,
 		);
 	}
 
@@ -298,6 +295,20 @@ export class Conductor<
 		TName extends EventName<Events>,
 		TDef extends FindEventByIdentifier<Events, TName> = FindEventByIdentifier<Events, TName>,
 	>(event: TName, payload: InferEventPayload<TDef>): Promise<string> {
+		// Runtime schemas are deliberately validated before the database call. This
+		// keeps emit a persistence boundary: an invalid event can never be queued.
+		const definition = this.options.events?.definitions.find(
+			(candidate: EventDefinition<string, any, any>) => candidate.name === event,
+		);
+		const standard = (definition?.payload as any)?.["~standard"];
+		if (standard?.validate) {
+			const result = await standard.validate(payload);
+			if (result && typeof result === "object" && "issues" in result && result.issues) {
+				throw new Error(`Invalid payload for event "${String(event)}"`);
+			}
+			payload = ((result as any)?.value ?? payload) as InferEventPayload<TDef>;
+		}
+
 		return this.db.emitEvent({
 			eventKey: event,
 			payload: payload as any,

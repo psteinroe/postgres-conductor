@@ -278,7 +278,11 @@ begin
     RETURN NEW;
 
   elsif tg_op = 'UPDATE' then
-    -- protect default queue from modification
+    -- protect queues required by the runtime
+    if old.name = 'pgconductor.internal' or new.name = 'pgconductor.internal' then
+      raise exception 'Modifying the internal queue is not allowed';
+    end if;
+
     if old.name = 'default' or new.name = 'default' then
       raise exception 'Modifying the default queue is not allowed';
     end if;
@@ -291,7 +295,11 @@ begin
     return new;
 
   elsif tg_op = 'DELETE' then
-    -- protect default queue from deletion
+    -- protect queues required by the runtime
+    if old.name = 'pgconductor.internal' then
+      raise exception 'Deleting the internal queue is not allowed';
+    end if;
+
     if old.name = 'default' then
       raise exception 'Deleting the default queue is not allowed';
     end if;
@@ -355,22 +363,11 @@ create type pgconductor.task_spec as (
     dead_letter_task_key text
 );
 
-create type pgconductor._private_event_operation as enum (
-    'insert',
-    'update',
-    'delete'
-);
-
 create type pgconductor.event_subscription_spec as (
     task_key text,
-    queue text,
     event_key text,
-    schema_name text,
-    table_name text,
-    operation pgconductor._private_event_operation,
-    when_clause text,
     payload_fields text[],
-    column_names text[]
+    filter jsonb
 );
 
 create or replace function pgconductor._private_register_worker(
@@ -385,19 +382,35 @@ volatile
 set search_path to ''
 as $function$
 begin
-  -- step 1: upsert queue (triggers partition creation)
+  -- Upsert every required queue in a stable order (triggers partition
+  -- creation).  Registrations may reference one another as dead-letter queues,
+  -- so queue creation and locking share a global order.
   insert into pgconductor._private_queues (name)
-  values (p_queue_name)
+  select required.name
+  from (
+    select p_queue_name as name
+    union
+    select spec.dead_letter_queue
+    from unnest(p_task_specs) as spec
+    where spec.dead_letter_queue is not null
+  ) required
+  order by required.name
   on conflict (name) do nothing;
 
-  -- Dead-letter destinations may not have a worker yet; create their partitions.
-  insert into pgconductor._private_queues (name)
-  select distinct spec.dead_letter_queue
-  from unnest(p_task_specs) as spec
-  where spec.dead_letter_queue is not null
-  on conflict (name) do nothing;
+  -- Queue row locks are the only registration locks; acquire them in order.
+  perform 1
+  from pgconductor._private_queues queue
+  where queue.name in (
+    select p_queue_name
+    union
+    select spec.dead_letter_queue
+    from unnest(p_task_specs) as spec
+    where spec.dead_letter_queue is not null
+  )
+  order by queue.name
+  for update;
 
-  -- step 2: register/update tasks
+  -- Register/update tasks.
   insert into pgconductor._private_tasks (key, queue, max_attempts, remove_on_complete_days, remove_on_fail_days, window_start, window_end, concurrency_limit, group_concurrency_limit, dead_letter_queue, dead_letter_task_key)
   select
     spec.key,
@@ -425,7 +438,7 @@ begin
     dead_letter_queue = excluded.dead_letter_queue,
     dead_letter_task_key = excluded.dead_letter_task_key;
 
-  -- step 3: insert scheduled cron executions
+  -- Insert scheduled cron executions.
   insert into pgconductor._private_executions (task_key, queue, payload, run_at, dedupe_key, cron_expression, "group")
   select
     spec.task_key,
@@ -443,8 +456,7 @@ begin
     cron_expression = excluded.cron_expression,
     "group" = excluded."group";
 
-  -- step 4: clean up stale schedules for this queue
-  -- delete future executions for schedules that no longer exist
+  -- Clean up stale schedules for this queue.
   delete from pgconductor._private_executions
   where queue = p_queue_name
     and cron_expression is not null
@@ -456,7 +468,6 @@ begin
       where spec.dedupe_key is not null and spec.dedupe_key like 'scheduled::%'
     );
 
-  -- mark running executions as cancelled for schedules that no longer exist
   update pgconductor._private_executions
   set cancelled = true
   where queue = p_queue_name
@@ -472,59 +483,10 @@ begin
       where spec.dedupe_key is not null and spec.dedupe_key like 'scheduled::%'
     );
 
-  -- step 5: manage event subscriptions (only recreate triggers when subscriptions change)
-  merge into pgconductor._private_event_subscriptions as target
-  using (
-    select
-      s.task_key,
-      s.queue,
-      s.event_key,
-      s.schema_name,
-      s.table_name,
-      s.operation,
-      s.when_clause,
-      s.payload_fields,
-      s.column_names
-    from unnest(p_event_subscriptions) as s
-  ) as source
-  on (
-    target.queue = source.queue and
-    target.task_key = source.task_key and
-    coalesce(target.event_key, '') = coalesce(source.event_key, '') and
-    coalesce(target.schema_name, '') = coalesce(source.schema_name, '') and
-    coalesce(target.table_name, '') = coalesce(source.table_name, '') and
-    coalesce(target.operation::text, '') = coalesce(source.operation::text, '') and
-    coalesce(target.when_clause, '') = coalesce(source.when_clause, '') and
-    coalesce(array_to_string(target.payload_fields, ','), '') =
-      coalesce(array_to_string(source.payload_fields, ','), '') and
-    coalesce(array_to_string(target.column_names, ','), '') =
-      coalesce(array_to_string(source.column_names, ','), '')
-  )
-  when not matched then insert (
-    task_key, queue, event_key, schema_name, table_name, operation,
-    when_clause, payload_fields, column_names
-  ) values (
-    source.task_key, source.queue, source.event_key,
-    source.schema_name, source.table_name, source.operation,
-    source.when_clause, source.payload_fields, source.column_names
+  perform pgconductor._private_replace_custom_event_subscriptions(
+    p_queue_name,
+    p_event_subscriptions
   );
-
-  -- step 6: delete old subscriptions for this queue not in new set
-  delete from pgconductor._private_event_subscriptions target
-  where target.queue = p_queue_name
-    and not exists (
-      select 1 from unnest(p_event_subscriptions) source
-      where target.task_key = source.task_key
-        and coalesce(target.event_key, '') = coalesce(source.event_key, '')
-        and coalesce(target.schema_name, '') = coalesce(source.schema_name, '')
-        and coalesce(target.table_name, '') = coalesce(source.table_name, '')
-        and coalesce(target.operation::text, '') = coalesce(source.operation::text, '')
-        and coalesce(target.when_clause, '') = coalesce(source.when_clause, '')
-        and coalesce(array_to_string(target.payload_fields, ','), '') =
-          coalesce(array_to_string(source.payload_fields, ','), '')
-        and coalesce(array_to_string(target.column_names, ','), '') =
-          coalesce(array_to_string(source.column_names, ','), '')
-    );
 end;
 $function$;
 
@@ -908,3 +870,412 @@ begin
 end;
 $function$;
 
+-- Event deliveries are independent executions.  The source execution has the
+-- same UUID as its event-log row; destinations carry the event identity and
+-- subscription identity in dedicated columns rather than using workflow
+-- parentage.
+alter table pgconductor._private_executions
+    add column source_event_id uuid,
+    add column event_subscription_id uuid,
+    drop column if exists subscription_id;
+
+alter table pgconductor._private_executions
+    add constraint chk_executions_event_delivery_pair
+    check ((source_event_id is null) = (event_subscription_id is null));
+
+alter table pgconductor._private_executions
+    add constraint chk_executions_event_delivery_no_parent
+    check (source_event_id is null or parent_execution_id is null);
+
+create unique index idx_executions_event_destination
+    on pgconductor._private_executions (source_event_id, event_subscription_id, queue)
+    where source_event_id is not null and event_subscription_id is not null;
+
+-- A small immutable helper is used by the generated subscription field count.
+create or replace function pgconductor._private_jsonb_object_size(p_value jsonb)
+returns integer
+language sql
+immutable
+strict
+set search_path to ''
+as $function$
+    select count(*)::integer from jsonb_object_keys(p_value);
+$function$;
+
+create table pgconductor._private_custom_event_subscriptions (
+    id uuid primary key default pgconductor._private_portable_uuidv7(),
+    event_key text not null,
+    task_key text not null,
+    queue text not null,
+    payload_fields text[],
+    filter jsonb not null default '{}'::jsonb,
+    field_count integer generated always as
+        (pgconductor._private_jsonb_object_size(filter)) stored,
+    created_at timestamptz not null default pgconductor._private_current_time(),
+    constraint chk_custom_event_subscription_event_key check (
+        btrim(event_key) <> '' and octet_length(event_key) between 1 and 255
+    ),
+    constraint chk_custom_event_subscription_filter_object check (
+        jsonb_typeof(filter) = 'object'
+    )
+);
+
+create index idx_custom_event_subscriptions_event
+    on pgconductor._private_custom_event_subscriptions (event_key, id);
+create index idx_custom_event_subscriptions_unfiltered
+    on pgconductor._private_custom_event_subscriptions (event_key, id)
+    where field_count = 0;
+
+create table pgconductor._private_custom_event_predicates (
+    id bigint generated always as identity primary key,
+    subscription_id uuid not null references pgconductor._private_custom_event_subscriptions(id) on delete cascade,
+    event_key text not null,
+    field_name text not null,
+    value jsonb not null,
+    constraint uq_custom_event_predicate_alternative
+        unique (subscription_id, field_name, value),
+    constraint chk_custom_event_predicate_event_key check (
+        btrim(event_key) <> '' and octet_length(event_key) between 1 and 255
+    ),
+    constraint chk_custom_event_predicate_field_name check (
+        btrim(field_name) <> '' and octet_length(field_name) <= 128
+    ),
+    constraint chk_custom_event_predicate_scalar check (
+        jsonb_typeof(value) in ('string', 'number', 'boolean', 'null')
+    ),
+    constraint chk_custom_event_predicate_scalar_text_size check (
+        octet_length(value::text) <= 1024
+    )
+);
+
+create index idx_custom_event_predicates_exact
+    on pgconductor._private_custom_event_predicates
+       (event_key, field_name, value, subscription_id);
+
+-- Persistent worker subscriptions are replaced as one queue-scoped snapshot.
+-- Canonicalization and policy validation happen in TypeScript; database checks
+-- retain only storage and index integrity guarantees.
+create or replace function pgconductor._private_replace_custom_event_subscriptions(
+    p_queue_name text,
+    p_subscriptions pgconductor.event_subscription_spec[]
+)
+returns void
+language sql
+volatile
+set search_path to ''
+as $function$
+    with removed as (
+        delete from pgconductor._private_custom_event_subscriptions
+        where queue = p_queue_name
+    ), input as materialized (
+        select task_key, event_key, payload_fields, filter, input_ordinal
+        from unnest(p_subscriptions) with ordinality
+          as subscription(task_key, event_key, payload_fields, filter, input_ordinal)
+    ), inserted as (
+        insert into pgconductor._private_custom_event_subscriptions (
+            id, event_key, task_key, queue, payload_fields, filter
+        )
+        select
+            pgconductor._private_portable_uuidv7(),
+            input.event_key,
+            input.task_key,
+            p_queue_name,
+            input.payload_fields,
+            coalesce(input.filter, '{}'::jsonb)
+        from input
+        order by input.input_ordinal
+        returning id, event_key, filter
+    )
+    insert into pgconductor._private_custom_event_predicates (
+        subscription_id, event_key, field_name, value
+    )
+    select
+        inserted.id,
+        inserted.event_key,
+        field.key,
+        alternative.value
+    from inserted
+    cross join lateral jsonb_each(inserted.filter) as field
+    cross join lateral jsonb_array_elements(field.value) as alternative(value);
+$function$;
+
+create table pgconductor._private_custom_events (
+    id uuid primary key,
+    event_position bigint generated always as identity unique,
+    event_key text not null,
+    payload jsonb not null,
+    created_at timestamptz not null default pgconductor._private_current_time(),
+    dispatched_at timestamptz,
+    constraint chk_custom_event_event_key check (
+        btrim(event_key) <> '' and octet_length(event_key) between 1 and 255
+    ),
+    constraint chk_custom_event_payload_object check (
+        jsonb_typeof(payload) = 'object'
+    )
+);
+
+-- event_position is a deterministic replay cursor, not commit order. A future
+-- one-shot wait implementation must define its own no-miss registration boundary.
+create index idx_custom_events_replay
+    on pgconductor._private_custom_events (event_key, event_position);
+create index idx_custom_events_retention
+    on pgconductor._private_custom_events (dispatched_at, event_position)
+    where dispatched_at is not null;
+create index idx_custom_events_terminal_cleanup
+    on pgconductor._private_custom_events (created_at, event_position);
+
+insert into pgconductor._private_queues (name)
+values ('pgconductor.internal')
+on conflict do nothing;
+
+insert into pgconductor._private_tasks (
+    key, queue, max_attempts, remove_on_complete_days, remove_on_fail_days
+)
+values (
+    'pgconductor.event-dispatch', 'pgconductor.internal', 3, 0, null
+)
+on conflict (queue, key) do update set
+    max_attempts = excluded.max_attempts,
+    remove_on_complete_days = excluded.remove_on_complete_days,
+    remove_on_fail_days = excluded.remove_on_fail_days;
+
+create or replace function pgconductor._private_extract_event_payload(p_fields text[], p_payload jsonb)
+returns jsonb
+language sql
+immutable
+set search_path to ''
+as $function$
+    select case
+        when p_fields is null then p_payload
+        else coalesce(
+            (
+                select jsonb_object_agg(key, p_payload -> key)
+                from unnest(p_fields) key
+                where p_payload ? key
+            ),
+            '{}'::jsonb
+        )
+    end;
+$function$;
+
+-- Claiming, matching, destination insertion, and marking the source dispatched
+-- are one statement.  The write barrier makes the UPDATE depend on the
+-- destination INSERT even when an event has zero matches.
+create or replace function pgconductor._private_dispatch_custom_events(
+    p_event_ids uuid[],
+    p_orchestrator_id uuid
+)
+returns table(event_id uuid)
+language sql
+volatile
+security definer
+set search_path to ''
+as $function$
+    with claimed as materialized (
+        select
+            source.id,
+            source_event.event_key,
+            source_event.payload,
+            source_event.dispatched_at
+        from pgconductor._private_executions source
+        join pgconductor._private_custom_events source_event
+          on source_event.id = source.id
+        where source.id = any(coalesce(p_event_ids, array[]::uuid[]))
+          and source.queue = 'pgconductor.internal'
+          and source.task_key = 'pgconductor.event-dispatch'
+          and source.locked_by = p_orchestrator_id
+          and source.completed_at is null
+          and source.failed_at is null
+          and not source.cancelled
+        for update of source, source_event
+    ), pending as materialized (
+        select id, event_key, payload
+        from claimed
+        where dispatched_at is null
+    ), event_values as materialized (
+        select
+            pending.id as event_id,
+            pending.event_key,
+            pending.payload,
+            field.key as field_name,
+            field.value
+        from pending
+        cross join lateral jsonb_each(pending.payload) as field
+        where jsonb_typeof(field.value) in ('string', 'number', 'boolean', 'null')
+    ), filtered_candidates as materialized (
+        select
+            event_value.event_id,
+            event_value.event_key,
+            event_value.payload,
+            subscription.id as subscription_id,
+            subscription.task_key,
+            subscription.queue,
+            subscription.payload_fields
+        from event_values event_value
+        join pgconductor._private_custom_event_predicates predicate
+          on predicate.event_key = event_value.event_key
+         and predicate.field_name = event_value.field_name
+         and jsonb_typeof(predicate.value) = jsonb_typeof(event_value.value)
+         and predicate.value = event_value.value
+        join pgconductor._private_custom_event_subscriptions subscription
+          on subscription.id = predicate.subscription_id
+         and subscription.event_key = event_value.event_key
+         and subscription.field_count > 0
+        join pgconductor._private_tasks task
+          on task.key = subscription.task_key
+         and task.queue = subscription.queue
+        group by
+            event_value.event_id,
+            event_value.event_key,
+            event_value.payload,
+            subscription.id,
+            subscription.task_key,
+            subscription.queue,
+            subscription.payload_fields,
+            subscription.field_count
+        having count(distinct predicate.field_name) = subscription.field_count
+    ), unfiltered_candidates as materialized (
+        select
+            pending.id as event_id,
+            pending.event_key,
+            pending.payload,
+            subscription.id as subscription_id,
+            subscription.task_key,
+            subscription.queue,
+            subscription.payload_fields
+        from pending
+        join pgconductor._private_custom_event_subscriptions subscription
+          on subscription.event_key = pending.event_key
+         and subscription.field_count = 0
+        join pgconductor._private_tasks task
+          on task.key = subscription.task_key
+         and task.queue = subscription.queue
+    ), candidates as materialized (
+        select * from filtered_candidates
+        union all
+        select * from unfiltered_candidates
+    ), matches as materialized (
+        select distinct
+            candidate.event_id,
+            candidate.task_key,
+            candidate.queue,
+            candidate.payload_fields,
+            candidate.event_key,
+            candidate.payload,
+            candidate.subscription_id
+        from candidates candidate
+    ), inserted_destinations as (
+        insert into pgconductor._private_executions (
+            id,
+            task_key,
+            queue,
+            payload,
+            source_event_id,
+            event_subscription_id
+        )
+        select
+            pgconductor._private_portable_uuidv7(),
+            candidate_match.task_key,
+            candidate_match.queue,
+            jsonb_build_object(
+                'event', candidate_match.event_key,
+                'payload', pgconductor._private_extract_event_payload(
+                    candidate_match.payload_fields, candidate_match.payload
+                )
+            ),
+            candidate_match.event_id,
+            candidate_match.subscription_id
+        from matches candidate_match
+        on conflict (source_event_id, event_subscription_id, queue)
+        where source_event_id is not null and event_subscription_id is not null
+        do nothing
+        returning source_event_id
+    ), write_barrier as (
+        select true as ready from inserted_destinations
+        union all
+        select true
+        where not exists (select 1 from inserted_destinations)
+    ), updated as (
+        update pgconductor._private_custom_events source_event
+        set dispatched_at = pgconductor._private_current_time()
+        from pending
+        cross join write_barrier
+        where source_event.id = pending.id
+          and source_event.dispatched_at is null
+        returning source_event.id
+    )
+    select claimed.id as event_id
+    from claimed
+    left join updated
+      on updated.id = claimed.id
+    where claimed.dispatched_at is not null
+       or updated.id is not null;
+$function$;
+
+create or replace function pgconductor.emit_event(
+    p_event_key text,
+    p_payload jsonb default '{}'::jsonb
+)
+returns uuid
+language sql
+volatile
+set search_path to ''
+as $function$
+    with inserted_event as (
+        insert into pgconductor._private_custom_events (id, event_key, payload)
+        values (pgconductor._private_portable_uuidv7(), p_event_key, coalesce(p_payload, '{}'::jsonb))
+        returning id
+    ), inserted_source as (
+        insert into pgconductor._private_executions (
+            id, task_key, queue, payload
+        )
+        select
+            inserted_event.id,
+            'pgconductor.event-dispatch',
+            'pgconductor.internal',
+            '{}'::jsonb
+        from inserted_event
+        returning id
+    )
+    select id from inserted_source;
+$function$;
+
+create or replace function pgconductor._private_remove_custom_events(
+    p_before timestamptz,
+    p_batch integer
+)
+returns integer
+language plpgsql
+volatile
+security definer
+set search_path to ''
+as $function$
+declare
+    v_removed integer;
+begin
+    with candidates as materialized (
+        select event.id
+        from pgconductor._private_custom_events event
+        left join pgconductor._private_executions source
+          on source.id = event.id
+         and source.queue = 'pgconductor.internal'
+         and source.task_key = 'pgconductor.event-dispatch'
+        where event.created_at < p_before
+          and (
+              source.id is null
+              or source.completed_at is not null
+              or source.failed_at is not null
+              or source.cancelled
+          )
+        order by event.created_at, event.event_position
+        limit greatest(coalesce(p_batch, 0), 0)
+        for update of event skip locked
+    )
+    delete from pgconductor._private_custom_events event
+    using candidates
+    where event.id = candidates.id;
+
+    get diagnostics v_removed = row_count;
+    return v_removed;
+end;
+$function$;

@@ -4,19 +4,9 @@ import type {
 	HasInvocable,
 	HasCron,
 	HasCustomEvent,
-	HasDatabaseEvent,
 	CronTrigger,
 } from "./task-definition";
-import type {
-	EventDefinition,
-	FindEventByIdentifier,
-	InferEventPayload,
-	GenericDatabase,
-	DatabaseEventPayload,
-	SchemaName,
-	TableName,
-	RowType,
-} from "./event-definition";
+import type { EventDefinition, FindEventByIdentifier, InferEventPayload } from "./event-definition";
 import type { SelectedRow } from "./select-columns";
 import * as assert from "./lib/assert";
 
@@ -100,29 +90,10 @@ type ExtractCronTriggers<TTriggers> = TTriggers extends readonly any[]
 		? TTriggers
 		: never;
 
-// Extract custom event triggers from array
+// Extract custom event triggers from array.
 type ExtractCustomEventTriggers<TTriggers> = TTriggers extends readonly any[]
-	? TTriggers[number] extends infer T
-		? T extends { event: string }
-			? T extends { schema: string }
-				? never // Database event, not custom event
-				: T
-			: never
-		: never
+	? Extract<TTriggers[number], { event: string }>
 	: TTriggers extends { event: string }
-		? TTriggers extends { schema: string }
-			? never // Database event, not custom event
-			: TTriggers
-		: never;
-
-// Extract database event triggers from array
-type ExtractDatabaseEventTriggers<TTriggers> = TTriggers extends readonly any[]
-	? TTriggers[number] extends infer T
-		? T extends { schema: string; table: string; operation: "insert" | "update" | "delete" }
-			? T
-			: never
-		: never
-	: TTriggers extends { schema: string; table: string; operation: "insert" | "update" | "delete" }
 		? TTriggers
 		: never;
 
@@ -135,11 +106,11 @@ type CronEventUnion<TTriggers> =
 		: never;
 
 // Build custom event union from triggers
-type CustomEventUnion<TTriggers, Events extends readonly EventDefinition<string, any>[]> =
+type CustomEventUnion<TTriggers, Events extends readonly EventDefinition<string, any, any>[]> =
 	ExtractCustomEventTriggers<TTriggers> extends infer T
 		? T extends { event: infer TName extends string }
 			? FindEventByIdentifier<Events, TName> extends infer TEvent
-				? TEvent extends EventDefinition<string, any>
+				? TEvent extends EventDefinition<string, any, any>
 					? T extends { fields: infer TFields extends string }
 						? {
 								name: TName;
@@ -151,64 +122,17 @@ type CustomEventUnion<TTriggers, Events extends readonly EventDefinition<string,
 			: never
 		: never;
 
-// Build database event union from triggers
-type DatabaseEventUnion<TTriggers, Database extends GenericDatabase> =
-	ExtractDatabaseEventTriggers<TTriggers> extends infer T
-		? T extends { schema: infer TSchema extends string }
-			? T extends { table: infer TTable extends string }
-				? T extends { operation: infer TOp extends "insert" | "update" | "delete" }
-					? TSchema extends SchemaName<Database>
-						? TTable extends TableName<Database, TSchema>
-							? T extends { columns: infer TColumns extends string }
-								? {
-										name: `${TSchema}.${TTable}.${TOp}`;
-										payload: DatabaseEventPayload<
-											RowType<Database, TSchema, TTable>,
-											TOp,
-											TColumns
-										>;
-									}
-								: never
-							: T extends { columns: infer _TColumns extends string }
-								? {
-										name: `${TSchema}.${TTable}.${TOp}`;
-										payload: {
-											old: TOp extends "delete" | "update" ? Record<string, unknown> : null;
-											new: TOp extends "insert" | "update" ? Record<string, unknown> : null;
-											tg_table: string;
-											tg_op: Uppercase<TOp>;
-										};
-									}
-								: never
-						: T extends { columns: infer _TColumns extends string }
-							? {
-									name: `${TSchema}.${TTable}.${TOp}`;
-									payload: {
-										old: TOp extends "delete" | "update" ? Record<string, unknown> : null;
-										new: TOp extends "insert" | "update" ? Record<string, unknown> : null;
-										tg_table: string;
-										tg_op: Uppercase<TOp>;
-									};
-								}
-							: never
-					: never
-				: never
-			: never
-		: never;
-
 // Conditional event type based on triggers
 export type TaskEventFromTriggers<
 	TTriggers,
 	TPayload extends object,
-	Events extends readonly EventDefinition<string, any>[] = [],
-	Database extends GenericDatabase = {},
+	Events extends readonly EventDefinition<string, any, any>[] = [],
 > =
 	| (HasInvocable<TTriggers> extends true
 			? { name: "pgconductor.invoke"; payload: TPayload }
 			: never)
 	| (HasCron<TTriggers> extends true ? CronEventUnion<TTriggers> : never)
-	| (HasCustomEvent<TTriggers> extends true ? CustomEventUnion<TTriggers, Events> : never)
-	| (HasDatabaseEvent<TTriggers> extends true ? DatabaseEventUnion<TTriggers, Database> : never);
+	| (HasCustomEvent<TTriggers> extends true ? CustomEventUnion<TTriggers, Events> : never);
 
 // Conditional execute function type based on whether task has batch config
 export type ExecuteFunction<

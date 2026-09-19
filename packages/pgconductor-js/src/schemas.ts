@@ -1,5 +1,5 @@
 import type { TaskDefinition } from "./task-definition";
-import type { EventDefinition, GenericDatabase } from "./event-definition";
+import type { EventDefinition } from "./event-definition";
 
 /**
  * Stackable adapter for task definitions.
@@ -65,89 +65,50 @@ export class TaskSchemas<
  *   .fromUnion<AppAccountCreated | UserDeleted>()
  */
 export class EventSchemas<
-	TSchemaTypes extends readonly EventDefinition<string, any>[] = readonly [],
-	TUnionTypes extends EventDefinition<string, any> = never,
+	TSchemaTypes extends readonly EventDefinition<string, any, any>[] = readonly [],
+	TUnionTypes extends EventDefinition<string, any, any> = never,
 > {
-	private constructor(readonly definitions: TSchemaTypes) {}
+	private constructor(
+		readonly definitions: TSchemaTypes,
+		readonly hasTypeOnlyDefinitions: boolean,
+	) {}
 
 	/**
 	 * Create EventSchemas from standard-schema based event definitions.
 	 */
-	static fromSchema<const T extends readonly EventDefinition<string, any>[]>(
+	static fromSchema<const T extends readonly EventDefinition<string, any, any>[]>(
 		events: T,
 	): EventSchemas<T, never> {
-		return new EventSchemas(events);
+		return new EventSchemas(events, false);
 	}
 
 	/**
 	 * Add type-only event definitions via union type.
 	 */
-	static fromUnion<TUnion extends EventDefinition<string, any>>(): EventSchemas<
+	static fromUnion<TUnion extends EventDefinition<string, any, any>>(): EventSchemas<
 		readonly [],
 		TUnion
 	> {
-		return new EventSchemas([]);
+		return new EventSchemas([], true);
 	}
 
 	/**
 	 * Chain: Add more standard-schema based event definitions.
 	 */
-	fromSchema<const T extends readonly EventDefinition<string, any>[]>(
+	fromSchema<const T extends readonly EventDefinition<string, any, any>[]>(
 		events: T,
 	): EventSchemas<readonly [...TSchemaTypes, ...T], TUnionTypes> {
-		return new EventSchemas([...this.definitions, ...events]);
+		return new EventSchemas([...this.definitions, ...events], this.hasTypeOnlyDefinitions);
 	}
 
 	/**
 	 * Chain: Add type-only event definitions via union type.
 	 */
-	fromUnion<TUnion extends EventDefinition<string, any>>(): EventSchemas<
+	fromUnion<TUnion extends EventDefinition<string, any, any>>(): EventSchemas<
 		TSchemaTypes,
 		TUnionTypes | TUnion
 	> {
-		return new EventSchemas(this.definitions);
-	}
-}
-
-type SupabaseDatabase = {
-	[schema_name: string]: {
-		Tables: {
-			[table_name: string]: {
-				Row: unknown;
-				Insert?: unknown;
-				Update?: unknown;
-			};
-		};
-	};
-};
-
-type ConvertSupabaseTables<T> = {
-	[Schema in keyof T]: T[Schema] extends { Tables: infer Tables }
-		? {
-				[Table in keyof Tables]: Tables[Table] extends { Row: infer Row } ? Row : unknown;
-			}
-		: {};
-};
-
-/**
- * Adapter for database type definitions.
- * Wraps database types to allow different sources in the future (e.g., Supabase).
- */
-export class DatabaseSchema<_TDatabase extends GenericDatabase> {
-	private constructor() {}
-
-	/**
-	 * Create DatabaseSchema from generated types (e.g., from pgtyped, kysely, etc.).
-	 */
-	static fromGeneratedTypes<T extends GenericDatabase>(): DatabaseSchema<T> {
-		return new DatabaseSchema();
-	}
-
-	/**
-	 * Create DatabaseSchema from Supabase generated types.
-	 */
-	static fromSupabaseTypes<T extends SupabaseDatabase>(): DatabaseSchema<ConvertSupabaseTables<T>> {
-		return new DatabaseSchema();
+		return new EventSchemas(this.definitions, true);
 	}
 }
 
@@ -165,5 +126,3 @@ export type InferEventsFromSchema<T> =
 			? TSchema
 			: readonly [...TSchema, TUnion]
 		: readonly [];
-
-export type InferDatabaseFromSchema<T> = T extends DatabaseSchema<infer U> ? U : GenericDatabase;

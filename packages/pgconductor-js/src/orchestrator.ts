@@ -1,4 +1,4 @@
-import { Worker, type WorkerConfig } from "./worker";
+import { createEventDispatchTask, EVENT_DISPATCH_QUEUE, Worker, type WorkerConfig } from "./worker";
 import { DatabaseClient } from "./database-client";
 import { MigrationStore } from "./migration-store";
 import { SchemaManager } from "./schema-manager";
@@ -13,14 +13,14 @@ import { noop } from "./lib/noop";
 import { coerceError } from "./lib/coerce-error";
 
 export type OrchestratorOptions<TTasks extends readonly AnyTask[] = readonly AnyTask[]> = {
-	conductor: Conductor<any, any, any, any, any, any, any>;
+	conductor: Conductor<any, any, any, any, any>;
 	tasks?: ValidateTasksQueue<"default", TTasks>;
 	defaultWorker?: Partial<WorkerConfig>;
 	workers?: Worker[];
 };
 
 type InternalOrchestratorOptions = {
-	conductor: Conductor<any, any, any, any, any, any, any>;
+	conductor: Conductor<any, any, any, any, any>;
 	tasks?: readonly AnyTask[];
 	defaultWorker?: Partial<WorkerConfig>;
 	workers?: Worker[];
@@ -39,6 +39,7 @@ const STALE_ORCHESTRATOR_MAX_AGE_MS = HEARTBEAT_INTERVAL_MS * 10;
 export class Orchestrator {
 	private readonly db: DatabaseClient;
 	private readonly workers: Worker[] = [];
+	private readonly eventWorker: Worker;
 	private readonly orchestratorId: string;
 	private readonly migrationStore: MigrationStore;
 	private readonly schemaManager: SchemaManager;
@@ -69,17 +70,47 @@ export class Orchestrator {
 				this.logger,
 				options.defaultWorker,
 				options.conductor.options.context,
+				options.conductor.options.events?.definitions ?? [],
+				true,
+				options.conductor.options.events?.hasTypeOnlyDefinitions ?? false,
 			);
 			this.workers.push(worker);
 		}
 
 		for (const w of options.workers || []) {
-			if (this.workers.find((existing) => existing.queueName === w.queueName)) {
-				throw new Error(`Duplicate worker name: ${w.queueName}`);
-			}
-
 			this.workers.push(w);
 		}
+
+		const queues = new Set<string>();
+		for (const worker of this.workers) {
+			if (worker.queueName === EVENT_DISPATCH_QUEUE) {
+				throw new Error(`Queue "${EVENT_DISPATCH_QUEUE}" is reserved for internal use`);
+			}
+			if (queues.has(worker.queueName)) {
+				throw new Error(
+					`Orchestrator cannot configure multiple workers for queue "${worker.queueName}"; configure one worker with all tasks for that queue`,
+				);
+			}
+			queues.add(worker.queueName);
+		}
+
+		this.eventWorker = new Worker(
+			EVENT_DISPATCH_QUEUE,
+			[createEventDispatchTask()],
+			this.db,
+			this.logger,
+			{
+				concurrency: 1,
+				fetchBatchSize: 10,
+				flushBatchSize: 10,
+				pollIntervalMs: options.defaultWorker?.pollIntervalMs || 1000,
+				flushIntervalMs: options.defaultWorker?.flushIntervalMs || 2000,
+			},
+			{},
+			[],
+			true,
+			false,
+		);
 	}
 
 	static create<const TTasks extends readonly Task<any, "default", any, any, any, any>[]>(
@@ -139,6 +170,9 @@ export class Orchestrator {
 		}
 
 		this._stopDeferred = new Deferred<void>();
+		// Startup can fail before callers have a reason to observe `stopped`.
+		// Keep the rejection available to explicit awaiters while marking it handled.
+		this._stopDeferred.promise.catch(noop);
 		this._startDeferred = new Deferred<void>();
 		this._abortController = new AbortController();
 		this.registerSignalHandlers();
@@ -189,32 +223,59 @@ export class Orchestrator {
 				// Start heartbeat loop
 				this.startHeartbeatLoop();
 
-				// Kick off all workers (don't await yet!)
-				if (runOnce) {
-					// Drain mode: workers will process and stop
-					this.workers.forEach((w) => void w.drain(this.orchestratorId));
-				} else {
-					// Normal mode: workers will run continuously
-					this.workers.forEach((w) => void w.run(this.orchestratorId));
-				}
+				const startWorkers = async () => {
+					const userWorkerLifecycles = this.workers.map((worker) => {
+						const lifecycle = runOnce
+							? worker.drain(this.orchestratorId)
+							: worker.run(this.orchestratorId);
+						// A sibling may fail registration before these promises are returned
+						// to the caller. Mark every lifecycle as observed immediately.
+						lifecycle.catch(noop);
+						return lifecycle;
+					});
 
-				// Wait for ALL workers to finish starting (register() complete)
-				await Promise.all(this.workers.map((w) => w.started));
+					// Subscription registration must commit before the dispatcher can
+					// claim source executions and freeze their delivery snapshot.
+					await Promise.all(this.workers.map((worker) => worker.started));
+
+					const eventWorkerLifecycle = runOnce
+						? this.eventWorker.drain(this.orchestratorId)
+						: this.eventWorker.run(this.orchestratorId);
+					eventWorkerLifecycle.catch(noop);
+					await this.eventWorker.started;
+
+					return {
+						allWorkers: Promise.all([...userWorkerLifecycles, eventWorkerLifecycle]),
+					};
+				};
+
+				let { allWorkers } = await startWorkers();
 
 				// NOW signal that orchestrator has started
 				this.startDeferred.resolve();
 
-				// Wait for shutdown signal or all workers to complete
-				await Promise.race([
-					Promise.all(this.workers.map((w) => w.stopped)),
-					this.waitForShutdownSignal(),
-				]);
+				if (runOnce) {
+					// Event fan-out can create work in a queue that already finished its
+					// pass, and destination tasks can recursively emit more events.
+					await allWorkers;
+					while (
+						this.eventWorker.drainDidWork ||
+						this.workers.some((worker) => worker.drainDidWork)
+					) {
+						({ allWorkers } = await startWorkers());
+						await allWorkers;
+					}
+				} else {
+					// Wait for shutdown signal or all workers to complete
+					await Promise.race([allWorkers, this.waitForShutdownSignal()]);
+				}
 
 				// Stop gracefully
 				await this.stopWorkers();
 			} catch (err) {
 				error = coerceError(err);
 				this.logger.error(err);
+				await this.stopWorkers();
 
 				// Only reject startDeferred if startup hasn't completed yet
 				if (!this.startDeferred.isSettled) {
@@ -329,9 +390,10 @@ export class Orchestrator {
 								signal.signal_payload &&
 								signal.signal_payload.queue
 							) {
-								const worker = this.workers.find(
-									(w) => w.queueName === signal.signal_payload?.queue,
-								);
+								const worker =
+									signal.signal_payload.queue === EVENT_DISPATCH_QUEUE
+										? this.eventWorker
+										: this.workers.find((w) => w.queueName === signal.signal_payload?.queue);
 								if (worker) {
 									worker.cancelExecutions([signal.signal_execution_id]);
 								}
@@ -373,7 +435,7 @@ export class Orchestrator {
 	 * Stop all workers gracefully
 	 */
 	private async stopWorkers(): Promise<void> {
-		await Promise.all(this.workers.map((worker) => worker.stop()));
+		await Promise.all([...this.workers.map((worker) => worker.stop()), this.eventWorker.stop()]);
 	}
 
 	/**

@@ -45,6 +45,7 @@ describe("SchemaManager", () => {
 		expect(tableNames).toContain("schema_migrations");
 		expect(tableNames).toContain("_private_tasks");
 		expect(tableNames).toContain("_private_executions");
+		expect(tableNames).not.toContain("_private_event_subscriptions");
 
 		// Calling again should report no migration needed
 		const result2 = await schemaManager.ensureLatest(controller.signal);
