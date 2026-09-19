@@ -209,6 +209,61 @@ describe("event triggers", () => {
 		).not.toThrow();
 	});
 
+	test("filter operators follow the filterable field type", () => {
+		const changed = defineEvent({
+			name: "order.changed",
+			payload: z.object({
+				status: z.string(),
+				total: z.number(),
+				active: z.boolean(),
+				note: z.string().optional(),
+			}),
+			filterable: ["status", "total", "active", "note"],
+		});
+		const taskDef = defineTask({ name: "filtered-order", payload: z.object({}) });
+		const conductor = Conductor.create({
+			sql: {} as any,
+			tasks: TaskSchemas.fromSchema([taskDef]),
+			events: EventSchemas.fromSchema([changed]),
+			context: {},
+		});
+
+		conductor.createTask(
+			{ name: "filtered-order" },
+			{
+				event: "order.changed",
+				filter: {
+					status: [{ prefix: "paid-" }],
+					total: [{ numeric: [">=", 10, "<", 20] }],
+					active: [{ "anything-but": false }],
+					note: [{ exists: true }],
+				},
+			},
+			async () => {},
+		);
+
+		if (false) {
+			conductor.createTask(
+				{ name: "filtered-order" },
+				// @ts-expect-error Prefix filters require a string-valued field.
+				{ event: "order.changed", filter: { total: [{ prefix: "10" }] } },
+				async () => {},
+			);
+			conductor.createTask(
+				{ name: "filtered-order" },
+				// @ts-expect-error Numeric filters require a number-valued field.
+				{ event: "order.changed", filter: { status: [{ numeric: [">", 10] }] } },
+				async () => {},
+			);
+			conductor.createTask(
+				{ name: "filtered-order" },
+				// @ts-expect-error Anything-but operands must match the field scalar type.
+				{ event: "order.changed", filter: { active: [{ "anything-but": "true" }] } },
+				async () => {},
+			);
+		}
+	});
+
 	test("filterable event fields must contain scalar values", () => {
 		if (false) {
 			// @ts-expect-error Object-valued payload fields cannot be filterable.

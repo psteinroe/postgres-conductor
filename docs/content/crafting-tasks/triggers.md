@@ -108,7 +108,7 @@ await conductor.emit("user.created", {
 });
 ```
 
-Each event is appended to the event log and paired with a short-lived internal dispatch execution. Destination fan-out and the event's `dispatched_at` state commit in one database transaction, so failures retry without duplicating destination executions. Event rows are retained independently for seven days by default.
+Each event is stored as a short-lived internal dispatch execution. Destination fan-out and a reserved completion marker commit in one database transaction, so failures retry without duplicating or changing the matched destination set.
 
 ### Emitting from Database Triggers
 
@@ -130,24 +130,34 @@ after insert on app.users
 for each row execute function app.emit_user_created();
 ```
 
-Because `emit_event()` inserts both the event row and its dispatch execution in the current transaction, emission is committed or rolled back with the database change.
+Because `emit_event()` inserts the dispatch execution in the current transaction, emission is committed or rolled back with the database change.
 
 ### Event Filters
 
-Declare top-level scalar fields as filterable, then register equality allowlists on handlers:
+Declare top-level scalar fields as filterable, then register typed predicates on handlers:
 
 ```typescript
 const orderChanged = defineEvent({
   name: "order.changed",
-  payload: z.object({ status: z.string(), region: z.string() }),
-  filterable: ["status", "region"],
+  payload: z.object({
+    status: z.string(),
+    region: z.string(),
+    amount: z.number(),
+    note: z.string().optional(),
+  }),
+  filterable: ["status", "region", "amount", "note"],
 });
 
 conductor.createTask(
   { name: "handle-paid-us-orders" },
   {
     event: "order.changed",
-    filter: { status: ["paid", "trial"], region: ["us"] },
+    filter: {
+      status: ["paid", "trial"],
+      region: [{ prefix: "us-" }],
+      amount: [{ numeric: [">=", 10, "<", 100] }],
+      note: [{ exists: false }],
+    },
   },
   async (event, ctx) => {
     // Both fields matched; values within one field are alternatives.
@@ -155,7 +165,15 @@ conductor.createTask(
 );
 ```
 
-Fields are combined with AND and values within a field with OR. Strings, numbers, booleans, and `null` are type-sensitive; a missing field does not match `null`. A filter may contain up to 8 fields and 4 values per field.
+Fields are combined with AND and alternatives within a field with OR. Supported alternatives are:
+
+- a string, number, boolean, or `null` for type-sensitive equality;
+- `{ prefix: "literal" }` for a literal string prefix (`%`, `_`, and `\\` have no special meaning);
+- `{ numeric: [">=", 10, "<", 100] }` for a one- or two-bound numeric range;
+- `{ exists: true }` or `{ exists: false }` for field presence;
+- `{ "anything-but": value }` for one atomic scalar exclusion.
+
+Missing fields differ from JSON `null`. An `anything-but` predicate must be the field's only alternative. Filters are stored as normalized, typed predicates, narrowed through exact/prefix/range indexes or an explicit route-local fallback, and then completely verified. A filter may contain up to 8 fields and 4 alternatives per field; literal prefixes are limited to 64 characters.
 
 ### Field Selection
 

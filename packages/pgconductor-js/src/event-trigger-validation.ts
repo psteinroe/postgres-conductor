@@ -7,6 +7,7 @@ const MAX_EVENT_FIELD_BYTES = 128;
 const MAX_FILTER_VALUE_BYTES = 1024;
 const MAX_FILTER_FIELDS = 8;
 const MAX_FILTER_ALTERNATIVES = 4;
+const MAX_PREFIX_CHARACTERS = 64;
 
 function utf8ByteLength(value: string): number {
 	return new TextEncoder().encode(value).length;
@@ -60,6 +61,145 @@ function scalarByteLength(value: string | number | boolean | null): number {
 	return utf8ByteLength(JSON.stringify(value));
 }
 
+type CanonicalPredicate = JsonValue;
+type NumericOperator = ">" | ">=" | "<" | "<=";
+
+function assertScalarSize(
+	value: string | number | boolean | null,
+	eventName: string,
+	field: string,
+) {
+	if (scalarByteLength(value) > MAX_FILTER_VALUE_BYTES) {
+		throw new Error(
+			`Filter value for event "${eventName}" field "${field}" exceeds 1024 UTF-8 bytes`,
+		);
+	}
+}
+
+function canonicalNumericRange(
+	value: unknown,
+	eventName: string,
+	field: string,
+): CanonicalPredicate {
+	if (!Array.isArray(value) || (value.length !== 2 && value.length !== 4)) {
+		throw new Error(
+			`Numeric filter for event "${eventName}" field "${field}" must contain one or two operator/value pairs`,
+		);
+	}
+
+	let lower: number | null = null;
+	let lowerInclusive = false;
+	let upper: number | null = null;
+	let upperInclusive = false;
+	for (let index = 0; index < value.length; index += 2) {
+		const operator = value[index];
+		const operand = value[index + 1];
+		if (![">", ">=", "<", "<="].includes(operator as string)) {
+			throw new Error(
+				`Numeric filter for event "${eventName}" field "${field}" has an unsupported operator`,
+			);
+		}
+		if (typeof operand !== "number" || !Number.isFinite(operand)) {
+			throw new Error(
+				`Numeric filter for event "${eventName}" field "${field}" requires finite operands`,
+			);
+		}
+
+		if ((operator as NumericOperator) === ">" || (operator as NumericOperator) === ">=") {
+			if (lower !== null) {
+				throw new Error(
+					`Numeric filter for event "${eventName}" field "${field}" contains duplicate lower bounds`,
+				);
+			}
+			lower = operand;
+			lowerInclusive = operator === ">=";
+		} else {
+			if (upper !== null) {
+				throw new Error(
+					`Numeric filter for event "${eventName}" field "${field}" contains duplicate upper bounds`,
+				);
+			}
+			upper = operand;
+			upperInclusive = operator === "<=";
+		}
+	}
+
+	if (
+		lower !== null &&
+		upper !== null &&
+		(lower > upper || (lower === upper && (!lowerInclusive || !upperInclusive)))
+	) {
+		throw new Error(`Numeric filter for event "${eventName}" field "${field}" is empty`);
+	}
+
+	return {
+		$operator: "numeric_range",
+		lower,
+		lowerInclusive,
+		upper,
+		upperInclusive,
+	};
+}
+
+function canonicalPredicate(value: unknown, eventName: string, field: string): CanonicalPredicate {
+	if (isEventFilterScalar(value)) {
+		assertScalarSize(value, eventName, field);
+		return value;
+	}
+	if (typeof value !== "object" || value === null || Array.isArray(value)) {
+		throw new Error(
+			`Filter value for event "${eventName}" field "${field}" must be a scalar or supported operator`,
+		);
+	}
+
+	const entries = Object.entries(value as Record<string, unknown>);
+	if (entries.length !== 1) {
+		throw new Error(
+			`Filter operator for event "${eventName}" field "${field}" must contain exactly one key`,
+		);
+	}
+	const [operator, operand] = entries[0]!;
+	switch (operator) {
+		case "prefix":
+			if (typeof operand !== "string" || operand.length === 0) {
+				throw new Error(
+					`Prefix filter for event "${eventName}" field "${field}" must be a non-empty string`,
+				);
+			}
+			if (Array.from(operand).length > MAX_PREFIX_CHARACTERS) {
+				throw new Error(
+					`Prefix filter for event "${eventName}" field "${field}" exceeds 64 characters`,
+				);
+			}
+			assertScalarSize(operand, eventName, field);
+			return { $operator: "prefix", value: operand };
+		case "numeric":
+			return canonicalNumericRange(operand, eventName, field);
+		case "exists":
+			if (typeof operand !== "boolean") {
+				throw new Error(`Exists filter for event "${eventName}" field "${field}" must be boolean`);
+			}
+			return { $operator: "exists", value: operand };
+		case "anything-but":
+			if (!isEventFilterScalar(operand)) {
+				throw new Error(
+					`Anything-but filter for event "${eventName}" field "${field}" requires one scalar value`,
+				);
+			}
+			assertScalarSize(operand, eventName, field);
+			return { $operator: "anything_but", value: operand };
+		default:
+			throw new Error(
+				`Filter for event "${eventName}" field "${field}" uses unsupported operator "${operator}"`,
+			);
+	}
+}
+
+function predicateSortKey(value: CanonicalPredicate): string {
+	if (isEventFilterScalar(value)) return `0:${scalarSortKey(value)}`;
+	return `1:${JSON.stringify(value)}`;
+}
+
 function canonicalFilter(
 	filter: unknown,
 	eventName: string,
@@ -105,23 +245,27 @@ function canonicalFilter(
 			);
 		}
 
-		const byKey = new Map<string, string | number | boolean | null>();
-		for (const value of values) {
-			if (!isEventFilterScalar(value)) {
-				throw new Error(
-					`Filter value for event "${eventName}" field "${field}" must contain only scalar values`,
-				);
-			}
-			if (scalarByteLength(value) > MAX_FILTER_VALUE_BYTES) {
-				throw new Error(
-					`Filter value for event "${eventName}" field "${field}" exceeds 1024 UTF-8 bytes`,
-				);
-			}
-			byKey.set(scalarSortKey(value), value);
+		const predicates = values.map((value) => canonicalPredicate(value, eventName, field));
+		if (
+			predicates.length > 1 &&
+			predicates.some(
+				(predicate) =>
+					typeof predicate === "object" &&
+					predicate !== null &&
+					!Array.isArray(predicate) &&
+					predicate.$operator === "anything_but",
+			)
+		) {
+			throw new Error(
+				`Anything-but filter for event "${eventName}" field "${field}" must be atomic`,
+			);
 		}
+
+		const byKey = new Map<string, CanonicalPredicate>();
+		for (const predicate of predicates) byKey.set(predicateSortKey(predicate), predicate);
 		canonical[field] = [...byKey.entries()]
 			.sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
-			.map(([, value]) => value);
+			.map(([, predicate]) => predicate);
 	}
 	return canonical;
 }

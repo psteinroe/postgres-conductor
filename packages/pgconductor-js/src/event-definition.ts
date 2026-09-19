@@ -8,6 +8,22 @@ type EventPayload<T> = T extends undefined ? {} : EnsureObject<SchemaOutput<T>>;
 export type EventFilterScalar = string | number | boolean | null;
 type ScalarFilterValue<T> = Extract<T, EventFilterScalar>;
 
+type EventFilterPrefix = { readonly prefix: string };
+type EventFilterNumeric = {
+	readonly numeric:
+		| readonly [">" | ">=" | "<" | "<=", number]
+		| readonly [">" | ">=" | "<" | "<=", number, ">" | ">=" | "<" | "<=", number];
+};
+type EventFilterExists = { readonly exists: boolean };
+type EventFilterAnythingBut<T> = { readonly "anything-but": ScalarFilterValue<T> };
+
+type EventFilterPredicate<T> =
+	| ScalarFilterValue<T>
+	| (Extract<T, string> extends never ? never : EventFilterPrefix)
+	| (Extract<T, number> extends never ? never : EventFilterNumeric)
+	| EventFilterExists
+	| EventFilterAnythingBut<T>;
+
 export type FilterableKeys<T> = {
 	[K in keyof EventPayload<T> & string]: Exclude<
 		EventPayload<T>[K],
@@ -20,13 +36,13 @@ export type FilterableKeys<T> = {
 }[keyof EventPayload<T> & string];
 
 export type EventFilter<T> = {
-	readonly [K in FilterableKeys<T>]?: readonly ScalarFilterValue<EventPayload<T>[K]>[];
+	readonly [K in FilterableKeys<T>]?: readonly EventFilterPredicate<EventPayload<T>[K]>[];
 };
 
 export type FilterForEvent<T> =
 	T extends EventDefinition<string, infer P, infer K>
 		? {
-				readonly [F in K & FilterableKeys<P>]?: readonly ScalarFilterValue<EventPayload<P>[F]>[];
+				readonly [F in K & FilterableKeys<P>]?: readonly EventFilterPredicate<EventPayload<P>[F]>[];
 			}
 		: never;
 

@@ -19,7 +19,6 @@ export class MockDatabaseClient implements IDatabaseClient {
 	getExecutions = mock(async () => []);
 	returnExecutions = mock(async (_results) => {});
 	removeExecutions = mock(async () => false);
-	removeCustomEvents = mock(async (..._args: any[]) => false);
 	registerWorker = mock(async () => {});
 	scheduleCronExecution = mock(async () => "mock-cron-id");
 	unscheduleCronExecution = mock(async () => {});

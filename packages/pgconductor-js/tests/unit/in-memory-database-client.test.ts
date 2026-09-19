@@ -1,4 +1,4 @@
-// @ts-nocheck - Event support commented out
+// @ts-nocheck
 import { test, expect, describe } from "bun:test";
 import { InMemoryDatabaseClient } from "../mocks/in-memory-database-client";
 
@@ -853,6 +853,90 @@ describe("InMemoryDatabaseClient", () => {
 			});
 
 			expect(batch3.length).toBe(1);
+		});
+	});
+
+	describe("Event dispatch", () => {
+		test("validates payload objects and persists one idempotent fan-out marker", async () => {
+			const db = new InMemoryDatabaseClient();
+			await expect(db.emitEvent({ eventKey: "mock.invalid", payload: [] } as any)).rejects.toThrow(
+				"Event payload must be a JSON object",
+			);
+			await expect(
+				db.emitEvent({ eventKey: "mock.invalid", payload: null } as any),
+			).rejects.toThrow("Event payload must be a JSON object");
+			await db.registerWorker({
+				queueName: "default",
+				taskSpecs: [{ key: "event-target", maxAttempts: 3 }],
+				cronSchedules: [],
+				eventSubscriptions: [
+					{
+						task_key: "event-target",
+						event_key: "mock.event",
+						payload_fields: null,
+						filter: { code: [{ $operator: "prefix", value: "ok-" }] },
+					},
+				],
+			});
+			const eventId = await db.emitEvent({
+				eventKey: "mock.event",
+				payload: { code: "ok-value" },
+			});
+			await db.getExecutions({
+				orchestratorId: "event-orchestrator",
+				queueName: "pgconductor.internal",
+				batchSize: 10,
+				filterTaskKeys: [],
+			});
+
+			expect(
+				await db.dispatchCustomEvents({
+					eventIds: [eventId],
+					orchestratorId: "event-orchestrator",
+				}),
+			).toEqual([eventId]);
+			expect(
+				await db.dispatchCustomEvents({
+					eventIds: [eventId],
+					orchestratorId: "event-orchestrator",
+				}),
+			).toEqual([eventId]);
+			expect(
+				db
+					.getAllExecutions()
+					.filter(
+						(execution) =>
+							execution.parent_execution_id === eventId && execution.subscription_id != null,
+					),
+			).toHaveLength(1);
+			expect(
+				await db.loadStep({
+					executionId: eventId,
+					queue: "pgconductor.internal",
+					orchestratorId: "event-orchestrator",
+					key: "pgconductor.internal.event-fanout.v1",
+				}),
+			).toEqual({});
+
+			await db.returnExecutions([
+				{
+					execution_id: eventId,
+					...fencing(db, eventId),
+					queue: "pgconductor.internal",
+					task_key: "pgconductor.event-dispatch",
+					status: "completed",
+					result: null,
+				},
+			]);
+			expect(db.getExecution(eventId)).toBeUndefined();
+			expect(
+				await db.loadStep({
+					executionId: eventId,
+					queue: "pgconductor.internal",
+					orchestratorId: "event-orchestrator",
+					key: "pgconductor.internal.event-fanout.v1",
+				}),
+			).toBeUndefined();
 		});
 	});
 

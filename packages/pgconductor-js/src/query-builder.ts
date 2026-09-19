@@ -7,7 +7,6 @@ import type {
 	EventSubscriptionSpec,
 	Payload,
 	TaskSpec,
-	JsonValue,
 } from "./database-client";
 
 export type OrchestratorHeartbeatArgs = {
@@ -41,11 +40,6 @@ export type GetExecutionsArgs = {
 
 export type RemoveExecutionsArgs = {
 	queueName: string;
-	batchSize: number;
-};
-
-export type RemoveCustomEventsArgs = {
-	before: Date;
 	batchSize: number;
 };
 
@@ -96,7 +90,7 @@ export type ClearWaitingStateArgs = {
 
 export type EmitEventArgs = {
 	eventKey: string;
-	payload?: JsonValue;
+	payload?: Payload;
 };
 
 export class QueryBuilder {
@@ -384,14 +378,14 @@ export class QueryBuilder {
 				returning e.id, e.task_key, e.queue, e.payload, e.waiting_on_execution_id,
 					e.waiting_step_key, e.cancelled, e.last_error, e.dedupe_key, e.cron_expression,
 					e.locked_by, e."group", e.priority, e.run_at, e.created_at,
-					e.source_event_id, e.event_subscription_id,
+					e.subscription_id,
 					e.dead_letter_source_execution_id, e.dead_letter_source_queue,
 					e.dead_letter_source_task_key, e.dead_letter_error,
 					e.dead_letter_attempts, e.dead_letter_failed_at
 			)
 			select id, task_key, queue, payload, waiting_on_execution_id, waiting_step_key,
 				cancelled, last_error, dedupe_key, cron_expression, locked_by, "group",
-				source_event_id, event_subscription_id,
+				subscription_id,
 				dead_letter_source_execution_id, dead_letter_source_queue,
 				dead_letter_source_task_key, dead_letter_error, dead_letter_attempts, dead_letter_failed_at
 			from claimed
@@ -425,7 +419,8 @@ export class QueryBuilder {
 		// new claim from racing the side effects below.
 		ctes.push(this.sql`valid_results as materialized (
 			select r.*,
-				e.cancelled as execution_cancelled, e.last_error as execution_last_error
+				e.cancelled as execution_cancelled, e.last_error as execution_last_error,
+				e.subscription_id
 			from result_data r
 			join pgconductor._private_executions e
 				on e.id = r.execution_id
@@ -464,7 +459,8 @@ export class QueryBuilder {
 			from completed_results r
 			join pgconductor._private_executions parent
 				on parent.waiting_on_execution_id = r.execution_id
-			where parent.completed_at is null
+			where r.subscription_id is null
+				and parent.completed_at is null
 				and parent.failed_at is null
 				and parent.locked_by is null
 			for update of parent
@@ -486,6 +482,7 @@ export class QueryBuilder {
 			where e.id = r.execution_id and e.queue = r.queue
 				and e.locked_by = r.orchestrator_id
 				and e.parent_execution_id is not null
+				and e.subscription_id is null
 				and not exists (
 					select 1 from pgconductor._private_executions parent
 					where parent.waiting_on_execution_id = r.execution_id
@@ -528,6 +525,7 @@ export class QueryBuilder {
 				e."group" as execution_group,
 				e.payload as execution_payload,
 				e.attempts as execution_attempts,
+				e.subscription_id,
 				tc.remove_on_fail_days = 0 as should_remove,
 				tc.dead_letter_queue, tc.dead_letter_task_key
 			from failed_results r
@@ -551,7 +549,8 @@ export class QueryBuilder {
 				on parent.waiting_on_execution_id = p.execution_id
 			join pgconductor._private_tasks pt
 				on pt.key = parent.task_key and pt.queue = parent.queue
-			where parent.completed_at is null and parent.failed_at is null and parent.locked_by is null
+			where p.subscription_id is null
+				and parent.completed_at is null and parent.failed_at is null and parent.locked_by is null
 			for update of parent
 		)`);
 		ctes.push(this.sql`terminal_failures as materialized (
@@ -723,18 +722,6 @@ export class QueryBuilder {
 				returning 1
 			)
 			select count(*)::int as deleted_count from deleted
-		`;
-	}
-
-	buildRemoveCustomEvents({
-		before,
-		batchSize,
-	}: RemoveCustomEventsArgs): PendingQuery<{ deleted_count: number }[]> {
-		return this.sql<{ deleted_count: number }[]>`
-			select pgconductor._private_remove_custom_events(
-				${before.toISOString()}::timestamptz,
-				${batchSize}::integer
-			)::integer as deleted_count
 		`;
 	}
 
@@ -1090,10 +1077,11 @@ export class QueryBuilder {
 		eventIds,
 		orchestratorId,
 	}: DispatchCustomEventsArgs): PendingQuery<{ event_id: string }[]> {
+		// Pass uuid[]'s OID so postgres.js serializes arrays correctly on a fresh connection.
 		return this.sql<{ event_id: string }[]>`
 			select event_id
 			from pgconductor._private_dispatch_custom_events(
-				${this.sql.array(eventIds)}::uuid[],
+				${this.sql.array(eventIds, 2951)}::uuid[],
 				${orchestratorId}::uuid
 			)
 		`;

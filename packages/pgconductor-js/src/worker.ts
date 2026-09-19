@@ -667,7 +667,7 @@ export class Worker<
 				const scheduleName = exec.dedupe_key?.split("::")[1] || "unknown";
 				taskEvent = { name: scheduleName };
 			} else if (
-				exec.source_event_id != null &&
+				exec.subscription_id != null &&
 				exec.payload &&
 				typeof exec.payload === "object" &&
 				"event" in exec.payload
@@ -793,7 +793,7 @@ export class Worker<
 				const scheduleName = exec.dedupe_key?.split("::")[1] || "unknown";
 				return { name: scheduleName };
 			} else if (
-				exec.source_event_id != null &&
+				exec.subscription_id != null &&
 				exec.payload &&
 				typeof exec.payload === "object" &&
 				"event" in exec.payload

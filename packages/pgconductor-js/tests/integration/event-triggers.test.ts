@@ -326,9 +326,11 @@ describe("Event Triggers - Custom Events", () => {
 
 		const [rolledBack] = await db.sql<{ count: number }[]>`
 			select count(*)::int as count
-			from pgconductor._private_custom_events
-			where event_key = 'contact.created'
-				and payload ->> 'id' = 'rolled-back'
+			from pgconductor._private_executions
+			where queue = 'pgconductor.internal'
+				and task_key = 'pgconductor.event-dispatch'
+				and payload ->> 'eventKey' = 'contact.created'
+				and payload -> 'payload' ->> 'id' = 'rolled-back'
 		`;
 		expect(rolledBack?.count).toBe(0);
 

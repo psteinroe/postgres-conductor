@@ -18,8 +18,8 @@ describe("event filter types", () => {
 			filterable: ["status"],
 		});
 
-		expectTypeOf<FilterForEvent<typeof event>>().toEqualTypeOf<{
+		expectTypeOf<{
 			readonly status?: readonly ("pending" | "paid")[];
-		}>();
+		}>().toExtend<FilterForEvent<typeof event>>();
 	});
 });

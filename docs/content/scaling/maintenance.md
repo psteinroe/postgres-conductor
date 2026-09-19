@@ -8,9 +8,8 @@ Maintenance runs daily on each queue:
 
 - Removes old completed executions (based on task retention config)
 - Removes old failed executions (based on task retention config)
-- On the always-present internal queue, removes settled custom-event log rows after seven days
 
-Event cleanup is independent of execution retention. It is bounded and skips events whose internal dispatch execution may still be retried.
+Custom events use ordinary internal executions and therefore do not require a separate event-log cleanup pass.
 
 ## What's Next?
 

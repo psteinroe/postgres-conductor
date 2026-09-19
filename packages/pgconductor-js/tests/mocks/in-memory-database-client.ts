@@ -6,7 +6,6 @@ import type {
 	TaskSpec,
 	Payload,
 	SetFakeTimeArgs,
-	// EventSubscriptionSpec,
 } from "../../src/database-client";
 import { DatabaseClient as RealDatabaseClient } from "../../src/database-client";
 import type {
@@ -16,7 +15,6 @@ import type {
 	CountActiveOrchestratorsBelowArgs,
 	GetExecutionsArgs,
 	RemoveExecutionsArgs,
-	RemoveCustomEventsArgs,
 	RegisterWorkerArgs,
 	ScheduleCronExecutionArgs,
 	UnscheduleCronExecutionArgs,
@@ -24,7 +22,7 @@ import type {
 	SaveStepArgs,
 	ClearWaitingStateArgs,
 	OrchestratorShutdownArgs,
-	// EmitEventArgs,
+	EmitEventArgs,
 } from "../../src/query-builder";
 import type { Migration } from "../../src/migration-store";
 import type { Logger } from "../../src/lib/logger";
@@ -35,6 +33,10 @@ type PublicMethodsOf<T> = {
 };
 
 type IDatabaseClient = PublicMethodsOf<DatabaseClient>;
+
+const EVENT_DISPATCH_QUEUE = "pgconductor.internal";
+const EVENT_DISPATCH_TASK = "pgconductor.event-dispatch";
+const EVENT_FANOUT_STEP = "pgconductor.internal.event-fanout.v1";
 
 interface StoredExecution {
 	id: string;
@@ -62,8 +64,7 @@ interface StoredExecution {
 	created_at: Date;
 	updated_at: Date;
 	failed_at: Date | null;
-	source_event_id: string | null;
-	event_subscription_id: string | null;
+	subscription_id: string | null;
 	dead_letter_source_execution_id: string | null;
 	dead_letter_source_queue: string | null;
 	dead_letter_source_task_key: string | null;
@@ -132,13 +133,13 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 	private cronSchedules = new Map<string, StoredCronSchedule>();
 	private orchestrators = new Map<string, StoredOrchestrator>();
 	private eventSubscriptions = new Map<string, StoredEventSubscription>();
-	private dispatchedEvents = new Set<string>();
 	private currentTime: Date;
 	private migrationNumber = -1;
 	private idCounter = 0;
 
 	constructor(initialTime: Date = new Date()) {
 		this.currentTime = new Date(initialTime);
+		this.registerInternalEventTask();
 	}
 
 	// ============================================================================
@@ -160,6 +161,46 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 	// Internal synchronous method for time management
 	private getInternalTime(): Date {
 		return new Date(this.currentTime);
+	}
+
+	private createExecution(spec: ExecutionSpec, now: Date, singletonOn: Date | null = null): string {
+		const task = this.tasks.get(this.taskId(spec.task_key, spec.queue));
+		const id = this.generateId();
+		this.executions.set(id, {
+			id,
+			task_key: spec.task_key,
+			queue: spec.queue,
+			group: spec.group || null,
+			payload: spec.payload || {},
+			state: "pending",
+			run_at: spec.run_at || now,
+			attempts: 0,
+			max_attempts: task?.max_attempts || 3,
+			last_error: null,
+			result: null,
+			cancelled: false,
+			waiting_on_execution_id: null,
+			waiting_step_key: null,
+			waiting_timeout_at: null,
+			dedupe_key: spec.dedupe_key || null,
+			singleton_on: singletonOn,
+			cron_expression: spec.cron_expression || null,
+			priority: spec.priority || 0,
+			orchestrator_id: null,
+			parent_execution_id: spec.parent_execution_id || null,
+			parent_step_key: spec.parent_step_key || null,
+			created_at: now,
+			updated_at: now,
+			failed_at: null,
+			subscription_id: null,
+			dead_letter_source_execution_id: null,
+			dead_letter_source_queue: null,
+			dead_letter_source_task_key: null,
+			dead_letter_error: null,
+			dead_letter_attempts: null,
+			dead_letter_failed_at: null,
+		});
+		return id;
 	}
 
 	// Public synchronous method for test assertions
@@ -296,8 +337,8 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 				key: taskSpec.key,
 				queue: taskSpec.queue || args.queueName,
 				max_attempts: taskSpec.maxAttempts || 3,
-				remove_on_complete_days: taskSpec.removeOnCompleteDays || null,
-				remove_on_fail_days: taskSpec.removeOnFailDays || null,
+				remove_on_complete_days: taskSpec.removeOnCompleteDays ?? null,
+				remove_on_fail_days: taskSpec.removeOnFailDays ?? null,
 				window_start: taskSpec.window?.[0] || null,
 				window_end: taskSpec.window?.[1] || null,
 				concurrency: taskSpec.concurrency || null,
@@ -432,8 +473,7 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 				dedupe_key: exec.dedupe_key || undefined,
 				cron_expression: exec.cron_expression || undefined,
 				group: exec.group,
-				source_event_id: exec.source_event_id,
-				event_subscription_id: exec.event_subscription_id,
+				subscription_id: exec.subscription_id,
 				dead_letter_source_execution_id: exec.dead_letter_source_execution_id,
 				dead_letter_source_queue: exec.dead_letter_source_queue,
 				dead_letter_source_task_key: exec.dead_letter_source_task_key,
@@ -486,8 +526,8 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 					exec.result = result.result || null;
 					exec.orchestrator_id = null;
 
-					// Wake up parent if waiting
-					if (exec.parent_execution_id) {
+					// Event deliveries retain lineage without workflow-child behavior.
+					if (exec.parent_execution_id && exec.subscription_id === null) {
 						const parent = this.executions.get(exec.parent_execution_id);
 						if (parent && parent.waiting_on_execution_id === exec.id) {
 							parent.waiting_on_execution_id = null;
@@ -503,9 +543,9 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 						await this.scheduleNextCronExecution(exec);
 					}
 
-					// Remove if cleanup is configured (only if task registered)
+					// Zero-day retention removes immediately; positive retention is swept later.
 					const task = this.tasks.get(this.taskId(exec.task_key, exec.queue));
-					if (task && task.remove_on_complete_days != null) {
+					if (task?.remove_on_complete_days === 0) {
 						this.executions.delete(exec.id);
 						this.steps.delete(exec.id);
 					}
@@ -525,9 +565,8 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 						exec.failed_at = now;
 						if (!exec.cancelled) this.deliverToDeadLetterQueue(exec, task, result.error, now);
 
-						// Fail parent if waiting. A force-failed parent is itself terminal and
-						// follows its own DLQ and retention policy.
-						if (exec.parent_execution_id) {
+						// Fail a workflow parent only. Event delivery lineage is independent.
+						if (exec.parent_execution_id && exec.subscription_id === null) {
 							const parent = this.executions.get(exec.parent_execution_id);
 							if (parent && parent.waiting_on_execution_id === exec.id) {
 								parent.state = "failed";
@@ -538,15 +577,15 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 								if (!exec.cancelled) {
 									this.deliverToDeadLetterQueue(parent, parentTask, parent.last_error, now);
 								}
-								if (parentTask?.remove_on_fail_days != null) {
+								if (parentTask?.remove_on_fail_days === 0) {
 									this.executions.delete(parent.id);
 									this.steps.delete(parent.id);
 								}
 							}
 						}
 
-						// Remove if cleanup is configured (only if task registered)
-						if (task && task.remove_on_fail_days != null) {
+						// Zero-day retention removes immediately; positive retention is swept later.
+						if (task?.remove_on_fail_days === 0) {
 							this.executions.delete(exec.id);
 							this.steps.delete(exec.id);
 						}
@@ -587,9 +626,8 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 					if (!exec.cancelled) this.deliverToDeadLetterQueue(exec, task, result.error, now);
 					exec.orchestrator_id = null;
 
-					// Fail parent if waiting. A force-failed parent is itself terminal and
-					// follows its own DLQ and retention policy.
-					if (exec.parent_execution_id) {
+					// Fail a workflow parent only. Event delivery lineage is independent.
+					if (exec.parent_execution_id && exec.subscription_id === null) {
 						const parent = this.executions.get(exec.parent_execution_id);
 						if (parent && parent.waiting_on_execution_id === exec.id) {
 							parent.state = "failed";
@@ -601,14 +639,14 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 							if (!exec.cancelled) {
 								this.deliverToDeadLetterQueue(parent, parentTask, parent.last_error, now);
 							}
-							if (parentTask?.remove_on_fail_days != null) {
+							if (parentTask?.remove_on_fail_days === 0) {
 								this.executions.delete(parent.id);
 								this.steps.delete(parent.id);
 							}
 						}
 					}
 
-					if (task && task.remove_on_fail_days != null) {
+					if (task?.remove_on_fail_days === 0) {
 						this.executions.delete(exec.id);
 						this.steps.delete(exec.id);
 					}
@@ -698,40 +736,6 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 		return candidates.length >= args.batchSize;
 	}
 
-	async removeCustomEvents(
-		before: Date,
-		batchSize: number,
-		_opts?: { signal?: AbortSignal },
-	): Promise<boolean>;
-	async removeCustomEvents(
-		args: RemoveCustomEventsArgs,
-		_opts?: { signal?: AbortSignal },
-	): Promise<boolean>;
-	async removeCustomEvents(
-		beforeOrArgs: Date | RemoveCustomEventsArgs,
-		batchSizeOrOpts?: number | { signal?: AbortSignal },
-		_opts?: { signal?: AbortSignal },
-	): Promise<boolean> {
-		const before = beforeOrArgs instanceof Date ? beforeOrArgs : beforeOrArgs.before;
-		const batchSize =
-			beforeOrArgs instanceof Date ? (batchSizeOrOpts as number) : beforeOrArgs.batchSize;
-		const candidates = Array.from(this.executions.values())
-			.filter(
-				(exec) =>
-					exec.queue === "pgconductor.internal" &&
-					exec.task_key === "pgconductor.event-dispatch" &&
-					exec.created_at < before &&
-					(exec.state === "completed" || exec.state === "failed" || exec.cancelled),
-			)
-			.slice(0, batchSize);
-
-		for (const exec of candidates) {
-			this.executions.delete(exec.id);
-			this.steps.delete(exec.id);
-		}
-		return candidates.length >= batchSize;
-	}
-
 	async invoke(spec: ExecutionSpec, _opts?: { signal?: AbortSignal }): Promise<string | null> {
 		const now = this.getInternalTime();
 
@@ -760,50 +764,8 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 			singletonOn = new Date(slotNumber * dedupeSeconds * 1000);
 		}
 
-		// Helper to create execution
-		const createExecution = (singletonOnValue: Date | null): string => {
-			const task = this.tasks.get(this.taskId(spec.task_key, spec.queue));
-			const id = this.generateId();
-
-			const execution: StoredExecution = {
-				id,
-				task_key: spec.task_key,
-				queue: spec.queue,
-				group: spec.group || null,
-				payload: spec.payload || {},
-				state: "pending",
-				run_at: spec.run_at || now,
-				attempts: 0,
-				max_attempts: task?.max_attempts || 3,
-				last_error: null,
-				result: null,
-				cancelled: false,
-				waiting_on_execution_id: null,
-				waiting_step_key: null,
-				waiting_timeout_at: null,
-				dedupe_key: spec.dedupe_key || null,
-				singleton_on: singletonOnValue,
-				cron_expression: spec.cron_expression || null,
-				priority: spec.priority || 0,
-				orchestrator_id: null,
-				parent_execution_id: spec.parent_execution_id || null,
-				parent_step_key: spec.parent_step_key || null,
-				created_at: now,
-				updated_at: now,
-				failed_at: null,
-				source_event_id: null,
-				event_subscription_id: null,
-				dead_letter_source_execution_id: null,
-				dead_letter_source_queue: null,
-				dead_letter_source_task_key: null,
-				dead_letter_error: null,
-				dead_letter_attempts: null,
-				dead_letter_failed_at: null,
-			};
-
-			this.executions.set(id, execution);
-			return id;
-		};
+		const createExecution = (singletonOnValue: Date | null): string =>
+			this.createExecution(spec, now, singletonOnValue);
 
 		// Throttle/debounce logic
 		if (singletonOn) {
@@ -1118,52 +1080,70 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 		exec.waiting_timeout_at = null;
 	}
 
-	// // ============================================================================
-	// // Events
-	// // ============================================================================
-	//
-	// async emitEvent(args: { eventKey: string; payload: unknown }, _opts?: { signal?: AbortSignal }): Promise<string> {
-	// 	const eventId = this.generateId();
-	// 	const now = this.getInternalTime();
-	//
-	// 	// Find subscriptions waiting for this event
-	// 	for (const [subId, sub] of this.eventSubscriptions.entries()) {
-	// 		if (sub.source === "event" && sub.event_key === args.eventKey) {
-	// 			// Check timeout
-	// 			if (sub.timeout_at && now > sub.timeout_at) {
-	// 				this.eventSubscriptions.delete(subId);
-	// 				continue;
-	// 			}
-	//
-	// 			// Wake up execution
-	// 			const exec = this.executions.get(sub.execution_id);
-	// 			if (exec) {
-	// 				exec.state = "pending";
-	// 				exec.run_at = now;
-	// 				this.eventSubscriptions.delete(subId);
-	// 			}
-	// 		}
-	// 	}
-	//
-	// 	return eventId;
-	// }
-	//
+	// ============================================================================
+	// Events
+	// ============================================================================
 
 	async invokeChild(): Promise<string> {
 		return this.generateId();
 	}
 
-	async emitEvent(args: { eventKey: string; payload?: unknown }): Promise<string> {
-		const id = await this.invoke({
-			task_key: "pgconductor.event-dispatch",
-			queue: "pgconductor.internal",
-			payload: {
-				event_key: args.eventKey,
-				payload: args.payload && typeof args.payload === "object" ? (args.payload as Payload) : {},
+	async emitEvent(args: EmitEventArgs): Promise<string> {
+		if (
+			typeof args.eventKey !== "string" ||
+			args.eventKey.trim().length === 0 ||
+			new TextEncoder().encode(args.eventKey).length > 255
+		) {
+			throw new Error("Event name must contain between 1 and 255 UTF-8 bytes");
+		}
+		const payload = args.payload === undefined ? {} : args.payload;
+		if (typeof payload !== "object" || payload === null || Array.isArray(payload)) {
+			throw new Error("Event payload must be a JSON object");
+		}
+		return this.createExecution(
+			{
+				task_key: EVENT_DISPATCH_TASK,
+				queue: EVENT_DISPATCH_QUEUE,
+				payload: { eventKey: args.eventKey, payload },
 			},
-		});
-		if (!id) throw new Error("Failed to persist event execution");
-		return id;
+			this.getInternalTime(),
+		);
+	}
+
+	private scalarMatches(left: unknown, right: unknown): boolean {
+		return left === right && (left === null || typeof left === typeof right);
+	}
+
+	private eventPredicateMatches(present: boolean, value: unknown, predicate: unknown): boolean {
+		if (
+			predicate === null ||
+			typeof predicate === "string" ||
+			typeof predicate === "number" ||
+			typeof predicate === "boolean"
+		) {
+			return present && this.scalarMatches(value, predicate);
+		}
+		if (typeof predicate !== "object" || Array.isArray(predicate)) return false;
+		const spec = predicate as Record<string, unknown>;
+		switch (spec.$operator) {
+			case "prefix":
+				return present && typeof value === "string" && value.startsWith(String(spec.value));
+			case "numeric_range": {
+				if (!present || typeof value !== "number") return false;
+				const lower = spec.lower as number | null;
+				const upper = spec.upper as number | null;
+				return (
+					(lower === null || (spec.lowerInclusive === true ? value >= lower : value > lower)) &&
+					(upper === null || (spec.upperInclusive === true ? value <= upper : value < upper))
+				);
+			}
+			case "exists":
+				return present === spec.value;
+			case "anything_but":
+				return present && !this.scalarMatches(value, spec.value);
+			default:
+				return false;
+		}
 	}
 
 	async dispatchCustomEvents(args: {
@@ -1175,25 +1155,38 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 			const source = this.executions.get(eventId);
 			if (
 				!source ||
-				source.queue !== "pgconductor.internal" ||
-				source.task_key !== "pgconductor.event-dispatch" ||
+				source.queue !== EVENT_DISPATCH_QUEUE ||
+				source.task_key !== EVENT_DISPATCH_TASK ||
 				source.orchestrator_id !== args.orchestratorId ||
+				source.state === "completed" ||
+				source.state === "failed" ||
 				source.cancelled
 			) {
 				continue;
 			}
-			if (this.dispatchedEvents.has(eventId)) {
+			if (this.steps.get(eventId)?.has(EVENT_FANOUT_STEP)) {
 				dispatched.push(eventId);
 				continue;
 			}
-			const eventKey = String(source.payload.event_key);
+
+			const eventKey = String(source.payload.eventKey);
 			const payload = source.payload.payload as Payload;
+			const destinations: Array<{ spec: ExecutionSpec; subscriptionId: string }> = [];
 			for (const subscription of this.eventSubscriptions.values()) {
-				if (subscription.event_key !== eventKey) continue;
-				const matches = Object.entries(subscription.filter || {}).every(([field, values]) =>
-					values.some((value) => Object.is(value, payload[field])),
-				);
+				if (
+					subscription.event_key !== eventKey ||
+					!this.tasks.has(this.taskId(subscription.task_key, subscription.queue))
+				) {
+					continue;
+				}
+				const matches = Object.entries(subscription.filter || {}).every(([field, values]) => {
+					const present = Object.prototype.hasOwnProperty.call(payload, field);
+					return values.some((predicate) =>
+						this.eventPredicateMatches(present, payload[field], predicate),
+					);
+				});
 				if (!matches) continue;
+
 				const destinationPayload = subscription.payload_fields
 					? (Object.fromEntries(
 							subscription.payload_fields
@@ -1201,20 +1194,40 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 								.map((field) => [field, payload[field]]),
 						) as Payload)
 					: structuredClone(payload);
-				const destinationId = await this.invoke({
-					task_key: subscription.task_key,
-					queue: subscription.queue,
-					payload: { event: eventKey, payload: destinationPayload },
+				destinations.push({
+					spec: {
+						task_key: subscription.task_key,
+						queue: subscription.queue,
+						payload: { event: eventKey, payload: destinationPayload },
+						parent_execution_id: eventId,
+					},
+					subscriptionId: subscription.id,
 				});
-				if (destinationId) {
-					const destination = this.executions.get(destinationId);
-					if (destination) {
-						destination.source_event_id = eventId;
-						destination.event_subscription_id = subscription.id;
-					}
-				}
 			}
-			this.dispatchedEvents.add(eventId);
+
+			const insertedIds: string[] = [];
+			try {
+				const now = this.getInternalTime();
+				for (const destination of destinations) {
+					const destinationId = this.createExecution(destination.spec, now);
+					insertedIds.push(destinationId);
+					this.executions.get(destinationId)!.subscription_id = destination.subscriptionId;
+				}
+				let sourceSteps = this.steps.get(eventId);
+				if (!sourceSteps) {
+					sourceSteps = new Map();
+					this.steps.set(eventId, sourceSteps);
+				}
+				sourceSteps.set(EVENT_FANOUT_STEP, {
+					execution_id: eventId,
+					step_key: EVENT_FANOUT_STEP,
+					result: {},
+					created_at: now,
+				});
+			} catch (error) {
+				for (const destinationId of insertedIds) this.executions.delete(destinationId);
+				throw error;
+			}
 			dispatched.push(eventId);
 		}
 		return dispatched;
@@ -1263,8 +1276,7 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 			created_at: now,
 			updated_at: now,
 			failed_at: null,
-			source_event_id: null,
-			event_subscription_id: null,
+			subscription_id: null,
 			dead_letter_source_execution_id: exec.id,
 			dead_letter_source_queue: exec.queue,
 			dead_letter_source_task_key: exec.task_key,
@@ -1276,6 +1288,22 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 
 	// Helpers
 	// ============================================================================
+
+	private registerInternalEventTask(): void {
+		this.tasks.set(this.taskId(EVENT_DISPATCH_TASK, EVENT_DISPATCH_QUEUE), {
+			key: EVENT_DISPATCH_TASK,
+			queue: EVENT_DISPATCH_QUEUE,
+			max_attempts: 3,
+			remove_on_complete_days: 0,
+			remove_on_fail_days: null,
+			window_start: null,
+			window_end: null,
+			concurrency: null,
+			group_concurrency: null,
+			dead_letter_queue: null,
+			dead_letter_task_key: null,
+		});
+	}
 
 	private taskId(key: string, queue: string): string {
 		return `${queue}\u0000${key}`;
@@ -1347,6 +1375,7 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 		this.executions.clear();
 		this.steps.clear();
 		this.tasks.clear();
+		this.registerInternalEventTask();
 		this.cronSchedules.clear();
 		this.orchestrators.clear();
 		this.eventSubscriptions.clear();

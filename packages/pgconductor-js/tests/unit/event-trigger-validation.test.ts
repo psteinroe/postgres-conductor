@@ -25,6 +25,51 @@ describe("event trigger compilation", () => {
 		});
 	});
 
+	test("canonicalizes supported atomic operators", () => {
+		const compiled = compileEventTrigger(
+			{
+				event: "catalog.changed",
+				filter: {
+					status: [{ "anything-but": "blocked" }],
+					score: [{ numeric: ["<", 20, ">=", 10] }],
+					name: [{ prefix: "literal%_\\" }, "exact"],
+					deleted: [{ exists: false }],
+				},
+			},
+			[],
+			true,
+		);
+
+		expect(compiled?.filter).toEqual({
+			deleted: [{ $operator: "exists", value: false }],
+			name: ["exact", { $operator: "prefix", value: "literal%_\\" }],
+			score: [
+				{
+					$operator: "numeric_range",
+					lower: 10,
+					lowerInclusive: true,
+					upper: 20,
+					upperInclusive: false,
+				},
+			],
+			status: [{ $operator: "anything_but", value: "blocked" }],
+		});
+	});
+
+	test("rejects malformed, unbounded, and non-atomic operators", () => {
+		const compile = (value: unknown[]) =>
+			compileEventTrigger({ event: "catalog.changed", filter: { value } }, [], true);
+
+		expect(() => compile([{ prefix: "" }])).toThrow(/non-empty string/);
+		expect(() => compile([{ prefix: "x".repeat(65) }])).toThrow(/64 characters/);
+		expect(() => compile([{ numeric: [">", 10, ">=", 11] }])).toThrow(/duplicate lower bounds/);
+		expect(() => compile([{ numeric: [">", 10, "<", 10] }])).toThrow(/is empty/);
+		expect(() => compile([{ exists: "yes" }])).toThrow(/must be boolean/);
+		expect(() => compile([{ "anything-but": ["a", "b"] }])).toThrow(/requires one scalar value/);
+		expect(() => compile([{ "anything-but": "a" }, "b"])).toThrow(/must be atomic/);
+		expect(() => compile([{ suffix: "x" }])).toThrow(/unsupported operator/);
+	});
+
 	test("enforces index-safe UTF-8 byte limits before registration", () => {
 		expect(() => compileEventTrigger({ event: "e".repeat(256) }, [], true)).toThrow(
 			/255 UTF-8 bytes/,
