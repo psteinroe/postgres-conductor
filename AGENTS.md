@@ -160,7 +160,7 @@ The migration file contains:
 
 ### SQL Functions
 
-**Important**: All core logic lives in PostgreSQL functions (not application code). The TypeScript layer is intentionally thin - it only orchestrates calls to SQL functions via `DatabaseClient`.
+**Important**: Keep durability, claiming, and atomic state transitions in Postgres. Use TypeScript for validation and multi-query orchestration through `DatabaseClient` transactions.
 
 SQL functions in `migrations/0000000001_setup.sql`:
 - `get_executions()`: Fetch and claim ready executions
@@ -240,7 +240,7 @@ Guidelines for SQL functions:
 
 3. **Prefer SQL functions with CTEs over plpgsql**: CTEs are declarative and easier to optimize
 
-4. **No foreign keys**: Performance optimization - rely on application/SQL function logic
+4. **Target foreign keys**: Use cascading foreign keys for cold configuration and metadata tables. Avoid adding foreign keys to hot execution tables; maintain those relationships in application/SQL logic.
 
 ## Common Development Tasks
 

@@ -1140,7 +1140,14 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 			case "exists":
 				return present === spec.value;
 			case "anything_but":
-				return present && !this.scalarMatches(value, spec.value);
+				return (
+					present &&
+					(value === null ||
+						typeof value === "string" ||
+						typeof value === "number" ||
+						typeof value === "boolean") &&
+					!this.scalarMatches(value, spec.value)
+				);
 			default:
 				return false;
 		}

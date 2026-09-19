@@ -922,6 +922,8 @@ create table pgconductor._private_event_filter_groups (
     strategy text not null check (strategy in ('candidate', 'fallback')),
     anchor_clause_number smallint,
     primary key (subscription_id, group_number),
+    constraint fk_event_filter_group_subscription foreign key (subscription_id)
+        references pgconductor._private_custom_event_subscriptions(id) on delete cascade,
     constraint chk_event_filter_group_anchor check (
         (strategy = 'candidate' and anchor_clause_number is not null)
         or (strategy = 'fallback' and anchor_clause_number is null)
@@ -939,6 +941,9 @@ create table pgconductor._private_event_filter_clauses (
     clause_number smallint not null check (clause_number > 0),
     field_name text not null,
     primary key (subscription_id, group_number, clause_number),
+    constraint fk_event_filter_clause_group foreign key (subscription_id, group_number)
+        references pgconductor._private_event_filter_groups(subscription_id, group_number)
+        on delete cascade,
     constraint chk_event_filter_clause_field_name check (
         btrim(field_name) <> '' and octet_length(field_name) <= 128
     )
@@ -966,6 +971,11 @@ create table pgconductor._private_event_filter_predicates (
     number_range numrange,
     is_anchor boolean not null default false,
     primary key (subscription_id, group_number, clause_number, predicate_number),
+    constraint fk_event_filter_predicate_clause foreign key (
+        subscription_id, group_number, clause_number
+    ) references pgconductor._private_event_filter_clauses(
+        subscription_id, group_number, clause_number
+    ) on delete cascade,
     constraint chk_event_filter_predicate_value check (
         (operator in ('exact', 'anything_but') and (
             (scalar_type = 'string' and text_value is not null
@@ -1044,23 +1054,12 @@ as $function$
         delete from pgconductor._private_custom_event_subscriptions
         where queue = p_queue_name
         returning id
-    ), removed_predicates as (
-        delete from pgconductor._private_event_filter_predicates predicate
-        using removed
-        where predicate.subscription_id = removed.id
-    ), removed_clauses as (
-        delete from pgconductor._private_event_filter_clauses clause
-        using removed
-        where clause.subscription_id = removed.id
-    ), removed_groups as (
-        delete from pgconductor._private_event_filter_groups filter_group
-        using removed
-        where filter_group.subscription_id = removed.id
     ), input as materialized (
         select task_key, event_key, payload_fields,
             coalesce(filter, '{}'::jsonb) as filter, input_ordinal
         from unnest(p_subscriptions) with ordinality
           as subscription(task_key, event_key, payload_fields, filter, input_ordinal)
+        cross join (select count(*) from removed) removal_barrier
     ), prepared as materialized (
         select pgconductor._private_portable_uuidv7() as id, input.*
         from input
@@ -1210,372 +1209,6 @@ on conflict (queue, key) do update set
     max_attempts = excluded.max_attempts,
     remove_on_complete_days = excluded.remove_on_complete_days,
     remove_on_fail_days = excluded.remove_on_fail_days;
-
-create or replace function pgconductor._private_extract_event_payload(p_fields text[], p_payload jsonb)
-returns jsonb
-language sql
-immutable
-set search_path to ''
-as $function$
-    select case
-        when p_fields is null then p_payload
-        else coalesce(
-            (
-                select jsonb_object_agg(key, p_payload -> key)
-                from unnest(p_fields) key
-                where p_payload ? key
-            ),
-            '{}'::jsonb
-        )
-    end;
-$function$;
-
--- Claim-fenced fan-out. Destination insertion and the reserved completion step
--- commit together. The step freezes the subscription snapshot across retries,
--- including events with no destinations.
-create or replace function pgconductor._private_dispatch_custom_events(
-    p_event_ids uuid[],
-    p_orchestrator_id uuid
-)
-returns table(event_id uuid)
-language plpgsql
-volatile
-security definer
-set search_path to ''
-as $function$
-begin
-    -- Acquire source locks in stable order in a separate statement. Under
-    -- READ COMMITTED the fan-out query below then receives a fresh snapshot,
-    -- so a concurrent dispatcher that waited here can see the first marker.
-    perform locked.id
-    from (
-        select source.id
-        from pgconductor._private_executions source
-        where source.id = any(coalesce(p_event_ids, array[]::uuid[]))
-          and source.queue = 'pgconductor.internal'
-          and source.task_key = 'pgconductor.event-dispatch'
-          and source.locked_by = p_orchestrator_id
-          and source.completed_at is null
-          and source.failed_at is null
-          and not source.cancelled
-        order by source.id
-        for update of source
-    ) locked;
-
-    return query
-    with claimed as materialized (
-        select
-            source.id,
-            source.payload ->> 'eventKey' as event_key,
-            source.payload -> 'payload' as event_payload
-        from pgconductor._private_executions source
-        where source.id = any(coalesce(p_event_ids, array[]::uuid[]))
-          and source.queue = 'pgconductor.internal'
-          and source.task_key = 'pgconductor.event-dispatch'
-          and source.locked_by = p_orchestrator_id
-          and source.completed_at is null
-          and source.failed_at is null
-          and not source.cancelled
-        for update of source
-    ), existing_markers as materialized (
-        select claimed.id
-        from claimed
-        join pgconductor._private_steps marker
-          on marker.execution_id = claimed.id
-         and marker.queue = 'pgconductor.internal'
-         and marker.key = 'pgconductor.internal.event-fanout.v1'
-    ), pending as materialized (
-        select claimed.*
-        from claimed
-        left join existing_markers on existing_markers.id = claimed.id
-        where existing_markers.id is null
-    ), event_values as materialized (
-        select pending.id as event_id, pending.event_key,
-            field.key as field_name, field.value,
-            jsonb_typeof(field.value) as scalar_type
-        from pending
-        cross join lateral jsonb_each(pending.event_payload) field
-        where jsonb_typeof(field.value) in ('string', 'number', 'boolean', 'null')
-    ), event_prefixes as materialized (
-        select event_value.event_id, event_value.event_key, event_value.field_name,
-            prefix_length,
-            left(event_value.value #>> '{}', prefix_length) as prefix_value
-        from event_values event_value
-        cross join lateral generate_series(
-            1,
-            least(64, length(event_value.value #>> '{}'))
-        ) prefix_length
-        where event_value.scalar_type = 'string'
-    ), exact_text_candidates as (
-        select event_value.event_id, predicate.subscription_id, predicate.group_number
-        from event_values event_value
-        join pgconductor._private_event_filter_predicates predicate
-          on predicate.is_anchor
-         and predicate.operator = 'exact'
-         and predicate.scalar_type = 'string'
-         and event_value.scalar_type = 'string'
-         and predicate.event_key collate "C" = event_value.event_key collate "C"
-         and predicate.field_name collate "C" = event_value.field_name collate "C"
-         and predicate.text_value collate "C" =
-             (event_value.value #>> '{}') collate "C"
-        join pgconductor._private_event_filter_groups filter_group
-          on filter_group.subscription_id = predicate.subscription_id
-         and filter_group.group_number = predicate.group_number
-         and filter_group.strategy = 'candidate'
-         and filter_group.anchor_clause_number = predicate.clause_number
-    ), exact_number_candidates as (
-        select event_value.event_id, predicate.subscription_id, predicate.group_number
-        from event_values event_value
-        join pgconductor._private_event_filter_predicates predicate
-          on predicate.is_anchor
-         and predicate.operator = 'exact'
-         and predicate.scalar_type = 'number'
-         and event_value.scalar_type = 'number'
-         and predicate.event_key = event_value.event_key
-         and predicate.field_name = event_value.field_name
-         and predicate.number_value = case
-             when event_value.scalar_type = 'number'
-             then (event_value.value #>> '{}')::numeric
-         end
-        join pgconductor._private_event_filter_groups filter_group
-          on filter_group.subscription_id = predicate.subscription_id
-         and filter_group.group_number = predicate.group_number
-         and filter_group.strategy = 'candidate'
-         and filter_group.anchor_clause_number = predicate.clause_number
-    ), exact_boolean_candidates as (
-        select event_value.event_id, predicate.subscription_id, predicate.group_number
-        from event_values event_value
-        join pgconductor._private_event_filter_predicates predicate
-          on predicate.is_anchor
-         and predicate.operator = 'exact'
-         and predicate.scalar_type = 'boolean'
-         and event_value.scalar_type = 'boolean'
-         and predicate.event_key = event_value.event_key
-         and predicate.field_name = event_value.field_name
-         and predicate.boolean_value = case
-             when event_value.scalar_type = 'boolean'
-             then (event_value.value #>> '{}')::boolean
-         end
-        join pgconductor._private_event_filter_groups filter_group
-          on filter_group.subscription_id = predicate.subscription_id
-         and filter_group.group_number = predicate.group_number
-         and filter_group.strategy = 'candidate'
-         and filter_group.anchor_clause_number = predicate.clause_number
-    ), exact_null_candidates as (
-        select event_value.event_id, predicate.subscription_id, predicate.group_number
-        from event_values event_value
-        join pgconductor._private_event_filter_predicates predicate
-          on predicate.is_anchor
-         and predicate.operator = 'exact'
-         and predicate.scalar_type = 'null'
-         and event_value.scalar_type = 'null'
-         and predicate.event_key = event_value.event_key
-         and predicate.field_name = event_value.field_name
-        join pgconductor._private_event_filter_groups filter_group
-          on filter_group.subscription_id = predicate.subscription_id
-         and filter_group.group_number = predicate.group_number
-         and filter_group.strategy = 'candidate'
-         and filter_group.anchor_clause_number = predicate.clause_number
-    ), prefix_candidates as (
-        select event_prefix.event_id, predicate.subscription_id, predicate.group_number
-        from event_prefixes event_prefix
-        join pgconductor._private_event_filter_predicates predicate
-          on predicate.is_anchor
-         and predicate.operator = 'prefix'
-         and predicate.event_key collate "C" = event_prefix.event_key collate "C"
-         and predicate.field_name collate "C" = event_prefix.field_name collate "C"
-         and predicate.prefix_length = event_prefix.prefix_length
-         and predicate.text_value collate "C" = event_prefix.prefix_value collate "C"
-        join pgconductor._private_event_filter_groups filter_group
-          on filter_group.subscription_id = predicate.subscription_id
-         and filter_group.group_number = predicate.group_number
-         and filter_group.strategy = 'candidate'
-         and filter_group.anchor_clause_number = predicate.clause_number
-    ), numeric_range_candidates as (
-        select event_value.event_id, predicate.subscription_id, predicate.group_number
-        from event_values event_value
-        join pgconductor._private_event_filter_predicates predicate
-          on predicate.is_anchor
-         and predicate.operator = 'numeric_range'
-         and event_value.scalar_type = 'number'
-         and predicate.event_key = event_value.event_key
-         and predicate.field_name = event_value.field_name
-         and predicate.number_range @> case
-             when event_value.scalar_type = 'number'
-             then (event_value.value #>> '{}')::numeric
-         end
-        join pgconductor._private_event_filter_groups filter_group
-          on filter_group.subscription_id = predicate.subscription_id
-         and filter_group.group_number = predicate.group_number
-         and filter_group.strategy = 'candidate'
-         and filter_group.anchor_clause_number = predicate.clause_number
-    ), fallback_candidates as (
-        select pending.id as event_id, filter_group.subscription_id,
-            filter_group.group_number
-        from pending
-        join pgconductor._private_event_filter_groups filter_group
-          on filter_group.event_key = pending.event_key
-         and filter_group.strategy = 'fallback'
-    ), candidate_groups as materialized (
-        select * from exact_text_candidates
-        union
-        select * from exact_number_candidates
-        union
-        select * from exact_boolean_candidates
-        union
-        select * from exact_null_candidates
-        union
-        select * from prefix_candidates
-        union
-        select * from numeric_range_candidates
-        union
-        select * from fallback_candidates
-    ), matching_groups as materialized (
-        select candidate.event_id, candidate.subscription_id
-        from candidate_groups candidate
-        join pending
-          on pending.id = candidate.event_id
-        where not exists (
-            select 1
-            from pgconductor._private_event_filter_clauses clause
-            where clause.subscription_id = candidate.subscription_id
-              and clause.group_number = candidate.group_number
-              and not exists (
-                  select 1
-                  from pgconductor._private_event_filter_predicates predicate
-                  where predicate.subscription_id = clause.subscription_id
-                    and predicate.group_number = clause.group_number
-                    and predicate.clause_number = clause.clause_number
-                    and case predicate.operator
-                        when 'exact' then case predicate.scalar_type
-                            when 'string' then
-                                jsonb_typeof(pending.event_payload -> clause.field_name) = 'string'
-                                and predicate.text_value collate "C" =
-                                    (pending.event_payload ->> clause.field_name) collate "C"
-                            when 'number' then predicate.number_value = case
-                                when jsonb_typeof(
-                                    pending.event_payload -> clause.field_name
-                                ) = 'number'
-                                then (pending.event_payload ->> clause.field_name)::numeric
-                            end
-                            when 'boolean' then predicate.boolean_value = case
-                                when jsonb_typeof(
-                                    pending.event_payload -> clause.field_name
-                                ) = 'boolean'
-                                then (pending.event_payload ->> clause.field_name)::boolean
-                            end
-                            when 'null' then
-                                pending.event_payload ? clause.field_name
-                                and jsonb_typeof(
-                                    pending.event_payload -> clause.field_name
-                                ) = 'null'
-                            else false
-                        end
-                        when 'prefix' then
-                            jsonb_typeof(pending.event_payload -> clause.field_name) = 'string'
-                            and left(
-                                pending.event_payload ->> clause.field_name,
-                                predicate.prefix_length
-                            ) collate "C" = predicate.text_value collate "C"
-                        when 'numeric_range' then predicate.number_range @> case
-                            when jsonb_typeof(
-                                pending.event_payload -> clause.field_name
-                            ) = 'number'
-                            then (pending.event_payload ->> clause.field_name)::numeric
-                        end
-                        when 'exists' then
-                            (pending.event_payload ? clause.field_name) = predicate.boolean_value
-                        when 'anything_but' then
-                            pending.event_payload ? clause.field_name
-                            and jsonb_typeof(
-                                pending.event_payload -> clause.field_name
-                            ) in ('string', 'number', 'boolean', 'null')
-                            and not coalesce(case predicate.scalar_type
-                                when 'string' then
-                                    jsonb_typeof(
-                                        pending.event_payload -> clause.field_name
-                                    ) = 'string'
-                                    and predicate.text_value collate "C" =
-                                        (pending.event_payload ->> clause.field_name) collate "C"
-                                when 'number' then predicate.number_value = case
-                                    when jsonb_typeof(
-                                        pending.event_payload -> clause.field_name
-                                    ) = 'number'
-                                    then (
-                                        pending.event_payload ->> clause.field_name
-                                    )::numeric
-                                end
-                                when 'boolean' then predicate.boolean_value = case
-                                    when jsonb_typeof(
-                                        pending.event_payload -> clause.field_name
-                                    ) = 'boolean'
-                                    then (
-                                        pending.event_payload ->> clause.field_name
-                                    )::boolean
-                                end
-                                when 'null' then jsonb_typeof(
-                                    pending.event_payload -> clause.field_name
-                                ) = 'null'
-                                else false
-                            end, false)
-                        else false
-                    end
-              )
-        )
-    ), matches as materialized (
-        select distinct
-            pending.id as event_id,
-            pending.event_key,
-            pending.event_payload,
-            subscription.id as subscription_id,
-            subscription.task_key,
-            subscription.queue,
-            subscription.payload_fields
-        from matching_groups matching_group
-        join pending on pending.id = matching_group.event_id
-        join pgconductor._private_custom_event_subscriptions subscription
-          on subscription.id = matching_group.subscription_id
-         and subscription.event_key = pending.event_key
-        join pgconductor._private_tasks task
-          on task.key = subscription.task_key
-         and task.queue = subscription.queue
-    ), inserted_destinations as (
-        insert into pgconductor._private_executions (
-            id, task_key, queue, payload, parent_execution_id, subscription_id
-        )
-        select
-            pgconductor._private_portable_uuidv7(),
-            candidate_match.task_key,
-            candidate_match.queue,
-            jsonb_build_object(
-                'event', candidate_match.event_key,
-                'payload', pgconductor._private_extract_event_payload(
-                    candidate_match.payload_fields, candidate_match.event_payload
-                )
-            ),
-            candidate_match.event_id,
-            candidate_match.subscription_id
-        from matches candidate_match
-        on conflict (parent_execution_id, subscription_id, queue)
-        where subscription_id is not null
-        do nothing
-        returning parent_execution_id
-    ), inserted_markers as (
-        insert into pgconductor._private_steps (execution_id, queue, key, result)
-        select pending.id, 'pgconductor.internal',
-            'pgconductor.internal.event-fanout.v1', null::jsonb
-        from pending
-        -- Consume the destination CTE explicitly: all destination writes must
-        -- finish before any completion marker can be produced.
-        cross join (select count(*) from inserted_destinations) destination_barrier
-        on conflict (execution_id, key) do nothing
-        returning execution_id
-    )
-    select id as event_id from existing_markers
-    union all
-    select execution_id from inserted_markers;
-end;
-$function$;
 
 create or replace function pgconductor.emit_event(
     p_event_key text,

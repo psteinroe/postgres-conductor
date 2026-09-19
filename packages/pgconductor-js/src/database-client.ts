@@ -20,6 +20,7 @@ import {
 	type EmitEventArgs,
 } from "./query-builder";
 import { makeChildLogger, type Logger } from "./lib/logger";
+import { buildEventDispatchDestinations } from "./event-dispatch";
 
 export type JsonValue = string | number | boolean | null | Payload | JsonValue[];
 export type Payload = { [key: string]: JsonValue };
@@ -582,11 +583,29 @@ export class DatabaseClient {
 		args: DispatchCustomEventsArgs,
 		opts?: QueryMethodOptions,
 	): Promise<string[]> {
-		const rows = await this.query(() => this.builder.buildDispatchCustomEvents(args), {
-			label: "dispatchCustomEvents",
-			...opts,
-		});
-		return rows.map((row) => row.event_id);
+		return this.query(
+			(sql) =>
+				sql.begin(async (transaction) => {
+					const builder = new QueryBuilder(transaction);
+					const sources = await builder.buildLockEventDispatchSources(args);
+					const eventIds = sources.map((source) => source.event_id);
+					if (eventIds.length === 0) return [];
+
+					const completed = await builder.buildGetCompletedEventDispatches(eventIds);
+					const completedIds = new Set(completed.map((row) => row.event_id));
+					const pendingIds = eventIds.filter((eventId) => !completedIds.has(eventId));
+					if (pendingIds.length === 0) return eventIds;
+
+					const candidates = await builder.buildGetEventDispatchCandidates(pendingIds);
+					const destinations = buildEventDispatchDestinations(candidates);
+					const committed = await builder.buildCommitEventDispatches(pendingIds, destinations);
+					return [...completedIds, ...committed.map((row) => row.event_id)];
+				}),
+			{
+				label: "dispatchCustomEvents",
+				...opts,
+			},
+		);
 	}
 
 	async emitEvent(args: EmitEventArgs, opts?: QueryMethodOptions): Promise<string> {

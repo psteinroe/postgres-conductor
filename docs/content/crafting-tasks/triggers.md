@@ -108,7 +108,7 @@ await conductor.emit("user.created", {
 });
 ```
 
-Each event is stored as a short-lived internal dispatch execution. Destination fan-out and a reserved completion marker commit in one database transaction, so failures retry without duplicating or changing the matched destination set.
+Each event is stored as a short-lived internal dispatch execution. Destination fan-out and a reserved completion marker commit in one database transaction. A committed marker freezes the matched destination set; a transaction that rolls back retries against the current subscriptions without leaving partial destinations.
 
 ### Emitting from Database Triggers
 

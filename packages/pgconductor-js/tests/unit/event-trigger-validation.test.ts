@@ -70,7 +70,10 @@ describe("event trigger compilation", () => {
 		expect(() => compile([{ suffix: "x" }])).toThrow(/unsupported operator/);
 	});
 
-	test("enforces index-safe UTF-8 byte limits before registration", () => {
+	test("enforces index-safe names and UTF-8 byte limits before registration", () => {
+		expect(() =>
+			compileEventTrigger({ event: "catalog.changed", filter: { " ": [true] } }, [], true),
+		).toThrow(/empty field names/);
 		expect(() => compileEventTrigger({ event: "e".repeat(256) }, [], true)).toThrow(
 			/255 UTF-8 bytes/,
 		);

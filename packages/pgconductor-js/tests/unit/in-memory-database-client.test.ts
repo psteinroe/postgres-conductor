@@ -937,6 +937,39 @@ describe("InMemoryDatabaseClient", () => {
 					key: "pgconductor.internal.event-fanout.v1",
 				}),
 			).toBeUndefined();
+
+			await db.registerWorker({
+				queueName: "default",
+				taskSpecs: [{ key: "event-target", maxAttempts: 3 }],
+				cronSchedules: [],
+				eventSubscriptions: [
+					{
+						task_key: "event-target",
+						event_key: "mock.event",
+						payload_fields: null,
+						filter: { value: [{ $operator: "anything_but", value: "blocked" }] },
+					},
+				],
+			});
+			const nonScalarEventId = await db.emitEvent({
+				eventKey: "mock.event",
+				payload: { value: { nested: true } },
+			});
+			await db.getExecutions({
+				orchestratorId: "event-orchestrator",
+				queueName: "pgconductor.internal",
+				batchSize: 10,
+				filterTaskKeys: [],
+			});
+			await db.dispatchCustomEvents({
+				eventIds: [nonScalarEventId],
+				orchestratorId: "event-orchestrator",
+			});
+			expect(
+				db
+					.getAllExecutions()
+					.filter((execution) => execution.parent_execution_id === nonScalarEventId),
+			).toHaveLength(0);
 		});
 	});
 

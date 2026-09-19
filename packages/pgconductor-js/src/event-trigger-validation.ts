@@ -1,3 +1,4 @@
+import { z } from "zod";
 import type { EventDefinition } from "./event-definition";
 import type { EventSubscriptionSpec, JsonValue } from "./database-client";
 
@@ -8,6 +9,48 @@ const MAX_FILTER_VALUE_BYTES = 1024;
 const MAX_FILTER_FIELDS = 8;
 const MAX_FILTER_ALTERNATIVES = 4;
 const MAX_PREFIX_CHARACTERS = 64;
+
+const EVENT_TRIGGER_SCHEMA = z.looseObject({
+	event: z
+		.string({ error: "Custom event triggers require a non-empty event name" })
+		.refine(
+			(value) => value.trim().length > 0,
+			"Custom event triggers require a non-empty event name",
+		),
+	fields: z.unknown().optional(),
+	filter: z.unknown().optional(),
+});
+const FILTER_SCALAR_SCHEMA = z.union([z.string(), z.number().finite(), z.boolean(), z.null()], {
+	error: "requires one scalar value",
+});
+const FILTER_SCHEMA = z.record(
+	z.string(),
+	z
+		.array(z.unknown(), { error: "must be an array" })
+		.min(1, "cannot be empty")
+		.max(MAX_FILTER_ALTERNATIVES, "supports at most 4 values"),
+);
+const NUMERIC_OPERATOR_SCHEMA = z.enum([">", ">=", "<", "<="], {
+	error: "has an unsupported operator",
+});
+const FINITE_NUMBER_SCHEMA = z
+	.number({ error: "requires finite operands" })
+	.finite("requires finite operands");
+const PREFIX_SCHEMA = z
+	.string({ error: "must be a non-empty string" })
+	.min(1, "must be a non-empty string")
+	.refine((value) => Array.from(value).length <= MAX_PREFIX_CHARACTERS, "exceeds 64 characters");
+const EXISTS_SCHEMA = z.boolean({ error: "must be boolean" });
+
+type FilterScalar = z.infer<typeof FILTER_SCALAR_SCHEMA>;
+type CanonicalPredicate = JsonValue;
+
+function parse<T>(schema: z.ZodType<T>, value: unknown, context: string): T {
+	const parsed = schema.safeParse(value);
+	if (parsed.success) return parsed.data;
+	const message = parsed.error.issues[0]?.message || "is invalid";
+	throw new Error(`${context} ${message}`);
+}
 
 function utf8ByteLength(value: string): number {
 	return new TextEncoder().encode(value).length;
@@ -24,52 +67,31 @@ function assertFieldName(field: string, eventName: string): void {
 
 export function parseEventPayloadFields(fields: unknown, eventName: string): string[] | null {
 	if (fields === undefined) return null;
-	if (typeof fields !== "string") {
-		throw new Error(`Fields for event "${eventName}" must be a comma-separated string`);
-	}
-
-	const selected = fields.split(",").map((field) => field.trim());
+	const value = parse(
+		z.string({ error: "must be a comma-separated string" }),
+		fields,
+		`Fields for event "${eventName}"`,
+	);
+	const selected = value.split(",").map((field) => field.trim());
 	if (selected.some((field) => field.length === 0)) {
 		throw new Error(`Fields for event "${eventName}" cannot contain empty names`);
 	}
-	for (const field of selected) {
-		assertFieldName(field, eventName);
-	}
+	for (const field of selected) assertFieldName(field, eventName);
 	if (new Set(selected).size !== selected.length) {
 		throw new Error(`Fields for event "${eventName}" cannot contain duplicate names`);
 	}
 	return selected;
 }
 
-function isEventFilterScalar(value: unknown): value is string | number | boolean | null {
-	return (
-		value === null ||
-		typeof value === "string" ||
-		typeof value === "boolean" ||
-		(typeof value === "number" && Number.isFinite(value))
-	);
-}
-
-function scalarSortKey(value: string | number | boolean | null): string {
+function scalarSortKey(value: FilterScalar): string {
 	if (value === null) return "0:null";
 	if (typeof value === "boolean") return `1:${value ? "true" : "false"}`;
 	if (typeof value === "number") return `2:${JSON.stringify(value)}`;
 	return `3:${JSON.stringify(value)}`;
 }
 
-function scalarByteLength(value: string | number | boolean | null): number {
-	return utf8ByteLength(JSON.stringify(value));
-}
-
-type CanonicalPredicate = JsonValue;
-type NumericOperator = ">" | ">=" | "<" | "<=";
-
-function assertScalarSize(
-	value: string | number | boolean | null,
-	eventName: string,
-	field: string,
-) {
-	if (scalarByteLength(value) > MAX_FILTER_VALUE_BYTES) {
+function assertScalarSize(value: FilterScalar, eventName: string, field: string): void {
+	if (utf8ByteLength(JSON.stringify(value)) > MAX_FILTER_VALUE_BYTES) {
 		throw new Error(
 			`Filter value for event "${eventName}" field "${field}" exceeds 1024 UTF-8 bytes`,
 		);
@@ -81,123 +103,97 @@ function canonicalNumericRange(
 	eventName: string,
 	field: string,
 ): CanonicalPredicate {
-	if (!Array.isArray(value) || (value.length !== 2 && value.length !== 4)) {
-		throw new Error(
-			`Numeric filter for event "${eventName}" field "${field}" must contain one or two operator/value pairs`,
-		);
-	}
+	const context = `Numeric filter for event "${eventName}" field "${field}"`;
+	const values = parse(
+		z.array(z.unknown()).refine((items) => items.length === 2 || items.length === 4, {
+			message: "must contain one or two operator/value pairs",
+		}),
+		value,
+		context,
+	);
 
 	let lower: number | null = null;
 	let lowerInclusive = false;
 	let upper: number | null = null;
 	let upperInclusive = false;
-	for (let index = 0; index < value.length; index += 2) {
-		const operator = value[index];
-		const operand = value[index + 1];
-		if (![">", ">=", "<", "<="].includes(operator as string)) {
-			throw new Error(
-				`Numeric filter for event "${eventName}" field "${field}" has an unsupported operator`,
-			);
-		}
-		if (typeof operand !== "number" || !Number.isFinite(operand)) {
-			throw new Error(
-				`Numeric filter for event "${eventName}" field "${field}" requires finite operands`,
-			);
-		}
-
-		if ((operator as NumericOperator) === ">" || (operator as NumericOperator) === ">=") {
-			if (lower !== null) {
-				throw new Error(
-					`Numeric filter for event "${eventName}" field "${field}" contains duplicate lower bounds`,
-				);
-			}
+	for (let index = 0; index < values.length; index += 2) {
+		const operator = parse(NUMERIC_OPERATOR_SCHEMA, values[index], context);
+		const operand = parse(FINITE_NUMBER_SCHEMA, values[index + 1], context);
+		if (operator === ">" || operator === ">=") {
+			if (lower !== null) throw new Error(`${context} contains duplicate lower bounds`);
 			lower = operand;
 			lowerInclusive = operator === ">=";
 		} else {
-			if (upper !== null) {
-				throw new Error(
-					`Numeric filter for event "${eventName}" field "${field}" contains duplicate upper bounds`,
-				);
-			}
+			if (upper !== null) throw new Error(`${context} contains duplicate upper bounds`);
 			upper = operand;
 			upperInclusive = operator === "<=";
 		}
 	}
-
 	if (
 		lower !== null &&
 		upper !== null &&
 		(lower > upper || (lower === upper && (!lowerInclusive || !upperInclusive)))
 	) {
-		throw new Error(`Numeric filter for event "${eventName}" field "${field}" is empty`);
+		throw new Error(`${context} is empty`);
 	}
-
-	return {
-		$operator: "numeric_range",
-		lower,
-		lowerInclusive,
-		upper,
-		upperInclusive,
-	};
+	return { $operator: "numeric_range", lower, lowerInclusive, upper, upperInclusive };
 }
 
 function canonicalPredicate(value: unknown, eventName: string, field: string): CanonicalPredicate {
-	if (isEventFilterScalar(value)) {
-		assertScalarSize(value, eventName, field);
-		return value;
-	}
-	if (typeof value !== "object" || value === null || Array.isArray(value)) {
-		throw new Error(
-			`Filter value for event "${eventName}" field "${field}" must be a scalar or supported operator`,
-		);
+	const scalar = FILTER_SCALAR_SCHEMA.safeParse(value);
+	if (scalar.success) {
+		assertScalarSize(scalar.data, eventName, field);
+		return scalar.data;
 	}
 
-	const entries = Object.entries(value as Record<string, unknown>);
+	const context = `Filter for event "${eventName}" field "${field}"`;
+	const operator = parse(z.record(z.string(), z.unknown()), value, context);
+	const entries = Object.entries(operator);
 	if (entries.length !== 1) {
-		throw new Error(
-			`Filter operator for event "${eventName}" field "${field}" must contain exactly one key`,
-		);
+		throw new Error(`${context} operator must contain exactly one key`);
 	}
-	const [operator, operand] = entries[0]!;
-	switch (operator) {
-		case "prefix":
-			if (typeof operand !== "string" || operand.length === 0) {
-				throw new Error(
-					`Prefix filter for event "${eventName}" field "${field}" must be a non-empty string`,
-				);
-			}
-			if (Array.from(operand).length > MAX_PREFIX_CHARACTERS) {
-				throw new Error(
-					`Prefix filter for event "${eventName}" field "${field}" exceeds 64 characters`,
-				);
-			}
-			assertScalarSize(operand, eventName, field);
-			return { $operator: "prefix", value: operand };
+	const entry = entries[0];
+	if (!entry) throw new Error(`${context} operator must contain exactly one key`);
+	const [name, operand] = entry;
+
+	switch (name) {
+		case "prefix": {
+			const prefix = parse(
+				PREFIX_SCHEMA,
+				operand,
+				`Prefix filter for event "${eventName}" field "${field}"`,
+			);
+			assertScalarSize(prefix, eventName, field);
+			return { $operator: "prefix", value: prefix };
+		}
 		case "numeric":
 			return canonicalNumericRange(operand, eventName, field);
 		case "exists":
-			if (typeof operand !== "boolean") {
-				throw new Error(`Exists filter for event "${eventName}" field "${field}" must be boolean`);
-			}
-			return { $operator: "exists", value: operand };
-		case "anything-but":
-			if (!isEventFilterScalar(operand)) {
-				throw new Error(
-					`Anything-but filter for event "${eventName}" field "${field}" requires one scalar value`,
-				);
-			}
-			assertScalarSize(operand, eventName, field);
-			return { $operator: "anything_but", value: operand };
-		default:
-			throw new Error(
-				`Filter for event "${eventName}" field "${field}" uses unsupported operator "${operator}"`,
+			return {
+				$operator: "exists",
+				value: parse(
+					EXISTS_SCHEMA,
+					operand,
+					`Exists filter for event "${eventName}" field "${field}"`,
+				),
+			};
+		case "anything-but": {
+			const scalarOperand = parse(
+				FILTER_SCALAR_SCHEMA,
+				operand,
+				`Anything-but filter for event "${eventName}" field "${field}"`,
 			);
+			assertScalarSize(scalarOperand, eventName, field);
+			return { $operator: "anything_but", value: scalarOperand };
+		}
+		default:
+			throw new Error(`${context} uses unsupported operator "${name}"`);
 	}
 }
 
 function predicateSortKey(value: CanonicalPredicate): string {
-	if (isEventFilterScalar(value)) return `0:${scalarSortKey(value)}`;
-	return `1:${JSON.stringify(value)}`;
+	const scalar = FILTER_SCALAR_SCHEMA.safeParse(value);
+	return scalar.success ? `0:${scalarSortKey(scalar.data)}` : `1:${JSON.stringify(value)}`;
 }
 
 function canonicalFilter(
@@ -207,24 +203,19 @@ function canonicalFilter(
 	allowUnknownEvents: boolean,
 ): Record<string, JsonValue[]> | null {
 	if (filter === undefined || filter === null) return null;
-	if (typeof filter !== "object" || Array.isArray(filter)) {
-		throw new Error(`Filter for event "${eventName}" must be an object`);
-	}
-
-	const filterEntries = Object.entries(filter as Record<string, unknown>);
-	if (filterEntries.length > MAX_FILTER_FIELDS) {
+	const input = parse(FILTER_SCHEMA, filter, `Filter for event "${eventName}"`);
+	const entries = Object.entries(input);
+	if (entries.length > MAX_FILTER_FIELDS) {
 		throw new Error(`Filter for event "${eventName}" supports at most 8 fields`);
 	}
 	if (!definition && !allowUnknownEvents) {
 		throw new Error(`Filtered event "${eventName}" has no runtime event definition`);
 	}
 
-	const allowed = definition ? new Set(definition.filterable ?? []) : undefined;
+	const allowed = definition ? new Set(definition.filterable || []) : null;
 	const canonical: Record<string, JsonValue[]> = {};
-	for (const [field, values] of filterEntries.sort(([left], [right]) =>
-		left < right ? -1 : left > right ? 1 : 0,
-	)) {
-		if (utf8ByteLength(field) === 0) {
+	for (const [field, values] of entries.sort(([left], [right]) => left.localeCompare(right))) {
+		if (field.trim().length === 0) {
 			throw new Error(`Filter for event "${eventName}" cannot contain empty field names`);
 		}
 		if (utf8ByteLength(field) > MAX_EVENT_FIELD_BYTES) {
@@ -232,17 +223,6 @@ function canonicalFilter(
 		}
 		if (allowed && !allowed.has(field)) {
 			throw new Error(`Filter for event "${eventName}" contains undeclared field "${field}"`);
-		}
-		if (!Array.isArray(values)) {
-			throw new Error(`Filter value for event "${eventName}" field "${field}" must be an array`);
-		}
-		if (values.length === 0) {
-			throw new Error(`Filter value for event "${eventName}" field "${field}" cannot be empty`);
-		}
-		if (values.length > MAX_FILTER_ALTERNATIVES) {
-			throw new Error(
-				`Filter value for event "${eventName}" field "${field}" supports at most 4 values`,
-			);
 		}
 
 		const predicates = values.map((value) => canonicalPredicate(value, eventName, field));
@@ -260,11 +240,9 @@ function canonicalFilter(
 				`Anything-but filter for event "${eventName}" field "${field}" must be atomic`,
 			);
 		}
-
-		const byKey = new Map<string, CanonicalPredicate>();
-		for (const predicate of predicates) byKey.set(predicateSortKey(predicate), predicate);
-		canonical[field] = [...byKey.entries()]
-			.sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
+		const unique = new Map(predicates.map((predicate) => [predicateSortKey(predicate), predicate]));
+		canonical[field] = [...unique.entries()]
+			.sort(([left], [right]) => left.localeCompare(right))
 			.map(([, predicate]) => predicate);
 	}
 	return canonical;
@@ -282,16 +260,12 @@ export function compileEventTrigger(
 	allowUnknownEvents = false,
 ): CompiledEventTrigger | null {
 	if (!("event" in trigger)) return null;
-	const candidate = trigger as Record<string, unknown>;
-	if (typeof candidate.event !== "string" || candidate.event.trim().length === 0) {
-		throw new Error("Custom event triggers require a non-empty event name");
-	}
-
+	const candidate = parse(EVENT_TRIGGER_SCHEMA, trigger, "Custom event trigger");
 	const eventName = candidate.event;
 	if (utf8ByteLength(eventName) > MAX_EVENT_NAME_BYTES) {
 		throw new Error(`Event "${eventName}" exceeds 255 UTF-8 bytes`);
 	}
-	if ("when" in candidate) {
+	if ("when" in trigger) {
 		throw new Error(`Custom event "${eventName}" does not support a when clause`);
 	}
 
@@ -299,7 +273,6 @@ export function compileEventTrigger(
 	if (eventDefinitions.length > 0 && !definition && !allowUnknownEvents) {
 		throw new Error(`Event "${eventName}" is not defined in the conductor event catalog`);
 	}
-
 	return {
 		event_key: eventName,
 		payload_fields: parseEventPayloadFields(candidate.fields, eventName),
