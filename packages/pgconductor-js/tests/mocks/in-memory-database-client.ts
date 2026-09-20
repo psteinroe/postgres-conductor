@@ -5,6 +5,7 @@ import type {
 	ExecutionSpec,
 	TaskSpec,
 	Payload,
+	JsonValue,
 	SetFakeTimeArgs,
 } from "../../src/database-client";
 import { DatabaseClient as RealDatabaseClient } from "../../src/database-client";
@@ -27,6 +28,7 @@ import type {
 import type { Migration } from "../../src/migration-store";
 import type { Logger } from "../../src/lib/logger";
 import CronExpressionParser from "cron-parser";
+import { eventFilterMatches } from "../../src/event-dispatch";
 
 type PublicMethodsOf<T> = {
 	[K in keyof T as T[K] extends Function ? K : never]: T[K];
@@ -115,7 +117,7 @@ interface StoredEventSubscription {
 	queue: string;
 	event_key: string;
 	payload_fields: string[] | null;
-	filter: Record<string, unknown[]> | null;
+	filter: Record<string, JsonValue[]> | null;
 }
 
 interface SignalData {
@@ -362,7 +364,7 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 				queue: args.queueName,
 				event_key: spec.event_key,
 				payload_fields: spec.payload_fields,
-				filter: spec.filter as Record<string, unknown[]> | null,
+				filter: spec.filter,
 			});
 		}
 
@@ -1110,49 +1112,6 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 		);
 	}
 
-	private scalarMatches(left: unknown, right: unknown): boolean {
-		return left === right && (left === null || typeof left === typeof right);
-	}
-
-	private eventPredicateMatches(present: boolean, value: unknown, predicate: unknown): boolean {
-		if (
-			predicate === null ||
-			typeof predicate === "string" ||
-			typeof predicate === "number" ||
-			typeof predicate === "boolean"
-		) {
-			return present && this.scalarMatches(value, predicate);
-		}
-		if (typeof predicate !== "object" || Array.isArray(predicate)) return false;
-		const spec = predicate as Record<string, unknown>;
-		switch (spec.$operator) {
-			case "prefix":
-				return present && typeof value === "string" && value.startsWith(String(spec.value));
-			case "numeric_range": {
-				if (!present || typeof value !== "number") return false;
-				const lower = spec.lower as number | null;
-				const upper = spec.upper as number | null;
-				return (
-					(lower === null || (spec.lowerInclusive === true ? value >= lower : value > lower)) &&
-					(upper === null || (spec.upperInclusive === true ? value <= upper : value < upper))
-				);
-			}
-			case "exists":
-				return present === spec.value;
-			case "anything_but":
-				return (
-					present &&
-					(value === null ||
-						typeof value === "string" ||
-						typeof value === "number" ||
-						typeof value === "boolean") &&
-					!this.scalarMatches(value, spec.value)
-				);
-			default:
-				return false;
-		}
-	}
-
 	async dispatchCustomEvents(args: {
 		eventIds: string[];
 		orchestratorId: string;
@@ -1186,13 +1145,7 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 				) {
 					continue;
 				}
-				const matches = Object.entries(subscription.filter || {}).every(([field, values]) => {
-					const present = Object.prototype.hasOwnProperty.call(payload, field);
-					return values.some((predicate) =>
-						this.eventPredicateMatches(present, payload[field], predicate),
-					);
-				});
-				if (!matches) continue;
+				if (!eventFilterMatches(payload, subscription.filter)) continue;
 
 				const destinationPayload = subscription.payload_fields
 					? (Object.fromEntries(

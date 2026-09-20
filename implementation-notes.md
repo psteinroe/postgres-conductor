@@ -10,12 +10,12 @@ Running notes for the custom-event pipeline implementation.
 - A reserved `_private_steps` row, `pgconductor.internal.event-fanout.v1`, is the atomic fan-out commit marker. TypeScript holds the source locks while destination and marker insertion commit in the same transaction. A retry that sees the marker completes without re-reading subscriptions, including zero-destination events.
 - Source completion removes the immediate-retention dispatch execution and cascades marker removal. Destinations remain because they have no foreign key to the source.
 - Destination identity is `(parent_execution_id, subscription_id)`. `parent_execution_id` records source-event lineage, while non-null `subscription_id` excludes the delivery from workflow child settlement, orphaning, wake-up, and failure propagation.
-- Persistent filters are normalized as subscription OR-groups, group AND-clauses, and clause OR-predicates. The public API compiles one group per filter object and one clause per field. Predicates support exact scalars, literal prefixes, numeric ranges, presence, and atomic `anything-but`.
-- Registration deterministically chooses the safest complete anchor clause by operator rank and field name. Every alternative in that clause must support exact, prefix, or numeric-range candidate lookup. Groups with only presence/negative clauses and empty filters are explicit fallback groups.
-- Predicates store an operator and scalar discriminator plus typed text, numeric, boolean, prefix-length, or `numrange` operands. JSON null has its own discriminator and no SQL operand. Missing fields therefore remain distinct from JSON null.
-- Dispatch uses SQL for operator-specific indexed anchor probes, including bounded literal event-prefix expansion, then verifies the returned normalized candidate predicates in TypeScript. Destination and marker writes remain atomic in the same transaction. No JSONB predicate values, stored match counts, or hashes are used.
-- Zod validates event catalog policy, limits, operators, and scalar values before TypeScript canonicalizes field ordering and type-sensitive scalar alternatives. The private registration SQL converts that transport value into normalized relational rows set-wise.
-- Cascading foreign keys maintain the cold subscription → group → clause → predicate hierarchy. Hot execution and destination lineage remain independent of that hierarchy.
+- Each subscription stores one canonical filter object directly. Fields are AND clauses and each field's alternatives are OR predicates supporting exact scalars, literal prefixes, numeric ranges, presence, and atomic `anything-but`.
+- Registration deterministically chooses one complete candidate-safe field by operator rank and field name. Only that field's exact, prefix, or numeric-range alternatives are stored in `_private_event_filter_anchors`; filters without a safe field store one event-key fallback anchor.
+- Dispatch uses one SQL statement to lock/fence sources, inspect markers, and perform typed indexed anchor probes. It returns one row per candidate subscription rather than one row per predicate. TypeScript evaluates the already-canonical filter directly, then one SQL statement atomically inserts destinations and markers.
+- Zod validates and canonicalizes each event trigger once when its `Task` is constructed. The compiled subscription and anchors are cached on the task and worker registration persists them without recompilation. The private SQL trusts this compiled policy and only converts anchor transport values into indexed typed columns.
+- A cascading foreign key maintains the cold subscription → anchor relationship. Hot execution and destination lineage remain independent of subscription metadata.
+- The in-memory client reuses the production filter matcher instead of maintaining a second implementation.
 - Registration remains queue-scoped and atomic under the existing queue-row lock. Dispatch sees either the old or new committed subscription snapshot.
 
 ## Lifecycle invariants
@@ -35,11 +35,20 @@ Running notes for the custom-event pipeline implementation.
 - Missing values differ from JSON null; `exists` tests presence directly.
 - `{}` is unconditional and uses the explicit fallback path.
 - Event names are limited to 255 UTF-8 bytes, field names to 128 bytes, and indexed scalar JSON text to 1,024 bytes.
-- Event payloads and private filter transport values must be JSON objects at their database boundaries.
+- Event payloads and private filter transport values must be JSON objects at their database boundaries. Because final matching uses JavaScript numbers, top-level numeric fields emitted directly from SQL must round-trip through PostgreSQL `double precision` without changing their decimal value.
 
-## Deviations and tradeoffs
+## Deviations
 
 - Migrations are rewritten in place under the active-development policy. Databases created from earlier unreleased snapshots must be recreated.
-- Presence and `anything-but` are residual-only operators. A group that has no complete exact, prefix, or numeric-range anchor clause is intentionally routed through the event-key-local fallback index.
 - There is no independent event replay or custom-event retention layer. A future one-shot wait feature must define its own no-miss registration/replay protocol rather than inferring commit order from event IDs.
+
+## Tradeoffs
+
+- Presence and `anything-but` are residual-only operators. A filter without a complete exact, prefix, or numeric-range candidate field intentionally uses the event-key-local fallback index.
+- Canonical filters remain JSONB because TypeScript owns final matching. Only candidate anchors are relational and typed; fully normalizing residual predicates would duplicate the matcher and increase query results.
+- Combining source locking and candidate lookup into one SQL statement can use the statement's pre-wait snapshot during a concurrent dispatch. The commit statement rechecks the marker before inserting destinations, so a dispatcher that waited for an already-committed fan-out cannot extend its frozen destination set.
 - Dispatcher batches remain 10. Fan-out is one atomic transaction per batch and reuses the existing hidden Worker path.
+
+## Open questions
+
+- None.

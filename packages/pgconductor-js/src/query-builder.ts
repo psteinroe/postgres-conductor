@@ -8,11 +8,7 @@ import type {
 	Payload,
 	TaskSpec,
 } from "./database-client";
-import type {
-	EventDispatchCandidate,
-	EventDispatchDestination,
-	EventDispatchSource,
-} from "./event-dispatch";
+import type { EventDispatchCandidate, EventDispatchDestination } from "./event-dispatch";
 
 export type OrchestratorHeartbeatArgs = {
 	orchestratorId: string;
@@ -770,6 +766,7 @@ export class QueryBuilder {
 			event_key: spec.event_key,
 			payload_fields: spec.payload_fields,
 			filter: spec.filter,
+			anchors: spec.anchors,
 		}));
 
 		return this.sql`
@@ -1078,51 +1075,39 @@ export class QueryBuilder {
 		`;
 	}
 
-	buildLockEventDispatchSources({
+	buildGetEventDispatchCandidates({
 		eventIds,
 		orchestratorId,
-	}: DispatchCustomEventsArgs): PendingQuery<EventDispatchSource[]> {
-		return this.sql<EventDispatchSource[]>`
-			select
-				source.id as event_id,
-				source.payload ->> 'eventKey' as event_key,
-				source.payload -> 'payload' as event_payload
-			from pgconductor._private_executions source
-			where source.id = any(${this.sql.array(eventIds, 2951)}::uuid[])
-				and source.queue = 'pgconductor.internal'
-				and source.task_key = 'pgconductor.event-dispatch'
-				and source.locked_by = ${orchestratorId}::uuid
-				and source.completed_at is null
-				and source.failed_at is null
-				and not source.cancelled
-			order by source.id
-			for update of source
-		`;
-	}
-
-	buildGetCompletedEventDispatches(eventIds: string[]): PendingQuery<{ event_id: string }[]> {
-		return this.sql<{ event_id: string }[]>`
-			select marker.execution_id as event_id
-			from pgconductor._private_steps marker
-			where marker.execution_id = any(${this.sql.array(eventIds, 2951)}::uuid[])
-				and marker.queue = 'pgconductor.internal'
-				and marker.key = 'pgconductor.internal.event-fanout.v1'
-		`;
-	}
-
-	buildGetEventDispatchCandidates(eventIds: string[]): PendingQuery<EventDispatchCandidate[]> {
+	}: DispatchCustomEventsArgs): PendingQuery<EventDispatchCandidate[]> {
 		return this.sql<EventDispatchCandidate[]>`
 			with sources as materialized (
 				select
 					source.id as event_id,
 					source.payload ->> 'eventKey' as event_key,
-					source.payload -> 'payload' as event_payload
+					source.payload -> 'payload' as event_payload,
+					exists (
+						select 1
+						from pgconductor._private_steps marker
+						where marker.execution_id = source.id
+							and marker.queue = 'pgconductor.internal'
+							and marker.key = 'pgconductor.internal.event-fanout.v1'
+					) as completed
 				from pgconductor._private_executions source
 				where source.id = any(${this.sql.array(eventIds, 2951)}::uuid[])
+					and source.queue = 'pgconductor.internal'
+					and source.task_key = 'pgconductor.event-dispatch'
+					and source.locked_by = ${orchestratorId}::uuid
+					and source.completed_at is null
+					and source.failed_at is null
+					and not source.cancelled
+				order by source.id
+				for update of source
+			), pending as materialized (
+				select * from sources where not completed
 			), event_values as materialized (
 				select source.event_id, source.event_key, field.key as field_name,
 					field.value, jsonb_typeof(field.value) as scalar_type
-				from sources source
+				from pending source
 				cross join lateral jsonb_each(source.event_payload) field
 				where jsonb_typeof(field.value) in ('string', 'number', 'boolean', 'null')
 			), event_prefixes as materialized (
@@ -1134,130 +1119,102 @@ export class QueryBuilder {
 					left(event_value.value #>> '{}', anchor.prefix_length) as prefix_value
 				from event_values event_value
 				cross join lateral (
-					select distinct predicate.prefix_length
-					from pgconductor._private_event_filter_predicates predicate
-					where predicate.is_anchor
-						and predicate.operator = 'prefix'
-						and predicate.event_key collate "C" = event_value.event_key collate "C"
-						and predicate.field_name collate "C" = event_value.field_name collate "C"
+					select distinct candidate.prefix_length
+					from pgconductor._private_event_filter_anchors candidate
+					where candidate.operator = 'prefix'
+						and candidate.event_key collate "C" = event_value.event_key collate "C"
+						and candidate.field_name collate "C" = event_value.field_name collate "C"
 				) anchor
 				where event_value.scalar_type = 'string'
-			), candidate_groups as materialized (
-				select event_value.event_id, predicate.subscription_id, predicate.group_number
+			), candidate_subscriptions as materialized (
+				select event_value.event_id, anchor.subscription_id
 				from event_values event_value
-				join pgconductor._private_event_filter_predicates predicate
-					on predicate.is_anchor
-					and predicate.operator = 'exact'
-					and predicate.scalar_type = 'string'
+				join pgconductor._private_event_filter_anchors anchor
+					on anchor.operator = 'exact'
+					and anchor.scalar_type = 'string'
 					and event_value.scalar_type = 'string'
-					and predicate.event_key collate "C" = event_value.event_key collate "C"
-					and predicate.field_name collate "C" = event_value.field_name collate "C"
-					and predicate.text_value collate "C" = (event_value.value #>> '{}') collate "C"
+					and anchor.event_key collate "C" = event_value.event_key collate "C"
+					and anchor.field_name collate "C" = event_value.field_name collate "C"
+					and anchor.text_value collate "C" = (event_value.value #>> '{}') collate "C"
 				union
-				select event_value.event_id, predicate.subscription_id, predicate.group_number
+				select event_value.event_id, anchor.subscription_id
 				from event_values event_value
-				join pgconductor._private_event_filter_predicates predicate
-					on predicate.is_anchor
-					and predicate.operator = 'exact'
-					and predicate.scalar_type = 'number'
+				join pgconductor._private_event_filter_anchors anchor
+					on anchor.operator = 'exact'
+					and anchor.scalar_type = 'number'
 					and event_value.scalar_type = 'number'
-					and predicate.event_key = event_value.event_key
-					and predicate.field_name = event_value.field_name
-					and predicate.number_value = case
-						when event_value.scalar_type = 'number'
-						then (event_value.value #>> '{}')::numeric
-					end
+					and anchor.event_key = event_value.event_key
+					and anchor.field_name = event_value.field_name
+					and anchor.number_value = case when event_value.scalar_type = 'number'
+						then (event_value.value #>> '{}')::numeric end
 				union
-				select event_value.event_id, predicate.subscription_id, predicate.group_number
+				select event_value.event_id, anchor.subscription_id
 				from event_values event_value
-				join pgconductor._private_event_filter_predicates predicate
-					on predicate.is_anchor
-					and predicate.operator = 'exact'
-					and predicate.scalar_type = 'boolean'
+				join pgconductor._private_event_filter_anchors anchor
+					on anchor.operator = 'exact'
+					and anchor.scalar_type = 'boolean'
 					and event_value.scalar_type = 'boolean'
-					and predicate.event_key = event_value.event_key
-					and predicate.field_name = event_value.field_name
-					and predicate.boolean_value = case
-						when event_value.scalar_type = 'boolean'
-						then (event_value.value #>> '{}')::boolean
-					end
+					and anchor.event_key = event_value.event_key
+					and anchor.field_name = event_value.field_name
+					and anchor.boolean_value = case when event_value.scalar_type = 'boolean'
+						then (event_value.value #>> '{}')::boolean end
 				union
-				select event_value.event_id, predicate.subscription_id, predicate.group_number
+				select event_value.event_id, anchor.subscription_id
 				from event_values event_value
-				join pgconductor._private_event_filter_predicates predicate
-					on predicate.is_anchor
-					and predicate.operator = 'exact'
-					and predicate.scalar_type = 'null'
+				join pgconductor._private_event_filter_anchors anchor
+					on anchor.operator = 'exact'
+					and anchor.scalar_type = 'null'
 					and event_value.scalar_type = 'null'
-					and predicate.event_key = event_value.event_key
-					and predicate.field_name = event_value.field_name
+					and anchor.event_key = event_value.event_key
+					and anchor.field_name = event_value.field_name
 				union
-				select event_prefix.event_id, predicate.subscription_id, predicate.group_number
+				select event_prefix.event_id, anchor.subscription_id
 				from event_prefixes event_prefix
-				join pgconductor._private_event_filter_predicates predicate
-					on predicate.is_anchor
-					and predicate.operator = 'prefix'
-					and predicate.event_key collate "C" = event_prefix.event_key collate "C"
-					and predicate.field_name collate "C" = event_prefix.field_name collate "C"
-					and predicate.prefix_length = event_prefix.prefix_length
-					and predicate.text_value collate "C" = event_prefix.prefix_value collate "C"
+				join pgconductor._private_event_filter_anchors anchor
+					on anchor.operator = 'prefix'
+					and anchor.event_key collate "C" = event_prefix.event_key collate "C"
+					and anchor.field_name collate "C" = event_prefix.field_name collate "C"
+					and anchor.prefix_length = event_prefix.prefix_length
+					and anchor.text_value collate "C" = event_prefix.prefix_value collate "C"
 				union
-				select event_value.event_id, predicate.subscription_id, predicate.group_number
+				select event_value.event_id, anchor.subscription_id
 				from event_values event_value
-				join pgconductor._private_event_filter_predicates predicate
-					on predicate.is_anchor
-					and predicate.operator = 'numeric_range'
+				join pgconductor._private_event_filter_anchors anchor
+					on anchor.operator = 'numeric_range'
 					and event_value.scalar_type = 'number'
-					and predicate.event_key = event_value.event_key
-					and predicate.field_name = event_value.field_name
-					and predicate.number_range @> case
-						when event_value.scalar_type = 'number'
-						then (event_value.value #>> '{}')::numeric
-					end
+					and anchor.event_key = event_value.event_key
+					and anchor.field_name = event_value.field_name
+					and anchor.number_range @> case when event_value.scalar_type = 'number'
+						then (event_value.value #>> '{}')::numeric end
 				union
-				select source.event_id, filter_group.subscription_id, filter_group.group_number
-				from sources source
-				join pgconductor._private_event_filter_groups filter_group
-					on filter_group.event_key = source.event_key
-					and filter_group.strategy = 'fallback'
+				select source.event_id, anchor.subscription_id
+				from pending source
+				join pgconductor._private_event_filter_anchors anchor
+					on anchor.event_key = source.event_key
+					and anchor.operator = 'fallback'
+			), candidates as materialized (
+				select candidate.event_id, subscription.id as subscription_id,
+					subscription.task_key, subscription.queue,
+					subscription.payload_fields, subscription.filter
+				from candidate_subscriptions candidate
+				join pgconductor._private_custom_event_subscriptions subscription
+					on subscription.id = candidate.subscription_id
+				join pgconductor._private_tasks task
+					on task.key = subscription.task_key and task.queue = subscription.queue
 			)
 			select
 				source.event_id,
 				source.event_key,
 				source.event_payload,
-				subscription.id as subscription_id,
-				subscription.task_key,
-				subscription.queue,
-				subscription.payload_fields,
-				candidate.group_number,
-				clause.clause_number,
-				clause.field_name,
-				predicate.operator,
-				predicate.scalar_type,
-				predicate.text_value,
-				predicate.number_value::double precision as number_value,
-				predicate.boolean_value,
-				lower(predicate.number_range)::double precision as lower_value,
-				upper(predicate.number_range)::double precision as upper_value,
-				lower_inc(predicate.number_range) as lower_inclusive,
-				upper_inc(predicate.number_range) as upper_inclusive
-			from candidate_groups candidate
-			join sources source on source.event_id = candidate.event_id
-			join pgconductor._private_custom_event_subscriptions subscription
-				on subscription.id = candidate.subscription_id
-				and subscription.event_key = source.event_key
-			join pgconductor._private_tasks task
-				on task.key = subscription.task_key
-				and task.queue = subscription.queue
-			left join pgconductor._private_event_filter_clauses clause
-				on clause.subscription_id = candidate.subscription_id
-				and clause.group_number = candidate.group_number
-			left join pgconductor._private_event_filter_predicates predicate
-				on predicate.subscription_id = clause.subscription_id
-				and predicate.group_number = clause.group_number
-				and predicate.clause_number = clause.clause_number
-			order by source.event_id, subscription.id, candidate.group_number,
-				clause.clause_number, predicate.predicate_number
+				source.completed,
+				candidate.subscription_id,
+				candidate.task_key,
+				candidate.queue,
+				candidate.payload_fields,
+				candidate.filter
+			from sources source
+			left join candidates candidate on candidate.event_id = source.event_id
+			order by source.event_id, candidate.subscription_id
 		`;
 	}
 
@@ -1287,6 +1244,13 @@ export class QueryBuilder {
 					destination."eventId",
 					destination."subscriptionId"
 				from destinations destination
+				where not exists (
+					select 1
+					from pgconductor._private_steps marker
+					where marker.execution_id = destination."eventId"
+						and marker.queue = 'pgconductor.internal'
+						and marker.key = 'pgconductor.internal.event-fanout.v1'
+				)
 				on conflict (parent_execution_id, subscription_id, queue)
 				where subscription_id is not null
 				do nothing
@@ -1300,7 +1264,9 @@ export class QueryBuilder {
 				on conflict (execution_id, key) do nothing
 				returning execution_id
 			)
-			select execution_id as event_id from inserted_markers
+			select event_id
+			from unnest(${this.sql.array(eventIds, 2951)}::uuid[]) event_id
+			cross join (select count(*) from inserted_markers) marker_barrier
 		`;
 	}
 

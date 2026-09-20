@@ -9,6 +9,7 @@ import type {
 import type { EventDefinition, FindEventByIdentifier, InferEventPayload } from "./event-definition";
 import type { SelectedRow } from "./select-columns";
 import * as assert from "./lib/assert";
+import { compileEventTriggers, type CompiledEventTrigger } from "./event-trigger-validation";
 
 export type TaskIdentifier<TName extends string = string, TQueue extends string = "default"> = {
 	readonly name: TName;
@@ -167,11 +168,14 @@ export class Task<
 	public readonly deadLetter?: DeadLetterConfiguration<Payload>;
 
 	public readonly triggers: NonEmptyArray<Trigger>;
+	public readonly eventTriggers: CompiledEventTrigger[];
 
 	constructor(
 		definition: TaskConfiguration<Key, Queue, Payload>,
 		triggers: NonEmptyArray<Trigger> | Trigger,
 		public readonly execute: ExecuteFunction<EventType, Returns, Context>,
+		eventDefinitions: readonly EventDefinition<string, any, any>[] = [],
+		allowUnknownEvents = true,
 	) {
 		const { name, queue, ...config } = definition;
 		this.name = name;
@@ -196,6 +200,7 @@ export class Task<
 		}
 
 		this.triggers = Array.isArray(triggers) ? triggers : [triggers];
+		this.eventTriggers = compileEventTriggers(this.triggers, eventDefinitions, allowUnknownEvents);
 	}
 
 	static create<
@@ -209,11 +214,15 @@ export class Task<
 		definition: TaskConfiguration<Key, Queue, Payload>,
 		triggers: NonEmptyArray<Trigger> | Trigger,
 		execute: ExecuteFunction<EventType, Returns, Context>,
+		eventDefinitions: readonly EventDefinition<string, any, any>[] = [],
+		allowUnknownEvents = true,
 	): Task<Key, Queue, Payload, Returns, Context, EventType> {
 		return new Task<Key, Queue, Payload, Returns, Context, EventType>(
 			definition,
 			triggers,
 			execute,
+			eventDefinitions,
+			allowUnknownEvents,
 		);
 	}
 }

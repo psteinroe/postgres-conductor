@@ -30,7 +30,6 @@ import * as assert from "./lib/assert";
 import { createMaintenanceTask } from "./maintenance-task";
 import { makeChildLogger, type Logger } from "./lib/logger";
 import type { EventDefinition } from "./event-definition";
-import { compileEventTriggers } from "./event-trigger-validation";
 import { coerceError } from "./lib/coerce-error";
 import type { TypedAbortController } from "./lib/typed-abort-controller";
 
@@ -175,9 +174,9 @@ export class Worker<
 		private readonly logger: Logger,
 		config: Partial<WorkerConfig> = {},
 		private readonly extraContext: object = {},
-		private readonly eventDefinitions: readonly EventDefinition<string, any, any>[] = [],
+		_eventDefinitions: readonly EventDefinition<string, any, any>[] = [],
 		includeMaintenance = true,
-		private readonly allowUnknownEvents = false,
+		_allowUnknownEvents = false,
 	) {
 		const initialTasks = new Map<string, AnyTask>();
 		if (includeMaintenance) {
@@ -421,12 +420,10 @@ export class Worker<
 		);
 
 		const eventSubscriptions: EventSubscriptionSpec[] = allTasks.flatMap((task) =>
-			compileEventTriggers(task.triggers, this.eventDefinitions, this.allowUnknownEvents).map(
-				(spec) => ({
-					task_key: task.name,
-					...spec,
-				}),
-			),
+			(task.eventTriggers ?? []).map((spec) => ({
+				task_key: task.name,
+				...spec,
+			})),
 		);
 
 		await this.db.registerWorker(

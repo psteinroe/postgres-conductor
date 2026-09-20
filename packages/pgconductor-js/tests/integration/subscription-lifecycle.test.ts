@@ -34,7 +34,7 @@ describe("event subscription lifecycle", () => {
 		return db;
 	}
 
-	test("persists an unconditional subscription as a fallback DNF group", async () => {
+	test("persists an unconditional subscription with one fallback anchor", async () => {
 		const db = await database();
 		const event = defineEvent({
 			name: "user.created",
@@ -67,37 +67,25 @@ describe("event subscription lifecycle", () => {
 				id: string;
 				event_key: string;
 				task_key: string;
-				strategy: string;
-				anchor_clause_number: number | null;
-				clause_count: number;
-				predicate_count: number;
+				filter: Record<string, unknown>;
+				operator: string;
+				field_name: string | null;
 			}[]
 		>`
 			select subscription.id, subscription.event_key, subscription.task_key,
-				filter_group.strategy, filter_group.anchor_clause_number,
-				count(distinct clause.clause_number)::integer as clause_count,
-				count(predicate.predicate_number)::integer as predicate_count
+				subscription.filter, anchor.operator, anchor.field_name
 			from pgconductor._private_custom_event_subscriptions subscription
-			join pgconductor._private_event_filter_groups filter_group
-				on filter_group.subscription_id = subscription.id
-			left join pgconductor._private_event_filter_clauses clause
-				on clause.subscription_id = filter_group.subscription_id
-				and clause.group_number = filter_group.group_number
-			left join pgconductor._private_event_filter_predicates predicate
-				on predicate.subscription_id = clause.subscription_id
-				and predicate.group_number = clause.group_number
-				and predicate.clause_number = clause.clause_number
+			join pgconductor._private_event_filter_anchors anchor
+				on anchor.subscription_id = subscription.id
 			where subscription.event_key = 'user.created'
-			group by subscription.id, filter_group.strategy, filter_group.anchor_clause_number
 		`;
 		expect(stored).toEqual({
 			id: expect.any(String),
 			event_key: "user.created",
 			task_key: "on-user-created",
-			strategy: "fallback",
-			anchor_clause_number: null,
-			clause_count: 0,
-			predicate_count: 0,
+			filter: {},
+			operator: "fallback",
+			field_name: null,
 		});
 
 		const eventId = await conductor.emit("user.created", { userId: "user-123" });
@@ -113,7 +101,7 @@ describe("event subscription lifecycle", () => {
 		});
 	}, 30_000);
 
-	test("normalizes typed exact filters and marks the complete first clause as anchor", async () => {
+	test("stores the canonical filter and only its selected candidate anchors", async () => {
 		const db = await database();
 		const event = defineEvent({
 			name: "user.qualified",
@@ -141,75 +129,39 @@ describe("event subscription lifecycle", () => {
 
 		const rows = await db.sql<
 			{
+				filter: Record<string, unknown[]>;
 				field_name: string;
-				clause_number: number;
+				operator: string;
 				scalar_type: string;
-				text_value: string | null;
-				number_value: string | null;
 				boolean_value: boolean | null;
-				is_anchor: boolean;
 			}[]
 		>`
-			select clause.field_name, clause.clause_number, predicate.scalar_type,
-				predicate.text_value, predicate.number_value::text,
-				predicate.boolean_value, predicate.is_anchor
+			select subscription.filter, anchor.field_name, anchor.operator,
+				anchor.scalar_type, anchor.boolean_value
 			from pgconductor._private_custom_event_subscriptions subscription
-			join pgconductor._private_event_filter_clauses clause
-				on clause.subscription_id = subscription.id
-			join pgconductor._private_event_filter_predicates predicate
-				on predicate.subscription_id = clause.subscription_id
-				and predicate.group_number = clause.group_number
-				and predicate.clause_number = clause.clause_number
+			join pgconductor._private_event_filter_anchors anchor
+				on anchor.subscription_id = subscription.id
 			where subscription.event_key = 'user.qualified'
-			order by clause.clause_number, predicate.predicate_number
+			order by anchor.anchor_number
 		`;
 		expect([...rows]).toEqual([
 			{
+				filter: { active: [true], region: ["eu", "us"], score: [7] },
 				field_name: "active",
-				clause_number: 1,
+				operator: "exact",
 				scalar_type: "boolean",
-				text_value: null,
-				number_value: null,
 				boolean_value: true,
-				is_anchor: true,
-			},
-			{
-				field_name: "region",
-				clause_number: 2,
-				scalar_type: "string",
-				text_value: "eu",
-				number_value: null,
-				boolean_value: null,
-				is_anchor: false,
-			},
-			{
-				field_name: "region",
-				clause_number: 2,
-				scalar_type: "string",
-				text_value: "us",
-				number_value: null,
-				boolean_value: null,
-				is_anchor: false,
-			},
-			{
-				field_name: "score",
-				clause_number: 3,
-				scalar_type: "number",
-				text_value: null,
-				number_value: "7",
-				boolean_value: null,
-				is_anchor: false,
 			},
 		]);
 
 		await orchestrator.stop();
-		const [counts] = await db.sql<{ groups: number; clauses: number; predicates: number }[]>`
+		const [counts] = await db.sql<{ subscriptions: number; anchors: number }[]>`
 			select
-				(select count(*)::integer from pgconductor._private_event_filter_groups) as groups,
-				(select count(*)::integer from pgconductor._private_event_filter_clauses) as clauses,
-				(select count(*)::integer from pgconductor._private_event_filter_predicates) as predicates
+				(select count(*)::integer from pgconductor._private_custom_event_subscriptions)
+					as subscriptions,
+				(select count(*)::integer from pgconductor._private_event_filter_anchors) as anchors
 		`;
-		expect(counts).toEqual({ groups: 1, clauses: 3, predicates: 4 });
+		expect(counts).toEqual({ subscriptions: 1, anchors: 1 });
 	}, 30_000);
 
 	test("replaces only the registered queue subscription snapshot", async () => {
@@ -268,15 +220,15 @@ describe("event subscription lifecycle", () => {
 		expect([...subscriptions]).toEqual([
 			{ task_key: "second-handler", payload_fields: ["userId"] },
 		]);
-		const [normalized] = await db.sql<{ groups: number; orphan_groups: number }[]>`
+		const [normalized] = await db.sql<{ anchors: number; orphan_anchors: number }[]>`
 			select
-				count(*)::integer as groups,
-				count(*) filter (where subscription.id is null)::integer as orphan_groups
-			from pgconductor._private_event_filter_groups filter_group
+				count(*)::integer as anchors,
+				count(*) filter (where subscription.id is null)::integer as orphan_anchors
+			from pgconductor._private_event_filter_anchors anchor
 			left join pgconductor._private_custom_event_subscriptions subscription
-				on subscription.id = filter_group.subscription_id
+				on subscription.id = anchor.subscription_id
 		`;
-		expect(normalized).toEqual({ groups: 1, orphan_groups: 0 });
+		expect(normalized).toEqual({ anchors: 1, orphan_anchors: 0 });
 	}, 30_000);
 
 	test("stores multiple subscriptions on the same event", async () => {

@@ -31,7 +31,6 @@ import type {
 	FindEventByIdentifier,
 	InferEventPayload,
 } from "./event-definition";
-import { validateEventTriggers } from "./event-trigger-validation";
 import {
 	TaskSchemas,
 	EventSchemas,
@@ -177,11 +176,6 @@ export class Conductor<
 		TaskContext<Tasks, Events> & ExtraContext,
 		TaskEventFromTriggers<TTriggers, ResolvedPayload<Tasks, TDef>, Events>
 	> {
-		validateEventTriggers(
-			triggers,
-			this.options.events?.definitions ?? [],
-			this.options.events?.hasTypeOnlyDefinitions ?? false,
-		);
 		return Task.create<
 			TDef["name"],
 			ResolvedQueue<TDef>,
@@ -201,6 +195,8 @@ export class Conductor<
 				ResolvedReturns<Tasks, TDef>,
 				TaskContext<Tasks, Events> & ExtraContext
 			>,
+			this.options.events?.definitions ?? [],
+			this.options.events?.hasTypeOnlyDefinitions ?? false,
 		);
 	}
 

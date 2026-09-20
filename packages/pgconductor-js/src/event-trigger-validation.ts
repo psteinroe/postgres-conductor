@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { EventDefinition } from "./event-definition";
-import type { EventSubscriptionSpec, JsonValue } from "./database-client";
+import type { EventFilterAnchor, EventSubscriptionSpec, JsonValue } from "./database-client";
 
 const EVENT_FIELD_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const MAX_EVENT_NAME_BYTES = 255;
@@ -43,7 +43,8 @@ const PREFIX_SCHEMA = z
 const EXISTS_SCHEMA = z.boolean({ error: "must be boolean" });
 
 type FilterScalar = z.infer<typeof FILTER_SCALAR_SCHEMA>;
-type CanonicalPredicate = JsonValue;
+export type CanonicalEventPredicate = JsonValue;
+export type CanonicalEventFilter = Record<string, CanonicalEventPredicate[]>;
 
 function parse<T>(schema: z.ZodType<T>, value: unknown, context: string): T {
 	const parsed = schema.safeParse(value);
@@ -102,7 +103,7 @@ function canonicalNumericRange(
 	value: unknown,
 	eventName: string,
 	field: string,
-): CanonicalPredicate {
+): CanonicalEventPredicate {
 	const context = `Numeric filter for event "${eventName}" field "${field}"`;
 	const values = parse(
 		z.array(z.unknown()).refine((items) => items.length === 2 || items.length === 4, {
@@ -139,7 +140,11 @@ function canonicalNumericRange(
 	return { $operator: "numeric_range", lower, lowerInclusive, upper, upperInclusive };
 }
 
-function canonicalPredicate(value: unknown, eventName: string, field: string): CanonicalPredicate {
+function canonicalPredicate(
+	value: unknown,
+	eventName: string,
+	field: string,
+): CanonicalEventPredicate {
 	const scalar = FILTER_SCALAR_SCHEMA.safeParse(value);
 	if (scalar.success) {
 		assertScalarSize(scalar.data, eventName, field);
@@ -191,7 +196,7 @@ function canonicalPredicate(value: unknown, eventName: string, field: string): C
 	}
 }
 
-function predicateSortKey(value: CanonicalPredicate): string {
+function predicateSortKey(value: CanonicalEventPredicate): string {
 	const scalar = FILTER_SCALAR_SCHEMA.safeParse(value);
 	return scalar.success ? `0:${scalarSortKey(scalar.data)}` : `1:${JSON.stringify(value)}`;
 }
@@ -201,10 +206,10 @@ function canonicalFilter(
 	eventName: string,
 	definition: EventDefinition<string, any, any> | undefined,
 	allowUnknownEvents: boolean,
-): Record<string, JsonValue[]> | null {
+): CanonicalEventFilter | null {
 	if (filter === undefined || filter === null) return null;
-	const input = parse(FILTER_SCHEMA, filter, `Filter for event "${eventName}"`);
-	const entries = Object.entries(input);
+	parse(FILTER_SCHEMA, filter, `Filter for event "${eventName}"`);
+	const entries = Object.entries(filter as Record<string, unknown[]>);
 	if (entries.length > MAX_FILTER_FIELDS) {
 		throw new Error(`Filter for event "${eventName}" supports at most 8 fields`);
 	}
@@ -213,7 +218,7 @@ function canonicalFilter(
 	}
 
 	const allowed = definition ? new Set(definition.filterable || []) : null;
-	const canonical: Record<string, JsonValue[]> = {};
+	const canonical: CanonicalEventFilter = Object.create(null) as CanonicalEventFilter;
 	for (const [field, values] of entries.sort(([left], [right]) => left.localeCompare(right))) {
 		if (field.trim().length === 0) {
 			throw new Error(`Filter for event "${eventName}" cannot contain empty field names`);
@@ -248,9 +253,90 @@ function canonicalFilter(
 	return canonical;
 }
 
+function fallbackAnchor(): EventFilterAnchor {
+	return { operator: "fallback" };
+}
+
+function anchorForPredicate(field: string, predicate: CanonicalEventPredicate): EventFilterAnchor {
+	if (predicate === null) {
+		return { field_name: field, operator: "exact", scalar_type: "null" };
+	}
+	if (typeof predicate === "string") {
+		return {
+			field_name: field,
+			operator: "exact",
+			scalar_type: "string",
+			text_value: predicate,
+		};
+	}
+	if (typeof predicate === "number") {
+		return {
+			field_name: field,
+			operator: "exact",
+			scalar_type: "number",
+			number_value: predicate,
+		};
+	}
+	if (typeof predicate === "boolean") {
+		return {
+			field_name: field,
+			operator: "exact",
+			scalar_type: "boolean",
+			boolean_value: predicate,
+		};
+	}
+
+	const operator = predicate as Record<string, JsonValue>;
+	if (operator.$operator === "prefix") {
+		return {
+			field_name: field,
+			operator: "prefix",
+			scalar_type: "string",
+			text_value: operator.value as string,
+		};
+	}
+	return {
+		field_name: field,
+		operator: "numeric_range",
+		scalar_type: "number",
+		lower_value: operator.lower as number | null,
+		upper_value: operator.upper as number | null,
+		lower_inclusive: operator.lowerInclusive as boolean,
+		upper_inclusive: operator.upperInclusive as boolean,
+	};
+}
+
+export function compileEventFilterAnchors(
+	filter: CanonicalEventFilter | null,
+): EventFilterAnchor[] {
+	if (!filter || Object.keys(filter).length === 0) return [fallbackAnchor()];
+
+	const candidates = Object.entries(filter).flatMap(([field, predicates]) => {
+		const anchors = predicates.flatMap((predicate) => {
+			if (typeof predicate === "object" && predicate !== null) {
+				if (Array.isArray(predicate)) return [];
+				const operator = (predicate as Record<string, JsonValue>).$operator;
+				if (operator !== "prefix" && operator !== "numeric_range") return [];
+			}
+			return [anchorForPredicate(field, predicate)];
+		});
+		if (anchors.length !== predicates.length) return [];
+		const rank = Math.max(
+			...anchors.map((anchor) => {
+				if (anchor.operator === "exact") return 1;
+				if (anchor.operator === "prefix") return 2;
+				return 3;
+			}),
+		);
+		return [{ field, rank, anchors }];
+	});
+	candidates.sort((left, right) => left.rank - right.rank || left.field.localeCompare(right.field));
+	return candidates[0]?.anchors ?? [fallbackAnchor()];
+}
+
 export type CompiledEventTrigger = Pick<
 	EventSubscriptionSpec,
-	"event_key" | "payload_fields" | "filter"
+	"event_key" | "payload_fields" | "filter" | "anchors"
 >;
 
 /** Validate and canonicalize one trigger. Non-event triggers return null. */
@@ -273,10 +359,12 @@ export function compileEventTrigger(
 	if (eventDefinitions.length > 0 && !definition && !allowUnknownEvents) {
 		throw new Error(`Event "${eventName}" is not defined in the conductor event catalog`);
 	}
+	const filter = canonicalFilter(candidate.filter, eventName, definition, allowUnknownEvents);
 	return {
 		event_key: eventName,
 		payload_fields: parseEventPayloadFields(candidate.fields, eventName),
-		filter: canonicalFilter(candidate.filter, eventName, definition, allowUnknownEvents),
+		filter,
+		anchors: compileEventFilterAnchors(filter),
 	};
 }
 
@@ -290,12 +378,4 @@ export function compileEventTriggers(
 		const compiled = compileEventTrigger(trigger, eventDefinitions, allowUnknownEvents);
 		return compiled ? [compiled] : [];
 	});
-}
-
-export function validateEventTriggers(
-	triggers: object | readonly object[],
-	eventDefinitions: readonly EventDefinition<string, any, any>[],
-	allowUnknownEvents = false,
-): void {
-	compileEventTriggers(triggers, eventDefinitions, allowUnknownEvents);
 }

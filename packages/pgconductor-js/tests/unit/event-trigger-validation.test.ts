@@ -15,7 +15,9 @@ describe("event trigger compilation", () => {
 			true,
 		);
 
-		expect(compiled).toEqual({
+		if (!compiled) throw new Error("expected an event trigger");
+		const { anchors, ...subscription } = compiled;
+		expect(subscription).toEqual({
 			event_key: "catalog.changed",
 			payload_fields: null,
 			filter: {
@@ -23,6 +25,39 @@ describe("event trigger compilation", () => {
 				z: [0, 1],
 			},
 		});
+		expect(
+			anchors.map(({ field_name, operator, scalar_type }) => ({
+				field_name,
+				operator,
+				scalar_type,
+			})),
+		).toEqual([
+			{ field_name: "a", operator: "exact", scalar_type: "null" },
+			{ field_name: "a", operator: "exact", scalar_type: "boolean" },
+			{ field_name: "a", operator: "exact", scalar_type: "number" },
+			{ field_name: "a", operator: "exact", scalar_type: "string" },
+		]);
+	});
+
+	test("preserves prototype-named filter fields", () => {
+		const compiled = compileEventTrigger(
+			{
+				event: "catalog.changed",
+				filter: JSON.parse('{"__proto__":["safe"]}') as Record<string, unknown>,
+			},
+			[],
+			true,
+		);
+
+		expect(compiled?.filter).toEqual(JSON.parse('{"__proto__":["safe"]}'));
+		expect(compiled?.anchors).toEqual([
+			{
+				field_name: "__proto__",
+				operator: "exact",
+				scalar_type: "string",
+				text_value: "safe",
+			},
+		]);
 	});
 
 	test("canonicalizes supported atomic operators", () => {

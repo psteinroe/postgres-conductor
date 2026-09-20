@@ -8,7 +8,7 @@ import {
 	type JsonValue,
 } from "../../src/database-client";
 import { defineEvent } from "../../src/event-definition";
-import { compileEventTrigger } from "../../src/event-trigger-validation";
+import { compileEventFilterAnchors, compileEventTrigger } from "../../src/event-trigger-validation";
 import { DefaultLogger } from "../../src/lib/logger";
 import { Orchestrator } from "../../src/orchestrator";
 import { EventSchemas, TaskSchemas } from "../../src/schemas";
@@ -56,12 +56,16 @@ describe("event pipeline", () => {
 		db: TestDatabase,
 		subscriptions: CustomSubscription[],
 	): Promise<void> {
-		const eventSubscriptions: EventSubscriptionSpec[] = subscriptions.map((subscription) => ({
-			task_key: subscription.taskKey,
-			event_key: subscription.eventKey,
-			payload_fields: subscription.payloadFields || null,
-			filter: subscription.filter || null,
-		}));
+		const eventSubscriptions: EventSubscriptionSpec[] = subscriptions.map((subscription) => {
+			const filter = subscription.filter || null;
+			return {
+				task_key: subscription.taskKey,
+				event_key: subscription.eventKey,
+				payload_fields: subscription.payloadFields || null,
+				filter,
+				anchors: compileEventFilterAnchors(filter),
+			};
+		});
 		await db.client.registerWorker({
 			queueName: "default",
 			taskSpecs: subscriptions.map((subscription) => ({
@@ -112,6 +116,32 @@ describe("event pipeline", () => {
 			taskKeys: new Set([DISPATCH_TASK]),
 		});
 	}
+
+	test("rejects SQL numeric fields that cannot round-trip through JavaScript", async () => {
+		const db = await database();
+
+		let rejection: unknown;
+		try {
+			await db.sql`
+				select pgconductor.emit_event(
+					'pipeline.numeric-boundary',
+					'{"value": 9007199254740993}'::jsonb
+				)
+			`;
+		} catch (error) {
+			rejection = error;
+		}
+		expect(String(rejection)).toContain(
+			"Event payload contains a number that cannot be represented as a JavaScript number",
+		);
+		const accepted = await db.sql`
+			select pgconductor.emit_event(
+				'pipeline.numeric-boundary',
+				'{"value": 0.1}'::jsonb
+			)
+		`;
+		expect(accepted).toHaveLength(1);
+	}, 15_000);
 
 	test("uses subscription identity rather than payload shape for direct invocations", async () => {
 		const db = await database();
@@ -509,7 +539,7 @@ describe("event pipeline", () => {
 		});
 	});
 
-	test("serializes concurrent dispatch for the same claimed event", async () => {
+	test("serializes concurrent dispatch and freezes the first committed subscription snapshot", async () => {
 		const db = await database();
 		await registerSubscriptions(db, [
 			{ taskKey: "pipeline.concurrent-destination", eventKey: "pipeline.dispatch-race" },
@@ -541,6 +571,9 @@ describe("event pipeline", () => {
 				orchestratorId: owner,
 			});
 			await new Promise((resolve) => setTimeout(resolve, 25));
+			await registerSubscriptions(db, [
+				{ taskKey: "pipeline.replacement-destination", eventKey: "pipeline.dispatch-race" },
+			]);
 			const second = secondClient.dispatchCustomEvents({
 				eventIds: [eventId],
 				orchestratorId: owner,
@@ -778,6 +811,7 @@ describe("event pipeline", () => {
 							event_key: "pipeline.serialized",
 							payload_fields: null,
 							filter: null,
+							anchors: compileEventFilterAnchors(null),
 						},
 					],
 				});

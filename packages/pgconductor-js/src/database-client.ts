@@ -155,11 +155,25 @@ export interface ExecutionInvokeChild {
 	child_payload: Payload | null;
 }
 
+export type EventFilterAnchor = Record<string, JsonValue | undefined> & {
+	operator: "fallback" | "exact" | "prefix" | "numeric_range";
+	field_name?: string;
+	scalar_type?: "string" | "number" | "boolean" | "null";
+	text_value?: string;
+	number_value?: number;
+	boolean_value?: boolean;
+	lower_value?: number | null;
+	upper_value?: number | null;
+	lower_inclusive?: boolean;
+	upper_inclusive?: boolean;
+};
+
 export interface EventSubscriptionSpec {
 	task_key: string;
 	event_key: string;
 	payload_fields: string[] | null;
 	filter: Record<string, JsonValue[]> | null;
+	anchors: EventFilterAnchor[];
 }
 
 const RETRYABLE_SQLSTATE_CODES = new Set([
@@ -587,16 +601,21 @@ export class DatabaseClient {
 			(sql) =>
 				sql.begin(async (transaction) => {
 					const builder = new QueryBuilder(transaction);
-					const sources = await builder.buildLockEventDispatchSources(args);
-					const eventIds = sources.map((source) => source.event_id);
-					if (eventIds.length === 0) return [];
+					const candidates = await builder.buildGetEventDispatchCandidates(args);
+					const completedIds = new Set(
+						candidates
+							.filter((candidate) => candidate.completed)
+							.map((candidate) => candidate.event_id),
+					);
+					const pendingIds = [
+						...new Set(
+							candidates
+								.filter((candidate) => !candidate.completed)
+								.map((candidate) => candidate.event_id),
+						),
+					];
+					if (pendingIds.length === 0) return [...completedIds];
 
-					const completed = await builder.buildGetCompletedEventDispatches(eventIds);
-					const completedIds = new Set(completed.map((row) => row.event_id));
-					const pendingIds = eventIds.filter((eventId) => !completedIds.has(eventId));
-					if (pendingIds.length === 0) return eventIds;
-
-					const candidates = await builder.buildGetEventDispatchCandidates(pendingIds);
 					const destinations = buildEventDispatchDestinations(candidates);
 					const committed = await builder.buildCommitEventDispatches(pendingIds, destinations);
 					return [...completedIds, ...committed.map((row) => row.event_id)];
