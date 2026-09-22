@@ -173,7 +173,7 @@ Fields are combined with AND and alternatives within a field with OR. Supported 
 - `{ exists: true }` or `{ exists: false }` for field presence;
 - `{ "anything-but": value }` for one atomic scalar exclusion.
 
-Missing fields differ from JSON `null`. An `anything-but` predicate must be the field's only alternative. Filters are stored as normalized, typed predicates, narrowed through exact/prefix/range indexes or an explicit route-local fallback, and then completely verified. A filter may contain up to 8 fields and 4 alternatives per field; literal prefixes are limited to 64 characters.
+Missing fields differ from JSON `null`. An `anything-but` predicate must be the field's only alternative. Filters are compiled into flat typed terms: alternatives for one field are ORed, while SQL requires every distinct filter field to match. Exact, prefix, and numeric-range terms use operator-specific indexes; presence and exclusions are evaluated set-wise in the same query. A filter may contain up to 8 fields and 4 alternatives per field; literal prefixes are limited to 64 characters.
 
 ### Field Selection
 

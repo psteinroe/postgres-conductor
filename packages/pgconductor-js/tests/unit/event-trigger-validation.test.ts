@@ -16,7 +16,7 @@ describe("event trigger compilation", () => {
 		);
 
 		if (!compiled) throw new Error("expected an event trigger");
-		const { anchors, ...subscription } = compiled;
+		const { terms, ...subscription } = compiled;
 		expect(subscription).toEqual({
 			event_key: "catalog.changed",
 			payload_fields: null,
@@ -24,9 +24,10 @@ describe("event trigger compilation", () => {
 				a: [null, true, 1, "1"],
 				z: [0, 1],
 			},
+			required_field_count: 2,
 		});
 		expect(
-			anchors.map(({ field_name, operator, scalar_type }) => ({
+			terms.map(({ field_name, operator, scalar_type }) => ({
 				field_name,
 				operator,
 				scalar_type,
@@ -36,6 +37,8 @@ describe("event trigger compilation", () => {
 			{ field_name: "a", operator: "exact", scalar_type: "boolean" },
 			{ field_name: "a", operator: "exact", scalar_type: "number" },
 			{ field_name: "a", operator: "exact", scalar_type: "string" },
+			{ field_name: "z", operator: "exact", scalar_type: "number" },
+			{ field_name: "z", operator: "exact", scalar_type: "number" },
 		]);
 	});
 
@@ -50,7 +53,7 @@ describe("event trigger compilation", () => {
 		);
 
 		expect(compiled?.filter).toEqual(JSON.parse('{"__proto__":["safe"]}'));
-		expect(compiled?.anchors).toEqual([
+		expect(compiled?.terms).toEqual([
 			{
 				field_name: "__proto__",
 				operator: "exact",
@@ -89,6 +92,19 @@ describe("event trigger compilation", () => {
 			],
 			status: [{ $operator: "anything_but", value: "blocked" }],
 		});
+		expect(
+			compiled?.terms.map(({ field_name, operator, scalar_type }) => ({
+				field_name,
+				operator,
+				scalar_type,
+			})),
+		).toEqual([
+			{ field_name: "deleted", operator: "exists", scalar_type: undefined },
+			{ field_name: "name", operator: "exact", scalar_type: "string" },
+			{ field_name: "name", operator: "prefix", scalar_type: "string" },
+			{ field_name: "score", operator: "numeric_range", scalar_type: "number" },
+			{ field_name: "status", operator: "anything_but", scalar_type: "string" },
+		]);
 	});
 
 	test("rejects malformed, unbounded, and non-atomic operators", () => {

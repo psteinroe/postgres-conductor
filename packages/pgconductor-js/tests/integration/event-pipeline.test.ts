@@ -8,7 +8,7 @@ import {
 	type JsonValue,
 } from "../../src/database-client";
 import { defineEvent } from "../../src/event-definition";
-import { compileEventFilterAnchors, compileEventTrigger } from "../../src/event-trigger-validation";
+import { compileEventFilterTerms, compileEventTrigger } from "../../src/event-trigger-validation";
 import { DefaultLogger } from "../../src/lib/logger";
 import { Orchestrator } from "../../src/orchestrator";
 import { EventSchemas, TaskSchemas } from "../../src/schemas";
@@ -62,8 +62,8 @@ describe("event pipeline", () => {
 				task_key: subscription.taskKey,
 				event_key: subscription.eventKey,
 				payload_fields: subscription.payloadFields || null,
-				filter,
-				anchors: compileEventFilterAnchors(filter),
+				required_field_count: filter ? Object.keys(filter).length : 0,
+				terms: compileEventFilterTerms(filter),
 			};
 		});
 		await db.client.registerWorker({
@@ -117,30 +117,73 @@ describe("event pipeline", () => {
 		});
 	}
 
-	test("rejects SQL numeric fields that cannot round-trip through JavaScript", async () => {
+	test("matches SQL numeric values without JavaScript precision loss", async () => {
 		const db = await database();
+		await registerSubscriptions(db, [
+			{
+				taskKey: "pipeline.numeric-destination",
+				eventKey: "pipeline.numeric-boundary",
+				filter: { value: [9007199254740992] },
+			},
+			{
+				taskKey: "pipeline.numeric-range-destination",
+				eventKey: "pipeline.numeric-boundary",
+				filter: {
+					value: [
+						{
+							$operator: "numeric_range",
+							lower: 9007199254740992,
+							lowerInclusive: false,
+							upper: 9007199254740994,
+							upperInclusive: false,
+						},
+					],
+				},
+			},
+		]);
 
-		let rejection: unknown;
-		try {
-			await db.sql`
-				select pgconductor.emit_event(
-					'pipeline.numeric-boundary',
-					'{"value": 9007199254740993}'::jsonb
-				)
-			`;
-		} catch (error) {
-			rejection = error;
-		}
-		expect(String(rejection)).toContain(
-			"Event payload contains a number that cannot be represented as a JavaScript number",
-		);
-		const accepted = await db.sql`
+		const [rounded] = await db.sql<{ event_id: string }[]>`
 			select pgconductor.emit_event(
 				'pipeline.numeric-boundary',
-				'{"value": 0.1}'::jsonb
-			)
+				'{"value": 9007199254740993}'::jsonb
+			) as event_id
 		`;
-		expect(accepted).toHaveLength(1);
+		if (!rounded) throw new Error("expected rounded numeric event");
+		const roundedId = rounded.event_id;
+		const roundedOwner = await claimEvent(db, roundedId);
+		await db.client.dispatchCustomEvents({ eventIds: [roundedId], orchestratorId: roundedOwner });
+
+		const [exact] = await db.sql<{ event_id: string }[]>`
+			select pgconductor.emit_event(
+				'pipeline.numeric-boundary',
+				'{"value": 9007199254740992}'::jsonb
+			) as event_id
+		`;
+		if (!exact) throw new Error("expected exact numeric event");
+		const exactId = exact.event_id;
+		const exactOwner = await claimEvent(db, exactId);
+		await db.client.dispatchCustomEvents({ eventIds: [exactId], orchestratorId: exactOwner });
+
+		const destinations = await db.sql<{ parent_execution_id: string; task_keys: string[] }[]>`
+			select parent_execution_id, array_agg(task_key order by task_key) as task_keys
+			from pgconductor._private_executions
+			where parent_execution_id in (${roundedId}::uuid, ${exactId}::uuid)
+				and subscription_id is not null
+			group by parent_execution_id
+			order by parent_execution_id
+		`;
+		expect([...destinations]).toEqual(
+			[
+				{
+					parent_execution_id: roundedId,
+					task_keys: ["pipeline.numeric-range-destination"],
+				},
+				{
+					parent_execution_id: exactId,
+					task_keys: ["pipeline.numeric-destination"],
+				},
+			].sort((left, right) => left.parent_execution_id.localeCompare(right.parent_execution_id)),
+		);
 	}, 15_000);
 
 	test("uses subscription identity rather than payload shape for direct invocations", async () => {
@@ -384,6 +427,32 @@ describe("event pipeline", () => {
 		}
 	});
 
+	test("intersects every indexed filter field before returning subscriptions", async () => {
+		const db = await database();
+		await registerSubscriptions(
+			db,
+			Array.from({ length: 50 }, (_, index) => ({
+				taskKey: `pipeline.inverted-${index}`,
+				eventKey: "pipeline.inverted",
+				filter: { status: ["paid"], tenantId: [`tenant-${index}`] },
+			})),
+		);
+
+		const eventId = await db.client.emitEvent({
+			eventKey: "pipeline.inverted",
+			payload: { status: "paid", tenantId: "tenant-37" },
+		});
+		const owner = await claimEvent(db, eventId);
+		await db.client.dispatchCustomEvents({ eventIds: [eventId], orchestratorId: owner });
+
+		const destinations = await db.sql<{ task_key: string }[]>`
+			select task_key
+			from pgconductor._private_executions
+			where parent_execution_id = ${eventId}::uuid and subscription_id is not null
+		`;
+		expect([...destinations]).toEqual([{ task_key: "pipeline.inverted-37" }]);
+	});
+
 	test("matches literal prefixes, numeric ranges, exists, and atomic anything-but", async () => {
 		const db = await database();
 		const compileFilter = (filter: Record<string, unknown[]>) =>
@@ -405,15 +474,25 @@ describe("event pipeline", () => {
 				filter: compileFilter({ note: [{ exists: false }] }),
 			},
 			{
+				taskKey: "pipeline.present",
+				eventKey: "pipeline.operators",
+				filter: compileFilter({ metadata: [{ exists: true }] }),
+			},
+			{
 				taskKey: "pipeline.anything",
 				eventKey: "pipeline.operators",
 				filter: compileFilter({ status: [{ "anything-but": "blocked" }] }),
+			},
+			{
+				taskKey: "pipeline.mixed-or",
+				eventKey: "pipeline.operators",
+				filter: compileFilter({ code: ["exact", { prefix: "a%_\\" }] }),
 			},
 		]);
 
 		const eventId = await db.client.emitEvent({
 			eventKey: "pipeline.operators",
-			payload: { code: "a%_\\suffix", amount: 10, status: 42 },
+			payload: { code: "a%_\\suffix", amount: 10, status: 42, metadata: { nested: true } },
 		});
 		const owner = await claimEvent(db, eventId);
 		expect(
@@ -427,7 +506,9 @@ describe("event pipeline", () => {
 		expect(destinations.map(({ task_key }) => task_key)).toEqual([
 			"pipeline.anything",
 			"pipeline.missing",
+			"pipeline.mixed-or",
 			"pipeline.prefix",
+			"pipeline.present",
 			"pipeline.range",
 		]);
 
@@ -449,7 +530,7 @@ describe("event pipeline", () => {
 		expect(negative?.count).toBe(0);
 	});
 
-	test("treats wrong residual scalar types as non-matches instead of cast errors", async () => {
+	test("treats wrong scalar types as non-matches instead of cast errors", async () => {
 		const db = await database();
 		await registerSubscriptions(db, [
 			{
@@ -457,10 +538,22 @@ describe("event pipeline", () => {
 				eventKey: "pipeline.residual",
 				filter: { anchor: ["match"], count: [1], enabled: [true] },
 			},
+			{
+				taskKey: "pipeline.anything-object",
+				eventKey: "pipeline.residual",
+				filter: {
+					status: [{ $operator: "anything_but", value: "blocked" }],
+				},
+			},
 		]);
 		const eventId = await db.client.emitEvent({
 			eventKey: "pipeline.residual",
-			payload: { anchor: "match", count: "not-a-number", enabled: "not-a-boolean" },
+			payload: {
+				anchor: "match",
+				count: "not-a-number",
+				enabled: "not-a-boolean",
+				status: { nested: true },
+			},
 		});
 		const owner = await claimEvent(db, eventId);
 		expect(
@@ -584,7 +677,9 @@ describe("event pipeline", () => {
 			await db.sql`drop trigger slow_event_destination on pgconductor._private_executions`;
 			await db.sql`drop function public.slow_event_destination()`;
 		}
-		const [counts] = await db.sql<{ destinations: number; markers: number }[]>`
+		const [counts] = await db.sql<
+			{ destination_tasks: string[]; destinations: number; markers: number }[]
+		>`
 			select
 				count(*) filter (
 					where execution_id = ${eventId}::uuid and key = ${FANOUT_STEP}
@@ -592,10 +687,18 @@ describe("event pipeline", () => {
 				(
 					select count(*)::integer from pgconductor._private_executions
 					where parent_execution_id = ${eventId}::uuid and subscription_id is not null
-				) as destinations
+				) as destinations,
+				(
+					select array_agg(task_key order by task_key) from pgconductor._private_executions
+					where parent_execution_id = ${eventId}::uuid and subscription_id is not null
+				) as destination_tasks
 			from pgconductor._private_steps
 		`;
-		expect(counts).toEqual({ destinations: 1, markers: 1 });
+		expect(counts).toEqual({
+			destination_tasks: ["pipeline.concurrent-destination"],
+			destinations: 1,
+			markers: 1,
+		});
 	});
 
 	test("marks zero-match fan-out complete", async () => {
@@ -810,8 +913,8 @@ describe("event pipeline", () => {
 							task_key: "pipeline.serialized",
 							event_key: "pipeline.serialized",
 							payload_fields: null,
-							filter: null,
-							anchors: compileEventFilterAnchors(null),
+							required_field_count: 0,
+							terms: [],
 						},
 					],
 				});

@@ -422,7 +422,10 @@ export class Worker<
 		const eventSubscriptions: EventSubscriptionSpec[] = allTasks.flatMap((task) =>
 			(task.eventTriggers ?? []).map((spec) => ({
 				task_key: task.name,
-				...spec,
+				event_key: spec.event_key,
+				payload_fields: spec.payload_fields,
+				required_field_count: spec.required_field_count,
+				terms: spec.terms,
 			})),
 		);
 

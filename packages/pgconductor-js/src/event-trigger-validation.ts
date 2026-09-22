@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { EventDefinition } from "./event-definition";
-import type { EventFilterAnchor, EventSubscriptionSpec, JsonValue } from "./database-client";
+import type { EventFilterTerm, JsonValue } from "./database-client";
 
 const EVENT_FIELD_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const MAX_EVENT_NAME_BYTES = 255;
@@ -253,91 +253,71 @@ function canonicalFilter(
 	return canonical;
 }
 
-function fallbackAnchor(): EventFilterAnchor {
-	return { operator: "fallback" };
+function scalarTerm(
+	field: string,
+	operator: "exact" | "anything_but",
+	value: FilterScalar,
+): EventFilterTerm {
+	if (value === null) return { field_name: field, operator, scalar_type: "null" };
+	if (typeof value === "string") {
+		return { field_name: field, operator, scalar_type: "string", text_value: value };
+	}
+	if (typeof value === "number") {
+		return { field_name: field, operator, scalar_type: "number", number_value: value };
+	}
+	return { field_name: field, operator, scalar_type: "boolean", boolean_value: value };
 }
 
-function anchorForPredicate(field: string, predicate: CanonicalEventPredicate): EventFilterAnchor {
-	if (predicate === null) {
-		return { field_name: field, operator: "exact", scalar_type: "null" };
-	}
-	if (typeof predicate === "string") {
-		return {
-			field_name: field,
-			operator: "exact",
-			scalar_type: "string",
-			text_value: predicate,
-		};
-	}
-	if (typeof predicate === "number") {
-		return {
-			field_name: field,
-			operator: "exact",
-			scalar_type: "number",
-			number_value: predicate,
-		};
-	}
-	if (typeof predicate === "boolean") {
-		return {
-			field_name: field,
-			operator: "exact",
-			scalar_type: "boolean",
-			boolean_value: predicate,
-		};
-	}
+function termForPredicate(field: string, predicate: CanonicalEventPredicate): EventFilterTerm {
+	const scalar = FILTER_SCALAR_SCHEMA.safeParse(predicate);
+	if (scalar.success) return scalarTerm(field, "exact", scalar.data);
 
 	const operator = predicate as Record<string, JsonValue>;
-	if (operator.$operator === "prefix") {
-		return {
-			field_name: field,
-			operator: "prefix",
-			scalar_type: "string",
-			text_value: operator.value as string,
-		};
+	switch (operator.$operator) {
+		case "prefix":
+			return {
+				field_name: field,
+				operator: "prefix",
+				scalar_type: "string",
+				text_value: operator.value as string,
+			};
+		case "numeric_range":
+			return {
+				field_name: field,
+				operator: "numeric_range",
+				scalar_type: "number",
+				lower_value: operator.lower as number | null,
+				upper_value: operator.upper as number | null,
+				lower_inclusive: operator.lowerInclusive as boolean,
+				upper_inclusive: operator.upperInclusive as boolean,
+			};
+		case "exists":
+			return {
+				field_name: field,
+				operator: "exists",
+				boolean_value: operator.value as boolean,
+			};
+		case "anything_but":
+			return scalarTerm(field, "anything_but", operator.value as FilterScalar);
+		default:
+			throw new Error(`Unsupported canonical filter operator for field "${field}"`);
 	}
-	return {
-		field_name: field,
-		operator: "numeric_range",
-		scalar_type: "number",
-		lower_value: operator.lower as number | null,
-		upper_value: operator.upper as number | null,
-		lower_inclusive: operator.lowerInclusive as boolean,
-		upper_inclusive: operator.upperInclusive as boolean,
-	};
 }
 
-export function compileEventFilterAnchors(
-	filter: CanonicalEventFilter | null,
-): EventFilterAnchor[] {
-	if (!filter || Object.keys(filter).length === 0) return [fallbackAnchor()];
-
-	const candidates = Object.entries(filter).flatMap(([field, predicates]) => {
-		const anchors = predicates.flatMap((predicate) => {
-			if (typeof predicate === "object" && predicate !== null) {
-				if (Array.isArray(predicate)) return [];
-				const operator = (predicate as Record<string, JsonValue>).$operator;
-				if (operator !== "prefix" && operator !== "numeric_range") return [];
-			}
-			return [anchorForPredicate(field, predicate)];
-		});
-		if (anchors.length !== predicates.length) return [];
-		const rank = Math.max(
-			...anchors.map((anchor) => {
-				if (anchor.operator === "exact") return 1;
-				if (anchor.operator === "prefix") return 2;
-				return 3;
-			}),
-		);
-		return [{ field, rank, anchors }];
-	});
-	candidates.sort((left, right) => left.rank - right.rank || left.field.localeCompare(right.field));
-	return candidates[0]?.anchors ?? [fallbackAnchor()];
+export function compileEventFilterTerms(filter: CanonicalEventFilter | null): EventFilterTerm[] {
+	if (!filter) return [];
+	return Object.entries(filter).flatMap(([field, predicates]) =>
+		predicates.map((predicate) => termForPredicate(field, predicate)),
+	);
 }
 
-export type CompiledEventTrigger = Pick<
-	EventSubscriptionSpec,
-	"event_key" | "payload_fields" | "filter" | "anchors"
->;
+export type CompiledEventTrigger = {
+	event_key: string;
+	payload_fields: string[] | null;
+	filter: CanonicalEventFilter | null;
+	required_field_count: number;
+	terms: EventFilterTerm[];
+};
 
 /** Validate and canonicalize one trigger. Non-event triggers return null. */
 export function compileEventTrigger(
@@ -364,7 +344,8 @@ export function compileEventTrigger(
 		event_key: eventName,
 		payload_fields: parseEventPayloadFields(candidate.fields, eventName),
 		filter,
-		anchors: compileEventFilterAnchors(filter),
+		required_field_count: filter ? Object.keys(filter).length : 0,
+		terms: compileEventFilterTerms(filter),
 	};
 }
 

@@ -5,7 +5,7 @@ import type {
 	ExecutionSpec,
 	TaskSpec,
 	Payload,
-	JsonValue,
+	EventFilterTerm,
 	SetFakeTimeArgs,
 } from "../../src/database-client";
 import { DatabaseClient as RealDatabaseClient } from "../../src/database-client";
@@ -28,7 +28,7 @@ import type {
 import type { Migration } from "../../src/migration-store";
 import type { Logger } from "../../src/lib/logger";
 import CronExpressionParser from "cron-parser";
-import { eventFilterMatches } from "../../src/event-dispatch";
+import { eventFilterTermsMatch } from "../../src/event-dispatch";
 
 type PublicMethodsOf<T> = {
 	[K in keyof T as T[K] extends Function ? K : never]: T[K];
@@ -117,7 +117,8 @@ interface StoredEventSubscription {
 	queue: string;
 	event_key: string;
 	payload_fields: string[] | null;
-	filter: Record<string, JsonValue[]> | null;
+	required_field_count: number;
+	terms: EventFilterTerm[];
 }
 
 interface SignalData {
@@ -364,7 +365,8 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 				queue: args.queueName,
 				event_key: spec.event_key,
 				payload_fields: spec.payload_fields,
-				filter: spec.filter,
+				required_field_count: spec.required_field_count,
+				terms: structuredClone(spec.terms),
 			});
 		}
 
@@ -1145,7 +1147,8 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 				) {
 					continue;
 				}
-				if (!eventFilterMatches(payload, subscription.filter)) continue;
+				if (!eventFilterTermsMatch(payload, subscription.required_field_count, subscription.terms))
+					continue;
 
 				const destinationPayload = subscription.payload_fields
 					? (Object.fromEntries(

@@ -34,7 +34,7 @@ describe("event subscription lifecycle", () => {
 		return db;
 	}
 
-	test("persists an unconditional subscription with one fallback anchor", async () => {
+	test("persists an unconditional subscription without filter terms", async () => {
 		const db = await database();
 		const event = defineEvent({
 			name: "user.created",
@@ -67,25 +67,24 @@ describe("event subscription lifecycle", () => {
 				id: string;
 				event_key: string;
 				task_key: string;
-				filter: Record<string, unknown>;
-				operator: string;
-				field_name: string | null;
+				required_field_count: number;
+				term_count: number;
 			}[]
 		>`
 			select subscription.id, subscription.event_key, subscription.task_key,
-				subscription.filter, anchor.operator, anchor.field_name
+				subscription.required_field_count, count(term.*)::integer as term_count
 			from pgconductor._private_custom_event_subscriptions subscription
-			join pgconductor._private_event_filter_anchors anchor
-				on anchor.subscription_id = subscription.id
+			left join pgconductor._private_event_filter_terms term
+				on term.subscription_id = subscription.id
 			where subscription.event_key = 'user.created'
+			group by subscription.id
 		`;
 		expect(stored).toEqual({
 			id: expect.any(String),
 			event_key: "user.created",
 			task_key: "on-user-created",
-			filter: {},
-			operator: "fallback",
-			field_name: null,
+			required_field_count: 0,
+			term_count: 0,
 		});
 
 		const eventId = await conductor.emit("user.created", { userId: "user-123" });
@@ -101,7 +100,7 @@ describe("event subscription lifecycle", () => {
 		});
 	}, 30_000);
 
-	test("stores the canonical filter and only its selected candidate anchors", async () => {
+	test("stores every typed filter alternative as an inverted term", async () => {
 		const db = await database();
 		const event = defineEvent({
 			name: "user.qualified",
@@ -129,39 +128,61 @@ describe("event subscription lifecycle", () => {
 
 		const rows = await db.sql<
 			{
-				filter: Record<string, unknown[]>;
+				required_field_count: number;
 				field_name: string;
 				operator: string;
 				scalar_type: string;
-				boolean_value: boolean | null;
+				value: string;
 			}[]
 		>`
-			select subscription.filter, anchor.field_name, anchor.operator,
-				anchor.scalar_type, anchor.boolean_value
+			select subscription.required_field_count, term.field_name, term.operator,
+				term.scalar_type,
+				coalesce(term.text_value, term.number_value::text, term.boolean_value::text) as value
 			from pgconductor._private_custom_event_subscriptions subscription
-			join pgconductor._private_event_filter_anchors anchor
-				on anchor.subscription_id = subscription.id
+			join pgconductor._private_event_filter_terms term
+				on term.subscription_id = subscription.id
 			where subscription.event_key = 'user.qualified'
-			order by anchor.anchor_number
+			order by term.term_number
 		`;
 		expect([...rows]).toEqual([
 			{
-				filter: { active: [true], region: ["eu", "us"], score: [7] },
+				required_field_count: 3,
 				field_name: "active",
 				operator: "exact",
 				scalar_type: "boolean",
-				boolean_value: true,
+				value: "true",
+			},
+			{
+				required_field_count: 3,
+				field_name: "region",
+				operator: "exact",
+				scalar_type: "string",
+				value: "eu",
+			},
+			{
+				required_field_count: 3,
+				field_name: "region",
+				operator: "exact",
+				scalar_type: "string",
+				value: "us",
+			},
+			{
+				required_field_count: 3,
+				field_name: "score",
+				operator: "exact",
+				scalar_type: "number",
+				value: "7",
 			},
 		]);
 
 		await orchestrator.stop();
-		const [counts] = await db.sql<{ subscriptions: number; anchors: number }[]>`
+		const [counts] = await db.sql<{ subscriptions: number; terms: number }[]>`
 			select
 				(select count(*)::integer from pgconductor._private_custom_event_subscriptions)
 					as subscriptions,
-				(select count(*)::integer from pgconductor._private_event_filter_anchors) as anchors
+				(select count(*)::integer from pgconductor._private_event_filter_terms) as terms
 		`;
-		expect(counts).toEqual({ subscriptions: 1, anchors: 1 });
+		expect(counts).toEqual({ subscriptions: 1, terms: 4 });
 	}, 30_000);
 
 	test("replaces only the registered queue subscription snapshot", async () => {
@@ -220,15 +241,15 @@ describe("event subscription lifecycle", () => {
 		expect([...subscriptions]).toEqual([
 			{ task_key: "second-handler", payload_fields: ["userId"] },
 		]);
-		const [normalized] = await db.sql<{ anchors: number; orphan_anchors: number }[]>`
+		const [normalized] = await db.sql<{ terms: number; orphan_terms: number }[]>`
 			select
-				count(*)::integer as anchors,
-				count(*) filter (where subscription.id is null)::integer as orphan_anchors
-			from pgconductor._private_event_filter_anchors anchor
+				count(*)::integer as terms,
+				count(*) filter (where subscription.id is null)::integer as orphan_terms
+			from pgconductor._private_event_filter_terms term
 			left join pgconductor._private_custom_event_subscriptions subscription
-				on subscription.id = anchor.subscription_id
+				on subscription.id = term.subscription_id
 		`;
-		expect(normalized).toEqual({ anchors: 1, orphan_anchors: 0 });
+		expect(normalized).toEqual({ terms: 0, orphan_terms: 0 });
 	}, 30_000);
 
 	test("stores multiple subscriptions on the same event", async () => {

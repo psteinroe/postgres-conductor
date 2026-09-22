@@ -874,7 +874,15 @@ describe("InMemoryDatabaseClient", () => {
 						task_key: "event-target",
 						event_key: "mock.event",
 						payload_fields: null,
-						filter: { code: [{ $operator: "prefix", value: "ok-" }] },
+						required_field_count: 1,
+						terms: [
+							{
+								field_name: "code",
+								operator: "prefix",
+								scalar_type: "string",
+								text_value: "ok-",
+							},
+						],
 					},
 				],
 			});
@@ -947,7 +955,15 @@ describe("InMemoryDatabaseClient", () => {
 						task_key: "event-target",
 						event_key: "mock.event",
 						payload_fields: null,
-						filter: { value: [{ $operator: "anything_but", value: "blocked" }] },
+						required_field_count: 1,
+						terms: [
+							{
+								field_name: "value",
+								operator: "anything_but",
+								scalar_type: "string",
+								text_value: "blocked",
+							},
+						],
 					},
 				],
 			});
