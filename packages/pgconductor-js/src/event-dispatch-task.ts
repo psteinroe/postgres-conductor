@@ -1,42 +1,33 @@
-import type { DatabaseClient, Execution, ExecutionResult } from "./database-client";
+import type { DatabaseClient, Execution, ExecutionResult, Payload } from "./database-client";
 import { coerceError } from "./lib/coerce-error";
-import { Task, type AnyTask } from "./task";
+import { Task } from "./task";
 
 export const EVENT_DISPATCH_QUEUE = "pgconductor.internal";
 export const EVENT_DISPATCH_TASK = "pgconductor.event-dispatch";
 const EVENT_DISPATCH_BATCH_SIZE = 10;
 
-export function createEventDispatchTask(): AnyTask {
-	return new Task(
-		{
-			name: EVENT_DISPATCH_TASK,
-			queue: EVENT_DISPATCH_QUEUE,
-			maxAttempts: 3,
-			removeOnComplete: true,
-			batch: { size: EVENT_DISPATCH_BATCH_SIZE, timeoutMs: 10 },
-		},
-		{ invocable: true },
-		// Internal dispatch needs claimed execution IDs, so the worker calls the
-		// batch adapter below rather than the public payload-only task handler.
-		async () => {
-			throw new Error("Event dispatch must be executed by the internal worker");
-		},
-	);
-}
+type EventDispatchPayload = {
+	eventKey: string;
+	payload: Payload;
+};
 
-export async function executeEventDispatchBatch(
-	db: DatabaseClient,
+type EventDispatchContext = {
+	db: DatabaseClient;
+	orchestratorId: string;
+	signal: AbortSignal;
+};
+
+async function executeEventDispatch(
 	executions: Execution[],
-	orchestratorId: string,
-	signal: AbortSignal,
+	context: EventDispatchContext,
 ): Promise<ExecutionResult[]> {
 	try {
-		const dispatched = await db.dispatchCustomEvents(
+		const dispatched = await context.db.dispatchCustomEvents(
 			{
 				eventIds: executions.map((execution) => execution.id),
-				orchestratorId,
+				orchestratorId: context.orchestratorId,
 			},
-			{ signal },
+			{ signal: context.signal },
 		);
 		const dispatchedIds = new Set(dispatched);
 
@@ -72,3 +63,22 @@ export async function executeEventDispatchBatch(
 		}));
 	}
 }
+
+export const eventDispatchTask = new Task<
+	typeof EVENT_DISPATCH_TASK,
+	typeof EVENT_DISPATCH_QUEUE,
+	EventDispatchPayload,
+	ExecutionResult[],
+	EventDispatchContext,
+	Execution[]
+>(
+	{
+		name: EVENT_DISPATCH_TASK,
+		queue: EVENT_DISPATCH_QUEUE,
+		maxAttempts: 3,
+		removeOnComplete: true,
+		batch: { size: EVENT_DISPATCH_BATCH_SIZE, timeoutMs: 10 },
+	},
+	{ invocable: true },
+	executeEventDispatch,
+);

@@ -28,11 +28,7 @@ import {
 } from "./task-context";
 import * as assert from "./lib/assert";
 import { createMaintenanceTask } from "./maintenance-task";
-import {
-	EVENT_DISPATCH_QUEUE,
-	EVENT_DISPATCH_TASK,
-	executeEventDispatchBatch,
-} from "./event-dispatch-task";
+import { eventDispatchTask } from "./event-dispatch-task";
 import { makeChildLogger, type Logger } from "./lib/logger";
 import type { EventDefinition } from "./event-definition";
 import { coerceError } from "./lib/coerce-error";
@@ -556,9 +552,13 @@ export class Worker<
 					return [];
 				}
 
-				if (this.queueName === EVENT_DISPATCH_QUEUE && taskKey === EVENT_DISPATCH_TASK) {
+				if (task === eventDispatchTask) {
 					assert.ok(this.orchestratorId, "orchestratorId must be set while dispatching events");
-					return executeEventDispatchBatch(this.db, activeExecs, this.orchestratorId, this.signal);
+					return eventDispatchTask.execute(activeExecs, {
+						db: this.db,
+						orchestratorId: this.orchestratorId,
+						signal: this.signal,
+					});
 				}
 
 				// If task has batch config, always use batch execution (even for single items)

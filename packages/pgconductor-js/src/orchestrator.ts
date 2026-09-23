@@ -1,4 +1,4 @@
-import { createEventDispatchTask, EVENT_DISPATCH_QUEUE } from "./event-dispatch-task";
+import { eventDispatchTask, EVENT_DISPATCH_QUEUE } from "./event-dispatch-task";
 import { Worker, type WorkerConfig } from "./worker";
 import { DatabaseClient } from "./database-client";
 import { MigrationStore } from "./migration-store";
@@ -97,7 +97,7 @@ export class Orchestrator {
 
 		this.eventWorker = new Worker(
 			EVENT_DISPATCH_QUEUE,
-			[createEventDispatchTask()],
+			[eventDispatchTask],
 			this.db,
 			this.logger,
 			{
