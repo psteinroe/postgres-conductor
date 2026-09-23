@@ -1098,7 +1098,7 @@ export class QueryBuilder {
 				from sources source
 				cross join lateral jsonb_each(source.event_payload) field
 			), event_prefixes as materialized (
-				select distinct
+				select
 					event_value.event_id,
 					event_value.event_key,
 					event_value.field_name,
@@ -1258,11 +1258,9 @@ export class QueryBuilder {
 				on conflict (parent_execution_id, subscription_id, queue)
 				where subscription_id is not null
 				do nothing
-				returning parent_execution_id
 			)
 			select source.event_id
 			from sources source
-			cross join (select count(*) from inserted_destinations) destination_barrier
 			order by source.event_id
 		`;
 	}
