@@ -71,9 +71,6 @@ export class Orchestrator {
 				this.logger,
 				options.defaultWorker,
 				options.conductor.options.context,
-				options.conductor.options.events?.definitions ?? [],
-				true,
-				options.conductor.options.events?.hasTypeOnlyDefinitions ?? false,
 			);
 			this.workers.push(worker);
 		}
@@ -107,10 +104,7 @@ export class Orchestrator {
 				pollIntervalMs: options.defaultWorker?.pollIntervalMs || 1000,
 				flushIntervalMs: options.defaultWorker?.flushIntervalMs || 2000,
 			},
-			{},
-			[],
-			true,
-			false,
+			{ db: this.db },
 		);
 	}
 

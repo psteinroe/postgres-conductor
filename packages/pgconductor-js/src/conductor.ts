@@ -10,7 +10,7 @@ import {
 	type ExecuteFunction,
 	type ValidateDeadLetterConfiguration,
 } from "./task";
-import type { TaskContext, BatchTaskContext } from "./task-context";
+import type { TaskContext, BatchTaskContext, BatchTaskEvent } from "./task-context";
 import {
 	type FindTaskByIdentifier,
 	type InferPayload,
@@ -158,11 +158,15 @@ export class Conductor<
 		fn: TDef extends { readonly batch: BatchConfig }
 			? ResolvedReturns<Tasks, TDef> extends void
 				? (
-						events: Array<TaskEventFromTriggers<TTriggers, ResolvedPayload<Tasks, TDef>, Events>>,
+						events: Array<
+							BatchTaskEvent<TaskEventFromTriggers<TTriggers, ResolvedPayload<Tasks, TDef>, Events>>
+						>,
 						ctx: BatchTaskContext,
 					) => Promise<void>
 				: (
-						events: Array<TaskEventFromTriggers<TTriggers, ResolvedPayload<Tasks, TDef>, Events>>,
+						events: Array<
+							BatchTaskEvent<TaskEventFromTriggers<TTriggers, ResolvedPayload<Tasks, TDef>, Events>>
+						>,
 						ctx: BatchTaskContext,
 					) => Promise<Array<ResolvedReturns<Tasks, TDef>>>
 			: (
@@ -219,9 +223,6 @@ export class Conductor<
 			this.logger,
 			options.config,
 			this.options.context,
-			this.options.events?.definitions ?? [],
-			true,
-			this.options.events?.hasTypeOnlyDefinitions ?? false,
 		);
 	}
 

@@ -5,7 +5,7 @@ import { defineTask } from "../../src/task-definition";
 // import { defineEvent } from "../../src/event-definition";
 import { TaskSchemas /*, EventSchemas */ } from "../../src/schemas";
 import { z } from "zod";
-import type { BatchTaskContext } from "../../src/task-context";
+import type { BatchTaskContext, BatchTaskEvent } from "../../src/task-context";
 
 describe("batch task types", () => {
 	test("batch task with void return - receives array of events", () => {
@@ -24,14 +24,13 @@ describe("batch task types", () => {
 			{ name: "batch-task", batch: { size: 10, timeoutMs: 5000 } },
 			{ invocable: true },
 			async (events, ctx) => {
-				// Events should be an array
+				// Events should preserve name and payload and include execution identity.
 				expectTypeOf(events).toEqualTypeOf<
-					Array<{ name: "pgconductor.invoke"; payload: { value: number } }>
+					Array<BatchTaskEvent<{ name: "pgconductor.invoke"; payload: { value: number } }>>
 				>();
-
-				// Each event should have the correct shape
 				expectTypeOf(events[0]!.name).toEqualTypeOf<"pgconductor.invoke">();
 				expectTypeOf(events[0]!.payload.value).toEqualTypeOf<number>();
+				expectTypeOf(events[0]!.execution.id).toEqualTypeOf<string>();
 
 				// Context should be BatchTaskContext
 				expectTypeOf(ctx).toEqualTypeOf<BatchTaskContext>();
@@ -69,9 +68,8 @@ describe("batch task types", () => {
 			{ name: "batch-with-results", batch: { size: 5, timeoutMs: 5000 } },
 			{ invocable: true },
 			async (events, ctx) => {
-				// Events should be an array
 				expectTypeOf(events).toEqualTypeOf<
-					Array<{ name: "pgconductor.invoke"; payload: { value: number } }>
+					Array<BatchTaskEvent<{ name: "pgconductor.invoke"; payload: { value: number } }>>
 				>();
 
 				// Context should be BatchTaskContext
@@ -110,7 +108,9 @@ describe("batch task types", () => {
 				// Events array can contain either cron or invoke events
 				expectTypeOf(events).toEqualTypeOf<
 					Array<
-						{ name: "every-10min" } | { name: "pgconductor.invoke"; payload: { count: number } }
+						BatchTaskEvent<
+							{ name: "every-10min" } | { name: "pgconductor.invoke"; payload: { count: number } }
+						>
 					>
 				>();
 
@@ -119,15 +119,14 @@ describe("batch task types", () => {
 				// Can discriminate on each event
 				for (const event of events) {
 					if (event.name === "every-10min") {
-						expectTypeOf(event).toEqualTypeOf<{ name: "every-10min" }>();
+						expectTypeOf(event).toEqualTypeOf<BatchTaskEvent<{ name: "every-10min" }>>();
 
 						// @ts-expect-error - cron events don't have payload
 						const _invalid = event.payload;
 					} else {
-						expectTypeOf(event).toEqualTypeOf<{
-							name: "pgconductor.invoke";
-							payload: { count: number };
-						}>();
+						expectTypeOf(event).toEqualTypeOf<
+							BatchTaskEvent<{ name: "pgconductor.invoke"; payload: { count: number } }>
+						>();
 						expectTypeOf(event.payload.count).toEqualTypeOf<number>();
 					}
 				}
@@ -197,7 +196,7 @@ describe("batch task types", () => {
 			{ cron: "0 0 * * *", name: "daily" },
 			async (events, ctx) => {
 				// Events should be array with only cron events
-				expectTypeOf(events).toEqualTypeOf<Array<{ name: "daily" }>>();
+				expectTypeOf(events).toEqualTypeOf<Array<BatchTaskEvent<{ name: "daily" }>>>();
 
 				expectTypeOf(ctx).toEqualTypeOf<BatchTaskContext>();
 

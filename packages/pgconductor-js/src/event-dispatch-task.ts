@@ -1,5 +1,5 @@
-import type { DatabaseClient, Execution, ExecutionResult, Payload } from "./database-client";
-import { coerceError } from "./lib/coerce-error";
+import type { DatabaseClient, Payload } from "./database-client";
+import type { BatchTaskContext, BatchTaskEvent } from "./task-context";
 import { Task } from "./task";
 
 export const EVENT_DISPATCH_QUEUE = "pgconductor.internal";
@@ -11,66 +11,16 @@ type EventDispatchPayload = {
 	payload: Payload;
 };
 
-type EventDispatchContext = {
-	db: DatabaseClient;
-	orchestratorId: string;
-	signal: AbortSignal;
-};
-
-async function executeEventDispatch(
-	executions: Execution[],
-	context: EventDispatchContext,
-): Promise<ExecutionResult[]> {
-	try {
-		const dispatched = await context.db.dispatchCustomEvents(
-			{
-				eventIds: executions.map((execution) => execution.id),
-				orchestratorId: context.orchestratorId,
-			},
-			{ signal: context.signal },
-		);
-		const dispatchedIds = new Set(dispatched);
-
-		return executions.map((execution) => {
-			if (!dispatchedIds.has(execution.id)) {
-				return {
-					execution_id: execution.id,
-					orchestrator_id: execution.locked_by,
-					queue: execution.queue,
-					task_key: execution.task_key,
-					status: "failed" as const,
-					error: "Event dispatch claim is no longer valid",
-				};
-			}
-			return {
-				execution_id: execution.id,
-				orchestrator_id: execution.locked_by,
-				queue: execution.queue,
-				task_key: execution.task_key,
-				status: "completed" as const,
-				result: undefined,
-			};
-		});
-	} catch (error) {
-		const message = coerceError(error).message;
-		return executions.map((execution) => ({
-			execution_id: execution.id,
-			orchestrator_id: execution.locked_by,
-			queue: execution.queue,
-			task_key: execution.task_key,
-			status: "failed" as const,
-			error: message,
-		}));
-	}
-}
+type EventDispatchContext = BatchTaskContext & { db: Pick<DatabaseClient, "dispatchCustomEvents"> };
+type EventDispatchEvent = { name: "pgconductor.invoke"; payload: EventDispatchPayload };
 
 export const eventDispatchTask = new Task<
 	typeof EVENT_DISPATCH_TASK,
 	typeof EVENT_DISPATCH_QUEUE,
 	EventDispatchPayload,
-	ExecutionResult[],
+	void,
 	EventDispatchContext,
-	Execution[]
+	BatchTaskEvent<EventDispatchEvent>[]
 >(
 	{
 		name: EVENT_DISPATCH_TASK,
@@ -80,5 +30,16 @@ export const eventDispatchTask = new Task<
 		batch: { size: EVENT_DISPATCH_BATCH_SIZE, timeoutMs: 10 },
 	},
 	{ invocable: true },
-	executeEventDispatch,
+	async (events, context) => {
+		const first = events[0];
+		if (!first) return;
+
+		await context.db.dispatchCustomEvents(
+			{
+				eventIds: events.map((event) => event.execution.id),
+				orchestratorId: first.execution.locked_by,
+			},
+			{ signal: context.signal },
+		);
+	},
 );

@@ -446,11 +446,24 @@ export class TaskContext<
  * Batch tasks cannot use step() or invoke() since batch composition
  * is non-deterministic across retries.
  */
+export type BatchTaskEvent<Event extends object> = Event & {
+	readonly execution: Readonly<Pick<Execution, "id" | "queue" | "task_key" | "locked_by">>;
+};
+
 export class BatchTaskContext {
 	constructor(
 		private readonly abortController: TypedAbortController<TaskAbortReasons>,
 		public readonly logger: Logger,
 	) {}
+
+	static create<Extra extends object>(
+		abortController: TypedAbortController<TaskAbortReasons>,
+		logger: Logger,
+		extra?: Extra,
+	): BatchTaskContext & Extra {
+		return Object.assign(new BatchTaskContext(abortController, logger), extra) as BatchTaskContext &
+			Extra;
+	}
 
 	get signal(): AbortSignal {
 		return this.abortController.signal;

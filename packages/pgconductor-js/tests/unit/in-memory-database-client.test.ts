@@ -857,7 +857,7 @@ describe("InMemoryDatabaseClient", () => {
 	});
 
 	describe("Event dispatch", () => {
-		test("validates payload objects and persists one idempotent fan-out marker", async () => {
+		test("validates payload objects and deduplicates repeated fan-out", async () => {
 			const db = new InMemoryDatabaseClient();
 			await expect(db.emitEvent({ eventKey: "mock.invalid", payload: [] } as any)).rejects.toThrow(
 				"Event payload must be a JSON object",
@@ -917,15 +917,6 @@ describe("InMemoryDatabaseClient", () => {
 							execution.parent_execution_id === eventId && execution.subscription_id != null,
 					),
 			).toHaveLength(1);
-			expect(
-				await db.loadStep({
-					executionId: eventId,
-					queue: "pgconductor.internal",
-					orchestratorId: "event-orchestrator",
-					key: "pgconductor.internal.event-fanout.v1",
-				}),
-			).toEqual({});
-
 			await db.returnExecutions([
 				{
 					execution_id: eventId,
@@ -937,14 +928,6 @@ describe("InMemoryDatabaseClient", () => {
 				},
 			]);
 			expect(db.getExecution(eventId)).toBeUndefined();
-			expect(
-				await db.loadStep({
-					executionId: eventId,
-					queue: "pgconductor.internal",
-					orchestratorId: "event-orchestrator",
-					key: "pgconductor.internal.event-fanout.v1",
-				}),
-			).toBeUndefined();
 
 			await db.registerWorker({
 				queueName: "default",

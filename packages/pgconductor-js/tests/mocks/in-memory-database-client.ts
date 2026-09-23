@@ -38,7 +38,6 @@ type IDatabaseClient = PublicMethodsOf<DatabaseClient>;
 
 const EVENT_DISPATCH_QUEUE = "pgconductor.internal";
 const EVENT_DISPATCH_TASK = "pgconductor.event-dispatch";
-const EVENT_FANOUT_STEP = "pgconductor.internal.event-fanout.v1";
 
 interface StoredExecution {
 	id: string;
@@ -1119,81 +1118,76 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 		orchestratorId: string;
 	}): Promise<string[]> {
 		const dispatched: string[] = [];
-		for (const eventId of args.eventIds) {
-			const source = this.executions.get(eventId);
-			if (
-				!source ||
-				source.queue !== EVENT_DISPATCH_QUEUE ||
-				source.task_key !== EVENT_DISPATCH_TASK ||
-				source.orchestrator_id !== args.orchestratorId ||
-				source.state === "completed" ||
-				source.state === "failed" ||
-				source.cancelled
-			) {
-				continue;
-			}
-			if (this.steps.get(eventId)?.has(EVENT_FANOUT_STEP)) {
-				dispatched.push(eventId);
-				continue;
-			}
-
-			const eventKey = String(source.payload.eventKey);
-			const payload = source.payload.payload as Payload;
-			const destinations: Array<{ spec: ExecutionSpec; subscriptionId: string }> = [];
-			for (const subscription of this.eventSubscriptions.values()) {
+		const insertedIds: string[] = [];
+		try {
+			for (const eventId of args.eventIds) {
+				const source = this.executions.get(eventId);
 				if (
-					subscription.event_key !== eventKey ||
-					!this.tasks.has(this.taskId(subscription.task_key, subscription.queue))
+					!source ||
+					source.queue !== EVENT_DISPATCH_QUEUE ||
+					source.task_key !== EVENT_DISPATCH_TASK ||
+					source.orchestrator_id !== args.orchestratorId ||
+					source.state === "completed" ||
+					source.state === "failed" ||
+					source.cancelled
 				) {
 					continue;
 				}
-				if (!eventFilterTermsMatch(payload, subscription.required_field_count, subscription.terms))
-					continue;
+				const eventKey = String(source.payload.eventKey);
+				const payload = source.payload.payload as Payload;
+				const destinations: Array<{ spec: ExecutionSpec; subscriptionId: string }> = [];
+				for (const subscription of this.eventSubscriptions.values()) {
+					if (
+						subscription.event_key !== eventKey ||
+						!this.tasks.has(this.taskId(subscription.task_key, subscription.queue))
+					) {
+						continue;
+					}
+					if (
+						!eventFilterTermsMatch(payload, subscription.required_field_count, subscription.terms)
+					)
+						continue;
+					if (
+						Array.from(this.executions.values()).some(
+							(execution) =>
+								execution.parent_execution_id === eventId &&
+								execution.subscription_id === subscription.id &&
+								execution.queue === subscription.queue,
+						)
+					)
+						continue;
 
-				const destinationPayload = subscription.payload_fields
-					? (Object.fromEntries(
-							subscription.payload_fields
-								.filter((field) => Object.prototype.hasOwnProperty.call(payload, field))
-								.map((field) => [field, payload[field]]),
-						) as Payload)
-					: structuredClone(payload);
-				destinations.push({
-					spec: {
-						task_key: subscription.task_key,
-						queue: subscription.queue,
-						payload: { event: eventKey, payload: destinationPayload },
-						parent_execution_id: eventId,
-					},
-					subscriptionId: subscription.id,
-				});
-			}
+					const destinationPayload = subscription.payload_fields
+						? (Object.fromEntries(
+								subscription.payload_fields
+									.filter((field) => Object.prototype.hasOwnProperty.call(payload, field))
+									.map((field) => [field, payload[field]]),
+							) as Payload)
+						: structuredClone(payload);
+					destinations.push({
+						spec: {
+							task_key: subscription.task_key,
+							queue: subscription.queue,
+							payload: { event: eventKey, payload: destinationPayload },
+							parent_execution_id: eventId,
+						},
+						subscriptionId: subscription.id,
+					});
+				}
 
-			const insertedIds: string[] = [];
-			try {
 				const now = this.getInternalTime();
 				for (const destination of destinations) {
 					const destinationId = this.createExecution(destination.spec, now);
 					insertedIds.push(destinationId);
 					this.executions.get(destinationId)!.subscription_id = destination.subscriptionId;
 				}
-				let sourceSteps = this.steps.get(eventId);
-				if (!sourceSteps) {
-					sourceSteps = new Map();
-					this.steps.set(eventId, sourceSteps);
-				}
-				sourceSteps.set(EVENT_FANOUT_STEP, {
-					execution_id: eventId,
-					step_key: EVENT_FANOUT_STEP,
-					result: {},
-					created_at: now,
-				});
-			} catch (error) {
-				for (const destinationId of insertedIds) this.executions.delete(destinationId);
-				throw error;
+				dispatched.push(eventId);
 			}
-			dispatched.push(eventId);
+			return dispatched;
+		} catch (error) {
+			for (const destinationId of insertedIds) this.executions.delete(destinationId);
+			throw error;
 		}
-		return dispatched;
 	}
 
 	// ============================================================================

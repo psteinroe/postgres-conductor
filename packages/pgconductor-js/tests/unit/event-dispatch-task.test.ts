@@ -1,10 +1,11 @@
 import { expect, mock, test } from "bun:test";
-import type { DatabaseClient, Execution } from "../../src/database-client";
 import {
 	eventDispatchTask,
 	EVENT_DISPATCH_QUEUE,
 	EVENT_DISPATCH_TASK,
 } from "../../src/event-dispatch-task";
+import { DefaultLogger } from "../../src/lib/logger";
+import { BatchTaskContext, createTaskSignal } from "../../src/task-context";
 
 test("defines the internal event dispatch task", () => {
 	expect({
@@ -22,43 +23,62 @@ test("defines the internal event dispatch task", () => {
 	});
 });
 
-test("dispatches claimed event executions through its task handler", async () => {
-	const execution: Execution = {
-		id: "00000000-0000-0000-0000-000000000001",
-		task_key: EVENT_DISPATCH_TASK,
-		queue: EVENT_DISPATCH_QUEUE,
-		payload: { eventKey: "order.created", payload: { orderId: "order-1" } },
-		waiting_on_execution_id: null,
-		waiting_step_key: null,
-		locked_by: "orchestrator-1",
-		cancelled: false,
-		last_error: null,
-	};
-	const dispatchCustomEvents = mock(async () => [execution.id]);
-	const db = { dispatchCustomEvents } as unknown as DatabaseClient;
-	const signal = new AbortController().signal;
+test("dispatches from ordinary batch event execution metadata", async () => {
+	const id = "00000000-0000-0000-0000-000000000001";
+	const owner = "00000000-0000-0000-0000-000000000002";
+	const dispatchCustomEvents = mock(async () => [id]);
+	const db = { dispatchCustomEvents };
+	const context = BatchTaskContext.create(
+		createTaskSignal(new AbortController().signal),
+		new DefaultLogger(),
+		{ db },
+	);
 
-	const results = await eventDispatchTask.execute([execution], {
-		db,
-		orchestratorId: "orchestrator-1",
-		signal,
-	});
+	const result = await eventDispatchTask.execute(
+		[
+			{
+				name: "pgconductor.invoke",
+				payload: { eventKey: "order.created", payload: { orderId: "order-1" } },
+				execution: {
+					id,
+					queue: EVENT_DISPATCH_QUEUE,
+					task_key: EVENT_DISPATCH_TASK,
+					locked_by: owner,
+				},
+			},
+		],
+		context,
+	);
 
 	expect(dispatchCustomEvents).toHaveBeenCalledWith(
-		{
-			eventIds: [execution.id],
-			orchestratorId: "orchestrator-1",
-		},
-		{ signal },
+		{ eventIds: [id], orchestratorId: owner },
+		{ signal: context.signal },
 	);
-	expect(results).toEqual([
-		{
-			execution_id: execution.id,
-			orchestrator_id: "orchestrator-1",
-			queue: EVENT_DISPATCH_QUEUE,
-			task_key: EVENT_DISPATCH_TASK,
-			status: "completed",
-			result: undefined,
-		},
-	]);
+	expect(result).toBeUndefined();
+});
+
+test("leaves stale claim settlement to the ordinary worker", async () => {
+	const db = { dispatchCustomEvents: mock(async () => []) };
+	const context = BatchTaskContext.create(
+		createTaskSignal(new AbortController().signal),
+		new DefaultLogger(),
+		{ db },
+	);
+	const result = await eventDispatchTask.execute(
+		[
+			{
+				name: "pgconductor.invoke",
+				payload: { eventKey: "order.created", payload: {} },
+				execution: {
+					id: "00000000-0000-0000-0000-000000000001",
+					queue: EVENT_DISPATCH_QUEUE,
+					task_key: EVENT_DISPATCH_TASK,
+					locked_by: "00000000-0000-0000-0000-000000000002",
+				},
+			},
+		],
+		context,
+	);
+
+	expect(result).toBeUndefined();
 });

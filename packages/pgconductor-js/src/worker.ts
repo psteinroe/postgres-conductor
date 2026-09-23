@@ -28,7 +28,6 @@ import {
 } from "./task-context";
 import * as assert from "./lib/assert";
 import { createMaintenanceTask } from "./maintenance-task";
-import { eventDispatchTask } from "./event-dispatch-task";
 import { makeChildLogger, type Logger } from "./lib/logger";
 import type { EventDefinition } from "./event-definition";
 import { coerceError } from "./lib/coerce-error";
@@ -155,19 +154,15 @@ export class Worker<
 		private readonly logger: Logger,
 		config: Partial<WorkerConfig> = {},
 		private readonly extraContext: object = {},
-		_eventDefinitions: readonly EventDefinition<string, any, any>[] = [],
-		includeMaintenance = true,
-		_allowUnknownEvents = false,
 	) {
-		const initialTasks = new Map<string, AnyTask>();
-		if (includeMaintenance) {
-			const maintenanceTask = createMaintenanceTask(this.queueName);
-			initialTasks.set(maintenanceTask.name, maintenanceTask);
-		}
-		this.tasks = tasks.reduce((registered, task) => {
-			registered.set(task.name, task);
-			return registered;
-		}, initialTasks);
+		const maintenanceTask = createMaintenanceTask(this.queueName);
+		this.tasks = tasks.reduce(
+			(registered, task) => {
+				registered.set(task.name, task);
+				return registered;
+			},
+			new Map<string, AnyTask>([[maintenanceTask.name, maintenanceTask]]),
+		);
 
 		const fullConfig = { ...DEFAULT_WORKER_CONFIG, ...config };
 
@@ -552,15 +547,6 @@ export class Worker<
 					return [];
 				}
 
-				if (task === eventDispatchTask) {
-					assert.ok(this.orchestratorId, "orchestratorId must be set while dispatching events");
-					return eventDispatchTask.execute(activeExecs, {
-						db: this.db,
-						orchestratorId: this.orchestratorId,
-						signal: this.signal,
-					});
-				}
-
 				// If task has batch config, always use batch execution (even for single items)
 				if (task.batch) {
 					return this.executeBatchTask(task, taskKey, activeExecs);
@@ -729,34 +715,42 @@ export class Worker<
 	): Promise<ExecutionResult[]> {
 		// Build event array
 		const events = executions.map((exec) => {
+			let event;
 			if (exec.cron_expression) {
 				const scheduleName = exec.dedupe_key?.split("::")[1] || "unknown";
-				return { name: scheduleName };
+				event = { name: scheduleName };
 			} else if (
 				exec.subscription_id != null &&
 				exec.payload &&
 				typeof exec.payload === "object" &&
 				"event" in exec.payload
 			) {
-				return {
-					name: exec.payload.event,
-					payload: exec.payload.payload,
-				};
+				event = { name: exec.payload.event, payload: exec.payload.payload };
 			} else {
-				return { name: "pgconductor.invoke", payload: exec.payload };
+				event = { name: "pgconductor.invoke", payload: exec.payload };
 			}
+			return {
+				...event,
+				execution: {
+					id: exec.id,
+					queue: exec.queue,
+					task_key: exec.task_key,
+					locked_by: exec.locked_by,
+				},
+			};
 		});
 
 		const taskAbortController = createTaskSignal(this.signal);
 
 		// Create batch context
-		const batchContext = new BatchTaskContext(
+		const batchContext = BatchTaskContext.create(
 			taskAbortController,
 			makeChildLogger(this.logger, {
 				task_key: taskKey,
 				queue: this.queueName,
 				batch_size: executions.length,
 			}),
+			this.extraContext,
 		);
 
 		const abortPromise = new Promise<TaskAbortReasons>((resolve) => {

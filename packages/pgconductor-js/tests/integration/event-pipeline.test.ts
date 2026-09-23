@@ -19,7 +19,6 @@ import { waitForCondition } from "../test-utils";
 
 const INTERNAL_QUEUE = "pgconductor.internal";
 const DISPATCH_TASK = "pgconductor.event-dispatch";
-const FANOUT_STEP = "pgconductor.internal.event-fanout.v1";
 
 type CustomSubscription = {
 	taskKey: string;
@@ -240,6 +239,12 @@ describe("event pipeline", () => {
 			{
 				name: "pgconductor.invoke",
 				payload: { event: "customer-action", payload: { value: "batch" } },
+				execution: {
+					id: expect.any(String),
+					queue: "default",
+					task_key: "pipeline.direct-batch",
+					locked_by: expect.any(String),
+				},
 			},
 		]);
 	});
@@ -573,7 +578,7 @@ describe("event pipeline", () => {
 		expect(result?.count).toBe(0);
 	});
 
-	test("commits destinations with a fan-out marker and freezes retries", async () => {
+	test("re-evaluates subscriptions on retry and keeps prior destinations", async () => {
 		const db = await database();
 		await registerSubscriptions(db, [
 			{ taskKey: "pipeline.first", eventKey: "pipeline.snapshot", filter: { kind: ["first"] } },
@@ -600,46 +605,27 @@ describe("event pipeline", () => {
 			from pgconductor._private_executions
 			where parent_execution_id = ${eventId}::uuid and subscription_id is not null
 		`;
-		expect([...destinations]).toEqual([
-			{
-				task_key: "pipeline.first",
-				parent_execution_id: eventId,
-				subscription_id: expect.any(String),
-			},
+		expect(destinations.map(({ task_key }) => task_key).sort()).toEqual([
+			"pipeline.first",
+			"pipeline.second",
 		]);
-		const [marker] = await db.sql<{ count: number }[]>`
-			select count(*)::integer as count
-			from pgconductor._private_steps
-			where execution_id = ${eventId}::uuid and key = ${FANOUT_STEP}
-		`;
-		expect(marker?.count).toBe(1);
 
 		await settleSource(db, eventId, orchestratorId);
-		const [settled] = await db.sql<
-			{ source_exists: boolean; marker_exists: boolean; destination_exists: boolean }[]
-		>`
+		const [settled] = await db.sql<{ source_exists: boolean; destinations: number }[]>`
 			select
 				exists(
 					select 1 from pgconductor._private_executions
 					where id = ${eventId}::uuid and queue = ${INTERNAL_QUEUE}
 				) as source_exists,
-				exists(
-					select 1 from pgconductor._private_steps
-					where execution_id = ${eventId}::uuid and key = ${FANOUT_STEP}
-				) as marker_exists,
-				exists(
-					select 1 from pgconductor._private_executions
+				(
+					select count(*)::integer from pgconductor._private_executions
 					where parent_execution_id = ${eventId}::uuid and subscription_id is not null
-				) as destination_exists
+				) as destinations
 		`;
-		expect(settled).toEqual({
-			source_exists: false,
-			marker_exists: false,
-			destination_exists: true,
-		});
+		expect(settled).toEqual({ source_exists: false, destinations: 2 });
 	});
 
-	test("serializes concurrent dispatch and freezes the first committed subscription snapshot", async () => {
+	test("deduplicates concurrent dispatch against the same subscription", async () => {
 		const db = await database();
 		await registerSubscriptions(db, [
 			{ taskKey: "pipeline.concurrent-destination", eventKey: "pipeline.dispatch-race" },
@@ -671,9 +657,6 @@ describe("event pipeline", () => {
 				orchestratorId: owner,
 			});
 			await new Promise((resolve) => setTimeout(resolve, 25));
-			await registerSubscriptions(db, [
-				{ taskKey: "pipeline.replacement-destination", eventKey: "pipeline.dispatch-race" },
-			]);
 			const second = secondClient.dispatchCustomEvents({
 				eventIds: [eventId],
 				orchestratorId: owner,
@@ -684,52 +667,33 @@ describe("event pipeline", () => {
 			await db.sql`drop trigger slow_event_destination on pgconductor._private_executions`;
 			await db.sql`drop function public.slow_event_destination()`;
 		}
-		const [counts] = await db.sql<
-			{ destination_tasks: string[]; destinations: number; markers: number }[]
-		>`
-			select
-				count(*) filter (
-					where execution_id = ${eventId}::uuid and key = ${FANOUT_STEP}
-				)::integer as markers,
-				(
-					select count(*)::integer from pgconductor._private_executions
-					where parent_execution_id = ${eventId}::uuid and subscription_id is not null
-				) as destinations,
-				(
-					select array_agg(task_key order by task_key) from pgconductor._private_executions
-					where parent_execution_id = ${eventId}::uuid and subscription_id is not null
-				) as destination_tasks
-			from pgconductor._private_steps
+		const [counts] = await db.sql<{ destinations: number }[]>`
+			select count(*)::integer as destinations
+			from pgconductor._private_executions
+			where parent_execution_id = ${eventId}::uuid and subscription_id is not null
 		`;
-		expect(counts).toEqual({
-			destination_tasks: ["pipeline.concurrent-destination"],
-			destinations: 1,
-			markers: 1,
-		});
+		expect(counts?.destinations).toBe(1);
 	});
 
-	test("marks zero-match fan-out complete", async () => {
+	test("re-evaluates zero-match fan-out on retry", async () => {
 		const db = await database();
 		const eventId = await db.client.emitEvent({ eventKey: "pipeline.none", payload: {} });
 		const orchestratorId = await claimEvent(db, eventId);
 		expect(await db.client.dispatchCustomEvents({ eventIds: [eventId], orchestratorId })).toEqual([
 			eventId,
 		]);
-		const [state] = await db.sql<{ destinations: number; markers: number }[]>`
-			select
-				count(*) filter (
-					where execution_id = ${eventId}::uuid and key = ${FANOUT_STEP}
-				)::integer as markers,
-				(
-					select count(*)::integer from pgconductor._private_executions
-					where parent_execution_id = ${eventId}::uuid and subscription_id is not null
-				) as destinations
-			from pgconductor._private_steps
+		await registerSubscriptions(db, [{ taskKey: "pipeline.late", eventKey: "pipeline.none" }]);
+		expect(await db.client.dispatchCustomEvents({ eventIds: [eventId], orchestratorId })).toEqual([
+			eventId,
+		]);
+		const [state] = await db.sql<{ destinations: number }[]>`
+			select count(*)::integer as destinations from pgconductor._private_executions
+			where parent_execution_id = ${eventId}::uuid and subscription_id is not null
 		`;
-		expect(state).toEqual({ destinations: 0, markers: 1 });
+		expect(state?.destinations).toBe(1);
 	});
 
-	test("rejects stale claims and rolls destination insertion back with the marker", async () => {
+	test("skips stale claims and rolls failed destination insertion back", async () => {
 		const db = await database();
 		await registerSubscriptions(db, [{ taskKey: "pipeline.atomic", eventKey: "pipeline.atomic" }]);
 		const eventId = await db.client.emitEvent({ eventKey: "pipeline.atomic", payload: {} });
@@ -759,57 +723,46 @@ describe("event pipeline", () => {
 		await expect(
 			db.client.dispatchCustomEvents({ eventIds: [eventId], orchestratorId: owner }),
 		).rejects.toThrow("event destination insert failed");
-		const [rolledBack] = await db.sql<{ destinations: number; markers: number }[]>`
-			select
-				count(*) filter (
-					where execution_id = ${eventId}::uuid and key = ${FANOUT_STEP}
-				)::integer as markers,
-				(
-					select count(*)::integer from pgconductor._private_executions
-					where parent_execution_id = ${eventId}::uuid and subscription_id is not null
-				) as destinations
-			from pgconductor._private_steps
+		const [rolledBack] = await db.sql<{ destinations: number }[]>`
+			select count(*)::integer as destinations from pgconductor._private_executions
+			where parent_execution_id = ${eventId}::uuid and subscription_id is not null
 		`;
-		expect(rolledBack).toEqual({ destinations: 0, markers: 0 });
+		expect(rolledBack?.destinations).toBe(0);
 		await db.sql`drop trigger fail_event_destination on pgconductor._private_executions`;
 		await db.sql`drop function public.fail_event_destination()`;
-
-		await db.sql`
-			create function public.fail_event_marker() returns trigger language plpgsql as $$
-			begin
-				if new.key = 'pgconductor.internal.event-fanout.v1' then
-					raise exception 'event marker insert failed';
-				end if;
-				return new;
-			end;
-			$$
-		`;
-		await db.sql`
-			create trigger fail_event_marker
-			before insert on pgconductor._private_steps
-			for each row execute function public.fail_event_marker()
-		`;
-		await expect(
-			db.client.dispatchCustomEvents({ eventIds: [eventId], orchestratorId: owner }),
-		).rejects.toThrow("event marker insert failed");
-		const [markerRollback] = await db.sql<{ destinations: number; markers: number }[]>`
-			select
-				count(*) filter (
-					where execution_id = ${eventId}::uuid and key = ${FANOUT_STEP}
-				)::integer as markers,
-				(
-					select count(*)::integer from pgconductor._private_executions
-					where parent_execution_id = ${eventId}::uuid and subscription_id is not null
-				) as destinations
-			from pgconductor._private_steps
-		`;
-		expect(markerRollback).toEqual({ destinations: 0, markers: 0 });
-		await db.sql`drop trigger fail_event_marker on pgconductor._private_steps`;
-		await db.sql`drop function public.fail_event_marker()`;
 
 		expect(
 			await db.client.dispatchCustomEvents({ eventIds: [eventId], orchestratorId: owner }),
 		).toEqual([eventId]);
+	});
+
+	test("ignores stale dispatch results after ownership changes", async () => {
+		const db = await database();
+		await registerSubscriptions(db, [{ taskKey: "pipeline.stale", eventKey: "pipeline.stale" }]);
+		const eventId = await db.client.emitEvent({ eventKey: "pipeline.stale", payload: {} });
+		const oldOwner = await claimEvent(db, eventId);
+		const newOwner = crypto.randomUUID();
+		await db.sql`
+			update pgconductor._private_executions
+			set locked_by = ${newOwner}::uuid
+			where id = ${eventId}::uuid
+		`;
+
+		expect(
+			await db.client.dispatchCustomEvents({ eventIds: [eventId], orchestratorId: oldOwner }),
+		).toEqual([]);
+		await settleSource(db, eventId, oldOwner);
+		const [state] = await db.sql<
+			{ locked_by: string; completed_at: Date | null; destinations: number }[]
+		>`
+			select source.locked_by,
+				source.completed_at,
+				(select count(*)::integer from pgconductor._private_executions destination
+				 where destination.parent_execution_id = source.id) as destinations
+			from pgconductor._private_executions source
+			where source.id = ${eventId}::uuid
+		`;
+		expect(state).toEqual({ locked_by: newOwner, completed_at: null, destinations: 0 });
 	});
 
 	test("settles event destinations independently from dispatch sources", async () => {

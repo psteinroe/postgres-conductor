@@ -1074,26 +1074,7 @@ export class QueryBuilder {
 		`;
 	}
 
-	buildLockEventDispatchSources({
-		eventIds,
-		orchestratorId,
-	}: DispatchCustomEventsArgs): PendingQuery<{ event_id: string }[]> {
-		return this.sql<{ event_id: string }[]>`
-			select source.id as event_id
-			from pgconductor._private_executions source
-			where source.id = any(${this.sql.array(eventIds, 2951)}::uuid[])
-				and source.queue = 'pgconductor.internal'
-				and source.task_key = 'pgconductor.event-dispatch'
-				and source.locked_by = ${orchestratorId}::uuid
-				and source.completed_at is null
-				and source.failed_at is null
-				and not source.cancelled
-			order by source.id
-			for update of source
-		`;
-	}
-
-	buildCommitEventDispatches({
+	buildDispatchCustomEvents({
 		eventIds,
 		orchestratorId,
 	}: DispatchCustomEventsArgs): PendingQuery<{ event_id: string }[]> {
@@ -1111,20 +1092,10 @@ export class QueryBuilder {
 					and source.completed_at is null
 					and source.failed_at is null
 					and not source.cancelled
-			), pending as materialized (
-				select source.*
-				from sources source
-				where not exists (
-					select 1
-					from pgconductor._private_steps marker
-					where marker.execution_id = source.event_id
-						and marker.queue = 'pgconductor.internal'
-						and marker.key = 'pgconductor.internal.event-fanout.v1'
-				)
 			), event_values as materialized (
 				select source.event_id, source.event_key, field.key as field_name,
 					field.value, jsonb_typeof(field.value) as scalar_type
-				from pending source
+				from sources source
 				cross join lateral jsonb_each(source.event_payload) field
 			), event_prefixes as materialized (
 				select distinct
@@ -1212,7 +1183,7 @@ export class QueryBuilder {
 					and term.boolean_value
 				union all
 				select source.event_id, term.subscription_id, term.field_name
-				from pending source
+				from sources source
 				join pgconductor._private_event_filter_terms term
 					on term.event_key = source.event_key
 					and term.operator = 'exists'
@@ -1248,7 +1219,7 @@ export class QueryBuilder {
 				having count(distinct matched.field_name) = subscription.required_field_count
 				union all
 				select source.event_id, subscription.id
-				from pending source
+				from sources source
 				join pgconductor._private_custom_event_subscriptions subscription
 					on subscription.event_key = source.event_key
 					and subscription.required_field_count = 0
@@ -1282,24 +1253,16 @@ export class QueryBuilder {
 					candidate.event_id,
 					candidate.subscription_id
 				from candidates candidate
-				join pending source on source.event_id = candidate.event_id
+				join sources source on source.event_id = candidate.event_id
 				order by candidate.event_id, candidate.subscription_id
 				on conflict (parent_execution_id, subscription_id, queue)
 				where subscription_id is not null
 				do nothing
 				returning parent_execution_id
-			), inserted_markers as (
-				insert into pgconductor._private_steps (execution_id, queue, key, result)
-				select source.event_id, 'pgconductor.internal',
-					'pgconductor.internal.event-fanout.v1', null::jsonb
-				from pending source
-				cross join (select count(*) from inserted_destinations) destination_barrier
-				on conflict (execution_id, key) do nothing
-				returning execution_id
 			)
 			select source.event_id
 			from sources source
-			cross join (select count(*) from inserted_markers) marker_barrier
+			cross join (select count(*) from inserted_destinations) destination_barrier
 			order by source.event_id
 		`;
 	}

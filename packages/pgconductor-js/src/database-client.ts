@@ -596,24 +596,11 @@ export class DatabaseClient {
 		args: DispatchCustomEventsArgs,
 		opts?: QueryMethodOptions,
 	): Promise<string[]> {
-		return this.query(
-			(sql) =>
-				sql.begin(async (transaction) => {
-					const builder = new QueryBuilder(transaction);
-					const sources = await builder.buildLockEventDispatchSources(args);
-					if (sources.length === 0) return [];
-
-					const committed = await builder.buildCommitEventDispatches({
-						eventIds: sources.map((source) => source.event_id),
-						orchestratorId: args.orchestratorId,
-					});
-					return committed.map((row) => row.event_id);
-				}),
-			{
-				label: "dispatchCustomEvents",
-				...opts,
-			},
-		);
+		const sources = await this.query(() => this.builder.buildDispatchCustomEvents(args), {
+			label: "dispatchCustomEvents",
+			...opts,
+		});
+		return sources.map((source) => source.event_id);
 	}
 
 	async emitEvent(args: EmitEventArgs, opts?: QueryMethodOptions): Promise<string> {
