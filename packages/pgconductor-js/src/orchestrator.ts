@@ -1,4 +1,5 @@
-import { createEventDispatchTask, EVENT_DISPATCH_QUEUE, Worker, type WorkerConfig } from "./worker";
+import { createEventDispatchTask, EVENT_DISPATCH_QUEUE } from "./event-dispatch-task";
+import { Worker, type WorkerConfig } from "./worker";
 import { DatabaseClient } from "./database-client";
 import { MigrationStore } from "./migration-store";
 import { SchemaManager } from "./schema-manager";

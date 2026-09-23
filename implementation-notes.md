@@ -5,15 +5,15 @@ Running notes for the custom-event pipeline implementation.
 ## Design decisions
 
 - An emitted event is a short-lived execution on `pgconductor.internal` for `pgconductor.event-dispatch`. Its execution ID is the public event ID and its payload is `{ eventKey, payload }`; there is no separate event-log table.
-- The hidden dispatcher uses the ordinary execution lifecycle for claiming, retries, recovery, settlement, drain, and shutdown. User workers register before dispatcher fetching begins, so dispatch never sees a partially registered local worker set.
+- The hidden dispatcher uses the ordinary execution lifecycle for claiming, retries, recovery, settlement, drain, and shutdown. `event-dispatch-task.ts` owns its task definition and batch adapter, and the orchestrator registers it through the normal worker task list. User workers register before dispatcher fetching begins, so dispatch never sees a partially registered local worker set.
 - Emission inserts only the dispatch execution and takes no event-key advisory lock. Application-owned PostgreSQL triggers can call `pgconductor.emit_event()` transactionally with their source change.
 - A reserved `_private_steps` row, `pgconductor.internal.event-fanout.v1`, is the atomic fan-out commit marker. TypeScript holds the source locks while destination and marker insertion commit in the same transaction. A retry that sees the marker completes without re-reading subscriptions, including zero-destination events.
 - Source completion removes the immediate-retention dispatch execution and cascades marker removal. Destinations remain because they have no foreign key to the source.
 - Destination identity is `(parent_execution_id, subscription_id)`. `parent_execution_id` records source-event lineage, while non-null `subscription_id` excludes the delivery from workflow child settlement, orphaning, wake-up, and failure propagation.
 - Each subscription is one AND-group. `_private_event_filter_terms` stores every typed atomic alternative; rows with the same field are OR predicates and distinct matched fields are ANDed. Multiple subscriptions preserve the outer OR without separate group or clause tables.
-- The subscription stores only its required distinct-field count, not canonical filter JSON or a dynamic match count. Empty filters have count zero and no terms.
+- The subscription stores only its required distinct-field count, not filter JSON or a dynamic match count. Empty filters have count zero and no terms.
 - Dispatch first locks/fences sources in stable order. A second statement takes a fresh snapshot, inspects markers, probes operator-specific indexes, deduplicates matched fields, and retains only subscriptions whose matched-field count equals their required-field count. That statement projects payloads and atomically inserts destinations and markers without materializing fan-out through TypeScript.
-- Zod validates and canonicalizes each event trigger once when its `Task` is constructed. The task caches the flat typed term transport, and worker registration persists it without recompilation. Private SQL trusts this compiled policy and converts range bounds into indexed `numrange` values.
+- Zod validates, sorts, and deduplicates each event trigger once when its `Task` is constructed. The task caches the flat typed term transport, and worker registration persists it without recompilation. Private SQL trusts this compiled policy and converts range bounds into indexed `numrange` values.
 - Cascading foreign keys maintain the cold subscription → term relationship. Hot execution and destination lineage remain independent of subscription metadata.
 - The in-memory client evaluates the same compiled typed terms to preserve test-double behavior; PostgreSQL is authoritative in production.
 - Registration remains queue-scoped and atomic under the existing queue-row lock. Dispatch sees either the old or new committed subscription snapshot.
@@ -46,6 +46,7 @@ Running notes for the custom-event pipeline implementation.
 
 - Exact, prefix, numeric-range, `exists: true`, and field-scoped `anything-but` probes use typed indexes. `exists: false` is inherently broad and scans the event key's absence terms because a missing field provides no positive lookup key.
 - Full inverted matching writes more cold metadata rows and performs a matched-field aggregation, in exchange for removing the single-anchor selectivity heuristic and avoiding false-positive candidate filters crossing into TypeScript.
+- Queue registration keeps a delete-and-insert subscription snapshot rather than `merge`: Postgres 15 cannot delete rows missing from the source or return generated subscription IDs from `merge`, and incoming subscriptions have no stable identity. The SQL directly expands terms from one materialized prepared set.
 - Source locking and fan-out use separate statements in one transaction. The fan-out statement therefore takes a fresh post-lock snapshot, so a dispatcher that waited for an already-committed fan-out sees its marker and cannot extend the frozen destination set.
 - Dispatcher batches remain 10. Fan-out is one atomic transaction per batch and reuses the existing hidden Worker path.
 

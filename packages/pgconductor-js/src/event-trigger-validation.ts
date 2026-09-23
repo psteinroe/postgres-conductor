@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { EventDefinition } from "./event-definition";
-import type { EventFilterTerm, JsonValue } from "./database-client";
+import type { EventFilterTerm } from "./database-client";
 
 const EVENT_FIELD_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const MAX_EVENT_NAME_BYTES = 255;
@@ -43,8 +43,19 @@ const PREFIX_SCHEMA = z
 const EXISTS_SCHEMA = z.boolean({ error: "must be boolean" });
 
 type FilterScalar = z.infer<typeof FILTER_SCALAR_SCHEMA>;
-export type CanonicalEventPredicate = JsonValue;
-export type CanonicalEventFilter = Record<string, CanonicalEventPredicate[]>;
+type EventFilterOperator =
+	| { $operator: "prefix"; value: string }
+	| {
+			$operator: "numeric_range";
+			lower: number | null;
+			lowerInclusive: boolean;
+			upper: number | null;
+			upperInclusive: boolean;
+	  }
+	| { $operator: "exists"; value: boolean }
+	| { $operator: "anything_but"; value: FilterScalar };
+export type EventFilterPredicate = FilterScalar | EventFilterOperator;
+export type EventFilter = Record<string, EventFilterPredicate[]>;
 
 function parse<T>(schema: z.ZodType<T>, value: unknown, context: string): T {
 	const parsed = schema.safeParse(value);
@@ -84,6 +95,10 @@ export function parseEventPayloadFields(fields: unknown, eventName: string): str
 	return selected;
 }
 
+function isFilterScalar(value: EventFilterPredicate): value is FilterScalar {
+	return value === null || ["string", "number", "boolean"].includes(typeof value);
+}
+
 function scalarSortKey(value: FilterScalar): string {
 	if (value === null) return "0:null";
 	if (typeof value === "boolean") return `1:${value ? "true" : "false"}`;
@@ -99,11 +114,7 @@ function assertScalarSize(value: FilterScalar, eventName: string, field: string)
 	}
 }
 
-function canonicalNumericRange(
-	value: unknown,
-	eventName: string,
-	field: string,
-): CanonicalEventPredicate {
+function parseNumericRange(value: unknown, eventName: string, field: string): EventFilterPredicate {
 	const context = `Numeric filter for event "${eventName}" field "${field}"`;
 	const values = parse(
 		z.array(z.unknown()).refine((items) => items.length === 2 || items.length === 4, {
@@ -140,11 +151,11 @@ function canonicalNumericRange(
 	return { $operator: "numeric_range", lower, lowerInclusive, upper, upperInclusive };
 }
 
-function canonicalPredicate(
+function parseFilterPredicate(
 	value: unknown,
 	eventName: string,
 	field: string,
-): CanonicalEventPredicate {
+): EventFilterPredicate {
 	const scalar = FILTER_SCALAR_SCHEMA.safeParse(value);
 	if (scalar.success) {
 		assertScalarSize(scalar.data, eventName, field);
@@ -172,7 +183,7 @@ function canonicalPredicate(
 			return { $operator: "prefix", value: prefix };
 		}
 		case "numeric":
-			return canonicalNumericRange(operand, eventName, field);
+			return parseNumericRange(operand, eventName, field);
 		case "exists":
 			return {
 				$operator: "exists",
@@ -196,17 +207,16 @@ function canonicalPredicate(
 	}
 }
 
-function predicateSortKey(value: CanonicalEventPredicate): string {
-	const scalar = FILTER_SCALAR_SCHEMA.safeParse(value);
-	return scalar.success ? `0:${scalarSortKey(scalar.data)}` : `1:${JSON.stringify(value)}`;
+function predicateSortKey(value: EventFilterPredicate): string {
+	return isFilterScalar(value) ? `0:${scalarSortKey(value)}` : `1:${JSON.stringify(value)}`;
 }
 
-function canonicalFilter(
+function parseEventFilter(
 	filter: unknown,
 	eventName: string,
 	definition: EventDefinition<string, any, any> | undefined,
 	allowUnknownEvents: boolean,
-): CanonicalEventFilter | null {
+): EventFilter | null {
 	if (filter === undefined || filter === null) return null;
 	parse(FILTER_SCHEMA, filter, `Filter for event "${eventName}"`);
 	const entries = Object.entries(filter as Record<string, unknown[]>);
@@ -218,7 +228,7 @@ function canonicalFilter(
 	}
 
 	const allowed = definition ? new Set(definition.filterable || []) : null;
-	const canonical: CanonicalEventFilter = Object.create(null) as CanonicalEventFilter;
+	const parsedFilter: EventFilter = Object.create(null) as EventFilter;
 	for (const [field, values] of entries.sort(([left], [right]) => left.localeCompare(right))) {
 		if (field.trim().length === 0) {
 			throw new Error(`Filter for event "${eventName}" cannot contain empty field names`);
@@ -230,7 +240,7 @@ function canonicalFilter(
 			throw new Error(`Filter for event "${eventName}" contains undeclared field "${field}"`);
 		}
 
-		const predicates = values.map((value) => canonicalPredicate(value, eventName, field));
+		const predicates = values.map((value) => parseFilterPredicate(value, eventName, field));
 		if (
 			predicates.length > 1 &&
 			predicates.some(
@@ -246,11 +256,11 @@ function canonicalFilter(
 			);
 		}
 		const unique = new Map(predicates.map((predicate) => [predicateSortKey(predicate), predicate]));
-		canonical[field] = [...unique.entries()]
+		parsedFilter[field] = [...unique.entries()]
 			.sort(([left], [right]) => left.localeCompare(right))
 			.map(([, predicate]) => predicate);
 	}
-	return canonical;
+	return parsedFilter;
 }
 
 function scalarTerm(
@@ -268,43 +278,39 @@ function scalarTerm(
 	return { field_name: field, operator, scalar_type: "boolean", boolean_value: value };
 }
 
-function termForPredicate(field: string, predicate: CanonicalEventPredicate): EventFilterTerm {
-	const scalar = FILTER_SCALAR_SCHEMA.safeParse(predicate);
-	if (scalar.success) return scalarTerm(field, "exact", scalar.data);
+function termForPredicate(field: string, predicate: EventFilterPredicate): EventFilterTerm {
+	if (isFilterScalar(predicate)) return scalarTerm(field, "exact", predicate);
 
-	const operator = predicate as Record<string, JsonValue>;
-	switch (operator.$operator) {
+	switch (predicate.$operator) {
 		case "prefix":
 			return {
 				field_name: field,
 				operator: "prefix",
 				scalar_type: "string",
-				text_value: operator.value as string,
+				text_value: predicate.value,
 			};
 		case "numeric_range":
 			return {
 				field_name: field,
 				operator: "numeric_range",
 				scalar_type: "number",
-				lower_value: operator.lower as number | null,
-				upper_value: operator.upper as number | null,
-				lower_inclusive: operator.lowerInclusive as boolean,
-				upper_inclusive: operator.upperInclusive as boolean,
+				lower_value: predicate.lower,
+				upper_value: predicate.upper,
+				lower_inclusive: predicate.lowerInclusive,
+				upper_inclusive: predicate.upperInclusive,
 			};
 		case "exists":
 			return {
 				field_name: field,
 				operator: "exists",
-				boolean_value: operator.value as boolean,
+				boolean_value: predicate.value,
 			};
 		case "anything_but":
-			return scalarTerm(field, "anything_but", operator.value as FilterScalar);
-		default:
-			throw new Error(`Unsupported canonical filter operator for field "${field}"`);
+			return scalarTerm(field, "anything_but", predicate.value);
 	}
 }
 
-export function compileEventFilterTerms(filter: CanonicalEventFilter | null): EventFilterTerm[] {
+export function compileEventFilterTerms(filter: EventFilter | null): EventFilterTerm[] {
 	if (!filter) return [];
 	return Object.entries(filter).flatMap(([field, predicates]) =>
 		predicates.map((predicate) => termForPredicate(field, predicate)),
@@ -314,12 +320,11 @@ export function compileEventFilterTerms(filter: CanonicalEventFilter | null): Ev
 export type CompiledEventTrigger = {
 	event_key: string;
 	payload_fields: string[] | null;
-	filter: CanonicalEventFilter | null;
 	required_field_count: number;
 	terms: EventFilterTerm[];
 };
 
-/** Validate and canonicalize one trigger. Non-event triggers return null. */
+/** Validate and compile one trigger. Non-event triggers return null. */
 export function compileEventTrigger(
 	trigger: object,
 	eventDefinitions: readonly EventDefinition<string, any, any>[],
@@ -339,11 +344,10 @@ export function compileEventTrigger(
 	if (eventDefinitions.length > 0 && !definition && !allowUnknownEvents) {
 		throw new Error(`Event "${eventName}" is not defined in the conductor event catalog`);
 	}
-	const filter = canonicalFilter(candidate.filter, eventName, definition, allowUnknownEvents);
+	const filter = parseEventFilter(candidate.filter, eventName, definition, allowUnknownEvents);
 	return {
 		event_key: eventName,
 		payload_fields: parseEventPayloadFields(candidate.fields, eventName),
-		filter,
 		required_field_count: filter ? Object.keys(filter).length : 0,
 		terms: compileEventFilterTerms(filter),
 	};

@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { compileEventTrigger } from "../../src/event-trigger-validation";
 
 describe("event trigger compilation", () => {
-	test("canonicalizes field order and deduplicates scalar alternatives type-sensitively", () => {
+	test("sorts fields and deduplicates scalar alternatives type-sensitively", () => {
 		const compiled = compileEventTrigger(
 			{
 				event: "catalog.changed",
@@ -16,30 +16,44 @@ describe("event trigger compilation", () => {
 		);
 
 		if (!compiled) throw new Error("expected an event trigger");
-		const { terms, ...subscription } = compiled;
-		expect(subscription).toEqual({
+		expect(compiled).toEqual({
 			event_key: "catalog.changed",
 			payload_fields: null,
-			filter: {
-				a: [null, true, 1, "1"],
-				z: [0, 1],
-			},
 			required_field_count: 2,
+			terms: [
+				{ field_name: "a", operator: "exact", scalar_type: "null" },
+				{
+					field_name: "a",
+					operator: "exact",
+					scalar_type: "boolean",
+					boolean_value: true,
+				},
+				{
+					field_name: "a",
+					operator: "exact",
+					scalar_type: "number",
+					number_value: 1,
+				},
+				{
+					field_name: "a",
+					operator: "exact",
+					scalar_type: "string",
+					text_value: "1",
+				},
+				{
+					field_name: "z",
+					operator: "exact",
+					scalar_type: "number",
+					number_value: 0,
+				},
+				{
+					field_name: "z",
+					operator: "exact",
+					scalar_type: "number",
+					number_value: 1,
+				},
+			],
 		});
-		expect(
-			terms.map(({ field_name, operator, scalar_type }) => ({
-				field_name,
-				operator,
-				scalar_type,
-			})),
-		).toEqual([
-			{ field_name: "a", operator: "exact", scalar_type: "null" },
-			{ field_name: "a", operator: "exact", scalar_type: "boolean" },
-			{ field_name: "a", operator: "exact", scalar_type: "number" },
-			{ field_name: "a", operator: "exact", scalar_type: "string" },
-			{ field_name: "z", operator: "exact", scalar_type: "number" },
-			{ field_name: "z", operator: "exact", scalar_type: "number" },
-		]);
 	});
 
 	test("preserves prototype-named filter fields", () => {
@@ -52,7 +66,6 @@ describe("event trigger compilation", () => {
 			true,
 		);
 
-		expect(compiled?.filter).toEqual(JSON.parse('{"__proto__":["safe"]}'));
 		expect(compiled?.terms).toEqual([
 			{
 				field_name: "__proto__",
@@ -63,7 +76,7 @@ describe("event trigger compilation", () => {
 		]);
 	});
 
-	test("canonicalizes supported atomic operators", () => {
+	test("compiles supported atomic operators", () => {
 		const compiled = compileEventTrigger(
 			{
 				event: "catalog.changed",
@@ -78,32 +91,35 @@ describe("event trigger compilation", () => {
 			true,
 		);
 
-		expect(compiled?.filter).toEqual({
-			deleted: [{ $operator: "exists", value: false }],
-			name: ["exact", { $operator: "prefix", value: "literal%_\\" }],
-			score: [
-				{
-					$operator: "numeric_range",
-					lower: 10,
-					lowerInclusive: true,
-					upper: 20,
-					upperInclusive: false,
-				},
-			],
-			status: [{ $operator: "anything_but", value: "blocked" }],
-		});
-		expect(
-			compiled?.terms.map(({ field_name, operator, scalar_type }) => ({
-				field_name,
-				operator,
-				scalar_type,
-			})),
-		).toEqual([
-			{ field_name: "deleted", operator: "exists", scalar_type: undefined },
-			{ field_name: "name", operator: "exact", scalar_type: "string" },
-			{ field_name: "name", operator: "prefix", scalar_type: "string" },
-			{ field_name: "score", operator: "numeric_range", scalar_type: "number" },
-			{ field_name: "status", operator: "anything_but", scalar_type: "string" },
+		expect(compiled?.terms).toEqual([
+			{ field_name: "deleted", operator: "exists", boolean_value: false },
+			{
+				field_name: "name",
+				operator: "exact",
+				scalar_type: "string",
+				text_value: "exact",
+			},
+			{
+				field_name: "name",
+				operator: "prefix",
+				scalar_type: "string",
+				text_value: "literal%_\\",
+			},
+			{
+				field_name: "score",
+				operator: "numeric_range",
+				scalar_type: "number",
+				lower_value: 10,
+				lower_inclusive: true,
+				upper_value: 20,
+				upper_inclusive: false,
+			},
+			{
+				field_name: "status",
+				operator: "anything_but",
+				scalar_type: "string",
+				text_value: "blocked",
+			},
 		]);
 	});
 

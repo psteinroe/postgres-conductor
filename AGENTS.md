@@ -17,6 +17,7 @@ pgconductor/
         │   ├── conductor.ts          # Task registry and invocation entry point
         │   ├── orchestrator.ts       # Worker lifecycle manager
         │   ├── worker.ts             # Fetch→execute→flush pipeline
+        │   ├── event-dispatch-task.ts # Internal event fan-out task definition
         │   ├── task.ts               # Task wrapper with execute method
         │   ├── task-definition.ts    # Zod-based task definitions
         │   ├── task-context.ts       # Context API (step, sleep, invoke)

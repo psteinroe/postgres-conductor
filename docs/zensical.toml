@@ -25,7 +25,7 @@ site_description = "A durable execution engine using only Postgres"
 # Read more: https://zensical.org/docs/setup/basics/#site_author
 site_author = "psteinroe"
 
-# The site_url is the canonical URL for your site. When building online
+# The site_url is the preferred public URL for your site. When building online
 # documentation you should set this.
 # Read more: https://zensical.org/docs/setup/basics/#site_url
 #site_url = "https://www.example.com/"

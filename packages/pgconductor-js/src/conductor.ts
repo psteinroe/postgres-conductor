@@ -22,7 +22,8 @@ import {
 	type ValidateTriggers,
 	type ValidateEventTriggers,
 } from "./task-definition";
-import { EVENT_DISPATCH_QUEUE, Worker, type WorkerConfig } from "./worker";
+import { EVENT_DISPATCH_QUEUE } from "./event-dispatch-task";
+import { Worker, type WorkerConfig } from "./worker";
 import { DefaultLogger, type Logger } from "./lib/logger";
 import { SchemaManager } from "./schema-manager";
 import type {

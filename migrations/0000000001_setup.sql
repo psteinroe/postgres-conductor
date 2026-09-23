@@ -1015,21 +1015,21 @@ as $function$
     with removed as materialized (
         delete from pgconductor._private_custom_event_subscriptions
         where queue = p_queue_name
-        returning id
-    ), input as materialized (
-        select task_key, event_key, payload_fields,
-            coalesce(required_field_count, 0) as required_field_count,
-            coalesce(terms, '[]'::jsonb) as terms,
-            input_ordinal
+        returning 1
+    ), prepared as materialized (
+        select pgconductor._private_portable_uuidv7() as id,
+            subscription.task_key,
+            subscription.event_key,
+            subscription.payload_fields,
+            coalesce(subscription.required_field_count, 0) as required_field_count,
+            coalesce(subscription.terms, '[]'::jsonb) as terms,
+            subscription.input_ordinal
         from unnest(p_subscriptions) with ordinality
           as subscription(
               task_key, event_key, payload_fields,
               required_field_count, terms, input_ordinal
           )
         cross join (select count(*) from removed) removal_barrier
-    ), prepared as materialized (
-        select pgconductor._private_portable_uuidv7() as id, input.*
-        from input
     ), inserted_subscriptions as (
         insert into pgconductor._private_custom_event_subscriptions (
             id, event_key, task_key, queue, payload_fields, required_field_count
@@ -1039,52 +1039,44 @@ as $function$
         from prepared
         order by input_ordinal
         returning id
-    ), terms as materialized (
-        select prepared.id as subscription_id, prepared.event_key,
-            term.ordinality::smallint as term_number,
-            fields.field_name, fields.operator, fields.scalar_type,
-            fields.text_value, fields.number_value, fields.boolean_value,
-            fields.lower_value, fields.upper_value,
-            fields.lower_inclusive, fields.upper_inclusive
-        from prepared
-        cross join lateral jsonb_array_elements(prepared.terms)
-            with ordinality as term(value, ordinality)
-        cross join lateral jsonb_to_record(term.value) as fields(
-            field_name text,
-            operator text,
-            scalar_type text,
-            text_value text,
-            number_value numeric,
-            boolean_value boolean,
-            lower_value numeric,
-            upper_value numeric,
-            lower_inclusive boolean,
-            upper_inclusive boolean
-        )
     )
     insert into pgconductor._private_event_filter_terms (
         subscription_id, term_number, event_key, field_name, operator,
         scalar_type, text_value, number_value, boolean_value, number_range
     )
     select
-        terms.subscription_id,
-        terms.term_number,
-        terms.event_key,
-        terms.field_name,
-        terms.operator,
-        terms.scalar_type,
-        terms.text_value,
-        terms.number_value,
-        terms.boolean_value,
-        case when terms.operator = 'numeric_range' then numrange(
-            terms.lower_value,
-            terms.upper_value,
-            (case when terms.lower_inclusive then '[' else '(' end)
+        prepared.id,
+        term.ordinality::smallint,
+        prepared.event_key,
+        fields.field_name,
+        fields.operator,
+        fields.scalar_type,
+        fields.text_value,
+        fields.number_value,
+        fields.boolean_value,
+        case when fields.operator = 'numeric_range' then numrange(
+            fields.lower_value,
+            fields.upper_value,
+            (case when fields.lower_inclusive then '[' else '(' end)
                 ||
-            (case when terms.upper_inclusive then ']' else ')' end)
+            (case when fields.upper_inclusive then ']' else ')' end)
         ) end
-    from terms
-    join inserted_subscriptions on inserted_subscriptions.id = terms.subscription_id;
+    from prepared
+    join inserted_subscriptions on inserted_subscriptions.id = prepared.id
+    cross join lateral jsonb_array_elements(prepared.terms)
+        with ordinality as term(value, ordinality)
+    cross join lateral jsonb_to_record(term.value) as fields(
+        field_name text,
+        operator text,
+        scalar_type text,
+        text_value text,
+        number_value numeric,
+        boolean_value boolean,
+        lower_value numeric,
+        upper_value numeric,
+        lower_inclusive boolean,
+        upper_inclusive boolean
+    );
 $function$;
 
 insert into pgconductor._private_queues (name)

@@ -10,7 +10,7 @@ import type {
 	ExecutionReleased,
 	ExecutionInvokeChild,
 } from "./database-client";
-import { Task, type AnyTask, type BatchConfig } from "./task";
+import type { AnyTask, BatchConfig } from "./task";
 import type { TaskDefinition } from "./task-definition";
 import { waitFor } from "./lib/wait-for";
 import { mapConcurrent } from "./lib/map-concurrent";
@@ -28,6 +28,11 @@ import {
 } from "./task-context";
 import * as assert from "./lib/assert";
 import { createMaintenanceTask } from "./maintenance-task";
+import {
+	EVENT_DISPATCH_QUEUE,
+	EVENT_DISPATCH_TASK,
+	executeEventDispatchBatch,
+} from "./event-dispatch-task";
 import { makeChildLogger, type Logger } from "./lib/logger";
 import type { EventDefinition } from "./event-definition";
 import { coerceError } from "./lib/coerce-error";
@@ -47,26 +52,6 @@ export type WorkerConfig = {
 /**
  * The default configuration for the Worker.
  */
-export const EVENT_DISPATCH_QUEUE = "pgconductor.internal";
-export const EVENT_DISPATCH_TASK = "pgconductor.event-dispatch";
-const EVENT_DISPATCH_BATCH_SIZE = 10;
-
-export function createEventDispatchTask(): AnyTask {
-	return new Task(
-		{
-			name: EVENT_DISPATCH_TASK,
-			queue: EVENT_DISPATCH_QUEUE,
-			maxAttempts: 3,
-			removeOnComplete: true,
-			batch: { size: EVENT_DISPATCH_BATCH_SIZE, timeoutMs: 10 },
-		},
-		{ invocable: true },
-		async () => {
-			throw new Error("Event dispatch must be executed by the internal worker");
-		},
-	);
-}
-
 export const DEFAULT_WORKER_CONFIG: WorkerConfig = {
 	concurrency: 1,
 	flushBatchSize: 2,
@@ -572,7 +557,8 @@ export class Worker<
 				}
 
 				if (this.queueName === EVENT_DISPATCH_QUEUE && taskKey === EVENT_DISPATCH_TASK) {
-					return this.executeEventDispatchBatch(activeExecs);
+					assert.ok(this.orchestratorId, "orchestratorId must be set while dispatching events");
+					return executeEventDispatchBatch(this.db, activeExecs, this.orchestratorId, this.signal);
 				}
 
 				// If task has batch config, always use batch execution (even for single items)
@@ -592,52 +578,6 @@ export class Worker<
 			} else {
 				yield result;
 			}
-		}
-	}
-
-	private async executeEventDispatchBatch(executions: Execution[]): Promise<ExecutionResult[]> {
-		assert.ok(this.orchestratorId, "orchestratorId must be set while dispatching events");
-
-		try {
-			const dispatched = await this.db.dispatchCustomEvents(
-				{
-					eventIds: executions.map((execution) => execution.id),
-					orchestratorId: this.orchestratorId,
-				},
-				{ signal: this.signal },
-			);
-			const dispatchedIds = new Set(dispatched);
-
-			return executions.map((execution) => {
-				if (!dispatchedIds.has(execution.id)) {
-					return {
-						execution_id: execution.id,
-						orchestrator_id: execution.locked_by,
-						queue: execution.queue,
-						task_key: execution.task_key,
-						status: "failed" as const,
-						error: "Event dispatch claim is no longer valid",
-					};
-				}
-				return {
-					execution_id: execution.id,
-					orchestrator_id: execution.locked_by,
-					queue: execution.queue,
-					task_key: execution.task_key,
-					status: "completed" as const,
-					result: undefined,
-				};
-			});
-		} catch (error) {
-			const message = coerceError(error).message;
-			return executions.map((execution) => ({
-				execution_id: execution.id,
-				orchestrator_id: execution.locked_by,
-				queue: execution.queue,
-				task_key: execution.task_key,
-				status: "failed" as const,
-				error: message,
-			}));
 		}
 	}
 

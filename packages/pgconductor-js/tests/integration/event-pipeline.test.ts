@@ -2,13 +2,14 @@ import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test
 import postgres from "postgres";
 import { z } from "zod";
 import { Conductor } from "../../src/conductor";
-import {
-	DatabaseClient,
-	type EventSubscriptionSpec,
-	type JsonValue,
-} from "../../src/database-client";
+import { DatabaseClient, type EventSubscriptionSpec } from "../../src/database-client";
 import { defineEvent } from "../../src/event-definition";
-import { compileEventFilterTerms, compileEventTrigger } from "../../src/event-trigger-validation";
+import {
+	compileEventFilterTerms,
+	compileEventTrigger,
+	type CompiledEventTrigger,
+	type EventFilter,
+} from "../../src/event-trigger-validation";
 import { DefaultLogger } from "../../src/lib/logger";
 import { Orchestrator } from "../../src/orchestrator";
 import { EventSchemas, TaskSchemas } from "../../src/schemas";
@@ -23,7 +24,8 @@ const FANOUT_STEP = "pgconductor.internal.event-fanout.v1";
 type CustomSubscription = {
 	taskKey: string;
 	eventKey: string;
-	filter?: Record<string, JsonValue[]>;
+	filter?: EventFilter;
+	compiledFilter?: Pick<CompiledEventTrigger, "required_field_count" | "terms">;
 	payloadFields?: string[];
 	maxAttempts?: number;
 };
@@ -62,8 +64,10 @@ describe("event pipeline", () => {
 				task_key: subscription.taskKey,
 				event_key: subscription.eventKey,
 				payload_fields: subscription.payloadFields || null,
-				required_field_count: filter ? Object.keys(filter).length : 0,
-				terms: compileEventFilterTerms(filter),
+				required_field_count:
+					subscription.compiledFilter?.required_field_count ||
+					(filter ? Object.keys(filter).length : 0),
+				terms: subscription.compiledFilter?.terms || compileEventFilterTerms(filter),
 			};
 		});
 		await db.client.registerWorker({
@@ -455,38 +459,41 @@ describe("event pipeline", () => {
 
 	test("matches literal prefixes, numeric ranges, exists, and atomic anything-but", async () => {
 		const db = await database();
-		const compileFilter = (filter: Record<string, unknown[]>) =>
-			compileEventTrigger({ event: "pipeline.operators", filter }, [], true)?.filter || undefined;
+		const compileFilter = (filter: Record<string, unknown[]>) => {
+			const compiled = compileEventTrigger({ event: "pipeline.operators", filter }, [], true);
+			if (compiled === null) throw new Error("expected an event trigger");
+			return compiled;
+		};
 		await registerSubscriptions(db, [
 			{
 				taskKey: "pipeline.prefix",
 				eventKey: "pipeline.operators",
-				filter: compileFilter({ code: [{ prefix: "a%_\\" }] }),
+				compiledFilter: compileFilter({ code: [{ prefix: "a%_\\" }] }),
 			},
 			{
 				taskKey: "pipeline.range",
 				eventKey: "pipeline.operators",
-				filter: compileFilter({ amount: [{ numeric: [">=", 10, "<", 20] }] }),
+				compiledFilter: compileFilter({ amount: [{ numeric: [">=", 10, "<", 20] }] }),
 			},
 			{
 				taskKey: "pipeline.missing",
 				eventKey: "pipeline.operators",
-				filter: compileFilter({ note: [{ exists: false }] }),
+				compiledFilter: compileFilter({ note: [{ exists: false }] }),
 			},
 			{
 				taskKey: "pipeline.present",
 				eventKey: "pipeline.operators",
-				filter: compileFilter({ metadata: [{ exists: true }] }),
+				compiledFilter: compileFilter({ metadata: [{ exists: true }] }),
 			},
 			{
 				taskKey: "pipeline.anything",
 				eventKey: "pipeline.operators",
-				filter: compileFilter({ status: [{ "anything-but": "blocked" }] }),
+				compiledFilter: compileFilter({ status: [{ "anything-but": "blocked" }] }),
 			},
 			{
 				taskKey: "pipeline.mixed-or",
 				eventKey: "pipeline.operators",
-				filter: compileFilter({ code: ["exact", { prefix: "a%_\\" }] }),
+				compiledFilter: compileFilter({ code: ["exact", { prefix: "a%_\\" }] }),
 			},
 		]);
 
