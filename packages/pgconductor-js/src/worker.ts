@@ -144,7 +144,6 @@ export class Worker<
 	private _startDeferred: Deferred<void> | null = null;
 	private _stopDeferred: Deferred<void> | null = null;
 	private _abortController: AbortController | null = null;
-	private _drainDidWork = false;
 	private _runningTasks = new Map<string, TypedAbortController<TaskAbortReasons>>();
 
 	constructor(
@@ -193,11 +192,6 @@ export class Worker<
 		return this._stopDeferred?.promise || Promise.resolve();
 	}
 
-	/** @internal Whether the last run-once pass observed any work. */
-	get drainDidWork(): boolean {
-		return this._drainDidWork;
-	}
-
 	/**
 	 * Start the worker.
 	 * Returns when startup is complete (registration done).
@@ -236,7 +230,6 @@ export class Worker<
 		}
 
 		this.orchestratorId = orchestratorId;
-		this._drainDidWork = false;
 		this._startDeferred = new Deferred<void>();
 		this._stopDeferred = new Deferred<void>();
 		this._abortController = new AbortController();
@@ -276,39 +269,20 @@ export class Worker<
 		}
 
 		const queue = new BatchingAsyncQueue<Execution>(this.fetchBatchSize * 2, batchConfigs);
-		if (runOnce) {
-			void this.runDrainPipeline(queue);
-		} else {
-			void this.fetchExecutions(queue, { runOnce });
-			void (async () => {
-				try {
-					await this.flushResults(this.executeTasks(queue));
-				} catch (error) {
-					this.logger.error("Worker pipeline error:", error);
-					this._stopDeferred?.reject(error);
-				} finally {
-					queue.close();
-					if (this._stopDeferred && !this._stopDeferred.isSettled) this._stopDeferred.resolve();
-					this.resetLifecycle();
-				}
-			})();
-		}
+		void this.fetchExecutions(queue, { runOnce });
+		void (async () => {
+			try {
+				await this.flushResults(this.executeTasks(queue));
+			} catch (error) {
+				this.logger.error("Worker pipeline error:", error);
+			} finally {
+				queue.close();
+				if (this._stopDeferred && !this._stopDeferred.isSettled) this._stopDeferred.resolve();
+				this.resetLifecycle();
+			}
+		})();
 
 		return this._startDeferred.promise;
-	}
-
-	private async runDrainPipeline(queue: BatchingAsyncQueue<Execution>): Promise<void> {
-		try {
-			const fetched = this.fetchExecutions(queue, { runOnce: true });
-			await this.flushResults(this.executeTasks(queue));
-			this._drainDidWork = (await fetched) > 0;
-		} catch (error) {
-			this.logger.error("Worker pipeline error:", error);
-			this._stopDeferred?.reject(error);
-		} finally {
-			if (this._stopDeferred && !this._stopDeferred.isSettled) this._stopDeferred.resolve();
-			this.resetLifecycle();
-		}
 	}
 
 	private resetLifecycle(): void {
@@ -420,8 +394,7 @@ export class Worker<
 	private async fetchExecutions(
 		queue: BatchingAsyncQueue<Execution>,
 		{ runOnce = false }: { runOnce?: boolean },
-	): Promise<number> {
-		let fetched = 0;
+	) {
 		assert.ok(this.orchestratorId, "orchestratorId must be set when starting the pipeline");
 
 		// Pre-compute task metadata once
@@ -484,7 +457,6 @@ export class Worker<
 				}
 
 				for (const exec of executions) {
-					fetched++;
 					await queue.push(exec); // waits if full
 					if (this.signal.aborted) break;
 				}
@@ -494,7 +466,6 @@ export class Worker<
 		}
 
 		queue.close();
-		return fetched;
 	}
 
 	// --- Stage 2: Execute tasks concurrently ---
@@ -743,14 +714,13 @@ export class Worker<
 		const taskAbortController = createTaskSignal(this.signal);
 
 		// Create batch context
-		const batchContext = BatchTaskContext.create(
+		const batchContext = new BatchTaskContext(
 			taskAbortController,
 			makeChildLogger(this.logger, {
 				task_key: taskKey,
 				queue: this.queueName,
 				batch_size: executions.length,
 			}),
-			this.extraContext,
 		);
 
 		const abortPromise = new Promise<TaskAbortReasons>((resolve) => {

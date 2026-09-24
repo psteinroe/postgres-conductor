@@ -76,10 +76,9 @@ await orchestrator.drain();
 ```
 
 - Starts the orchestrator
-- Processes until all queues are globally quiescent, including event fan-out
-  created while another queue is finishing
-- Automatically stops
-- Returns when all work is done
+- Gives each worker one run-once pass
+- Automatically stops after those passes finish
+- May leave work created after another queue's pass, such as event fan-out; call `drain()` again to process another pass
 
 **Use case:** Testing
 

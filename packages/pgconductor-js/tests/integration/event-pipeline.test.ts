@@ -464,8 +464,21 @@ describe("event pipeline", () => {
 
 	test("matches literal prefixes, numeric ranges, exists, and atomic anything-but", async () => {
 		const db = await database();
+		const operatorEvent = defineEvent({
+			name: "pipeline.operators",
+			payload: z.object({
+				code: z.string(),
+				amount: z.number(),
+				note: z.string().optional(),
+				metadata: z.string().optional(),
+				status: z.string(),
+			}),
+			filterable: ["code", "amount", "note", "metadata", "status"],
+		});
 		const compileFilter = (filter: Record<string, unknown[]>) => {
-			const compiled = compileEventTrigger({ event: "pipeline.operators", filter }, [], true);
+			const compiled = compileEventTrigger({ event: "pipeline.operators", filter }, [
+				operatorEvent,
+			]);
 			if (compiled === null) throw new Error("expected an event trigger");
 			return compiled;
 		};
@@ -903,7 +916,7 @@ describe("event pipeline", () => {
 		expect(count?.count).toBe(1);
 	}, 30_000);
 
-	test("coordinates claims and recursively drains event fan-out", async () => {
+	test("coordinates claims and supports repeated event fan-out drain passes", async () => {
 		const db = await database();
 		await registerSubscriptions(db, [{ taskKey: "pipeline.once", eventKey: "pipeline.once" }]);
 		const eventId = await db.client.emitEvent({ eventKey: "pipeline.once", payload: {} });
@@ -968,12 +981,15 @@ describe("event pipeline", () => {
 			},
 		);
 		await conductor.invoke({ name: "pipeline.source" }, {});
-		await Orchestrator.create({
+		const orchestrator = Orchestrator.create({
 			conductor,
 			tasks: [source],
 			workers: [conductor.createWorker({ queue: "destination", tasks: [destination] })],
 			defaultWorker: { pollIntervalMs: 10, flushIntervalMs: 10 },
-		}).drain();
+		});
+		for (let pass = 0; pass < 3 && received.length === 0; pass++) {
+			await orchestrator.drain();
+		}
 		expect(received).toEqual(["done"]);
 	});
 

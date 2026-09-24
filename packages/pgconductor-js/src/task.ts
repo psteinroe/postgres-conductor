@@ -175,7 +175,6 @@ export class Task<
 		triggers: NonEmptyArray<Trigger> | Trigger,
 		public readonly execute: ExecuteFunction<EventType, Returns, Context>,
 		eventDefinitions: readonly EventDefinition<string, any, any>[] = [],
-		allowUnknownEvents = true,
 	) {
 		const { name, queue, ...config } = definition;
 		this.name = name;
@@ -200,7 +199,7 @@ export class Task<
 		}
 
 		this.triggers = Array.isArray(triggers) ? triggers : [triggers];
-		this.eventTriggers = compileEventTriggers(this.triggers, eventDefinitions, allowUnknownEvents);
+		this.eventTriggers = compileEventTriggers(this.triggers, eventDefinitions);
 	}
 
 	static create<
@@ -215,14 +214,12 @@ export class Task<
 		triggers: NonEmptyArray<Trigger> | Trigger,
 		execute: ExecuteFunction<EventType, Returns, Context>,
 		eventDefinitions: readonly EventDefinition<string, any, any>[] = [],
-		allowUnknownEvents = true,
 	): Task<Key, Queue, Payload, Returns, Context, EventType> {
 		return new Task<Key, Queue, Payload, Returns, Context, EventType>(
 			definition,
 			triggers,
 			execute,
 			eventDefinitions,
-			allowUnknownEvents,
 		);
 	}
 }

@@ -456,15 +456,6 @@ export class BatchTaskContext {
 		public readonly logger: Logger,
 	) {}
 
-	static create<Extra extends object>(
-		abortController: TypedAbortController<TaskAbortReasons>,
-		logger: Logger,
-		extra?: Extra,
-	): BatchTaskContext & Extra {
-		return Object.assign(new BatchTaskContext(abortController, logger), extra) as BatchTaskContext &
-			Extra;
-	}
-
 	get signal(): AbortSignal {
 		return this.abortController.signal;
 	}

@@ -63,6 +63,20 @@ type ResolvedReturns<
 	TDef extends { readonly name: string; readonly queue?: string },
 > = TDef["name"] extends TaskName<Tasks> ? InferReturns<ResolvedTaskDef<Tasks, TDef>> : void;
 
+type ResolvedTaskEvent<
+	Tasks extends readonly TaskDefinition<string, any, any, string>[],
+	Events extends readonly EventDefinition<string, any, any>[],
+	TDef extends { readonly name: string; readonly queue?: string },
+	TTriggers,
+> = TaskEventFromTriggers<TTriggers, ResolvedPayload<Tasks, TDef>, Events>;
+
+type ResolvedBatchTaskEvent<
+	Tasks extends readonly TaskDefinition<string, any, any, string>[],
+	Events extends readonly EventDefinition<string, any, any>[],
+	TDef extends { readonly name: string; readonly queue?: string },
+	TTriggers,
+> = BatchTaskEvent<ResolvedTaskEvent<Tasks, Events, TDef, TTriggers>>;
+
 export type ConductorOptions<
 	TTaskSchemas extends TaskSchemas<any> | undefined,
 	TEventSchemas extends EventSchemas<any> | undefined,
@@ -158,19 +172,15 @@ export class Conductor<
 		fn: TDef extends { readonly batch: BatchConfig }
 			? ResolvedReturns<Tasks, TDef> extends void
 				? (
-						events: Array<
-							BatchTaskEvent<TaskEventFromTriggers<TTriggers, ResolvedPayload<Tasks, TDef>, Events>>
-						>,
+						events: ResolvedBatchTaskEvent<Tasks, Events, TDef, TTriggers>[],
 						ctx: BatchTaskContext,
 					) => Promise<void>
 				: (
-						events: Array<
-							BatchTaskEvent<TaskEventFromTriggers<TTriggers, ResolvedPayload<Tasks, TDef>, Events>>
-						>,
+						events: ResolvedBatchTaskEvent<Tasks, Events, TDef, TTriggers>[],
 						ctx: BatchTaskContext,
 					) => Promise<Array<ResolvedReturns<Tasks, TDef>>>
 			: (
-					event: TaskEventFromTriggers<TTriggers, ResolvedPayload<Tasks, TDef>, Events>,
+					event: ResolvedTaskEvent<Tasks, Events, TDef, TTriggers>,
 					ctx: TaskContext<Tasks, Events> & ExtraContext,
 				) => Promise<ResolvedReturns<Tasks, TDef>>,
 	): Task<
@@ -201,7 +211,6 @@ export class Conductor<
 				TaskContext<Tasks, Events> & ExtraContext
 			>,
 			this.options.events?.definitions ?? [],
-			this.options.events?.hasTypeOnlyDefinitions ?? false,
 		);
 	}
 

@@ -1,4 +1,4 @@
-import { eventDispatchTask, EVENT_DISPATCH_QUEUE } from "./event-dispatch-task";
+import { createEventDispatchTask, EVENT_DISPATCH_QUEUE } from "./event-dispatch-task";
 import { Worker, type WorkerConfig } from "./worker";
 import { DatabaseClient } from "./database-client";
 import { MigrationStore } from "./migration-store";
@@ -40,7 +40,6 @@ const STALE_ORCHESTRATOR_MAX_AGE_MS = HEARTBEAT_INTERVAL_MS * 10;
 export class Orchestrator {
 	private readonly db: DatabaseClient;
 	private readonly workers: Worker[] = [];
-	private readonly eventWorker: Worker;
 	private readonly orchestratorId: string;
 	private readonly migrationStore: MigrationStore;
 	private readonly schemaManager: SchemaManager;
@@ -92,19 +91,14 @@ export class Orchestrator {
 			queues.add(worker.queueName);
 		}
 
-		this.eventWorker = new Worker(
-			EVENT_DISPATCH_QUEUE,
-			[eventDispatchTask],
-			this.db,
-			this.logger,
-			{
+		this.workers.push(
+			new Worker(EVENT_DISPATCH_QUEUE, [createEventDispatchTask(this.db)], this.db, this.logger, {
 				concurrency: 1,
 				fetchBatchSize: 10,
 				flushBatchSize: 10,
 				pollIntervalMs: options.defaultWorker?.pollIntervalMs || 1000,
 				flushIntervalMs: options.defaultWorker?.flushIntervalMs || 2000,
-			},
-			{ db: this.db },
+			}),
 		);
 	}
 
@@ -218,48 +212,23 @@ export class Orchestrator {
 				// Start heartbeat loop
 				this.startHeartbeatLoop();
 
-				const startWorkers = async () => {
-					const userWorkerLifecycles = this.workers.map((worker) => {
-						const lifecycle = runOnce
-							? worker.drain(this.orchestratorId)
-							: worker.run(this.orchestratorId);
-						// A sibling may fail registration before these promises are returned
-						// to the caller. Mark every lifecycle as observed immediately.
-						lifecycle.catch(noop);
-						return lifecycle;
-					});
-
-					// Subscription registration must commit before the dispatcher can
-					// claim source executions and freeze their delivery snapshot.
-					await Promise.all(this.workers.map((worker) => worker.started));
-
-					const eventWorkerLifecycle = runOnce
-						? this.eventWorker.drain(this.orchestratorId)
-						: this.eventWorker.run(this.orchestratorId);
-					eventWorkerLifecycle.catch(noop);
-					await this.eventWorker.started;
-
-					return {
-						allWorkers: Promise.all([...userWorkerLifecycles, eventWorkerLifecycle]),
-					};
-				};
-
-				let { allWorkers } = await startWorkers();
+				const workerLifecycles: Promise<void>[] = [];
+				for (const worker of this.workers) {
+					const lifecycle = runOnce
+						? worker.drain(this.orchestratorId)
+						: worker.run(this.orchestratorId);
+					// Mark each lifecycle as observed before awaiting registration.
+					lifecycle.catch(noop);
+					workerLifecycles.push(lifecycle);
+					await worker.started;
+				}
+				const allWorkers = Promise.all(workerLifecycles);
 
 				// NOW signal that orchestrator has started
 				this.startDeferred.resolve();
 
 				if (runOnce) {
-					// Event fan-out can create work in a queue that already finished its
-					// pass, and destination tasks can recursively emit more events.
 					await allWorkers;
-					while (
-						this.eventWorker.drainDidWork ||
-						this.workers.some((worker) => worker.drainDidWork)
-					) {
-						({ allWorkers } = await startWorkers());
-						await allWorkers;
-					}
 				} else {
 					// Wait for shutdown signal or all workers to complete
 					await Promise.race([allWorkers, this.waitForShutdownSignal()]);
@@ -385,10 +354,9 @@ export class Orchestrator {
 								signal.signal_payload &&
 								signal.signal_payload.queue
 							) {
-								const worker =
-									signal.signal_payload.queue === EVENT_DISPATCH_QUEUE
-										? this.eventWorker
-										: this.workers.find((w) => w.queueName === signal.signal_payload?.queue);
+								const worker = this.workers.find(
+									(w) => w.queueName === signal.signal_payload?.queue,
+								);
 								if (worker) {
 									worker.cancelExecutions([signal.signal_execution_id]);
 								}
@@ -430,7 +398,7 @@ export class Orchestrator {
 	 * Stop all workers gracefully
 	 */
 	private async stopWorkers(): Promise<void> {
-		await Promise.all([...this.workers.map((worker) => worker.stop()), this.eventWorker.stop()]);
+		await Promise.all(this.workers.map((worker) => worker.stop()));
 	}
 
 	/**

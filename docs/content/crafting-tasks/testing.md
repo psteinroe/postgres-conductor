@@ -55,7 +55,9 @@ test("processes tasks end-to-end", async () => {
 1. **`drain()` starts the orchestrator** - Workers begin polling for tasks
 2. **Processes all queued tasks** - Executes each task in order
 3. **Stops automatically** - Once the queue is empty, the orchestrator shuts down
-4. **Returns a promise** - Resolves when all work is complete
+4. **Returns a promise** - Resolves when that worker pass is complete
+
+If a task creates work for a queue whose pass already finished—for example through custom-event fan-out—call `drain()` again to run another pass.
 
 ## Testing with Custom Context
 

@@ -56,40 +56,23 @@ export class TaskSchemas<
 }
 
 /**
- * Stackable adapter for event definitions.
- * Supports chaining fromSchema() and fromUnion() to combine different definition styles.
+ * Stackable adapter for standard-schema based event definitions.
  *
  * @example
- * EventSchemas
- *   .fromSchema([orderPlaced])
- *   .fromUnion<AppAccountCreated | UserDeleted>()
+ * EventSchemas.fromSchema([orderPlaced]).fromSchema([userDeleted])
  */
 export class EventSchemas<
 	TSchemaTypes extends readonly EventDefinition<string, any, any>[] = readonly [],
-	TUnionTypes extends EventDefinition<string, any, any> = never,
 > {
-	private constructor(
-		readonly definitions: TSchemaTypes,
-		readonly hasTypeOnlyDefinitions: boolean,
-	) {}
+	private constructor(readonly definitions: TSchemaTypes) {}
 
 	/**
 	 * Create EventSchemas from standard-schema based event definitions.
 	 */
 	static fromSchema<const T extends readonly EventDefinition<string, any, any>[]>(
 		events: T,
-	): EventSchemas<T, never> {
-		return new EventSchemas(events, false);
-	}
-
-	/**
-	 * Add type-only event definitions via union type.
-	 */
-	static fromUnion<TUnion extends EventDefinition<string, any, any>>(): EventSchemas<
-		readonly [],
-		TUnion
-	> {
-		return new EventSchemas([], true);
+	): EventSchemas<T> {
+		return new EventSchemas(events);
 	}
 
 	/**
@@ -97,18 +80,8 @@ export class EventSchemas<
 	 */
 	fromSchema<const T extends readonly EventDefinition<string, any, any>[]>(
 		events: T,
-	): EventSchemas<readonly [...TSchemaTypes, ...T], TUnionTypes> {
-		return new EventSchemas([...this.definitions, ...events], this.hasTypeOnlyDefinitions);
-	}
-
-	/**
-	 * Chain: Add type-only event definitions via union type.
-	 */
-	fromUnion<TUnion extends EventDefinition<string, any, any>>(): EventSchemas<
-		TSchemaTypes,
-		TUnionTypes | TUnion
-	> {
-		return new EventSchemas(this.definitions, true);
+	): EventSchemas<readonly [...TSchemaTypes, ...T]> {
+		return new EventSchemas([...this.definitions, ...events]);
 	}
 }
 
@@ -121,8 +94,4 @@ export type InferTasksFromSchema<T> =
 		: readonly [];
 
 export type InferEventsFromSchema<T> =
-	T extends EventSchemas<infer TSchema, infer TUnion>
-		? [TUnion] extends [never]
-			? TSchema
-			: readonly [...TSchema, TUnion]
-		: readonly [];
+	T extends EventSchemas<infer TSchema> ? TSchema : readonly [];

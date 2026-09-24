@@ -2,7 +2,7 @@ import { test, expect, describe } from "bun:test";
 import { expectTypeOf } from "expect-type";
 import { Conductor } from "../../src/conductor";
 import { defineTask } from "../../src/task-definition";
-import { defineEvent, type DefineEvent } from "../../src/event-definition";
+import { defineEvent } from "../../src/event-definition";
 import { TaskSchemas, EventSchemas } from "../../src/schemas";
 import { z } from "zod";
 
@@ -182,21 +182,21 @@ describe("event triggers", () => {
 		).toThrow('Fields for event "user.created" contains invalid field');
 	});
 
-	test("type-only events remain valid beside runtime event definitions", () => {
-		type ExternalEvent = DefineEvent<{
-			name: "external.received";
-			payload: { externalId: string };
-			filterable: ["externalId"];
-		}>;
+	test("runtime event schema collections can be chained", () => {
 		const runtimeEvent = defineEvent({
 			name: "user.created",
 			payload: z.object({ userId: z.string() }),
+		});
+		const externalEvent = defineEvent({
+			name: "external.received",
+			payload: z.object({ externalId: z.string() }),
+			filterable: ["externalId"],
 		});
 		const taskDef = defineTask({ name: "external-task", payload: z.object({}) });
 		const conductor = Conductor.create({
 			sql: {} as any,
 			tasks: TaskSchemas.fromSchema([taskDef]),
-			events: EventSchemas.fromSchema([runtimeEvent]).fromUnion<ExternalEvent>(),
+			events: EventSchemas.fromSchema([runtimeEvent]).fromSchema([externalEvent]),
 			context: {},
 		});
 

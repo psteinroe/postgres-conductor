@@ -106,47 +106,17 @@ export const orderPlaced = defineEvent({
 });
 ```
 
-### With TypeScript Types
-
-```typescript
-import type { DefineEvent } from "pgconductor-js";
-
-export type UserCreated = DefineEvent<{
-  name: "user.created";
-  payload: {
-    userId: string;
-    email: string;
-    name: string;
-  };
-}>;
-
-export type OrderPlaced = DefineEvent<{
-  name: "order.placed";
-  payload: {
-    orderId: string;
-    total: number;
-  };
-}>;
-```
+Custom events require runtime Standard Schema definitions so pgconductor can validate event names, payload fields, and filterable fields when tasks are registered.
 
 ### Registering Events
 
 ```typescript
 import { EventSchemas } from "pgconductor-js";
 
-// With StandardSchema
 const conductor = Conductor.create({
   connectionString: "postgres://localhost/mydb",
   tasks: TaskSchemas.fromSchema([...]),
   events: EventSchemas.fromSchema([userCreated, orderPlaced]),
-  context: {},
-});
-
-// With TypeScript types
-const conductor = Conductor.create({
-  connectionString: "postgres://localhost/mydb",
-  tasks: TaskSchemas.fromTypes<[...]>(),
-  events: EventSchemas.fromTypes<[UserCreated, OrderPlaced]>(),
   context: {},
 });
 ```

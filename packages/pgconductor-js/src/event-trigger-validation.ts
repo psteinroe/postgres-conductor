@@ -214,8 +214,7 @@ function predicateSortKey(value: EventFilterPredicate): string {
 function parseEventFilter(
 	filter: unknown,
 	eventName: string,
-	definition: EventDefinition<string, any, any> | undefined,
-	allowUnknownEvents: boolean,
+	definition: EventDefinition<string, any, any>,
 ): EventFilter | null {
 	if (filter === undefined || filter === null) return null;
 	parse(FILTER_SCHEMA, filter, `Filter for event "${eventName}"`);
@@ -223,11 +222,7 @@ function parseEventFilter(
 	if (entries.length > MAX_FILTER_FIELDS) {
 		throw new Error(`Filter for event "${eventName}" supports at most 8 fields`);
 	}
-	if (!definition && !allowUnknownEvents) {
-		throw new Error(`Filtered event "${eventName}" has no runtime event definition`);
-	}
-
-	const allowed = definition ? new Set(definition.filterable || []) : null;
+	const allowed = new Set(definition.filterable || []);
 	const parsedFilter: EventFilter = Object.create(null) as EventFilter;
 	for (const [field, values] of entries.sort(([left], [right]) => left.localeCompare(right))) {
 		if (field.trim().length === 0) {
@@ -236,7 +231,7 @@ function parseEventFilter(
 		if (utf8ByteLength(field) > MAX_EVENT_FIELD_BYTES) {
 			throw new Error(`Filter field "${field}" for event "${eventName}" exceeds 128 UTF-8 bytes`);
 		}
-		if (allowed && !allowed.has(field)) {
+		if (!allowed.has(field)) {
 			throw new Error(`Filter for event "${eventName}" contains undeclared field "${field}"`);
 		}
 
@@ -328,7 +323,6 @@ export type CompiledEventTrigger = {
 export function compileEventTrigger(
 	trigger: object,
 	eventDefinitions: readonly EventDefinition<string, any, any>[],
-	allowUnknownEvents = false,
 ): CompiledEventTrigger | null {
 	if (!("event" in trigger)) return null;
 	const candidate = parse(EVENT_TRIGGER_SCHEMA, trigger, "Custom event trigger");
@@ -341,10 +335,10 @@ export function compileEventTrigger(
 	}
 
 	const definition = eventDefinitions.find((event) => event.name === eventName);
-	if (eventDefinitions.length > 0 && !definition && !allowUnknownEvents) {
+	if (!definition) {
 		throw new Error(`Event "${eventName}" is not defined in the conductor event catalog`);
 	}
-	const filter = parseEventFilter(candidate.filter, eventName, definition, allowUnknownEvents);
+	const filter = parseEventFilter(candidate.filter, eventName, definition);
 	return {
 		event_key: eventName,
 		payload_fields: parseEventPayloadFields(candidate.fields, eventName),
@@ -356,11 +350,10 @@ export function compileEventTrigger(
 export function compileEventTriggers(
 	triggers: object | readonly object[],
 	eventDefinitions: readonly EventDefinition<string, any, any>[],
-	allowUnknownEvents = false,
 ): CompiledEventTrigger[] {
 	const list = Array.isArray(triggers) ? triggers : [triggers];
 	return list.flatMap((trigger) => {
-		const compiled = compileEventTrigger(trigger, eventDefinitions, allowUnknownEvents);
+		const compiled = compileEventTrigger(trigger, eventDefinitions);
 		return compiled ? [compiled] : [];
 	});
 }

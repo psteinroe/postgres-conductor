@@ -1,5 +1,25 @@
 import { describe, expect, test } from "bun:test";
+import { z } from "zod";
+import { defineEvent } from "../../src/event-definition";
 import { compileEventTrigger } from "../../src/event-trigger-validation";
+import { Task } from "../../src/task";
+
+const catalogChanged = defineEvent({
+	name: "catalog.changed",
+	payload: z.object({
+		z: z.number(),
+		a: z.union([z.string(), z.number(), z.boolean(), z.null()]),
+		["__proto__"]: z.string(),
+		status: z.string(),
+		score: z.number(),
+		name: z.string(),
+		deleted: z.boolean(),
+		value: z.string(),
+	}),
+	filterable: ["z", "a", "__proto__", "status", "score", "name", "deleted", "value"],
+});
+
+const definitions = [catalogChanged] as const;
 
 describe("event trigger compilation", () => {
 	test("sorts fields and deduplicates scalar alternatives type-sensitively", () => {
@@ -11,8 +31,7 @@ describe("event trigger compilation", () => {
 					a: ["1", 1, true, null],
 				},
 			},
-			[],
-			true,
+			definitions,
 		);
 
 		if (!compiled) throw new Error("expected an event trigger");
@@ -62,8 +81,7 @@ describe("event trigger compilation", () => {
 				event: "catalog.changed",
 				filter: JSON.parse('{"__proto__":["safe"]}') as Record<string, unknown>,
 			},
-			[],
-			true,
+			definitions,
 		);
 
 		expect(compiled?.terms).toEqual([
@@ -87,8 +105,7 @@ describe("event trigger compilation", () => {
 					deleted: [{ exists: false }],
 				},
 			},
-			[],
-			true,
+			definitions,
 		);
 
 		expect(compiled?.terms).toEqual([
@@ -125,7 +142,7 @@ describe("event trigger compilation", () => {
 
 	test("rejects malformed, unbounded, and non-atomic operators", () => {
 		const compile = (value: unknown[]) =>
-			compileEventTrigger({ event: "catalog.changed", filter: { value } }, [], true);
+			compileEventTrigger({ event: "catalog.changed", filter: { value } }, definitions);
 
 		expect(() => compile([{ prefix: "" }])).toThrow(/non-empty string/);
 		expect(() => compile([{ prefix: "x".repeat(65) }])).toThrow(/64 characters/);
@@ -137,18 +154,33 @@ describe("event trigger compilation", () => {
 		expect(() => compile([{ suffix: "x" }])).toThrow(/unsupported operator/);
 	});
 
-	test("enforces index-safe names and UTF-8 byte limits before registration", () => {
-		expect(() =>
-			compileEventTrigger({ event: "catalog.changed", filter: { " ": [true] } }, [], true),
-		).toThrow(/empty field names/);
-		expect(() => compileEventTrigger({ event: "e".repeat(256) }, [], true)).toThrow(
-			/255 UTF-8 bytes/,
+	test("requires runtime definitions for directly constructed tasks", () => {
+		expect(
+			() => new Task({ name: "catalog-task" }, { event: "catalog.changed" }, async () => {}),
+		).toThrow('Event "catalog.changed" is not defined in the conductor event catalog');
+		expect(
+			() =>
+				new Task(
+					{ name: "catalog-task" },
+					{ event: "catalog.changed" },
+					async () => {},
+					definitions,
+				),
+		).not.toThrow();
+	});
+
+	test("enforces index-safe names and byte limits", () => {
+		expect(() => compileEventTrigger({ event: "catalog.changed" }, [])).toThrow(
+			'Event "catalog.changed" is not defined in the conductor event catalog',
 		);
+		expect(() =>
+			compileEventTrigger({ event: "catalog.changed", filter: { " ": [true] } }, definitions),
+		).toThrow(/empty field names/);
+		expect(() => compileEventTrigger({ event: "e".repeat(256) }, [])).toThrow(/255 UTF-8 bytes/);
 		expect(() =>
 			compileEventTrigger(
 				{ event: "catalog.changed", filter: { value: ["x".repeat(1023)] } },
-				[],
-				true,
+				definitions,
 			),
 		).toThrow(/1024 UTF-8 bytes/);
 	});
