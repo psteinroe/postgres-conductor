@@ -70,6 +70,26 @@ const task = conductor.createTask(
 - Resumes after duration expires
 - Execution continues from where it left off
 
+## ctx.waitForEvent()
+
+Wait durably for the next matching custom event. The event must belong to the Conductor's
+runtime `EventSchemas` catalog. Filters use the same typed operators and matching semantics as
+event-triggered tasks. The subscription is persisted before the worker is released, so a restart
+does not lose the wait.
+
+```typescript
+const event = await ctx.waitForEvent("payment", {
+  event: paymentReceived,
+  filter: { orderId: [orderId] },
+  timeout: 60_000,
+});
+// event.name and event.payload are typed from paymentReceived
+```
+
+A matching event is delivered once and cached by the step key. The subscription becomes active
+when registration commits; an event racing registration or timeout is not guaranteed to win.
+Earlier events do not satisfy the wait. If the timeout wins, `WaitForEventTimeoutError` is thrown.
+
 ## ctx.invoke()
 
 Invoke a child task and wait for result:

@@ -823,6 +823,10 @@ begin
           do nothing;
         end if;
       end if;
+
+      delete from pgconductor._private_custom_event_subscriptions
+      where kind = 'execution_wait'
+        and execution_id = v_child_id;
     end if;
 
     update pgconductor._private_executions
@@ -840,6 +844,13 @@ begin
       and locked_at is null;
 
     get diagnostics v_rows_affected = row_count;
+
+    if v_rows_affected > 0 then
+      delete from pgconductor._private_custom_event_subscriptions
+      where kind = 'execution_wait'
+        and execution_id = p_execution_id;
+    end if;
+
     return v_rows_affected > 0;
   else
     -- running: signal orchestrator + set cancelled flag
@@ -856,6 +867,10 @@ begin
     get diagnostics v_rows_affected = row_count;
 
     if v_rows_affected > 0 then
+      delete from pgconductor._private_custom_event_subscriptions
+      where kind = 'execution_wait'
+        and execution_id = p_execution_id;
+
       insert into pgconductor._private_orchestrator_signals
         (orchestrator_id, type, execution_id, payload)
       values (
@@ -890,14 +905,45 @@ create table pgconductor._private_custom_event_subscriptions (
     payload_fields text[],
     required_field_count smallint not null check (required_field_count between 0 and 8),
     created_at timestamptz not null default pgconductor._private_current_time(),
+    kind text not null default 'task_trigger',
+    execution_id uuid,
+    step_key text,
+    expires_at timestamptz,
     constraint chk_custom_event_subscription_event_key check (
         btrim(event_key) <> '' and octet_length(event_key) between 1 and 255
-    )
+    ),
+    constraint chk_custom_event_subscription_kind check (
+        kind in ('task_trigger', 'execution_wait')
+    ),
+    constraint chk_custom_event_subscription_shape check (
+        (kind = 'task_trigger'
+            and execution_id is null
+            and step_key is null
+            and expires_at is null)
+        or
+        (kind = 'execution_wait'
+            and execution_id is not null
+            and step_key is not null
+            and payload_fields is null)
+    ),
+    constraint fk_custom_event_subscription_execution
+        foreign key (execution_id, queue)
+        references pgconductor._private_executions(id, queue)
+        on delete cascade
 );
 
 create index idx_custom_event_subscriptions_event
     on pgconductor._private_custom_event_subscriptions
        (event_key, required_field_count, id);
+
+create unique index idx_custom_event_subscription_execution_wait
+    on pgconductor._private_custom_event_subscriptions (execution_id, step_key)
+    where kind = 'execution_wait';
+
+create index idx_custom_event_subscription_wait_match
+    on pgconductor._private_custom_event_subscriptions
+       (event_key, created_at, expires_at, id)
+    where kind = 'execution_wait';
 
 -- TypeScript validates and compiles filters once. Each row is one typed OR
 -- alternative; rows sharing a subscription and field form one clause, while
@@ -1000,9 +1046,192 @@ create index idx_event_filter_term_anything_but
        (event_key, field_name, subscription_id)
     where operator = 'anything_but';
 
--- Persistent worker subscriptions are replaced as one queue-scoped snapshot.
--- The private transport is already compiled; SQL persists every typed term used
--- by the set-wise matcher.
+create or replace function pgconductor._private_expand_event_filter_terms(
+    p_subscription_id uuid,
+    p_event_key text,
+    p_terms jsonb
+)
+returns table (
+    subscription_id uuid,
+    term_number smallint,
+    event_key text,
+    field_name text,
+    operator text,
+    scalar_type text,
+    text_value text,
+    number_value numeric,
+    boolean_value boolean,
+    number_range numrange
+)
+language sql
+immutable
+as $function$
+    select
+        p_subscription_id,
+        term.ordinality::smallint,
+        p_event_key,
+        fields.field_name,
+        fields.operator,
+        fields.scalar_type,
+        fields.text_value,
+        fields.number_value,
+        fields.boolean_value,
+        case when fields.operator = 'numeric_range' then pg_catalog.numrange(
+            fields.lower_value,
+            fields.upper_value,
+            (case when fields.lower_inclusive then '[' else '(' end)
+                ||
+            (case when fields.upper_inclusive then ']' else ')' end)
+        ) end
+    from pg_catalog.jsonb_array_elements(coalesce(p_terms, '[]'::jsonb))
+        with ordinality as term(value, ordinality)
+    cross join lateral pg_catalog.jsonb_to_record(term.value) as fields(
+        field_name text,
+        operator text,
+        scalar_type text,
+        text_value text,
+        number_value numeric,
+        boolean_value boolean,
+        lower_value numeric,
+        upper_value numeric,
+        lower_inclusive boolean,
+        upper_inclusive boolean
+    );
+$function$;
+
+create or replace function pgconductor._private_register_event_wait(
+    p_execution_id uuid,
+    p_queue text,
+    p_task_key text,
+    p_orchestrator_id uuid,
+    p_event_key text,
+    p_step_key text,
+    p_required_field_count smallint,
+    p_terms jsonb,
+    p_timeout_ms bigint
+)
+returns table (timed_out boolean, timeout_ms bigint)
+language plpgsql
+volatile
+set search_path to ''
+as $function$
+declare
+    v_subscription_id uuid;
+    v_expires_at timestamptz;
+    v_now timestamptz;
+begin
+    perform 1
+    from pgconductor._private_executions execution
+    where execution.id = p_execution_id
+      and execution.queue = p_queue
+      and execution.task_key = p_task_key
+      and execution.locked_by = p_orchestrator_id
+      and execution.completed_at is null
+      and execution.failed_at is null
+      and not execution.cancelled
+    for update;
+
+    if not found then
+        return query select false, null::bigint;
+        return;
+    end if;
+
+    v_now := pgconductor._private_current_time();
+
+    select subscription.id, subscription.expires_at
+    into v_subscription_id, v_expires_at
+    from pgconductor._private_custom_event_subscriptions subscription
+    where subscription.kind = 'execution_wait'
+      and subscription.execution_id = p_execution_id
+      and subscription.queue = p_queue
+      and subscription.step_key = p_step_key
+    for update;
+
+    if found then
+        if v_expires_at is not null and v_expires_at <= v_now then
+            delete from pgconductor._private_custom_event_subscriptions
+            where id = v_subscription_id;
+
+            insert into pgconductor._private_steps (execution_id, queue, key, result)
+            values (
+                p_execution_id,
+                p_queue,
+                p_step_key,
+                jsonb_build_object('status', 'timed_out')
+            )
+            on conflict (execution_id, key) do nothing;
+
+            return query select true, null::bigint;
+            return;
+        end if;
+
+        return query select false, case
+            when v_expires_at is null then null::bigint
+            else greatest(0, ceil(extract(epoch from (
+                v_expires_at - pgconductor._private_current_time()
+            )) * 1000)::bigint)
+        end;
+        return;
+    end if;
+
+    v_expires_at := case
+        when p_timeout_ms is null then null
+        else v_now + (p_timeout_ms || ' milliseconds')::interval
+    end;
+
+    insert into pgconductor._private_custom_event_subscriptions (
+        event_key,
+        task_key,
+        queue,
+        payload_fields,
+        required_field_count,
+        kind,
+        execution_id,
+        step_key,
+        expires_at
+    ) values (
+        p_event_key,
+        p_task_key,
+        p_queue,
+        null,
+        p_required_field_count,
+        'execution_wait',
+        p_execution_id,
+        p_step_key,
+        v_expires_at
+    )
+    returning id into v_subscription_id;
+
+    insert into pgconductor._private_event_filter_terms (
+        subscription_id,
+        term_number,
+        event_key,
+        field_name,
+        operator,
+        scalar_type,
+        text_value,
+        number_value,
+        boolean_value,
+        number_range
+    )
+    select *
+    from pgconductor._private_expand_event_filter_terms(
+        v_subscription_id,
+        p_event_key,
+        p_terms
+    );
+
+    return query select false, case
+        when v_expires_at is null then null::bigint
+        else greatest(0, ceil(extract(epoch from (
+            v_expires_at - pgconductor._private_current_time()
+        )) * 1000)::bigint)
+    end;
+end;
+$function$;
+
+-- Worker registration replaces only durable task-trigger subscriptions. Active
+-- execution waits belong to running workflows and survive worker restarts.
 create or replace function pgconductor._private_replace_custom_event_subscriptions(
     p_queue_name text,
     p_subscriptions pgconductor.event_subscription_spec[]
@@ -1014,7 +1243,7 @@ set search_path to ''
 as $function$
     with removed as materialized (
         delete from pgconductor._private_custom_event_subscriptions
-        where queue = p_queue_name
+        where queue = p_queue_name and kind = 'task_trigger'
         returning 1
     ), prepared as materialized (
         select pgconductor._private_portable_uuidv7() as id,
@@ -1032,10 +1261,11 @@ as $function$
         cross join (select count(*) from removed) removal_barrier
     ), inserted_subscriptions as (
         insert into pgconductor._private_custom_event_subscriptions (
-            id, event_key, task_key, queue, payload_fields, required_field_count
+            id, event_key, task_key, queue, payload_fields,
+            required_field_count, kind
         )
         select id, event_key, task_key, p_queue_name,
-            payload_fields, required_field_count
+            payload_fields, required_field_count, 'task_trigger'
         from prepared
         order by input_ordinal
         returning id
@@ -1044,39 +1274,14 @@ as $function$
         subscription_id, term_number, event_key, field_name, operator,
         scalar_type, text_value, number_value, boolean_value, number_range
     )
-    select
-        prepared.id,
-        term.ordinality::smallint,
-        prepared.event_key,
-        fields.field_name,
-        fields.operator,
-        fields.scalar_type,
-        fields.text_value,
-        fields.number_value,
-        fields.boolean_value,
-        case when fields.operator = 'numeric_range' then numrange(
-            fields.lower_value,
-            fields.upper_value,
-            (case when fields.lower_inclusive then '[' else '(' end)
-                ||
-            (case when fields.upper_inclusive then ']' else ')' end)
-        ) end
+    select terms.*
     from prepared
     join inserted_subscriptions on inserted_subscriptions.id = prepared.id
-    cross join lateral jsonb_array_elements(prepared.terms)
-        with ordinality as term(value, ordinality)
-    cross join lateral jsonb_to_record(term.value) as fields(
-        field_name text,
-        operator text,
-        scalar_type text,
-        text_value text,
-        number_value numeric,
-        boolean_value boolean,
-        lower_value numeric,
-        upper_value numeric,
-        lower_inclusive boolean,
-        upper_inclusive boolean
-    );
+    cross join lateral pgconductor._private_expand_event_filter_terms(
+        prepared.id,
+        prepared.event_key,
+        prepared.terms
+    ) terms;
 $function$;
 
 insert into pgconductor._private_queues (name)

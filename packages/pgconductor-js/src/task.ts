@@ -174,7 +174,7 @@ export class Task<
 		definition: TaskConfiguration<Key, Queue, Payload>,
 		triggers: NonEmptyArray<Trigger> | Trigger,
 		public readonly execute: ExecuteFunction<EventType, Returns, Context>,
-		eventDefinitions: readonly EventDefinition<string, any, any>[] = [],
+		public readonly eventDefinitions: readonly EventDefinition<string, any, any>[] = [],
 	) {
 		const { name, queue, ...config } = definition;
 		this.name = name;

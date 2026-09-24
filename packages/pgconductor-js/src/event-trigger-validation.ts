@@ -312,11 +312,30 @@ export function compileEventFilterTerms(filter: EventFilter | null): EventFilter
 	);
 }
 
-export type CompiledEventTrigger = {
-	event_key: string;
-	payload_fields: string[] | null;
+export type CompiledEventFilter = {
 	required_field_count: number;
 	terms: EventFilterTerm[];
+};
+
+export function compileEventFilter(
+	eventName: string,
+	filter: unknown,
+	eventDefinitions: readonly EventDefinition<string, any, any>[],
+): CompiledEventFilter {
+	const definition = eventDefinitions.find((event) => event.name === eventName);
+	if (!definition) {
+		throw new Error(`Event "${eventName}" is not defined in the conductor event catalog`);
+	}
+	const parsed = parseEventFilter(filter, eventName, definition);
+	return {
+		required_field_count: parsed ? Object.keys(parsed).length : 0,
+		terms: compileEventFilterTerms(parsed),
+	};
+}
+
+export type CompiledEventTrigger = CompiledEventFilter & {
+	event_key: string;
+	payload_fields: string[] | null;
 };
 
 /** Validate and compile one trigger. Non-event triggers return null. */
@@ -334,16 +353,10 @@ export function compileEventTrigger(
 		throw new Error(`Custom event "${eventName}" does not support a when clause`);
 	}
 
-	const definition = eventDefinitions.find((event) => event.name === eventName);
-	if (!definition) {
-		throw new Error(`Event "${eventName}" is not defined in the conductor event catalog`);
-	}
-	const filter = parseEventFilter(candidate.filter, eventName, definition);
 	return {
 		event_key: eventName,
 		payload_fields: parseEventPayloadFields(candidate.fields, eventName),
-		required_field_count: filter ? Object.keys(filter).length : 0,
-		terms: compileEventFilterTerms(filter),
+		...compileEventFilter(eventName, candidate.filter, eventDefinitions),
 	};
 }
 
