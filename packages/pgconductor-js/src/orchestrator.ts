@@ -1,3 +1,4 @@
+import { createEventDispatchTask, EVENT_DISPATCH_QUEUE } from "./event-dispatch-task";
 import { Worker, type WorkerConfig } from "./worker";
 import { DatabaseClient } from "./database-client";
 import { MigrationStore } from "./migration-store";
@@ -13,14 +14,14 @@ import { noop } from "./lib/noop";
 import { coerceError } from "./lib/coerce-error";
 
 export type OrchestratorOptions<TTasks extends readonly AnyTask[] = readonly AnyTask[]> = {
-	conductor: Conductor<any, any, any, any, any, any, any>;
+	conductor: Conductor<any, any, any, any, any>;
 	tasks?: ValidateTasksQueue<"default", TTasks>;
 	defaultWorker?: Partial<WorkerConfig>;
 	workers?: Worker[];
 };
 
 type InternalOrchestratorOptions = {
-	conductor: Conductor<any, any, any, any, any, any, any>;
+	conductor: Conductor<any, any, any, any, any>;
 	tasks?: readonly AnyTask[];
 	defaultWorker?: Partial<WorkerConfig>;
 	workers?: Worker[];
@@ -74,12 +75,31 @@ export class Orchestrator {
 		}
 
 		for (const w of options.workers || []) {
-			if (this.workers.find((existing) => existing.queueName === w.queueName)) {
-				throw new Error(`Duplicate worker name: ${w.queueName}`);
-			}
-
 			this.workers.push(w);
 		}
+
+		const queues = new Set<string>();
+		for (const worker of this.workers) {
+			if (worker.queueName === EVENT_DISPATCH_QUEUE) {
+				throw new Error(`Queue "${EVENT_DISPATCH_QUEUE}" is reserved for internal use`);
+			}
+			if (queues.has(worker.queueName)) {
+				throw new Error(
+					`Orchestrator cannot configure multiple workers for queue "${worker.queueName}"; configure one worker with all tasks for that queue`,
+				);
+			}
+			queues.add(worker.queueName);
+		}
+
+		this.workers.push(
+			new Worker(EVENT_DISPATCH_QUEUE, [createEventDispatchTask(this.db)], this.db, this.logger, {
+				concurrency: 1,
+				fetchBatchSize: 10,
+				flushBatchSize: 10,
+				pollIntervalMs: options.defaultWorker?.pollIntervalMs || 1000,
+				flushIntervalMs: options.defaultWorker?.flushIntervalMs || 2000,
+			}),
+		);
 	}
 
 	static create<const TTasks extends readonly Task<any, "default", any, any, any, any>[]>(
@@ -139,6 +159,9 @@ export class Orchestrator {
 		}
 
 		this._stopDeferred = new Deferred<void>();
+		// Startup can fail before callers have a reason to observe `stopped`.
+		// Keep the rejection available to explicit awaiters while marking it handled.
+		this._stopDeferred.promise.catch(noop);
 		this._startDeferred = new Deferred<void>();
 		this._abortController = new AbortController();
 		this.registerSignalHandlers();
@@ -189,32 +212,34 @@ export class Orchestrator {
 				// Start heartbeat loop
 				this.startHeartbeatLoop();
 
-				// Kick off all workers (don't await yet!)
-				if (runOnce) {
-					// Drain mode: workers will process and stop
-					this.workers.forEach((w) => void w.drain(this.orchestratorId));
-				} else {
-					// Normal mode: workers will run continuously
-					this.workers.forEach((w) => void w.run(this.orchestratorId));
+				const workerLifecycles: Promise<void>[] = [];
+				for (const worker of this.workers) {
+					const lifecycle = runOnce
+						? worker.drain(this.orchestratorId)
+						: worker.run(this.orchestratorId);
+					// Mark each lifecycle as observed before awaiting registration.
+					lifecycle.catch(noop);
+					workerLifecycles.push(lifecycle);
+					await worker.started;
 				}
-
-				// Wait for ALL workers to finish starting (register() complete)
-				await Promise.all(this.workers.map((w) => w.started));
+				const allWorkers = Promise.all(workerLifecycles);
 
 				// NOW signal that orchestrator has started
 				this.startDeferred.resolve();
 
-				// Wait for shutdown signal or all workers to complete
-				await Promise.race([
-					Promise.all(this.workers.map((w) => w.stopped)),
-					this.waitForShutdownSignal(),
-				]);
+				if (runOnce) {
+					await allWorkers;
+				} else {
+					// Wait for shutdown signal or all workers to complete
+					await Promise.race([allWorkers, this.waitForShutdownSignal()]);
+				}
 
 				// Stop gracefully
 				await this.stopWorkers();
 			} catch (err) {
 				error = coerceError(err);
 				this.logger.error(err);
+				await this.stopWorkers();
 
 				// Only reject startDeferred if startup hasn't completed yet
 				if (!this.startDeferred.isSettled) {

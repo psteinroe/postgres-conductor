@@ -7,7 +7,6 @@ import type {
 	EventSubscriptionSpec,
 	Payload,
 	TaskSpec,
-	JsonValue,
 } from "./database-client";
 
 export type OrchestratorHeartbeatArgs = {
@@ -42,6 +41,11 @@ export type GetExecutionsArgs = {
 export type RemoveExecutionsArgs = {
 	queueName: string;
 	batchSize: number;
+};
+
+export type DispatchCustomEventsArgs = {
+	eventIds: string[];
+	orchestratorId: string;
 };
 
 export type RegisterWorkerArgs = {
@@ -86,7 +90,7 @@ export type ClearWaitingStateArgs = {
 
 export type EmitEventArgs = {
 	eventKey: string;
-	payload?: JsonValue;
+	payload?: Payload;
 };
 
 export class QueryBuilder {
@@ -374,12 +378,14 @@ export class QueryBuilder {
 				returning e.id, e.task_key, e.queue, e.payload, e.waiting_on_execution_id,
 					e.waiting_step_key, e.cancelled, e.last_error, e.dedupe_key, e.cron_expression,
 					e.locked_by, e."group", e.priority, e.run_at, e.created_at,
+					e.subscription_id,
 					e.dead_letter_source_execution_id, e.dead_letter_source_queue,
 					e.dead_letter_source_task_key, e.dead_letter_error,
 					e.dead_letter_attempts, e.dead_letter_failed_at
 			)
 			select id, task_key, queue, payload, waiting_on_execution_id, waiting_step_key,
 				cancelled, last_error, dedupe_key, cron_expression, locked_by, "group",
+				subscription_id,
 				dead_letter_source_execution_id, dead_letter_source_queue,
 				dead_letter_source_task_key, dead_letter_error, dead_letter_attempts, dead_letter_failed_at
 			from claimed
@@ -413,7 +419,8 @@ export class QueryBuilder {
 		// new claim from racing the side effects below.
 		ctes.push(this.sql`valid_results as materialized (
 			select r.*,
-				e.cancelled as execution_cancelled, e.last_error as execution_last_error
+				e.cancelled as execution_cancelled, e.last_error as execution_last_error,
+				e.subscription_id
 			from result_data r
 			join pgconductor._private_executions e
 				on e.id = r.execution_id
@@ -452,7 +459,8 @@ export class QueryBuilder {
 			from completed_results r
 			join pgconductor._private_executions parent
 				on parent.waiting_on_execution_id = r.execution_id
-			where parent.completed_at is null
+			where r.subscription_id is null
+				and parent.completed_at is null
 				and parent.failed_at is null
 				and parent.locked_by is null
 			for update of parent
@@ -474,6 +482,7 @@ export class QueryBuilder {
 			where e.id = r.execution_id and e.queue = r.queue
 				and e.locked_by = r.orchestrator_id
 				and e.parent_execution_id is not null
+				and e.subscription_id is null
 				and not exists (
 					select 1 from pgconductor._private_executions parent
 					where parent.waiting_on_execution_id = r.execution_id
@@ -516,6 +525,7 @@ export class QueryBuilder {
 				e."group" as execution_group,
 				e.payload as execution_payload,
 				e.attempts as execution_attempts,
+				e.subscription_id,
 				tc.remove_on_fail_days = 0 as should_remove,
 				tc.dead_letter_queue, tc.dead_letter_task_key
 			from failed_results r
@@ -539,7 +549,8 @@ export class QueryBuilder {
 				on parent.waiting_on_execution_id = p.execution_id
 			join pgconductor._private_tasks pt
 				on pt.key = parent.task_key and pt.queue = parent.queue
-			where parent.completed_at is null and parent.failed_at is null and parent.locked_by is null
+			where p.subscription_id is null
+				and parent.completed_at is null and parent.failed_at is null and parent.locked_by is null
 			for update of parent
 		)`);
 		ctes.push(this.sql`terminal_failures as materialized (
@@ -751,14 +762,10 @@ export class QueryBuilder {
 
 		const eventSubscriptionRows = eventSubscriptions.map((spec) => ({
 			task_key: spec.task_key,
-			queue: spec.queue,
 			event_key: spec.event_key,
-			schema_name: spec.schema_name,
-			table_name: spec.table_name,
-			operation: spec.operation,
-			when_clause: spec.when_clause,
 			payload_fields: spec.payload_fields,
-			column_names: spec.column_names,
+			required_field_count: spec.required_field_count,
+			terms: spec.terms,
 		}));
 
 		return this.sql`
@@ -1064,6 +1071,197 @@ export class QueryBuilder {
 			from pgconductor._private_orchestrators
 			where migration_number < ${version}::integer
 			  and shutdown_signal = false
+		`;
+	}
+
+	buildDispatchCustomEvents({
+		eventIds,
+		orchestratorId,
+	}: DispatchCustomEventsArgs): PendingQuery<{ event_id: string }[]> {
+		return this.sql<{ event_id: string }[]>`
+			with sources as materialized (
+				select
+					source.id as event_id,
+					source.payload ->> 'eventKey' as event_key,
+					source.payload -> 'payload' as event_payload
+				from pgconductor._private_executions source
+				where source.id = any(${this.sql.array(eventIds, 2951)}::uuid[])
+					and source.queue = 'pgconductor.internal'
+					and source.task_key = 'pgconductor.event-dispatch'
+					and source.locked_by = ${orchestratorId}::uuid
+					and source.completed_at is null
+					and source.failed_at is null
+					and not source.cancelled
+			), event_values as materialized (
+				select source.event_id, source.event_key, field.key as field_name,
+					field.value, jsonb_typeof(field.value) as scalar_type
+				from sources source
+				cross join lateral jsonb_each(source.event_payload) field
+			), event_prefixes as materialized (
+				select
+					event_value.event_id,
+					event_value.event_key,
+					event_value.field_name,
+					term.prefix_length,
+					left(event_value.value #>> '{}', term.prefix_length) as prefix_value
+				from event_values event_value
+				cross join lateral (
+					select distinct candidate.prefix_length
+					from pgconductor._private_event_filter_terms candidate
+					where candidate.operator = 'prefix'
+						and candidate.event_key collate "C" = event_value.event_key collate "C"
+						and candidate.field_name collate "C" = event_value.field_name collate "C"
+				) term
+				where event_value.scalar_type = 'string'
+			), raw_matched_fields as (
+				select event_value.event_id, term.subscription_id, term.field_name
+				from event_values event_value
+				join pgconductor._private_event_filter_terms term
+					on term.operator = 'exact'
+					and term.scalar_type = 'string'
+					and event_value.scalar_type = 'string'
+					and term.event_key collate "C" = event_value.event_key collate "C"
+					and term.field_name collate "C" = event_value.field_name collate "C"
+					and term.text_value collate "C" = (event_value.value #>> '{}') collate "C"
+				union all
+				select event_value.event_id, term.subscription_id, term.field_name
+				from event_values event_value
+				join pgconductor._private_event_filter_terms term
+					on term.operator = 'exact'
+					and term.scalar_type = 'number'
+					and event_value.scalar_type = 'number'
+					and term.event_key = event_value.event_key
+					and term.field_name = event_value.field_name
+					and term.number_value = case when event_value.scalar_type = 'number'
+						then (event_value.value #>> '{}')::numeric end
+				union all
+				select event_value.event_id, term.subscription_id, term.field_name
+				from event_values event_value
+				join pgconductor._private_event_filter_terms term
+					on term.operator = 'exact'
+					and term.scalar_type = 'boolean'
+					and event_value.scalar_type = 'boolean'
+					and term.event_key = event_value.event_key
+					and term.field_name = event_value.field_name
+					and term.boolean_value = case when event_value.scalar_type = 'boolean'
+						then (event_value.value #>> '{}')::boolean end
+				union all
+				select event_value.event_id, term.subscription_id, term.field_name
+				from event_values event_value
+				join pgconductor._private_event_filter_terms term
+					on term.operator = 'exact'
+					and term.scalar_type = 'null'
+					and event_value.scalar_type = 'null'
+					and term.event_key = event_value.event_key
+					and term.field_name = event_value.field_name
+				union all
+				select event_prefix.event_id, term.subscription_id, term.field_name
+				from event_prefixes event_prefix
+				join pgconductor._private_event_filter_terms term
+					on term.operator = 'prefix'
+					and term.event_key collate "C" = event_prefix.event_key collate "C"
+					and term.field_name collate "C" = event_prefix.field_name collate "C"
+					and term.prefix_length = event_prefix.prefix_length
+					and term.text_value collate "C" = event_prefix.prefix_value collate "C"
+				union all
+				select event_value.event_id, term.subscription_id, term.field_name
+				from event_values event_value
+				join pgconductor._private_event_filter_terms term
+					on term.operator = 'numeric_range'
+					and event_value.scalar_type = 'number'
+					and term.event_key = event_value.event_key
+					and term.field_name = event_value.field_name
+					and term.number_range @> case when event_value.scalar_type = 'number'
+						then (event_value.value #>> '{}')::numeric end
+				union all
+				select event_value.event_id, term.subscription_id, term.field_name
+				from event_values event_value
+				join pgconductor._private_event_filter_terms term
+					on term.event_key = event_value.event_key
+					and term.field_name = event_value.field_name
+					and term.operator = 'exists'
+					and term.boolean_value
+				union all
+				select source.event_id, term.subscription_id, term.field_name
+				from sources source
+				join pgconductor._private_event_filter_terms term
+					on term.event_key = source.event_key
+					and term.operator = 'exists'
+					and not term.boolean_value
+				where not source.event_payload ? term.field_name
+				union all
+				select event_value.event_id, term.subscription_id, term.field_name
+				from event_values event_value
+				join pgconductor._private_event_filter_terms term
+					on term.event_key = event_value.event_key
+					and term.field_name = event_value.field_name
+					and term.operator = 'anything_but'
+				where event_value.scalar_type in ('string', 'number', 'boolean', 'null')
+					and case term.scalar_type
+					when 'string' then event_value.scalar_type <> 'string'
+						or term.text_value collate "C" <> (event_value.value #>> '{}') collate "C"
+					when 'number' then event_value.scalar_type <> 'number'
+						or term.number_value <> case when event_value.scalar_type = 'number'
+							then (event_value.value #>> '{}')::numeric end
+					when 'boolean' then event_value.scalar_type <> 'boolean'
+						or term.boolean_value <> case when event_value.scalar_type = 'boolean'
+							then (event_value.value #>> '{}')::boolean end
+					when 'null' then event_value.scalar_type <> 'null'
+					else false
+				end
+			), matched_subscriptions as materialized (
+				select matched.event_id, matched.subscription_id
+				from raw_matched_fields matched
+				join pgconductor._private_custom_event_subscriptions subscription
+					on subscription.id = matched.subscription_id
+				group by matched.event_id, matched.subscription_id,
+					subscription.required_field_count
+				having count(distinct matched.field_name) = subscription.required_field_count
+				union all
+				select source.event_id, subscription.id
+				from sources source
+				join pgconductor._private_custom_event_subscriptions subscription
+					on subscription.event_key = source.event_key
+					and subscription.required_field_count = 0
+			), candidates as materialized (
+				select matched.event_id, subscription.id as subscription_id,
+					subscription.task_key, subscription.queue, subscription.payload_fields
+				from matched_subscriptions matched
+				join pgconductor._private_custom_event_subscriptions subscription
+					on subscription.id = matched.subscription_id
+				join pgconductor._private_tasks task
+					on task.key = subscription.task_key and task.queue = subscription.queue
+			), inserted_destinations as (
+				insert into pgconductor._private_executions (
+					id, task_key, queue, payload, parent_execution_id, subscription_id
+				)
+				select
+					pgconductor._private_portable_uuidv7(),
+					candidate.task_key,
+					candidate.queue,
+					jsonb_build_object(
+						'event', source.event_key,
+						'payload', case
+							when candidate.payload_fields is null then source.event_payload
+							else coalesce((
+								select jsonb_object_agg(field_name, source.event_payload -> field_name)
+								from unnest(candidate.payload_fields) field_name
+								where source.event_payload ? field_name
+							), '{}'::jsonb)
+						end
+					),
+					candidate.event_id,
+					candidate.subscription_id
+				from candidates candidate
+				join sources source on source.event_id = candidate.event_id
+				order by candidate.event_id, candidate.subscription_id
+				on conflict (parent_execution_id, subscription_id, queue)
+				where subscription_id is not null
+				do nothing
+			)
+			select source.event_id
+			from sources source
+			order by source.event_id
 		`;
 	}
 

@@ -59,8 +59,11 @@ const processBatch = conductor.createTask(
   },
   { invocable: true },
   async (events, ctx) => {
-    // events is an array of 1-10 items
-    console.log(`Processing ${events.length} items together`);
+    // events is an array of 1-10 items; name and payload keep their usual shape.
+    // Each event also carries the identity of its claimed execution.
+    for (const event of events) {
+      ctx.logger.info(`Processing ${event.name} (${event.execution.id})`);
+    }
   }
 );
 ```
@@ -69,6 +72,8 @@ const processBatch = conductor.createTask(
 
 - `size` - Maximum number of events to batch together
 - `timeoutMs` - Maximum time to wait for a full batch before processing what's available
+
+Each batch event has `{ name, payload?, execution }`. The read-only `execution` object contains `id`, `queue`, `task_key`, and `locked_by`; the event payload remains unchanged. Batch handlers can use `event.execution.id` for their own idempotency keys.
 
 ### Batch Tasks with Returns
 
@@ -120,10 +125,8 @@ const batchTask = conductor.createTask(
     ctx.logger.info(`Processing ${events.length} events`);
     ctx.signal; // AbortSignal for cancellation
 
-    // NOT available in batch tasks:
-    // ctx.step()
-    // ctx.sleep()
-    // ctx.invoke()
+    // ctx.sleep("retry-later", 1000) reschedules the entire batch.
+    // NOT available in batch tasks: ctx.step(), ctx.invoke().
   }
 );
 ```
@@ -132,13 +135,13 @@ const batchTask = conductor.createTask(
 
 - `logger` - Logging methods
 - `signal` - AbortSignal for cancellation
+- `sleep(id, ms)` - Reschedule all executions in the batch
 
 **BatchTaskContext does NOT have:**
 
 - `step()` - No step memoization
-- `sleep()` - No sleeping/delaying
 - `invoke()` - No child task invocation
-- `executionId` - No single execution ID (processing multiple)
+- `executionId` - No single execution ID; use each `event.execution.id`
 
 ## What's Next?
 

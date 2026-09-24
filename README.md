@@ -14,7 +14,7 @@
 
 **Durable Execution** - Tasks survive crashes and restarts through automatic step memoization
 
-**Multiple Triggers** - Invocable APIs, cron schedules, custom events, and database triggers
+**Multiple Triggers** - Invocable APIs, cron schedules, and durable custom events
 
 **Workflows** - Invoke child tasks and wait for results with full type safety
 

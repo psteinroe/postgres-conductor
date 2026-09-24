@@ -15,6 +15,8 @@ create table if not exists pgconductor.schema_migrations (
 `,
   "0000000001_setup.sql": String.raw`
 
+create extension if not exists btree_gist;
+
 -- Returns either the actual current timestamp or a fake one for tests.
 -- Uses session variable (current_setting) for test time control.
 create function pgconductor._private_current_time ()
@@ -120,6 +122,7 @@ create table pgconductor._private_executions (
     waiting_on_execution_id uuid,
     waiting_step_key text,
     parent_execution_id uuid,
+    subscription_id uuid,
     singleton_on timestamptz,
 
     -- Dead-letter metadata is denormalized so retained source rows are optional.
@@ -130,7 +133,9 @@ create table pgconductor._private_executions (
     dead_letter_attempts integer,
     dead_letter_failed_at timestamptz,
     primary key (id, queue),
-    unique (task_key, dedupe_key, queue)
+    unique (task_key, dedupe_key, queue),
+    constraint chk_executions_event_delivery_parent
+        check (subscription_id is null or parent_execution_id is not null)
 ) partition by list (queue);
 
 -- unique index for singleton throttle/debounce enforcement on parent table
@@ -294,7 +299,11 @@ begin
     RETURN NEW;
 
   elsif tg_op = 'UPDATE' then
-    -- protect default queue from modification
+    -- protect queues required by the runtime
+    if old.name = 'pgconductor.internal' or new.name = 'pgconductor.internal' then
+      raise exception 'Modifying the internal queue is not allowed';
+    end if;
+
     if old.name = 'default' or new.name = 'default' then
       raise exception 'Modifying the default queue is not allowed';
     end if;
@@ -307,7 +316,11 @@ begin
     return new;
 
   elsif tg_op = 'DELETE' then
-    -- protect default queue from deletion
+    -- protect queues required by the runtime
+    if old.name = 'pgconductor.internal' then
+      raise exception 'Deleting the internal queue is not allowed';
+    end if;
+
     if old.name = 'default' then
       raise exception 'Deleting the default queue is not allowed';
     end if;
@@ -371,22 +384,12 @@ create type pgconductor.task_spec as (
     dead_letter_task_key text
 );
 
-create type pgconductor._private_event_operation as enum (
-    'insert',
-    'update',
-    'delete'
-);
-
 create type pgconductor.event_subscription_spec as (
     task_key text,
-    queue text,
     event_key text,
-    schema_name text,
-    table_name text,
-    operation pgconductor._private_event_operation,
-    when_clause text,
     payload_fields text[],
-    column_names text[]
+    required_field_count smallint,
+    terms jsonb
 );
 
 create or replace function pgconductor._private_register_worker(
@@ -401,19 +404,35 @@ volatile
 set search_path to ''
 as $function$
 begin
-  -- step 1: upsert queue (triggers partition creation)
+  -- Upsert every required queue in a stable order (triggers partition
+  -- creation).  Registrations may reference one another as dead-letter queues,
+  -- so queue creation and locking share a global order.
   insert into pgconductor._private_queues (name)
-  values (p_queue_name)
+  select required.name
+  from (
+    select p_queue_name as name
+    union
+    select spec.dead_letter_queue
+    from unnest(p_task_specs) as spec
+    where spec.dead_letter_queue is not null
+  ) required
+  order by required.name
   on conflict (name) do nothing;
 
-  -- Dead-letter destinations may not have a worker yet; create their partitions.
-  insert into pgconductor._private_queues (name)
-  select distinct spec.dead_letter_queue
-  from unnest(p_task_specs) as spec
-  where spec.dead_letter_queue is not null
-  on conflict (name) do nothing;
+  -- Queue row locks are the only registration locks; acquire them in order.
+  perform 1
+  from pgconductor._private_queues queue
+  where queue.name in (
+    select p_queue_name
+    union
+    select spec.dead_letter_queue
+    from unnest(p_task_specs) as spec
+    where spec.dead_letter_queue is not null
+  )
+  order by queue.name
+  for update;
 
-  -- step 2: register/update tasks
+  -- Register/update tasks.
   insert into pgconductor._private_tasks (key, queue, max_attempts, remove_on_complete_days, remove_on_fail_days, window_start, window_end, concurrency_limit, group_concurrency_limit, dead_letter_queue, dead_letter_task_key)
   select
     spec.key,
@@ -441,7 +460,7 @@ begin
     dead_letter_queue = excluded.dead_letter_queue,
     dead_letter_task_key = excluded.dead_letter_task_key;
 
-  -- step 3: insert scheduled cron executions
+  -- Insert scheduled cron executions.
   insert into pgconductor._private_executions (task_key, queue, payload, run_at, dedupe_key, cron_expression, "group")
   select
     spec.task_key,
@@ -459,8 +478,7 @@ begin
     cron_expression = excluded.cron_expression,
     "group" = excluded."group";
 
-  -- step 4: clean up stale schedules for this queue
-  -- delete future executions for schedules that no longer exist
+  -- Clean up stale schedules for this queue.
   delete from pgconductor._private_executions
   where queue = p_queue_name
     and cron_expression is not null
@@ -472,7 +490,6 @@ begin
       where spec.dedupe_key is not null and spec.dedupe_key like 'scheduled::%'
     );
 
-  -- mark running executions as cancelled for schedules that no longer exist
   update pgconductor._private_executions
   set cancelled = true
   where queue = p_queue_name
@@ -488,59 +505,10 @@ begin
       where spec.dedupe_key is not null and spec.dedupe_key like 'scheduled::%'
     );
 
-  -- step 5: manage event subscriptions (only recreate triggers when subscriptions change)
-  merge into pgconductor._private_event_subscriptions as target
-  using (
-    select
-      s.task_key,
-      s.queue,
-      s.event_key,
-      s.schema_name,
-      s.table_name,
-      s.operation,
-      s.when_clause,
-      s.payload_fields,
-      s.column_names
-    from unnest(p_event_subscriptions) as s
-  ) as source
-  on (
-    target.queue = source.queue and
-    target.task_key = source.task_key and
-    coalesce(target.event_key, '') = coalesce(source.event_key, '') and
-    coalesce(target.schema_name, '') = coalesce(source.schema_name, '') and
-    coalesce(target.table_name, '') = coalesce(source.table_name, '') and
-    coalesce(target.operation::text, '') = coalesce(source.operation::text, '') and
-    coalesce(target.when_clause, '') = coalesce(source.when_clause, '') and
-    coalesce(array_to_string(target.payload_fields, ','), '') =
-      coalesce(array_to_string(source.payload_fields, ','), '') and
-    coalesce(array_to_string(target.column_names, ','), '') =
-      coalesce(array_to_string(source.column_names, ','), '')
-  )
-  when not matched then insert (
-    task_key, queue, event_key, schema_name, table_name, operation,
-    when_clause, payload_fields, column_names
-  ) values (
-    source.task_key, source.queue, source.event_key,
-    source.schema_name, source.table_name, source.operation,
-    source.when_clause, source.payload_fields, source.column_names
+  perform pgconductor._private_replace_custom_event_subscriptions(
+    p_queue_name,
+    p_event_subscriptions
   );
-
-  -- step 6: delete old subscriptions for this queue not in new set
-  delete from pgconductor._private_event_subscriptions target
-  where target.queue = p_queue_name
-    and not exists (
-      select 1 from unnest(p_event_subscriptions) source
-      where target.task_key = source.task_key
-        and coalesce(target.event_key, '') = coalesce(source.event_key, '')
-        and coalesce(target.schema_name, '') = coalesce(source.schema_name, '')
-        and coalesce(target.table_name, '') = coalesce(source.table_name, '')
-        and coalesce(target.operation::text, '') = coalesce(source.operation::text, '')
-        and coalesce(target.when_clause, '') = coalesce(source.when_clause, '')
-        and coalesce(array_to_string(target.payload_fields, ','), '') =
-          coalesce(array_to_string(source.payload_fields, ','), '')
-        and coalesce(array_to_string(target.column_names, ','), '') =
-          coalesce(array_to_string(source.column_names, ','), '')
-    );
 end;
 $function$;
 
@@ -924,353 +892,260 @@ begin
 end;
 $function$;
 
-`,
-  "0000000002_events.sql": String.raw`
-alter table pgconductor._private_executions
-    add column if not exists subscription_id uuid;
+-- Event deliveries use the source dispatch execution as durable lineage without
+-- participating in workflow parent/child settlement.
+create unique index idx_executions_event_destination
+    on pgconductor._private_executions (parent_execution_id, subscription_id, queue)
+    where subscription_id is not null;
 
-create table if not exists pgconductor._private_custom_events (
-    id uuid default pgconductor._private_portable_uuidv7() not null,
-    event_key text not null,
-    payload jsonb not null default '{}'::jsonb,
-    created_at timestamptz default pgconductor._private_current_time() not null,
-    primary key (created_at, id)
-) partition by range (created_at);
-
-create index if not exists idx_custom_events_event_key
-    on pgconductor._private_custom_events (event_key, created_at desc);
-
--- Create initial partition for custom events (will cover many years)
-create table if not exists pgconductor._private_custom_events_default
-    partition of pgconductor._private_custom_events
-    for values from (minvalue) to (maxvalue);
-
-create table if not exists pgconductor._private_event_subscriptions (
+create table pgconductor._private_custom_event_subscriptions (
     id uuid primary key default pgconductor._private_portable_uuidv7(),
-
+    event_key text not null,
     task_key text not null,
     queue text not null,
-
-    event_key text,
-    schema_name text,
-    table_name text,
-    operation pgconductor._private_event_operation,
-
-    when_clause text,
     payload_fields text[],
-    column_names text[],
-
+    required_field_count smallint not null check (required_field_count between 0 and 8),
     created_at timestamptz not null default pgconductor._private_current_time(),
-
-    constraint chk_event_type check (
-        (event_key is not null and schema_name is null and table_name is null and operation is null)
-        or
-        (event_key is null and schema_name is not null and table_name is not null and operation is not null)
+    constraint chk_custom_event_subscription_event_key check (
+        btrim(event_key) <> '' and octet_length(event_key) between 1 and 255
     )
 );
 
-create index if not exists idx_event_subscriptions_custom
-    on pgconductor._private_event_subscriptions (event_key)
-    where event_key is not null;
+create index idx_custom_event_subscriptions_event
+    on pgconductor._private_custom_event_subscriptions
+       (event_key, required_field_count, id);
 
-create index if not exists idx_event_subscriptions_database
-    on pgconductor._private_event_subscriptions (schema_name, table_name, operation)
-    where schema_name is not null;
+-- TypeScript validates and compiles filters once. Each row is one typed OR
+-- alternative; rows sharing a subscription and field form one clause, while
+-- distinct fields are ANDed by the dispatch query.
+create table pgconductor._private_event_filter_terms (
+    subscription_id uuid not null,
+    term_number smallint not null check (term_number > 0),
+    event_key text not null,
+    field_name text not null,
+    operator text not null check (
+        operator in ('exact', 'prefix', 'numeric_range', 'exists', 'anything_but')
+    ),
+    scalar_type text check (scalar_type in ('string', 'number', 'boolean', 'null')),
+    text_value text,
+    number_value numeric,
+    boolean_value boolean,
+    prefix_length smallint generated always as (
+        case when operator = 'prefix' then length(text_value)::smallint end
+    ) stored,
+    number_range numrange,
+    primary key (subscription_id, term_number),
+    constraint chk_event_filter_term_names check (
+        btrim(event_key) <> '' and octet_length(event_key) between 1 and 255
+        and btrim(field_name) <> '' and octet_length(field_name) between 1 and 128
+        and (text_value is null or octet_length(text_value) <= 1024)
+    ),
+    constraint chk_event_filter_term_value check ((
+        case operator
+            when 'prefix' then scalar_type = 'string'
+                and text_value is not null and length(text_value) between 1 and 64
+                and number_value is null and boolean_value is null and number_range is null
+            when 'numeric_range' then scalar_type = 'number'
+                and text_value is null and number_value is null and boolean_value is null
+                and number_range is not null and not isempty(number_range)
+            when 'exists' then scalar_type is null
+                and text_value is null and number_value is null
+                and boolean_value is not null and number_range is null
+            when 'exact' then number_range is null and (
+                (scalar_type = 'string' and text_value is not null
+                    and number_value is null and boolean_value is null)
+                or (scalar_type = 'number' and text_value is null
+                    and number_value is not null and boolean_value is null)
+                or (scalar_type = 'boolean' and text_value is null
+                    and number_value is null and boolean_value is not null)
+                or (scalar_type = 'null' and text_value is null
+                    and number_value is null and boolean_value is null)
+            )
+            when 'anything_but' then number_range is null and (
+                (scalar_type = 'string' and text_value is not null
+                    and number_value is null and boolean_value is null)
+                or (scalar_type = 'number' and text_value is null
+                    and number_value is not null and boolean_value is null)
+                or (scalar_type = 'boolean' and text_value is null
+                    and number_value is null and boolean_value is not null)
+                or (scalar_type = 'null' and text_value is null
+                    and number_value is null and boolean_value is null)
+            )
+            else false
+        end
+    ) is true),
+    constraint fk_event_filter_term_subscription foreign key (subscription_id)
+        references pgconductor._private_custom_event_subscriptions(id) on delete cascade
+);
 
-create or replace function pgconductor._private_sync_custom_event_trigger()
-    returns trigger
-    language plpgsql
-    security definer
-    set search_path to ''
-as $_$
-declare
-    v_invoke_blocks text;
-    v_has_subscriptions boolean;
-begin
-    -- Only process custom event subscriptions (event_key is not null)
-    if coalesce(new.event_key, old.event_key) is null then
-        return coalesce(new, old);
-    end if;
+create index idx_event_filter_term_exact_text
+    on pgconductor._private_event_filter_terms
+       (event_key collate "C", field_name collate "C", text_value collate "C", subscription_id)
+    where operator = 'exact' and scalar_type = 'string';
+create index idx_event_filter_term_exact_number
+    on pgconductor._private_event_filter_terms
+       (event_key, field_name, number_value, subscription_id)
+    where operator = 'exact' and scalar_type = 'number';
+create index idx_event_filter_term_exact_boolean
+    on pgconductor._private_event_filter_terms
+       (event_key, field_name, boolean_value, subscription_id)
+    where operator = 'exact' and scalar_type = 'boolean';
+create index idx_event_filter_term_exact_null
+    on pgconductor._private_event_filter_terms
+       (event_key, field_name, subscription_id)
+    where operator = 'exact' and scalar_type = 'null';
+create index idx_event_filter_term_prefix
+    on pgconductor._private_event_filter_terms
+       (event_key collate "C", field_name collate "C", prefix_length,
+        text_value collate "C", subscription_id)
+    where operator = 'prefix';
+create index idx_event_filter_term_numeric_range
+    on pgconductor._private_event_filter_terms using gist
+       (event_key, field_name, number_range, subscription_id)
+    where operator = 'numeric_range';
+create index idx_event_filter_term_exists_true
+    on pgconductor._private_event_filter_terms
+       (event_key, field_name, subscription_id)
+    where operator = 'exists' and boolean_value;
+create index idx_event_filter_term_exists_false
+    on pgconductor._private_event_filter_terms
+       (event_key, subscription_id, field_name)
+    where operator = 'exists' and not boolean_value;
+create index idx_event_filter_term_anything_but
+    on pgconductor._private_event_filter_terms
+       (event_key, field_name, subscription_id)
+    where operator = 'anything_but';
 
-    drop trigger if exists pgconductor_custom_event on pgconductor._private_custom_events;
-    drop function if exists pgconductor._private_trigger_custom_event;
-
-    select exists(
-        select 1
-        from pgconductor._private_event_subscriptions
-        where event_key is not null
-    ) into v_has_subscriptions;
-
-    if v_has_subscriptions then
-        v_invoke_blocks := (
-            select string_agg(format(
-                $sql$
-                if new.event_key = %L and (%s) then
-                    v_task_keys := array_append(v_task_keys, %L);
-                    v_queues := array_append(v_queues, %L);
-                    v_payloads := array_append(v_payloads, jsonb_build_object('event', new.event_key, 'payload', %s));
-                    v_subscription_ids := array_append(v_subscription_ids, %L);
-                end if;
-                $sql$,
-                sub.event_key,
-                coalesce(nullif(sub.when_clause, ''), 'true'),
-                sub.task_key,
-                t.queue,
-                pgconductor._private_build_payload_fields(sub.payload_fields, 'new.payload'),
-                sub.id
-            ), e'\n')
-            from pgconductor._private_event_subscriptions as sub
-            join pgconductor._private_tasks as t on t.key = sub.task_key and t.queue = sub.queue
-            where sub.event_key is not null
-        );
-
-        execute format(
-            $sql$
-            create or replace function pgconductor._private_trigger_custom_event()
-                returns trigger
-                language plpgsql
-                security definer
-                set search_path to ''
-            as $inner$
-            declare
-                v_task_keys text[];
-                v_queues text[];
-                v_payloads jsonb[];
-                v_subscription_ids uuid[];
-            begin
-                %s
-
-                if array_length(v_task_keys, 1) > 0 then
-                    insert into pgconductor._private_executions (task_key, queue, payload, subscription_id)
-                    select unnest(v_task_keys), unnest(v_queues), unnest(v_payloads), unnest(v_subscription_ids);
-                end if;
-
-                return new;
-            end
-            $inner$
-            $sql$,
-            v_invoke_blocks
-        );
-
-        execute $sql$
-            create trigger pgconductor_custom_event
-                after insert on pgconductor._private_custom_events
-                for each row
-                execute function pgconductor._private_trigger_custom_event()
-        $sql$;
-    end if;
-
-    if tg_op = 'DELETE' then
-        return old;
-    end if;
-
-    return new;
-end;
-$_$;
-
-create trigger sync_custom_event_trigger
-    after insert or delete or update on pgconductor._private_event_subscriptions
-    for each row
-    execute function pgconductor._private_sync_custom_event_trigger();
-
-create or replace function pgconductor._private_build_payload_fields(
-    p_payload_fields text[],
-    p_payload_expr text
+-- Persistent worker subscriptions are replaced as one queue-scoped snapshot.
+-- The private transport is already compiled; SQL persists every typed term used
+-- by the set-wise matcher.
+create or replace function pgconductor._private_replace_custom_event_subscriptions(
+    p_queue_name text,
+    p_subscriptions pgconductor.event_subscription_spec[]
 )
-    returns text
-    language sql
-    immutable
-    set search_path to ''
-as $_$
-    select case
-        when p_payload_fields is null then p_payload_expr
-        else 'jsonb_build_object(' || array_to_string(
-            array(
-                select format('%L, %s->%L', field, p_payload_expr, field)
-                from unnest(p_payload_fields) as field
-            ),
-            ', '
-        ) || ')'
-    end;
-$_$;
+returns void
+language sql
+volatile
+set search_path to ''
+as $function$
+    with removed as materialized (
+        delete from pgconductor._private_custom_event_subscriptions
+        where queue = p_queue_name
+        returning 1
+    ), prepared as materialized (
+        select pgconductor._private_portable_uuidv7() as id,
+            subscription.task_key,
+            subscription.event_key,
+            subscription.payload_fields,
+            coalesce(subscription.required_field_count, 0) as required_field_count,
+            coalesce(subscription.terms, '[]'::jsonb) as terms,
+            subscription.input_ordinal
+        from unnest(p_subscriptions) with ordinality
+          as subscription(
+              task_key, event_key, payload_fields,
+              required_field_count, terms, input_ordinal
+          )
+        cross join (select count(*) from removed) removal_barrier
+    ), inserted_subscriptions as (
+        insert into pgconductor._private_custom_event_subscriptions (
+            id, event_key, task_key, queue, payload_fields, required_field_count
+        )
+        select id, event_key, task_key, p_queue_name,
+            payload_fields, required_field_count
+        from prepared
+        order by input_ordinal
+        returning id
+    )
+    insert into pgconductor._private_event_filter_terms (
+        subscription_id, term_number, event_key, field_name, operator,
+        scalar_type, text_value, number_value, boolean_value, number_range
+    )
+    select
+        prepared.id,
+        term.ordinality::smallint,
+        prepared.event_key,
+        fields.field_name,
+        fields.operator,
+        fields.scalar_type,
+        fields.text_value,
+        fields.number_value,
+        fields.boolean_value,
+        case when fields.operator = 'numeric_range' then numrange(
+            fields.lower_value,
+            fields.upper_value,
+            (case when fields.lower_inclusive then '[' else '(' end)
+                ||
+            (case when fields.upper_inclusive then ']' else ')' end)
+        ) end
+    from prepared
+    join inserted_subscriptions on inserted_subscriptions.id = prepared.id
+    cross join lateral jsonb_array_elements(prepared.terms)
+        with ordinality as term(value, ordinality)
+    cross join lateral jsonb_to_record(term.value) as fields(
+        field_name text,
+        operator text,
+        scalar_type text,
+        text_value text,
+        number_value numeric,
+        boolean_value boolean,
+        lower_value numeric,
+        upper_value numeric,
+        lower_inclusive boolean,
+        upper_inclusive boolean
+    );
+$function$;
 
-create or replace function pgconductor._private_build_column_list(
-    p_column_names text[],
-    p_record_name text
+insert into pgconductor._private_queues (name)
+values ('pgconductor.internal')
+on conflict do nothing;
+
+insert into pgconductor._private_tasks (
+    key, queue, max_attempts, remove_on_complete_days, remove_on_fail_days
 )
-    returns text
-    language sql
-    immutable
-    set search_path to ''
-as $_$
-    select case
-        when p_column_names is null then format('row_to_json(%I.*)', p_record_name)
-        else 'jsonb_build_object(' || array_to_string(
-            array(
-                select format('%L, %I.%I', col, p_record_name, col)
-                from unnest(p_column_names) as col
-            ),
-            ', '
-        ) || ')'
-    end;
-$_$;
-
-create or replace function pgconductor._private_sync_database_trigger()
-    returns trigger
-    language plpgsql
-    security definer
-    set search_path to ''
-as $_$
-declare
-    v_table_name text := coalesce(new.table_name, old.table_name);
-    v_schema_name text := coalesce(new.schema_name, old.schema_name);
-    v_op pgconductor._private_event_operation;
-    v_invoke_blocks text;
-    v_has_subscriptions boolean;
-begin
-    -- Only process database event subscriptions (schema_name is not null)
-    if v_schema_name is null then
-        return coalesce(new, old);
-    end if;
-
-    -- Process each operation type (insert, update, delete)
-    foreach v_op in array array['insert', 'update', 'delete']::pgconductor._private_event_operation[] loop
-        -- Drop existing trigger and function
-        execute format(
-            'drop trigger if exists pgconductor_event_%s on %I.%I',
-            v_op::text, v_schema_name, v_table_name
-        );
-
-        execute format(
-            'drop function if exists pgconductor._private_trigger_event_%s_on_%I_%I',
-            v_op::text, v_schema_name, v_table_name
-        );
-
-        -- Check if there are any subscriptions for this operation
-        select exists(
-            select 1
-            from pgconductor._private_event_subscriptions
-            where table_name = v_table_name
-                and schema_name = v_schema_name
-                and operation = v_op
-        ) into v_has_subscriptions;
-
-        if v_has_subscriptions then
-            -- Build if blocks to check conditions and append to arrays
-            -- Each subscription's when_clause is evaluated inside the trigger function
-            v_invoke_blocks := (
-                select string_agg(format(
-                    $sql$
-                    if %s then
-                        v_task_keys := array_append(v_task_keys, %L);
-                        v_queues := array_append(v_queues, %L);
-                        v_payloads := array_append(v_payloads, jsonb_build_object(
-                            'event', %L,
-                            'payload', jsonb_build_object(
-                                'old', case when tg_op is distinct from 'INSERT' then %s else null end,
-                                'new', case when tg_op is distinct from 'DELETE' then %s else null end,
-                                'tg_table', tg_table_name,
-                                'tg_op', tg_op
-                            )
-                        ));
-                        v_subscription_ids := array_append(v_subscription_ids, %L);
-                    end if;
-                    $sql$,
-                    coalesce(nullif(sub.when_clause, ''), 'true'),
-                    sub.task_key,
-                    t.queue,
-                    format('%s.%s.%s', v_schema_name, v_table_name, v_op::text),
-                    pgconductor._private_build_column_list(sub.column_names, 'old'),
-                    pgconductor._private_build_column_list(sub.column_names, 'new'),
-                    sub.id
-                ), e'\n')
-                from pgconductor._private_event_subscriptions as sub
-                join pgconductor._private_tasks as t on t.key = sub.task_key and t.queue = sub.queue
-                where sub.table_name = v_table_name
-                    and sub.schema_name = v_schema_name
-                    and sub.operation = v_op
-            );
-
-            -- Create trigger function
-            execute format(
-                $sql$
-                create or replace function pgconductor._private_trigger_event_%s_on_%I_%I()
-                    returns trigger
-                    language plpgsql
-                    security definer
-                    set search_path to ''
-                as $inner$
-                declare
-                    v_task_keys text[];
-                    v_queues text[];
-                    v_payloads jsonb[];
-                    v_subscription_ids uuid[];
-                begin
-                    %s
-
-                    if array_length(v_task_keys, 1) > 0 then
-                        insert into pgconductor._private_executions (task_key, queue, payload, subscription_id)
-                        select unnest(v_task_keys), unnest(v_queues), unnest(v_payloads), unnest(v_subscription_ids);
-                    end if;
-
-                    if tg_op = 'DELETE' then
-                        return old;
-                    end if;
-
-                    return new;
-                end
-                $inner$
-                $sql$,
-                v_op::text,
-                v_schema_name,
-                v_table_name,
-                v_invoke_blocks
-            );
-
-            -- Create trigger
-            execute format(
-                $sql$
-                create trigger pgconductor_event_%s
-                    after %s on %I.%I
-                    for each row
-                    execute function pgconductor._private_trigger_event_%s_on_%I_%I()
-                $sql$,
-                v_op::text,
-                upper(v_op::text),
-                v_schema_name,
-                v_table_name,
-                v_op::text,
-                v_schema_name,
-                v_table_name
-            );
-        end if;
-    end loop;
-
-    if tg_op = 'DELETE' then
-        return old;
-    end if;
-
-    return new;
-end;
-$_$;
-
-create trigger sync_database_trigger
-    after insert or delete or update on pgconductor._private_event_subscriptions
-    for each row
-    execute function pgconductor._private_sync_database_trigger();
+values (
+    'pgconductor.event-dispatch', 'pgconductor.internal', 3, 0, null
+)
+on conflict (queue, key) do update set
+    max_attempts = excluded.max_attempts,
+    remove_on_complete_days = excluded.remove_on_complete_days,
+    remove_on_fail_days = excluded.remove_on_fail_days;
 
 create or replace function pgconductor.emit_event(
     p_event_key text,
     p_payload jsonb default '{}'::jsonb
 )
-    returns uuid
-    language sql
-    volatile
-    set search_path to ''
-as $_$
-    insert into pgconductor._private_custom_events (event_key, payload)
-    values (p_event_key, p_payload)
-    returning id;
-$_$;
+returns uuid
+language plpgsql
+volatile
+set search_path to ''
+as $function$
+declare
+    v_payload jsonb := p_payload;
+    v_event_id uuid;
+begin
+    if p_event_key is null
+        or btrim(p_event_key) = ''
+        or octet_length(p_event_key) > 255
+    then
+        raise exception 'Event name must contain between 1 and 255 UTF-8 bytes';
+    end if;
+
+    if v_payload is null or jsonb_typeof(v_payload) <> 'object' then
+        raise exception 'Event payload must be a JSON object';
+    end if;
+
+    insert into pgconductor._private_executions (
+        id, task_key, queue, payload
+    ) values (
+        pgconductor._private_portable_uuidv7(),
+        'pgconductor.event-dispatch',
+        'pgconductor.internal',
+        jsonb_build_object('eventKey', p_event_key, 'payload', v_payload)
+    )
+    returning id into v_event_id;
+
+    return v_event_id;
+end;
+$function$;
 `,
 });

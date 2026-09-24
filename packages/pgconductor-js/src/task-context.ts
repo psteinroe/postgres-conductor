@@ -104,7 +104,11 @@ export class TaskContext<
 		any,
 		string
 	>[],
-	Events extends readonly EventDefinition<string, any>[] = readonly EventDefinition<string, any>[],
+	Events extends readonly EventDefinition<string, any, any>[] = readonly EventDefinition<
+		string,
+		any,
+		any
+	>[],
 > {
 	private readonly windowChecker?: WindowChecker;
 
@@ -116,7 +120,7 @@ export class TaskContext<
 
 	static create<
 		Tasks extends readonly TaskDefinition<string, any, any, string>[],
-		Events extends readonly EventDefinition<string, any>[],
+		Events extends readonly EventDefinition<string, any, any>[],
 		Extra extends object,
 	>(opts: TaskContextOptions, extra?: Extra): TaskContext<Tasks, Events> & Extra {
 		const base = new TaskContext<Tasks, Events>(opts);
@@ -442,6 +446,10 @@ export class TaskContext<
  * Batch tasks cannot use step() or invoke() since batch composition
  * is non-deterministic across retries.
  */
+export type BatchTaskEvent<Event extends object> = Event & {
+	readonly execution: Readonly<Pick<Execution, "id" | "queue" | "task_key" | "locked_by">>;
+};
+
 export class BatchTaskContext {
 	constructor(
 		private readonly abortController: TypedAbortController<TaskAbortReasons>,

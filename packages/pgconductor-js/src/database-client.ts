@@ -10,6 +10,7 @@ import {
 	type CountActiveOrchestratorsBelowArgs,
 	type GetExecutionsArgs,
 	type RemoveExecutionsArgs,
+	type DispatchCustomEventsArgs,
 	type RegisterWorkerArgs,
 	type ScheduleCronExecutionArgs,
 	type UnscheduleCronExecutionArgs,
@@ -74,6 +75,7 @@ export interface Execution {
 	dedupe_key?: string | null;
 	cron_expression?: string | null;
 	group?: string | null;
+	subscription_id?: string | null;
 	dead_letter_source_execution_id?: string | null;
 	dead_letter_source_queue?: string | null;
 	dead_letter_source_task_key?: string | null;
@@ -152,16 +154,25 @@ export interface ExecutionInvokeChild {
 	child_payload: Payload | null;
 }
 
+export type EventFilterTerm = Record<string, JsonValue | undefined> & {
+	field_name: string;
+	operator: "exact" | "prefix" | "numeric_range" | "exists" | "anything_but";
+	scalar_type?: "string" | "number" | "boolean" | "null";
+	text_value?: string;
+	number_value?: number;
+	boolean_value?: boolean;
+	lower_value?: number | null;
+	upper_value?: number | null;
+	lower_inclusive?: boolean;
+	upper_inclusive?: boolean;
+};
+
 export interface EventSubscriptionSpec {
 	task_key: string;
-	queue: string;
-	event_key: string | null;
-	schema_name: string | null;
-	table_name: string | null;
-	operation: "insert" | "update" | "delete" | null;
-	when_clause: string | null;
+	event_key: string;
 	payload_fields: string[] | null;
-	column_names: string[] | null;
+	required_field_count: number;
+	terms: EventFilterTerm[];
 }
 
 const RETRYABLE_SQLSTATE_CODES = new Set([
@@ -579,6 +590,17 @@ export class DatabaseClient {
 			label: "clearWaitingState",
 			...opts,
 		});
+	}
+
+	async dispatchCustomEvents(
+		args: DispatchCustomEventsArgs,
+		opts?: QueryMethodOptions,
+	): Promise<string[]> {
+		const sources = await this.query(() => this.builder.buildDispatchCustomEvents(args), {
+			label: "dispatchCustomEvents",
+			...opts,
+		});
+		return sources.map((source) => source.event_id);
 	}
 
 	async emitEvent(args: EmitEventArgs, opts?: QueryMethodOptions): Promise<string> {

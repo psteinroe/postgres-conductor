@@ -124,7 +124,11 @@ export class Worker<
 		any,
 		string
 	>[],
-	Events extends readonly EventDefinition<string, any>[] = readonly EventDefinition<string, any>[],
+	Events extends readonly EventDefinition<string, any, any>[] = readonly EventDefinition<
+		string,
+		any,
+		any
+	>[],
 > {
 	private orchestratorId: string | null = null;
 
@@ -152,9 +156,9 @@ export class Worker<
 	) {
 		const maintenanceTask = createMaintenanceTask(this.queueName);
 		this.tasks = tasks.reduce(
-			(m, task) => {
-				m.set(task.name, task);
-				return m;
+			(registered, task) => {
+				registered.set(task.name, task);
+				return registered;
 			},
 			new Map<string, AnyTask>([[maintenanceTask.name, maintenanceTask]]),
 		);
@@ -230,9 +234,27 @@ export class Worker<
 		this._stopDeferred = new Deferred<void>();
 		this._abortController = new AbortController();
 
-		// Sample before calculating or registering cron schedules.
-		await this.clock.start(this.abortController.signal);
-		await this.register();
+		// Startup failures reject both lifecycle promises; callers must never
+		// observe a worker that started partially.
+		try {
+			// Sample before calculating or registering cron schedules.
+			await this.clock.start(this.abortController.signal);
+			await this.register();
+		} catch (error) {
+			// Registration is part of startup, not a running pipeline. Resolve the
+			// stop promise so callers that only await `start()` do not get an
+			// unhandled rejection, then discard every piece of this failed attempt.
+			const stopDeferred = this._stopDeferred;
+			this._abortController.abort();
+			// Reject `started` so an Orchestrator observes registration failure, but
+			// attach a noop handler because callers that only use start() do not
+			// necessarily observe this internal lifecycle promise.
+			this._startDeferred.promise.catch(() => {});
+			this._startDeferred.reject(error);
+			if (!stopDeferred.isSettled) stopDeferred.resolve();
+			this.resetLifecycle();
+			throw error;
+		}
 
 		// Worker is now started
 		this._startDeferred.resolve();
@@ -248,24 +270,27 @@ export class Worker<
 
 		const queue = new BatchingAsyncQueue<Execution>(this.fetchBatchSize * 2, batchConfigs);
 		void this.fetchExecutions(queue, { runOnce });
-
-		(async () => {
+		void (async () => {
 			try {
-				// Consume from queue → execute → flush
 				await this.flushResults(this.executeTasks(queue));
-			} catch (err) {
-				this.logger.error("Worker pipeline error:", err);
+			} catch (error) {
+				this.logger.error("Worker pipeline error:", error);
 			} finally {
 				queue.close();
-				this.clock.stop();
-				this._stopDeferred?.resolve();
-				this._startDeferred = null;
-				this._stopDeferred = null;
-				this._abortController = null;
+				if (this._stopDeferred && !this._stopDeferred.isSettled) this._stopDeferred.resolve();
+				this.resetLifecycle();
 			}
 		})();
 
 		return this._startDeferred.promise;
+	}
+
+	private resetLifecycle(): void {
+		this.clock.stop();
+		this._startDeferred = null;
+		this._stopDeferred = null;
+		this._abortController = null;
+		this.orchestratorId = null;
 	}
 
 	/**
@@ -344,43 +369,15 @@ export class Worker<
 				}),
 		);
 
-		const eventSubscriptions: EventSubscriptionSpec[] = allTasks.flatMap((task) => {
-			const customEvents = task.triggers
-				.filter((t) => "event" in t && typeof t.event === "string")
-				.map((trigger): EventSubscriptionSpec => {
-					const customTrigger = trigger as any;
-					return {
-						task_key: task.name,
-						queue: this.queueName,
-						event_key: customTrigger.event,
-						schema_name: null,
-						table_name: null,
-						operation: null,
-						when_clause: customTrigger.when || null,
-						payload_fields: customTrigger.fields?.split(",").map((f: string) => f.trim()) || null,
-						column_names: null,
-					};
-				});
-
-			const dbEvents = task.triggers
-				.filter((t) => "schema" in t && "table" in t && "operation" in t)
-				.map((trigger): EventSubscriptionSpec => {
-					const dbTrigger = trigger as any;
-					return {
-						task_key: task.name,
-						queue: this.queueName,
-						event_key: null,
-						schema_name: dbTrigger.schema,
-						table_name: dbTrigger.table,
-						operation: dbTrigger.operation,
-						when_clause: dbTrigger.when || null,
-						payload_fields: null,
-						column_names: dbTrigger.columns?.split(",").map((c: string) => c.trim()) || null,
-					};
-				});
-
-			return [...customEvents, ...dbEvents];
-		});
+		const eventSubscriptions: EventSubscriptionSpec[] = allTasks.flatMap((task) =>
+			(task.eventTriggers ?? []).map((spec) => ({
+				task_key: task.name,
+				event_key: spec.event_key,
+				payload_fields: spec.payload_fields,
+				required_field_count: spec.required_field_count,
+				terms: spec.terms,
+			})),
+		);
 
 		await this.db.registerWorker(
 			{
@@ -567,12 +564,12 @@ export class Worker<
 				const scheduleName = exec.dedupe_key?.split("::")[1] || "unknown";
 				taskEvent = { name: scheduleName };
 			} else if (
+				exec.subscription_id != null &&
 				exec.payload &&
 				typeof exec.payload === "object" &&
-				"event" in exec.payload &&
-				exec.payload.event !== "pgconductor.invoke"
+				"event" in exec.payload
 			) {
-				// Event-triggered execution (custom event or db event)
+				// Event-triggered executions carry dedicated database identity.
 				taskEvent = {
 					name: exec.payload.event,
 					payload: exec.payload.payload,
@@ -689,22 +686,29 @@ export class Worker<
 	): Promise<ExecutionResult[]> {
 		// Build event array
 		const events = executions.map((exec) => {
+			let event;
 			if (exec.cron_expression) {
 				const scheduleName = exec.dedupe_key?.split("::")[1] || "unknown";
-				return { name: scheduleName };
+				event = { name: scheduleName };
 			} else if (
+				exec.subscription_id != null &&
 				exec.payload &&
 				typeof exec.payload === "object" &&
-				"event" in exec.payload &&
-				exec.payload.event !== "pgconductor.invoke"
+				"event" in exec.payload
 			) {
-				return {
-					name: exec.payload.event,
-					payload: exec.payload.payload,
-				};
+				event = { name: exec.payload.event, payload: exec.payload.payload };
 			} else {
-				return { name: "pgconductor.invoke", payload: exec.payload };
+				event = { name: "pgconductor.invoke", payload: exec.payload };
 			}
+			return {
+				...event,
+				execution: {
+					id: exec.id,
+					queue: exec.queue,
+					task_key: exec.task_key,
+					locked_by: exec.locked_by,
+				},
+			};
 		});
 
 		const taskAbortController = createTaskSignal(this.signal);

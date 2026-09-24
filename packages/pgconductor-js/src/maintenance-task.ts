@@ -37,7 +37,8 @@ export const createMaintenanceTask = <Queue extends string = "default">(queue: Q
 		},
 		async (_, ctx) => {
 			const { db, tasks, signal } = ctx;
-			// Skip if no tasks have retention settings (check in-memory config)
+
+			// Skip execution cleanup when no tasks have retention settings (check in-memory config)
 			const hasRetention = Array.from(tasks.values()).some(
 				(t) => t.removeOnComplete || t.removeOnFail,
 			);

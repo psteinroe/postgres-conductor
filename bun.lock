@@ -21,12 +21,12 @@
         "cron-parser": "catalog:",
         "postgres": "catalog:",
         "prettier": "catalog:",
+        "zod": "catalog:",
       },
       "devDependencies": {
         "@testcontainers/postgresql": "catalog:",
         "@types/bun": "catalog:",
         "expect-type": "catalog:",
-        "zod": "catalog:",
       },
       "peerDependencies": {
         "typescript": "catalog:",

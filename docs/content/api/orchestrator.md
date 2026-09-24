@@ -24,6 +24,11 @@ const orchestrator = Orchestrator.create({
 - `workers`: (optional) Array of custom workers from `conductor.createWorker()`
 - `defaultWorker`: (optional) Configuration for default worker
 
+The Orchestrator is the registration authority for its workers. Configure at
+most one worker for each queue (including the implicit `default` worker); put
+all tasks for a queue on that worker. Multiple workers for one queue are
+rejected rather than competing for registrations.
+
 **Default worker config:**
 
 ```typescript
@@ -71,9 +76,9 @@ await orchestrator.drain();
 ```
 
 - Starts the orchestrator
-- Processes until queue is empty
-- Automatically stops
-- Returns when all work is done
+- Gives each worker one run-once pass
+- Automatically stops after those passes finish
+- May leave work created after another queue's pass, such as event fan-out; call `drain()` again to process another pass
 
 **Use case:** Testing
 

@@ -7,6 +7,7 @@ import { TestDatabasePool } from "../fixtures/test-database";
 import type { TestDatabase } from "../fixtures/test-database";
 import crypto from "crypto";
 import { TaskSchemas } from "../../src/schemas";
+import { createMaintenanceTask } from "../../src/maintenance-task";
 
 function hashToJitter(str: string): number {
 	const hash = crypto.createHash("sha256").update(str).digest();

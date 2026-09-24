@@ -43,8 +43,7 @@
 	"devDependencies": {
 		"@testcontainers/postgresql": "catalog:",
 		"@types/bun": "catalog:",
-		"expect-type": "catalog:",
-		"zod": "catalog:",
+		"expect-type": "catalog:"
 	},
 	"peerDependencies": {
 		"typescript": "catalog:"
@@ -53,6 +52,7 @@
 		"@standard-schema/spec": "catalog:",
 		"cron-parser": "catalog:",
 		"postgres": "catalog:",
-		"prettier": "catalog:"
+		"prettier": "catalog:",
+		"zod": "catalog:"
 	}
 }

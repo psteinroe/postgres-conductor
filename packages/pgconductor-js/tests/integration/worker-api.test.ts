@@ -63,6 +63,7 @@ describe("Worker API", () => {
 			conductor,
 			workers: [notificationWorker],
 		});
+		expect(orchestrator.info.workerCount).toBe(2);
 
 		await orchestrator.start();
 

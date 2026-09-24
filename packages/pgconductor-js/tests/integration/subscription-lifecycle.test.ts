@@ -1,25 +1,26 @@
-import { test, expect, describe, beforeAll, afterAll, afterEach, mock } from "bun:test";
-import { Conductor } from "../../src/conductor";
-import { Orchestrator } from "../../src/orchestrator";
-import { defineTask } from "../../src/task-definition";
-import { defineEvent } from "../../src/event-definition";
-import { TaskSchemas } from "../../src/schemas";
-import { EventSchemas } from "../../src/schemas";
-import { DatabaseSchema } from "../../src/schemas";
+import { afterAll, afterEach, beforeAll, describe, expect, mock, test } from "bun:test";
 import { z } from "zod";
-import { TestDatabasePool, TestDatabase } from "../fixtures/test-database";
-import type { Database } from "../database.types";
+import { Conductor } from "../../src/conductor";
+import { defineEvent } from "../../src/event-definition";
+import { Orchestrator } from "../../src/orchestrator";
+import { EventSchemas, TaskSchemas } from "../../src/schemas";
+import { defineTask } from "../../src/task-definition";
+import { TestDatabasePool, type TestDatabase } from "../fixtures/test-database";
+import { waitForCondition } from "../test-utils";
 
-describe("Event Subscription Lifecycle", () => {
+describe("event subscription lifecycle", () => {
 	let pool: TestDatabasePool;
 	const databases: TestDatabase[] = [];
+	const orchestrators: Orchestrator[] = [];
 
 	beforeAll(async () => {
 		pool = await TestDatabasePool.create();
-	}, 60000);
+	}, 60_000);
 
 	afterEach(async () => {
-		await Promise.all(databases.map((db) => db.destroy()));
+		await Promise.all(orchestrators.map((orchestrator) => orchestrator.stop()));
+		orchestrators.length = 0;
+		await Promise.all(databases.map((database) => database.destroy()));
 		databases.length = 0;
 	});
 
@@ -27,437 +28,268 @@ describe("Event Subscription Lifecycle", () => {
 		await pool?.destroy();
 	});
 
-	test("custom event triggers are created on orchestrator start", async () => {
+	async function database(): Promise<TestDatabase> {
 		const db = await pool.child();
 		databases.push(db);
+		return db;
+	}
 
-		const userCreated = defineEvent({
+	test("persists an unconditional subscription without filter terms", async () => {
+		const db = await database();
+		const event = defineEvent({
 			name: "user.created",
 			payload: z.object({ userId: z.string() }),
 		});
-
-		const taskDef = defineTask({
-			name: "on-user-created",
-			payload: z.object({}),
-		});
-
+		const definition = defineTask({ name: "on-user-created", payload: z.object({}) });
 		const conductor = Conductor.create({
 			sql: db.sql,
-			tasks: TaskSchemas.fromSchema([taskDef]),
-			events: EventSchemas.fromSchema([userCreated]),
+			tasks: TaskSchemas.fromSchema([definition]),
+			events: EventSchemas.fromSchema([event]),
 			context: {},
 		});
-
+		const handler = mock(async () => {});
 		const task = conductor.createTask(
 			{ name: "on-user-created" },
 			{ event: "user.created" },
-			mock(async () => {}),
+			handler,
 		);
-
 		const orchestrator = Orchestrator.create({
 			conductor,
 			tasks: [task],
-			defaultWorker: { pollIntervalMs: 50, flushIntervalMs: 50 },
+			defaultWorker: { pollIntervalMs: 10, flushIntervalMs: 10 },
 		});
+		orchestrators.push(orchestrator);
 
 		await orchestrator.start();
 
-		// Check subscription was created
-		const [sub] = await db.sql<[{ event_key: string; task_key: string }]>`
-			select event_key, task_key
-			from pgconductor._private_event_subscriptions
-			where event_key = 'user.created'
-		`;
-
-		expect(sub).toBeTruthy();
-		expect(sub.event_key).toBe("user.created");
-		expect(sub.task_key).toBe("on-user-created");
-
-		// Check trigger function was created
-		const [trigger] = await db.sql<[{ exists: boolean }]>`
-			select exists(
-				select 1
-				from pg_trigger
-				where tgname = 'pgconductor_custom_event'
-					and tgrelid = 'pgconductor._private_custom_events'::regclass
-			)
-		`;
-
-		expect(trigger.exists).toBe(true);
-
-		await orchestrator.stop();
-	}, 30000);
-
-	test("database triggers are created on orchestrator start", async () => {
-		const db = await pool.child();
-		databases.push(db);
-
-		// Create contact table
-		await db.sql`
-			create table if not exists public.contact (
-				id text primary key default gen_random_uuid()::text,
-				email text,
-				name text
-			)
-		`;
-
-		const taskDef = defineTask({
-			name: "on-contact-insert",
-			payload: z.object({}),
-		});
-
-		const conductor = Conductor.create({
-			sql: db.sql,
-			tasks: TaskSchemas.fromSchema([taskDef]),
-			database: DatabaseSchema.fromGeneratedTypes<Database>(),
-			context: {},
-		});
-
-		const task = conductor.createTask(
-			{ name: "on-contact-insert" },
-			{ schema: "public", table: "contact", operation: "insert", columns: "id,email,name" },
-			mock(async () => {}),
-		);
-
-		const orchestrator = Orchestrator.create({
-			conductor,
-			tasks: [task],
-			defaultWorker: { pollIntervalMs: 50, flushIntervalMs: 50 },
-		});
-
-		await orchestrator.start();
-
-		// Check subscription was created
-		const [sub] = await db.sql<[{ schema_name: string; table_name: string; operation: string }]>`
-			select schema_name, table_name, operation::text
-			from pgconductor._private_event_subscriptions
-			where schema_name = 'public' and table_name = 'contact' and operation = 'insert'
-		`;
-
-		expect(sub).toBeTruthy();
-		expect(sub.schema_name).toBe("public");
-		expect(sub.table_name).toBe("contact");
-		expect(sub.operation).toBe("insert");
-
-		// Check trigger was created on table
-		const [trigger] = await db.sql<[{ exists: boolean }]>`
-			select exists(
-				select 1
-				from pg_trigger
-				where tgname = 'pgconductor_event_insert'
-					and tgrelid = 'public.contact'::regclass
-			)
-		`;
-
-		expect(trigger.exists).toBe(true);
-
-		await orchestrator.stop();
-	}, 30000);
-
-	test("stopping orchestrator does not remove triggers", async () => {
-		const db = await pool.child();
-		databases.push(db);
-
-		const userCreated = defineEvent({
-			name: "user.created.persistent",
-			payload: z.object({ userId: z.string() }),
-		});
-
-		const taskDef = defineTask({
-			name: "on-user-persistent",
-			payload: z.object({}),
-		});
-
-		const conductor = Conductor.create({
-			sql: db.sql,
-			tasks: TaskSchemas.fromSchema([taskDef]),
-			events: EventSchemas.fromSchema([userCreated]),
-			context: {},
-		});
-
-		const task = conductor.createTask(
-			{ name: "on-user-persistent" },
-			{ event: "user.created.persistent" },
-			mock(async () => {}),
-		);
-
-		const orchestrator = Orchestrator.create({
-			conductor,
-			tasks: [task],
-			defaultWorker: { pollIntervalMs: 50, flushIntervalMs: 50 },
-		});
-
-		await orchestrator.start();
-
-		// Verify trigger exists
-		const [beforeStop] = await db.sql<[{ exists: boolean }]>`
-			select exists(
-				select 1
-				from pg_trigger
-				where tgname = 'pgconductor_custom_event'
-					and tgrelid = 'pgconductor._private_custom_events'::regclass
-			)
-		`;
-		expect(beforeStop.exists).toBe(true);
-
-		await orchestrator.stop();
-
-		// Verify trigger still exists after stop
-		const [afterStop] = await db.sql<[{ exists: boolean }]>`
-			select exists(
-				select 1
-				from pg_trigger
-				where tgname = 'pgconductor_custom_event'
-					and tgrelid = 'pgconductor._private_custom_events'::regclass
-			)
-		`;
-		expect(afterStop.exists).toBe(true);
-
-		// Verify subscription still exists
-		const [sub] = await db.sql<[{ exists: boolean }]>`
-			select exists(
-				select 1
-				from pgconductor._private_event_subscriptions
-				where event_key = 'user.created.persistent'
-			)
-		`;
-		expect(sub.exists).toBe(true);
-	}, 30000);
-
-	test("triggers are recreated when subscriptions change", async () => {
-		const db = await pool.child();
-		databases.push(db);
-
-		const userCreated = defineEvent({
-			name: "user.created.change",
-			payload: z.object({ userId: z.string(), email: z.string() }),
-		});
-
-		const taskDef1 = defineTask({
-			name: "task-version-1",
-			payload: z.object({}),
-		});
-
-		const taskDef2 = defineTask({
-			name: "task-version-2",
-			payload: z.object({}),
-		});
-
-		// First orchestrator with no field selection
-		const conductor1 = Conductor.create({
-			sql: db.sql,
-			tasks: TaskSchemas.fromSchema([taskDef1]),
-			events: EventSchemas.fromSchema([userCreated]),
-			context: {},
-		});
-
-		const task1 = conductor1.createTask(
-			{ name: "task-version-1" },
-			{ event: "user.created.change" },
-			mock(async () => {}),
-		);
-
-		const orchestrator1 = Orchestrator.create({
-			conductor: conductor1,
-			tasks: [task1],
-			defaultWorker: { pollIntervalMs: 50, flushIntervalMs: 50 },
-		});
-
-		await orchestrator1.start();
-
-		// Check subscription without field selection
-		const [sub1] = await db.sql<[{ payload_fields: string[] | null }]>`
-			select payload_fields
-			from pgconductor._private_event_subscriptions
-			where event_key = 'user.created.change'
-		`;
-		expect(sub1.payload_fields).toBeNull();
-
-		await orchestrator1.stop();
-
-		// Second orchestrator with field selection
-		const conductor2 = Conductor.create({
-			sql: db.sql,
-			tasks: TaskSchemas.fromSchema([taskDef2]),
-			events: EventSchemas.fromSchema([userCreated]),
-			context: {},
-		});
-
-		const orchestrator2 = Orchestrator.create({
-			conductor: conductor2,
-			tasks: [
-				conductor2.createTask(
-					{ name: "task-version-2" },
-					{ event: "user.created.change", fields: "userId" },
-					mock(async () => {}),
-				),
-			],
-			defaultWorker: { pollIntervalMs: 50, flushIntervalMs: 50 },
-		});
-
-		await orchestrator2.start();
-
-		// Check subscription was updated with field selection
-		const [sub2] = await db.sql<[{ payload_fields: string[]; task_key: string }]>`
-			select payload_fields, task_key
-			from pgconductor._private_event_subscriptions
-			where event_key = 'user.created.change'
-		`;
-		expect(sub2.payload_fields).toEqual(["userId"]);
-		expect(sub2.task_key).toBe("task-version-2");
-
-		await orchestrator2.stop();
-	}, 30000);
-
-	test("multiple workers can register different subscriptions on same event", async () => {
-		const db = await pool.child();
-		databases.push(db);
-
-		const userCreated = defineEvent({
-			name: "user.created.multi",
-			payload: z.object({ userId: z.string() }),
-		});
-
-		const taskDef1 = defineTask({
-			name: "handler-1",
-			payload: z.object({}),
-		});
-
-		const taskDef2 = defineTask({
-			name: "handler-2",
-			payload: z.object({}),
-		});
-
-		const conductor = Conductor.create({
-			sql: db.sql,
-			tasks: TaskSchemas.fromSchema([taskDef1, taskDef2]),
-			events: EventSchemas.fromSchema([userCreated]),
-			context: {},
-		});
-
-		const task1 = conductor.createTask(
-			{ name: "handler-1" },
-			{ event: "user.created.multi" },
-			mock(async () => {}),
-		);
-
-		const task2 = conductor.createTask(
-			{ name: "handler-2" },
-			{ event: "user.created.multi" },
-			mock(async () => {}),
-		);
-
-		const orchestrator = Orchestrator.create({
-			conductor,
-			tasks: [task1, task2],
-			defaultWorker: { pollIntervalMs: 50, flushIntervalMs: 50 },
-		});
-
-		await orchestrator.start();
-
-		// Check both subscriptions exist
-		const subs = await db.sql<{ task_key: string }[]>`
-			select task_key
-			from pgconductor._private_event_subscriptions
-			where event_key = 'user.created.multi'
-			order by task_key
-		`;
-
-		expect(subs.length).toBe(2);
-		if (subs[0] && subs[1]) {
-			expect(subs[0].task_key).toBe("handler-1");
-			expect(subs[1].task_key).toBe("handler-2");
-		}
-
-		await orchestrator.stop();
-	}, 30000);
-
-	test("when clause changes trigger recreation", async () => {
-		const db = await pool.child();
-		databases.push(db);
-
-		// Create contact table
-		await db.sql`
-			create table if not exists public.contact (
-				id text primary key default gen_random_uuid()::text,
-				email text,
-				active boolean default true
-			)
-		`;
-
-		const taskDef = defineTask({
-			name: "on-contact-conditional",
-			payload: z.object({}),
-		});
-
-		// First orchestrator without when clause
-		const conductor1 = Conductor.create({
-			sql: db.sql,
-			tasks: TaskSchemas.fromSchema([taskDef]),
-			database: DatabaseSchema.fromGeneratedTypes<Database>(),
-			context: {},
-		});
-
-		const task1 = conductor1.createTask(
-			{ name: "on-contact-conditional" },
-			{ schema: "public", table: "contact", operation: "insert", columns: "id,email,active" },
-			mock(async () => {}),
-		);
-
-		const orchestrator1 = Orchestrator.create({
-			conductor: conductor1,
-			tasks: [task1],
-			defaultWorker: { pollIntervalMs: 50, flushIntervalMs: 50 },
-		});
-
-		await orchestrator1.start();
-
-		// Check subscription without when clause
-		const [sub1] = await db.sql<[{ when_clause: string | null }]>`
-			select when_clause
-			from pgconductor._private_event_subscriptions
-			where schema_name = 'public' and table_name = 'contact'
-		`;
-		expect(sub1.when_clause).toBeNull();
-
-		await orchestrator1.stop();
-
-		// Second orchestrator with when clause
-		const conductor2 = Conductor.create({
-			sql: db.sql,
-			tasks: TaskSchemas.fromSchema([taskDef]),
-			database: DatabaseSchema.fromGeneratedTypes<Database>(),
-			context: {},
-		});
-
-		const task2 = conductor2.createTask(
-			{ name: "on-contact-conditional" },
+		const [stored] = await db.sql<
 			{
-				schema: "public",
-				table: "contact",
-				operation: "insert",
-				when: "NEW.active = true",
-				columns: "id,email,active",
+				id: string;
+				event_key: string;
+				task_key: string;
+				required_field_count: number;
+				term_count: number;
+			}[]
+		>`
+			select subscription.id, subscription.event_key, subscription.task_key,
+				subscription.required_field_count, count(term.*)::integer as term_count
+			from pgconductor._private_custom_event_subscriptions subscription
+			left join pgconductor._private_event_filter_terms term
+				on term.subscription_id = subscription.id
+			where subscription.event_key = 'user.created'
+			group by subscription.id
+		`;
+		expect(stored).toEqual({
+			id: expect.any(String),
+			event_key: "user.created",
+			task_key: "on-user-created",
+			required_field_count: 0,
+			term_count: 0,
+		});
+
+		const eventId = await conductor.emit("user.created", { userId: "user-123" });
+		await waitForCondition(() => handler.mock.calls.length === 1);
+		await waitForCondition(async () => {
+			const [source] = await db.sql<{ exists: boolean }[]>`
+				select exists(
+					select 1 from pgconductor._private_executions
+					where id = ${eventId}::uuid and queue = 'pgconductor.internal'
+				) as exists
+			`;
+			return source?.exists === false;
+		});
+	}, 30_000);
+
+	test("stores every typed filter alternative as an inverted term", async () => {
+		const db = await database();
+		const event = defineEvent({
+			name: "user.qualified",
+			payload: z.object({ active: z.boolean(), region: z.string(), score: z.number() }),
+			filterable: ["active", "region", "score"],
+		});
+		const definition = defineTask({ name: "on-qualified-user", payload: z.object({}) });
+		const conductor = Conductor.create({
+			sql: db.sql,
+			tasks: TaskSchemas.fromSchema([definition]),
+			events: EventSchemas.fromSchema([event]),
+			context: {},
+		});
+		const task = conductor.createTask(
+			{ name: "on-qualified-user" },
+			{
+				event: "user.qualified",
+				filter: { score: [7], region: ["us", "eu", "us"], active: [true] },
 			},
 			mock(async () => {}),
 		);
+		const orchestrator = Orchestrator.create({ conductor, tasks: [task] });
+		orchestrators.push(orchestrator);
+		await orchestrator.start();
 
-		const orchestrator2 = Orchestrator.create({
-			conductor: conductor2,
-			tasks: [task2],
-			defaultWorker: { pollIntervalMs: 50, flushIntervalMs: 50 },
-		});
-
-		await orchestrator2.start();
-
-		// Check subscription was updated with when clause
-		const [sub2] = await db.sql<[{ when_clause: string }]>`
-			select when_clause
-			from pgconductor._private_event_subscriptions
-			where schema_name = 'public' and table_name = 'contact'
+		const rows = await db.sql<
+			{
+				required_field_count: number;
+				field_name: string;
+				operator: string;
+				scalar_type: string;
+				value: string;
+			}[]
+		>`
+			select subscription.required_field_count, term.field_name, term.operator,
+				term.scalar_type,
+				coalesce(term.text_value, term.number_value::text, term.boolean_value::text) as value
+			from pgconductor._private_custom_event_subscriptions subscription
+			join pgconductor._private_event_filter_terms term
+				on term.subscription_id = subscription.id
+			where subscription.event_key = 'user.qualified'
+			order by term.term_number
 		`;
-		expect(sub2.when_clause).toBe("NEW.active = true");
+		expect([...rows]).toEqual([
+			{
+				required_field_count: 3,
+				field_name: "active",
+				operator: "exact",
+				scalar_type: "boolean",
+				value: "true",
+			},
+			{
+				required_field_count: 3,
+				field_name: "region",
+				operator: "exact",
+				scalar_type: "string",
+				value: "eu",
+			},
+			{
+				required_field_count: 3,
+				field_name: "region",
+				operator: "exact",
+				scalar_type: "string",
+				value: "us",
+			},
+			{
+				required_field_count: 3,
+				field_name: "score",
+				operator: "exact",
+				scalar_type: "number",
+				value: "7",
+			},
+		]);
 
-		await orchestrator2.stop();
-	}, 30000);
+		await orchestrator.stop();
+		const [counts] = await db.sql<{ subscriptions: number; terms: number }[]>`
+			select
+				(select count(*)::integer from pgconductor._private_custom_event_subscriptions)
+					as subscriptions,
+				(select count(*)::integer from pgconductor._private_event_filter_terms) as terms
+		`;
+		expect(counts).toEqual({ subscriptions: 1, terms: 4 });
+	}, 30_000);
+
+	test("replaces only the registered queue subscription snapshot", async () => {
+		const db = await database();
+		const event = defineEvent({
+			name: "user.changed",
+			payload: z.object({ userId: z.string(), email: z.string() }),
+		});
+		const firstDefinition = defineTask({ name: "first-handler", payload: z.object({}) });
+		const secondDefinition = defineTask({ name: "second-handler", payload: z.object({}) });
+
+		const firstConductor = Conductor.create({
+			sql: db.sql,
+			tasks: TaskSchemas.fromSchema([firstDefinition]),
+			events: EventSchemas.fromSchema([event]),
+			context: {},
+		});
+		const first = Orchestrator.create({
+			conductor: firstConductor,
+			tasks: [
+				firstConductor.createTask(
+					{ name: "first-handler" },
+					{ event: "user.changed" },
+					mock(async () => {}),
+				),
+			],
+		});
+		orchestrators.push(first);
+		await first.start();
+		await first.stop();
+
+		const secondConductor = Conductor.create({
+			sql: db.sql,
+			tasks: TaskSchemas.fromSchema([secondDefinition]),
+			events: EventSchemas.fromSchema([event]),
+			context: {},
+		});
+		const second = Orchestrator.create({
+			conductor: secondConductor,
+			tasks: [
+				secondConductor.createTask(
+					{ name: "second-handler" },
+					{ event: "user.changed", fields: "userId" },
+					mock(async () => {}),
+				),
+			],
+		});
+		orchestrators.push(second);
+		await second.start();
+
+		const subscriptions = await db.sql<{ task_key: string; payload_fields: string[] | null }[]>`
+			select task_key, payload_fields
+			from pgconductor._private_custom_event_subscriptions
+			where queue = 'default' and event_key = 'user.changed'
+		`;
+		expect([...subscriptions]).toEqual([
+			{ task_key: "second-handler", payload_fields: ["userId"] },
+		]);
+		const [normalized] = await db.sql<{ terms: number; orphan_terms: number }[]>`
+			select
+				count(*)::integer as terms,
+				count(*) filter (where subscription.id is null)::integer as orphan_terms
+			from pgconductor._private_event_filter_terms term
+			left join pgconductor._private_custom_event_subscriptions subscription
+				on subscription.id = term.subscription_id
+		`;
+		expect(normalized).toEqual({ terms: 0, orphan_terms: 0 });
+	}, 30_000);
+
+	test("stores multiple subscriptions on the same event", async () => {
+		const db = await database();
+		const event = defineEvent({
+			name: "user.multi",
+			payload: z.object({ userId: z.string() }),
+		});
+		const firstDefinition = defineTask({ name: "handler-1", payload: z.object({}) });
+		const secondDefinition = defineTask({ name: "handler-2", payload: z.object({}) });
+		const conductor = Conductor.create({
+			sql: db.sql,
+			tasks: TaskSchemas.fromSchema([firstDefinition, secondDefinition]),
+			events: EventSchemas.fromSchema([event]),
+			context: {},
+		});
+		const orchestrator = Orchestrator.create({
+			conductor,
+			tasks: [
+				conductor.createTask(
+					{ name: "handler-1" },
+					{ event: "user.multi" },
+					mock(async () => {}),
+				),
+				conductor.createTask(
+					{ name: "handler-2" },
+					{ event: "user.multi" },
+					mock(async () => {}),
+				),
+			],
+		});
+		orchestrators.push(orchestrator);
+		await orchestrator.start();
+
+		const subscriptions = await db.sql<{ task_key: string }[]>`
+			select task_key
+			from pgconductor._private_custom_event_subscriptions
+			where event_key = 'user.multi'
+			order by task_key
+		`;
+		expect([...subscriptions]).toEqual([{ task_key: "handler-1" }, { task_key: "handler-2" }]);
+	}, 30_000);
 });

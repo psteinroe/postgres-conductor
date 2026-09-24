@@ -1,4 +1,4 @@
-// @ts-nocheck - Event support commented out
+// @ts-nocheck
 import { test, expect, describe } from "bun:test";
 import { InMemoryDatabaseClient } from "../mocks/in-memory-database-client";
 
@@ -853,6 +853,122 @@ describe("InMemoryDatabaseClient", () => {
 			});
 
 			expect(batch3.length).toBe(1);
+		});
+	});
+
+	describe("Event dispatch", () => {
+		test("validates payload objects and deduplicates repeated fan-out", async () => {
+			const db = new InMemoryDatabaseClient();
+			await expect(db.emitEvent({ eventKey: "mock.invalid", payload: [] } as any)).rejects.toThrow(
+				"Event payload must be a JSON object",
+			);
+			await expect(
+				db.emitEvent({ eventKey: "mock.invalid", payload: null } as any),
+			).rejects.toThrow("Event payload must be a JSON object");
+			await db.registerWorker({
+				queueName: "default",
+				taskSpecs: [{ key: "event-target", maxAttempts: 3 }],
+				cronSchedules: [],
+				eventSubscriptions: [
+					{
+						task_key: "event-target",
+						event_key: "mock.event",
+						payload_fields: null,
+						required_field_count: 1,
+						terms: [
+							{
+								field_name: "code",
+								operator: "prefix",
+								scalar_type: "string",
+								text_value: "ok-",
+							},
+						],
+					},
+				],
+			});
+			const eventId = await db.emitEvent({
+				eventKey: "mock.event",
+				payload: { code: "ok-value" },
+			});
+			await db.getExecutions({
+				orchestratorId: "event-orchestrator",
+				queueName: "pgconductor.internal",
+				batchSize: 10,
+				filterTaskKeys: [],
+			});
+
+			expect(
+				await db.dispatchCustomEvents({
+					eventIds: [eventId],
+					orchestratorId: "event-orchestrator",
+				}),
+			).toEqual([eventId]);
+			expect(
+				await db.dispatchCustomEvents({
+					eventIds: [eventId],
+					orchestratorId: "event-orchestrator",
+				}),
+			).toEqual([eventId]);
+			expect(
+				db
+					.getAllExecutions()
+					.filter(
+						(execution) =>
+							execution.parent_execution_id === eventId && execution.subscription_id != null,
+					),
+			).toHaveLength(1);
+			await db.returnExecutions([
+				{
+					execution_id: eventId,
+					...fencing(db, eventId),
+					queue: "pgconductor.internal",
+					task_key: "pgconductor.event-dispatch",
+					status: "completed",
+					result: null,
+				},
+			]);
+			expect(db.getExecution(eventId)).toBeUndefined();
+
+			await db.registerWorker({
+				queueName: "default",
+				taskSpecs: [{ key: "event-target", maxAttempts: 3 }],
+				cronSchedules: [],
+				eventSubscriptions: [
+					{
+						task_key: "event-target",
+						event_key: "mock.event",
+						payload_fields: null,
+						required_field_count: 1,
+						terms: [
+							{
+								field_name: "value",
+								operator: "anything_but",
+								scalar_type: "string",
+								text_value: "blocked",
+							},
+						],
+					},
+				],
+			});
+			const nonScalarEventId = await db.emitEvent({
+				eventKey: "mock.event",
+				payload: { value: { nested: true } },
+			});
+			await db.getExecutions({
+				orchestratorId: "event-orchestrator",
+				queueName: "pgconductor.internal",
+				batchSize: 10,
+				filterTaskKeys: [],
+			});
+			await db.dispatchCustomEvents({
+				eventIds: [nonScalarEventId],
+				orchestratorId: "event-orchestrator",
+			});
+			expect(
+				db
+					.getAllExecutions()
+					.filter((execution) => execution.parent_execution_id === nonScalarEventId),
+			).toHaveLength(0);
 		});
 	});
 

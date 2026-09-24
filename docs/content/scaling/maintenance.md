@@ -9,7 +9,7 @@ Maintenance runs daily on each queue:
 - Removes old completed executions (based on task retention config)
 - Removes old failed executions (based on task retention config)
 
-No manual intervention required.
+Custom events use ordinary internal executions and therefore do not require a separate event-log cleanup pass.
 
 ## What's Next?
 
