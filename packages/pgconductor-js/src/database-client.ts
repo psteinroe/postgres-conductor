@@ -21,7 +21,7 @@ import {
 	type RegisterEventWaitArgs,
 } from "./query-builder";
 import { makeChildLogger, type Logger } from "./lib/logger";
-import type { TraceContextCarrier } from "./telemetry";
+import type { PersistedTraceContext, TraceContextCarrier } from "./telemetry";
 
 export type JsonValue = string | number | boolean | null | Payload | JsonValue[];
 export type Payload = { [key: string]: JsonValue };
@@ -40,7 +40,7 @@ export interface ExecutionSpec {
 	parent_execution_id?: string | null;
 	parent_step_key?: string | null;
 	parent_timeout_ms?: number | null;
-	trace_context?: TraceContextCarrier | null;
+	trace_context?: PersistedTraceContext | null;
 }
 
 export interface TaskSpec {
@@ -73,6 +73,7 @@ export interface Execution {
 	waiting_on_execution_id: string | null;
 	waiting_step_key: string | null;
 	locked_by: string;
+	attempts: number;
 	cancelled: boolean;
 	last_error: string | null;
 	dedupe_key?: string | null;
@@ -85,7 +86,12 @@ export interface Execution {
 	dead_letter_error?: string | null;
 	dead_letter_attempts?: number | null;
 	dead_letter_failed_at?: Date | null;
-	trace_context?: TraceContextCarrier | null;
+	trace_context?: PersistedTraceContext | null;
+	parent_execution_id?: string | null;
+	parent_queue?: string | null;
+	parent_task_key?: string | null;
+	parent_dead_letter_queue?: string | null;
+	parent_dead_letter_task_key?: string | null;
 }
 
 // todo: move all of this to query-builder too or create new types.ts file
@@ -116,6 +122,12 @@ export interface ExecutionCompleted {
 	result?: Payload;
 }
 
+export type PendingDeadLetterDelivery = {
+	sourceExecutionId: string;
+	queue: string;
+	taskKey: string;
+};
+
 export interface ExecutionFailed {
 	execution_id: string;
 	queue: string;
@@ -136,6 +148,9 @@ export interface ExecutionReleased {
 }
 
 export interface ExecutionPermamentlyFailed {
+	producerParent?: TraceContextCarrier | null;
+	deadLetterDeliveries?: PendingDeadLetterDelivery[];
+	dead_letter_trace_contexts?: Record<string, PersistedTraceContext>;
 	execution_id: string;
 	queue: string;
 	orchestrator_id: string;
@@ -145,6 +160,8 @@ export interface ExecutionPermamentlyFailed {
 }
 
 export interface ExecutionInvokeChild {
+	producerParent?: TraceContextCarrier | null;
+	trace_context?: PersistedTraceContext | null;
 	group?: string | null;
 	execution_id: string;
 	queue: string;
@@ -505,11 +522,7 @@ export class DatabaseClient {
 		opts?: QueryMethodOptions,
 	): Promise<void> {
 		const query = this.builder.buildReturnExecutions(grouped);
-
-		if (!query) {
-			return;
-		}
-
+		if (!query) return;
 		await this.query(() => query, { label: "returnExecutions", ...opts });
 	}
 

@@ -463,7 +463,9 @@ begin
     dead_letter_task_key = excluded.dead_letter_task_key;
 
   -- Insert scheduled cron executions.
-  insert into pgconductor._private_executions (task_key, queue, payload, run_at, dedupe_key, cron_expression, "group")
+  insert into pgconductor._private_executions (
+    task_key, queue, payload, run_at, dedupe_key, cron_expression, "group", trace_context
+  )
   select
     spec.task_key,
     coalesce(spec.queue, 'default'),
@@ -471,14 +473,16 @@ begin
     coalesce(spec.run_at, pgconductor._private_current_time()),
     spec.dedupe_key,
     spec.cron_expression,
-    spec."group"
+    spec."group",
+    spec.trace_context
   from unnest(p_cron_schedules) as spec
   where spec.dedupe_key is not null
   on conflict (task_key, dedupe_key, queue) do update set
     payload = excluded.payload,
     run_at = excluded.run_at,
     cron_expression = excluded.cron_expression,
-    "group" = excluded."group";
+    "group" = excluded."group",
+    trace_context = coalesce(pgconductor._private_executions.trace_context, excluded.trace_context);
 
   -- Clean up stale schedules for this queue.
   delete from pgconductor._private_executions
@@ -1330,7 +1334,8 @@ on conflict (queue, key) do update set
 
 create or replace function pgconductor.emit_event(
     p_event_key text,
-    p_payload jsonb default '{}'::jsonb
+    p_payload jsonb default '{}'::jsonb,
+    p_trace_context jsonb default null
 )
 returns uuid
 language plpgsql
@@ -1353,12 +1358,13 @@ begin
     end if;
 
     insert into pgconductor._private_executions (
-        id, task_key, queue, payload
+        id, task_key, queue, payload, trace_context
     ) values (
         pgconductor._private_portable_uuidv7(),
         'pgconductor.event-dispatch',
         'pgconductor.internal',
-        jsonb_build_object('eventKey', p_event_key, 'payload', v_payload)
+        jsonb_build_object('eventKey', p_event_key, 'payload', v_payload),
+        p_trace_context
     )
     returning id into v_event_id;
 

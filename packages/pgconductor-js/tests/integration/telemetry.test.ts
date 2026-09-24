@@ -172,7 +172,7 @@ describe.serial("OpenTelemetry instrumentation", () => {
 		await cleanup(provider);
 	});
 
-	test("producer carrier becomes the real worker consumer parent", async () => {
+	test("producer carrier becomes the consumer parent without a redundant link", async () => {
 		const { exporter, provider } = installProvider();
 		const db = new InMemoryDatabaseClient();
 		const { carrier, producer } = producerCarrier("send-parent");
@@ -180,16 +180,14 @@ describe.serial("OpenTelemetry instrumentation", () => {
 			task_key: "parented",
 			queue: "default",
 			payload: {},
-			trace_context: carrier,
+			trace_context: { parent: carrier },
 		});
 		const task = makeTask("parented", async () => undefined);
 		await makeWorker(db, task).drain("worker");
 		const consumer = spans(exporter, "process default")[0]!;
 		expect(consumer.parentSpanId).toBe(producer.spanContext().spanId);
 		expect(consumer.spanContext().traceId).toBe(producer.spanContext().traceId);
-		expect(consumer.links.map((link) => link.context.spanId)).toEqual([
-			producer.spanContext().spanId,
-		]);
+		expect(consumer.links).toHaveLength(0);
 		await cleanup(provider);
 	});
 
@@ -199,9 +197,24 @@ describe.serial("OpenTelemetry instrumentation", () => {
 		const first = producerCarrier("batch-one");
 		const second = producerCarrier("batch-two");
 		await db.invokeBatch([
-			{ task_key: "batched", queue: "default", payload: {}, trace_context: first.carrier },
-			{ task_key: "batched", queue: "default", payload: {}, trace_context: second.carrier },
-			{ task_key: "batched", queue: "default", payload: {}, trace_context: first.carrier },
+			{
+				task_key: "batched",
+				queue: "default",
+				payload: {},
+				trace_context: { parent: first.carrier },
+			},
+			{
+				task_key: "batched",
+				queue: "default",
+				payload: {},
+				trace_context: { parent: second.carrier },
+			},
+			{
+				task_key: "batched",
+				queue: "default",
+				payload: {},
+				trace_context: { parent: first.carrier },
+			},
 		]);
 		const task = makeTask("batched", async () => [], { batch: { size: 10, timeoutMs: 1 } });
 		await makeWorker(db, task).drain("worker");
@@ -277,7 +290,11 @@ describe.serial("OpenTelemetry instrumentation", () => {
 			}),
 		).drain("worker");
 		const process = spans(exporter, "process default")[0]!;
-		expect(schedulingSpanId).toBeUndefined();
+		const schedule = spans(exporter, "send default").find(
+			(span) => span.spanContext().spanId === schedulingSpanId,
+		);
+		expect(schedule).toBeTruthy();
+		expect(schedulingSpanId).not.toBe(process.spanContext().spanId);
 		expect(handlerSpanId).toBe(process.spanContext().spanId);
 		await cleanup(provider);
 	});
@@ -327,7 +344,7 @@ describe.serial("OpenTelemetry instrumentation", () => {
 		await cleanup(provider);
 	});
 
-	test("cron and event executions are root process spans", async () => {
+	test("carrierless cron and event executions start root process spans", async () => {
 		const { exporter, provider } = installProvider();
 		const db = new InMemoryDatabaseClient();
 		await db.invoke({
@@ -387,6 +404,60 @@ describe.serial("OpenTelemetry instrumentation", () => {
 			expect(span.attributes).not.toHaveProperty("payload");
 			expect(JSON.stringify(span.attributes)).not.toContain("do not record");
 		}
+		await cleanup(provider);
+	});
+
+	test("persisted carriers keep only bounded trace-context fields", async () => {
+		const { provider } = installProvider();
+		const traceparent = `00-${"1".repeat(32)}-${"2".repeat(16)}-01`;
+		let extractedCarrier: unknown;
+		propagation.disable();
+		propagation.setGlobalPropagator({
+			inject(_context: unknown, carrier: Record<string, string>) {
+				carrier.traceparent = traceparent;
+				carrier.tracestate = "vendor=value";
+				carrier.baggage = "secret=value";
+			},
+			extract(ctx: any, carrier: unknown) {
+				extractedCarrier = carrier;
+				return ctx;
+			},
+			fields() {
+				return ["traceparent", "tracestate", "baggage"];
+			},
+		} as any);
+
+		const telemetry = new Telemetry();
+		expect(telemetry.traceContext()).toEqual({ traceparent, tracestate: "vendor=value" });
+		telemetry.extractTraceContext({
+			traceparent,
+			tracestate: "vendor=value",
+			baggage: "secret=value",
+		} as any);
+		expect(extractedCarrier).toEqual({ traceparent, tracestate: "vendor=value" });
+		await expect(
+			telemetry.trace({
+				name: "bounded carrier",
+				kind: SpanKind.INTERNAL,
+				run: (span) => span.persistedTraceContext(),
+			}),
+		).resolves.toEqual({
+			parent: { traceparent, tracestate: "vendor=value" },
+		});
+
+		propagation.disable();
+		propagation.setGlobalPropagator({
+			inject(_context: unknown, carrier: Record<string, string>) {
+				carrier.traceparent = "x".repeat(513);
+			},
+			extract(ctx: any) {
+				return ctx;
+			},
+			fields() {
+				return ["traceparent"];
+			},
+		} as any);
+		expect(telemetry.traceContext()).toBeNull();
 		await cleanup(provider);
 	});
 

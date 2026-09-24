@@ -6,6 +6,7 @@ import type {
 	TaskSpec,
 	Payload,
 	EventFilterTerm,
+	GroupedExecutionResults,
 	SetFakeTimeArgs,
 } from "../../src/database-client";
 import { DatabaseClient as RealDatabaseClient } from "../../src/database-client";
@@ -386,16 +387,26 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 
 		// Register cron schedules (ExecutionSpec[])
 		for (const cronSpec of args.cronSchedules || []) {
-			if (cronSpec.cron_expression) {
-				const key = `${cronSpec.task_key}:${cronSpec.cron_expression}`;
-				this.cronSchedules.set(key, {
-					task_key: cronSpec.task_key,
-					queue: cronSpec.queue,
-					schedule_name: cronSpec.cron_expression,
-					cron_expression: cronSpec.cron_expression,
-					last_execution_id: null,
-				});
-			}
+			if (!cronSpec.cron_expression) continue;
+			const key = `${cronSpec.task_key}:${cronSpec.cron_expression}`;
+			const existing = Array.from(this.executions.values()).find(
+				(execution) =>
+					execution.task_key === cronSpec.task_key &&
+					execution.queue === cronSpec.queue &&
+					execution.dedupe_key === cronSpec.dedupe_key &&
+					execution.state !== "completed" &&
+					execution.state !== "failed",
+			);
+			const persistedTraceContext = existing?.trace_context;
+			const executionId = await this.invoke(cronSpec);
+			if (existing && persistedTraceContext) existing.trace_context = persistedTraceContext;
+			this.cronSchedules.set(key, {
+				task_key: cronSpec.task_key,
+				queue: cronSpec.queue,
+				schedule_name: cronSpec.cron_expression,
+				cron_expression: cronSpec.cron_expression,
+				last_execution_id: executionId,
+			});
 		}
 	}
 
@@ -470,6 +481,10 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 			exec.state = "running";
 			exec.attempts += 1;
 			exec.orchestrator_id = args.orchestratorId;
+			const traceContext = exec.trace_context;
+			if (traceContext?.link) {
+				exec.trace_context = traceContext.parent ? { parent: traceContext.parent } : null;
+			}
 
 			// Update concurrency count
 			if (task?.concurrency != null) {
@@ -486,6 +501,7 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 				payload: exec.payload,
 				waiting_on_execution_id: exec.waiting_on_execution_id,
 				waiting_step_key: exec.waiting_step_key,
+				attempts: exec.attempts,
 				cancelled: exec.cancelled,
 				last_error: exec.last_error,
 				dedupe_key: exec.dedupe_key || undefined,
@@ -498,7 +514,30 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 				dead_letter_error: exec.dead_letter_error,
 				dead_letter_attempts: exec.dead_letter_attempts,
 				dead_letter_failed_at: exec.dead_letter_failed_at,
-				trace_context: exec.trace_context,
+				trace_context: traceContext,
+				parent_execution_id: exec.parent_execution_id,
+				parent_queue: exec.parent_execution_id
+					? this.executions.get(exec.parent_execution_id)?.queue || null
+					: null,
+				parent_task_key: exec.parent_execution_id
+					? this.executions.get(exec.parent_execution_id)?.task_key || null
+					: null,
+				parent_dead_letter_queue: exec.parent_execution_id
+					? this.tasks.get(
+							this.taskId(
+								this.executions.get(exec.parent_execution_id)?.task_key || "",
+								this.executions.get(exec.parent_execution_id)?.queue || "",
+							),
+						)?.dead_letter_queue || null
+					: null,
+				parent_dead_letter_task_key: exec.parent_execution_id
+					? this.tasks.get(
+							this.taskId(
+								this.executions.get(exec.parent_execution_id)?.task_key || "",
+								this.executions.get(exec.parent_execution_id)?.queue || "",
+							),
+						)?.dead_letter_task_key || null
+					: null,
 				locked_by: exec.orchestrator_id || "",
 			});
 
@@ -517,9 +556,7 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 	}
 
 	async returnExecutions(
-		resultsOrGrouped:
-			| ExecutionResult[]
-			| import("../../src/database-client").GroupedExecutionResults,
+		resultsOrGrouped: ExecutionResult[] | GroupedExecutionResults,
 		_opts?: { signal?: AbortSignal },
 	): Promise<void> {
 		// Handle both old array format (for testing) and new grouped format
@@ -566,11 +603,6 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 						}
 					}
 
-					// Schedule next cron execution if needed
-					if (exec.cron_expression) {
-						await this.scheduleNextCronExecution(exec);
-					}
-
 					// Zero-day retention removes immediately; positive retention is swept later.
 					const task = this.tasks.get(this.taskId(exec.task_key, exec.queue));
 					if (task?.remove_on_complete_days === 0) {
@@ -592,7 +624,9 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 						exec.state = "failed";
 						exec.failed_at = now;
 						this.deleteExecutionWaits(exec.id);
-						if (!exec.cancelled) this.deliverToDeadLetterQueue(exec, task, result.error, now);
+						if (!exec.cancelled) {
+							this.deliverToDeadLetterQueue(exec, task, result.error, now);
+						}
 
 						// Fail a workflow parent only. Event delivery lineage is independent.
 						if (exec.parent_execution_id && exec.subscription_id === null) {
@@ -655,7 +689,15 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 					this.deleteExecutionWaits(exec.id);
 
 					const task = this.tasks.get(this.taskId(exec.task_key, exec.queue));
-					if (!exec.cancelled) this.deliverToDeadLetterQueue(exec, task, result.error, now);
+					if (!exec.cancelled) {
+						this.deliverToDeadLetterQueue(
+							exec,
+							task,
+							result.error,
+							now,
+							result.dead_letter_trace_contexts?.[exec.id],
+						);
+					}
 					exec.orchestrator_id = null;
 
 					// Fail a workflow parent only. Event delivery lineage is independent.
@@ -670,7 +712,13 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 							this.deleteExecutionWaits(parent.id);
 							const parentTask = this.tasks.get(this.taskId(parent.task_key, parent.queue));
 							if (!exec.cancelled) {
-								this.deliverToDeadLetterQueue(parent, parentTask, parent.last_error, now);
+								this.deliverToDeadLetterQueue(
+									parent,
+									parentTask,
+									parent.last_error,
+									now,
+									result.dead_letter_trace_contexts?.[parent.id],
+								);
 							}
 							if (parentTask?.remove_on_fail_days === 0) {
 								this.executions.delete(parent.id);
@@ -693,6 +741,7 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 						queue: result.child_task_queue,
 						payload: result.child_payload || {},
 						group: result.group,
+						trace_context: result.trace_context,
 						parent_execution_id: exec.id,
 						parent_step_key: result.step_key,
 					});
@@ -877,6 +926,7 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 						exec.run_at = spec.run_at || now;
 						exec.priority = spec.priority || 0;
 						exec.cron_expression = spec.cron_expression || null;
+						exec.trace_context = spec.trace_context || null;
 						exec.updated_at = now;
 						return exec.id;
 					}
@@ -932,6 +982,7 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 						exec.priority = spec.priority || 0;
 						exec.singleton_on = singletonOn;
 						exec.cron_expression = spec.cron_expression || null;
+						exec.trace_context = spec.trace_context || null;
 						exec.updated_at = now;
 						ids.push(exec.id);
 						foundExisting = true;
@@ -1028,36 +1079,6 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 				});
 			}
 		}
-	}
-
-	private async scheduleNextCronExecution(exec: StoredExecution): Promise<void> {
-		if (!exec.cron_expression) return;
-
-		// Find the schedule
-		let schedule: StoredCronSchedule | undefined;
-		for (const s of this.cronSchedules.values()) {
-			if (s.task_key === exec.task_key && s.queue === exec.queue) {
-				schedule = s;
-				break;
-			}
-		}
-
-		if (!schedule) return; // Schedule was removed
-
-		// Calculate next run
-		const nextRun = this.calculateNextCronRun(exec.cron_expression);
-		const dedupeKey = `cron::${schedule.schedule_name}::${exec.task_key}::${exec.queue}`;
-
-		// Create next execution
-		await this.invoke({
-			task_key: exec.task_key,
-			queue: exec.queue,
-			payload: {},
-			run_at: nextRun,
-			dedupe_key: dedupeKey,
-			cron_expression: exec.cron_expression,
-			group: exec.group,
-		});
 	}
 
 	private calculateNextCronRun(cronExpression: string): Date {
@@ -1204,6 +1225,7 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 				task_key: EVENT_DISPATCH_TASK,
 				queue: EVENT_DISPATCH_QUEUE,
 				payload: { eventKey: args.eventKey, payload },
+				trace_context: args.trace_context || null,
 			},
 			this.getInternalTime(),
 		);
@@ -1268,6 +1290,7 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 							queue: subscription.queue,
 							payload: { event: eventKey, payload: destinationPayload },
 							parent_execution_id: eventId,
+							trace_context: source.trace_context,
 						},
 						subscriptionId: subscription.id,
 					});
@@ -1321,6 +1344,14 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 					this.eventSubscriptions.delete(subscription.id);
 					execution.waiting_step_key = null;
 					execution.waiting_timeout_at = null;
+					if (source.trace_context?.parent) {
+						execution.trace_context = {
+							...(execution.trace_context?.parent
+								? { parent: execution.trace_context.parent }
+								: {}),
+							link: source.trace_context.parent,
+						};
+					}
 					execution.run_at = now;
 				}
 				dispatched.push(eventId);
@@ -1338,6 +1369,7 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 		task: StoredTask | undefined,
 		error: string,
 		now: Date,
+		traceContext?: Execution["trace_context"],
 	): void {
 		if (!task?.dead_letter_queue || exec.cancelled) return;
 		const destinationTaskKey = task.dead_letter_task_key || exec.task_key;
@@ -1382,7 +1414,7 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 			dead_letter_error: error,
 			dead_letter_attempts: exec.attempts,
 			dead_letter_failed_at: now,
-			trace_context: null,
+			trace_context: traceContext || null,
 		});
 	}
 

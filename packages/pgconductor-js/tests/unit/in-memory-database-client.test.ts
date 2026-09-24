@@ -240,7 +240,7 @@ describe("InMemoryDatabaseClient", () => {
 			expect(schedules[0]?.schedule_name).toBe("test-schedule");
 		});
 
-		test("completed cron execution schedules next run", async () => {
+		test("completed cron execution leaves recurrence scheduling to the worker", async () => {
 			const db = new InMemoryDatabaseClient();
 
 			const id = await db.scheduleCronExecution({
@@ -271,14 +271,8 @@ describe("InMemoryDatabaseClient", () => {
 				},
 			]);
 
-			// Should have scheduled next execution
 			const pending = db.getPendingExecutions();
-			const nextExec = pending.find(
-				(e) => e.task_key === "cron-task" && e.cron_expression !== null,
-			);
-
-			expect(nextExec).toBeDefined();
-			expect(nextExec?.dedupe_key).toBe("cron::test-schedule::cron-task::default");
+			expect(pending.some((e) => e.task_key === "cron-task")).toBe(false);
 		});
 
 		test("unscheduleCronExecution removes schedule and cancels pending", async () => {

@@ -20,7 +20,7 @@ import { WindowChecker } from "./lib/window-checker";
 import { TypedAbortController } from "./lib/typed-abort-controller";
 import { parseDuration, type DurationInput } from "./lib/duration";
 import { SpanKind } from "@opentelemetry/api";
-import type { Telemetry } from "./telemetry";
+import type { Telemetry, TraceContextCarrier } from "./telemetry";
 import type {
 	EventDefinition,
 	EventName,
@@ -50,6 +50,7 @@ export type TaskAbortReasons =
 			task: TaskIdentifier<string, string>;
 			payload: Payload | null;
 			group?: string | null;
+			producerParent?: TraceContextCarrier | null;
 			__pgconductorTaskAborted: true;
 	  };
 
@@ -432,6 +433,7 @@ export class TaskContext<
 			step_key: key,
 			payload,
 			group,
+			producerParent: this.opts.telemetry.traceContext(),
 		});
 	}
 
@@ -464,21 +466,30 @@ export class TaskContext<
 		const nextTimestamp = nextCronOccurrence(options.cron, this.opts.clock.now());
 		const queue = task.queue || "default";
 
-		await this.opts.db.scheduleCronExecution(
-			{
-				spec: {
-					task_key: task.name,
-					queue,
-					payload,
-					run_at: nextTimestamp,
-					cron_expression: options.cron,
-					priority: options.priority || null,
-					group: options.group || null,
-				},
-				scheduleName,
+		await this.opts.telemetry.send({
+			taskKey: task.name,
+			queue,
+			run: async (span) => {
+				const id = await this.opts.db.scheduleCronExecution(
+					{
+						spec: {
+							task_key: task.name,
+							queue,
+							payload,
+							run_at: nextTimestamp,
+							cron_expression: options.cron,
+							priority: options.priority || null,
+							group: options.group || null,
+							trace_context: span.persistedTraceContext(),
+						},
+						scheduleName,
+					},
+					{ signal: this.signal },
+				);
+				span.setAttribute("messaging.message.id", id);
+				return id;
 			},
-			{ signal: this.signal },
-		);
+		});
 	}
 
 	async unschedule<TName extends TaskName<Tasks>, TQueue extends string = "default">(
@@ -528,13 +539,23 @@ export class TaskContext<
 		TName extends EventName<Events>,
 		TDef extends FindEventByIdentifier<Events, TName> = FindEventByIdentifier<Events, TName>,
 	>(event: TName, payload: InferEventPayload<TDef>): Promise<string> {
-		return this.opts.db.emitEvent(
-			{
-				eventKey: event,
-				payload: payload as any,
+		return this.opts.telemetry.send({
+			name: `send event ${String(event)}`,
+			queue: String(event),
+			run: async (span) => {
+				const id = await this.opts.db.emitEvent(
+					{
+						eventKey: event,
+						payload: payload as any,
+						trace_context: span.persistedTraceContext(),
+					},
+					{ signal: this.signal },
+				);
+				span.setAttribute("pgconductor.event.name", String(event));
+				span.setAttribute("messaging.message.id", id);
+				return id;
 			},
-			{ signal: this.signal },
-		);
+		});
 	}
 
 	/**

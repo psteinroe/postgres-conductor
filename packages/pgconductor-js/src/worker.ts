@@ -9,6 +9,7 @@ import type {
 	ExecutionPermamentlyFailed,
 	ExecutionReleased,
 	ExecutionInvokeChild,
+	PendingDeadLetterDelivery,
 } from "./database-client";
 import type { AnyTask, BatchConfig } from "./task";
 import type { TaskDefinition } from "./task-definition";
@@ -32,7 +33,7 @@ import { makeChildLogger, type Logger } from "./lib/logger";
 import type { EventDefinition } from "./event-definition";
 import { coerceError } from "./lib/coerce-error";
 import type { TypedAbortController } from "./lib/typed-abort-controller";
-import { Telemetry } from "./telemetry";
+import { Telemetry, type TraceContextCarrier } from "./telemetry";
 
 /**
  * The configuration options for the Worker.
@@ -110,6 +111,58 @@ class BufferState {
 			this.taskKeys.add(key);
 		}
 	}
+}
+
+function planDeadLetterDeliveries(
+	task: AnyTask,
+	execution: Execution,
+): PendingDeadLetterDelivery[] {
+	const deliveries: PendingDeadLetterDelivery[] = [];
+	if (task.deadLetter?.queue) {
+		deliveries.push({
+			sourceExecutionId: execution.id,
+			queue: task.deadLetter.queue,
+			taskKey: task.deadLetter.task?.name || execution.task_key,
+		});
+	}
+	if (execution.parent_execution_id && execution.parent_dead_letter_queue) {
+		deliveries.push({
+			sourceExecutionId: execution.parent_execution_id,
+			queue: execution.parent_dead_letter_queue,
+			taskKey:
+				execution.parent_dead_letter_task_key || execution.parent_task_key || execution.task_key,
+		});
+	}
+	return deliveries;
+}
+
+function failedExecutionResult({
+	task,
+	execution,
+	error,
+	producerParent,
+}: {
+	task: AnyTask;
+	execution: Execution;
+	error: string;
+	producerParent: TraceContextCarrier | null;
+}): ExecutionFailed | ExecutionPermamentlyFailed {
+	const result = {
+		execution_id: execution.id,
+		orchestrator_id: execution.locked_by,
+		queue: execution.queue,
+		task_key: execution.task_key,
+		error,
+	};
+	if (execution.attempts < (task.maxAttempts || 3)) {
+		return { ...result, status: "failed" };
+	}
+	return {
+		...result,
+		status: "permanently_failed",
+		producerParent,
+		deadLetterDeliveries: planDeadLetterDeliveries(task, execution),
+	};
 }
 
 function taskEventFor(execution: Execution): { name: string; payload?: unknown } {
@@ -400,15 +453,36 @@ export class Worker<
 			})),
 		);
 
-		await this.db.registerWorker(
-			{
-				queueName: this.queueName,
-				taskSpecs,
-				cronSchedules,
-				eventSubscriptions,
+		const register = () =>
+			this.db.registerWorker(
+				{
+					queueName: this.queueName,
+					taskSpecs,
+					cronSchedules,
+					eventSubscriptions,
+				},
+				{ signal: this.signal },
+			);
+
+		if (cronSchedules.length === 0) {
+			await register();
+			return;
+		}
+
+		await this.telemetry.produce({
+			messages: cronSchedules.map((schedule) => ({
+				key: schedule.dedupe_key || `${schedule.queue}:${schedule.task_key}`,
+				queue: schedule.queue,
+				taskKey: schedule.task_key,
+			})),
+			run: (traceStateBySchedule) => {
+				for (const schedule of cronSchedules) {
+					const key = schedule.dedupe_key || `${schedule.queue}:${schedule.task_key}`;
+					schedule.trace_context = traceStateBySchedule.get(key) || null;
+				}
+				return register();
 			},
-			{ signal: this.signal },
-		);
+		});
 	}
 
 	// --- Stage 1: Fetch executions from database ---
@@ -582,15 +656,17 @@ export class Worker<
 				? { ...this.extraContext, db: this.db, tasks: this.tasks }
 				: this.extraContext;
 
+		let processTraceContext: TraceContextCarrier | null = null;
 		return this.scheduleNextExecution(exec)
 			.then(async () => {
 				const output = await this.telemetry.process({
 					taskKey: exec.task_key,
 					queue: exec.queue,
 					messageId: exec.id,
-					traceContexts: [exec.trace_context],
-					run: () =>
-						Promise.race([
+					traceStates: [exec.trace_context],
+					run: (span) => {
+						processTraceContext = span.traceContext();
+						return Promise.race([
 							task.execute(
 								taskEvent,
 								TaskContext.create<Tasks, Events, typeof extraContext>(
@@ -613,7 +689,8 @@ export class Worker<
 								),
 							),
 							abortPromise,
-						]),
+						]);
+					},
 				});
 
 				if (isTaskAbortReason(output)) {
@@ -631,6 +708,7 @@ export class Worker<
 								child_task_queue: output.task.queue || "default",
 								child_payload: output.payload,
 								group: output.group,
+								producerParent: output.producerParent,
 							} as const;
 						case "cancelled":
 							return {
@@ -667,14 +745,12 @@ export class Worker<
 					result: output,
 				} as const;
 			})
-			.catch(
-				(err): ExecutionResult => ({
-					execution_id: exec.id,
-					orchestrator_id: exec.locked_by,
-					queue: exec.queue,
-					task_key: exec.task_key,
-					status: "failed",
+			.catch((err): ExecutionFailed | ExecutionPermamentlyFailed =>
+				failedExecutionResult({
+					task,
+					execution: exec,
 					error: coerceError(err).message,
+					producerParent: processTraceContext,
 				}),
 			)
 			.finally(() => this._runningTasks.delete(exec.id));
@@ -722,6 +798,7 @@ export class Worker<
 			});
 		});
 
+		let processTraceContext: TraceContextCarrier | null = null;
 		// Schedule recurring executions before passing the batch to the application handler.
 		return Promise.all(executions.map((exec) => this.scheduleNextExecution(exec)))
 			.then(() =>
@@ -729,8 +806,9 @@ export class Worker<
 					taskKey,
 					queue: this.queueName,
 					batchMessageCount: executions.length,
-					traceContexts: executions.map((exec) => exec.trace_context),
-					run: async () => {
+					traceStates: executions.map((execution) => execution.trace_context),
+					run: async (span) => {
+						processTraceContext = span.traceContext();
 						const result = await Promise.race([task.execute(events, batchContext), abortPromise]);
 						if (!isTaskAbortReason(result) && result !== undefined) {
 							if (!Array.isArray(result)) {
@@ -798,14 +876,14 @@ export class Worker<
 			.catch((err) => {
 				// Handler threw: all fail together
 				const error = coerceError(err).message;
-				return executions.map((exec) => ({
-					execution_id: exec.id,
-					orchestrator_id: exec.locked_by,
-					queue: exec.queue,
-					task_key: taskKey,
-					status: "failed" as const,
-					error,
-				}));
+				return executions.map((execution) =>
+					failedExecutionResult({
+						task,
+						execution,
+						error,
+						producerParent: processTraceContext,
+					}),
+				);
 			});
 	}
 
@@ -829,17 +907,25 @@ export class Worker<
 		const timestampSeconds = Math.floor(nextTimestamp.getTime() / 1000);
 		const nextDedupeKey = `scheduled::${scheduleName}::${timestampSeconds}`;
 
-		await this.db.invoke(
-			{
-				task_key: execution.task_key,
-				queue: execution.queue,
-				run_at: nextTimestamp,
-				dedupe_key: nextDedupeKey,
-				cron_expression: execution.cron_expression,
-				group: execution.group || null,
+		await this.telemetry.send({
+			taskKey: execution.task_key,
+			queue: execution.queue,
+			run: async (span) => {
+				const id = await this.db.invoke(
+					{
+						task_key: execution.task_key,
+						queue: execution.queue,
+						run_at: nextTimestamp,
+						dedupe_key: nextDedupeKey,
+						cron_expression: execution.cron_expression,
+						group: execution.group || null,
+						trace_context: span.persistedTraceContext(),
+					},
+					{ signal: this.signal },
+				);
+				if (id) span.setAttribute("messaging.message.id", id);
 			},
-			{ signal: this.signal },
-		);
+		});
 	}
 
 	// --- Stage 3: Flush results to database ---
@@ -859,11 +945,47 @@ export class Worker<
 			}
 
 			batch.orchestratorId = this.orchestratorId || batch.orchestratorId;
+			const pendingDeliveries = [
+				...batch.invokeChild.map((result) => ({
+					key: result.execution_id,
+					queue: result.child_task_queue,
+					taskKey: result.child_task_name,
+					parent: result.producerParent,
+				})),
+				...batch.failed.flatMap((result) =>
+					result.status === "permanently_failed"
+						? (result.deadLetterDeliveries || []).map((delivery) => ({
+								key: delivery.sourceExecutionId,
+								queue: delivery.queue,
+								taskKey: delivery.taskKey,
+								parent: result.producerParent,
+							}))
+						: [],
+				),
+			];
+
 			await this.telemetry
-				.settle({
-					queue: this.queueName,
-					batchMessageCount: batch.count,
-					run: () => this.db.returnExecutions(batch, { signal: this.signal }),
+				.produce({
+					messages: pendingDeliveries,
+					run: (traceStateBySourceExecutionId) => {
+						for (const result of batch.invokeChild) {
+							result.trace_context = traceStateBySourceExecutionId.get(result.execution_id) || null;
+						}
+						for (const result of batch.failed) {
+							if (result.status !== "permanently_failed") continue;
+							result.dead_letter_trace_contexts = Object.fromEntries(
+								(result.deadLetterDeliveries || []).flatMap((delivery) => {
+									const traceState = traceStateBySourceExecutionId.get(delivery.sourceExecutionId);
+									return traceState ? [[delivery.sourceExecutionId, traceState]] : [];
+								}),
+							);
+						}
+						return this.telemetry.settle({
+							queue: this.queueName,
+							batchMessageCount: batch.count,
+							run: () => this.db.returnExecutions(batch, { signal: this.signal }),
+						});
+					},
 				})
 				.catch((err) => {
 					this.logger.error("Error flushing results:", err);
