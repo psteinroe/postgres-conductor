@@ -94,6 +94,7 @@ create table pgconductor._private_executions (
     failed_at timestamptz,
     completed_at timestamptz,
     payload jsonb,
+    trace_context jsonb,
     run_at timestamptz default pgconductor._private_current_time() not null,
     locked_at timestamptz,
     locked_by uuid,
@@ -351,7 +352,8 @@ create type pgconductor.execution_spec as (
     dedupe_next_slot boolean,
     cron_expression text,
     priority integer,
-    "group" text
+    "group" text,
+    trace_context jsonb
 );
 
 create type pgconductor.task_spec as (
@@ -540,6 +542,7 @@ begin
         task_key,
         queue,
         payload,
+        trace_context,
         run_at,
         dedupe_key,
         singleton_on,
@@ -552,6 +555,7 @@ begin
         spec.task_key,
         coalesce(spec.queue, 'default'),
         spec.payload,
+        spec.trace_context,
         coalesce(spec.run_at, v_now),
         spec.dedupe_key,
         case
@@ -589,7 +593,8 @@ create or replace function pgconductor.invoke(
     p_dedupe_next_slot boolean default false,
     p_cron_expression text default null,
     p_priority integer default null,
-    p_group text default null
+    p_group text default null,
+    p_trace_context jsonb default null
 )
  returns table(id uuid)
  language plpgsql
@@ -645,6 +650,7 @@ begin
               task_key,
               queue,
               payload,
+              trace_context,
               run_at,
               dedupe_key,
               singleton_on,
@@ -656,6 +662,7 @@ begin
               p_task_key,
               p_queue,
               p_payload,
+              p_trace_context,
               v_run_at,
               p_dedupe_key,
               v_singleton_on,
@@ -678,6 +685,7 @@ begin
               task_key,
               queue,
               payload,
+              trace_context,
               run_at,
               dedupe_key,
               singleton_on,
@@ -689,6 +697,7 @@ begin
               p_task_key,
               p_queue,
               p_payload,
+              p_trace_context,
               v_next_singleton_on,
               p_dedupe_key,
               v_next_singleton_on,
@@ -700,6 +709,7 @@ begin
           where singleton_on is not null and completed_at is null and failed_at is null and cancelled = false
           do update set
               payload = excluded.payload,
+              trace_context = excluded.trace_context,
               run_at = excluded.run_at,
               priority = excluded.priority,
               cron_expression = excluded.cron_expression,
@@ -715,6 +725,7 @@ begin
     task_key,
     queue,
     payload,
+    trace_context,
     run_at,
     dedupe_key,
     cron_expression,
@@ -725,6 +736,7 @@ begin
     p_task_key,
     p_queue,
     p_payload,
+    p_trace_context,
     v_run_at,
     p_dedupe_key,
     p_cron_expression,
@@ -733,6 +745,7 @@ begin
   )
   on conflict (task_key, dedupe_key, queue) do update set
     payload = excluded.payload,
+    trace_context = excluded.trace_context,
     run_at = excluded.run_at,
     priority = excluded.priority,
     cron_expression = excluded.cron_expression,

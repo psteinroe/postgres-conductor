@@ -19,6 +19,8 @@ import type { Logger } from "./lib/logger";
 import { WindowChecker } from "./lib/window-checker";
 import { TypedAbortController } from "./lib/typed-abort-controller";
 import { parseDuration, type DurationInput } from "./lib/duration";
+import { SpanKind } from "@opentelemetry/api";
+import type { Telemetry } from "./telemetry";
 import type {
 	EventDefinition,
 	EventName,
@@ -139,6 +141,7 @@ export type TaskContextOptions = {
 	logger: Logger;
 	eventDefinitions: readonly EventDefinition<string, any, any>[];
 	window?: [string, string];
+	telemetry: Telemetry;
 };
 
 type ScheduleOptions = {
@@ -245,22 +248,31 @@ export class TaskContext<
 			return (cached as { result: T }).result;
 		}
 
-		// Execute and save
-		const result = await fn();
-
-		await this.opts.db.saveStep(
-			{
-				executionId: this.opts.execution.id,
-				queue: this.opts.execution.queue,
-				orchestratorId: this.opts.execution.locked_by,
-				key: name,
-				result: { result: result as JsonValue },
-				runAtMs: undefined,
+		// Execute and save. A cache hit intentionally has no span.
+		return this.opts.telemetry.trace({
+			name: `step ${this.opts.execution.task_key}`,
+			kind: SpanKind.INTERNAL,
+			attributes: {
+				"pgconductor.task.name": this.opts.execution.task_key,
+				"pgconductor.step.name": name,
+				"pgconductor.queue": this.opts.execution.queue,
 			},
-			{ signal: this.signal },
-		);
-
-		return result;
+			run: async () => {
+				const result = await fn();
+				await this.opts.db.saveStep(
+					{
+						executionId: this.opts.execution.id,
+						queue: this.opts.execution.queue,
+						orchestratorId: this.opts.execution.locked_by,
+						key: name,
+						result: { result: result as JsonValue },
+						runAtMs: undefined,
+					},
+					{ signal: this.signal },
+				);
+				return result;
+			},
+		});
 	}
 
 	async checkpoint(): Promise<void> {
