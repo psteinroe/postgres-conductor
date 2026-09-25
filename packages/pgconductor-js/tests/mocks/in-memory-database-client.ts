@@ -80,7 +80,7 @@ interface StoredExecution {
 interface StoredStep {
 	execution_id: string;
 	step_key: string;
-	result: Payload;
+	result: Payload | null;
 	created_at: Date;
 }
 
@@ -558,7 +558,7 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 	async returnExecutions(
 		resultsOrGrouped: ExecutionResult[] | GroupedExecutionResults,
 		_opts?: { signal?: AbortSignal },
-	): Promise<void> {
+	): Promise<ReadonlySet<string>> {
 		// Handle both old array format (for testing) and new grouped format
 		const results: ExecutionResult[] = Array.isArray(resultsOrGrouped)
 			? resultsOrGrouped
@@ -570,19 +570,35 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 					// ...resultsOrGrouped.waitForCustomEvent,
 					// ...resultsOrGrouped.waitForDbEvent,
 				];
+		const deliveryTraceContexts = Array.isArray(resultsOrGrouped)
+			? {}
+			: resultsOrGrouped.deliveryTraceContexts || {};
 		const now = this.getInternalTime();
+		const acceptedDeliveries = new Set<string>();
 
-		for (const result of results) {
-			const exec = this.executions.get(result.execution_id);
+		for (const returnedResult of results) {
+			const exec = this.executions.get(returnedResult.execution_id);
 			if (
 				!exec ||
 				!this.ownsClaim({
-					executionId: result.execution_id,
-					queue: result.queue,
-					orchestratorId: result.orchestrator_id,
+					executionId: returnedResult.execution_id,
+					queue: returnedResult.queue,
+					orchestratorId: returnedResult.orchestrator_id,
 				})
 			)
 				continue;
+
+			const result: ExecutionResult =
+				exec.cancelled && returnedResult.status !== "failed"
+					? {
+							execution_id: returnedResult.execution_id,
+							queue: returnedResult.queue,
+							orchestrator_id: returnedResult.orchestrator_id,
+							task_key: returnedResult.task_key,
+							status: "failed",
+							error: exec.last_error || "Execution was cancelled",
+						}
+					: returnedResult;
 
 			switch (result.status) {
 				case "completed": {
@@ -595,6 +611,21 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 					if (exec.parent_execution_id && exec.subscription_id === null) {
 						const parent = this.executions.get(exec.parent_execution_id);
 						if (parent && parent.waiting_on_execution_id === exec.id) {
+							if (parent.waiting_step_key) {
+								let parentSteps = this.steps.get(parent.id);
+								if (!parentSteps) {
+									parentSteps = new Map();
+									this.steps.set(parent.id, parentSteps);
+								}
+								if (!parentSteps.has(parent.waiting_step_key)) {
+									parentSteps.set(parent.waiting_step_key, {
+										execution_id: parent.id,
+										step_key: parent.waiting_step_key,
+										result: result.result ?? null,
+										created_at: now,
+									});
+								}
+							}
 							parent.waiting_on_execution_id = null;
 							parent.waiting_step_key = null;
 							parent.waiting_timeout_at = null;
@@ -619,13 +650,22 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 					const task = this.tasks.get(this.taskId(exec.task_key, exec.queue));
 					const maxAttempts = task?.max_attempts || 3;
 
-					if (exec.attempts >= maxAttempts) {
+					if (exec.attempts >= maxAttempts || exec.cancelled) {
 						// Permanently failed
 						exec.state = "failed";
 						exec.failed_at = now;
 						this.deleteExecutionWaits(exec.id);
-						if (!exec.cancelled) {
-							this.deliverToDeadLetterQueue(exec, task, result.error, now);
+						if (
+							!exec.cancelled &&
+							this.deliverToDeadLetterQueue(
+								exec,
+								task,
+								result.error,
+								now,
+								deliveryTraceContexts[`dlq:${exec.id}`],
+							)
+						) {
+							acceptedDeliveries.add(`dlq:${exec.id}`);
 						}
 
 						// Fail a workflow parent only. Event delivery lineage is independent.
@@ -638,8 +678,17 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 								parent.waiting_step_key = null;
 								this.deleteExecutionWaits(parent.id);
 								const parentTask = this.tasks.get(this.taskId(parent.task_key, parent.queue));
-								if (!exec.cancelled) {
-									this.deliverToDeadLetterQueue(parent, parentTask, parent.last_error, now);
+								if (
+									!exec.cancelled &&
+									this.deliverToDeadLetterQueue(
+										parent,
+										parentTask,
+										parent.last_error,
+										now,
+										deliveryTraceContexts[`dlq:${parent.id}`],
+									)
+								) {
+									acceptedDeliveries.add(`dlq:${parent.id}`);
 								}
 								if (parentTask?.remove_on_fail_days === 0) {
 									this.executions.delete(parent.id);
@@ -682,58 +731,6 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 					break;
 				}
 
-				case "permanently_failed": {
-					exec.state = "failed";
-					exec.failed_at = now;
-					exec.last_error = result.error;
-					this.deleteExecutionWaits(exec.id);
-
-					const task = this.tasks.get(this.taskId(exec.task_key, exec.queue));
-					if (!exec.cancelled) {
-						this.deliverToDeadLetterQueue(
-							exec,
-							task,
-							result.error,
-							now,
-							result.dead_letter_trace_contexts?.[exec.id],
-						);
-					}
-					exec.orchestrator_id = null;
-
-					// Fail a workflow parent only. Event delivery lineage is independent.
-					if (exec.parent_execution_id && exec.subscription_id === null) {
-						const parent = this.executions.get(exec.parent_execution_id);
-						if (parent && parent.waiting_on_execution_id === exec.id) {
-							parent.state = "failed";
-							parent.last_error = `Child execution failed: ${result.error}`;
-							parent.waiting_on_execution_id = null;
-							parent.waiting_step_key = null;
-							parent.waiting_timeout_at = null;
-							this.deleteExecutionWaits(parent.id);
-							const parentTask = this.tasks.get(this.taskId(parent.task_key, parent.queue));
-							if (!exec.cancelled) {
-								this.deliverToDeadLetterQueue(
-									parent,
-									parentTask,
-									parent.last_error,
-									now,
-									result.dead_letter_trace_contexts?.[parent.id],
-								);
-							}
-							if (parentTask?.remove_on_fail_days === 0) {
-								this.executions.delete(parent.id);
-								this.steps.delete(parent.id);
-							}
-						}
-					}
-
-					if (task?.remove_on_fail_days === 0) {
-						this.executions.delete(exec.id);
-						this.steps.delete(exec.id);
-					}
-					break;
-				}
-
 				case "invoke_child": {
 					// Create child execution
 					const childId = await this.invoke({
@@ -741,10 +738,11 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 						queue: result.child_task_queue,
 						payload: result.child_payload || {},
 						group: result.group,
-						trace_context: result.trace_context,
+						trace_context: deliveryTraceContexts[`child:${result.execution_id}`],
 						parent_execution_id: exec.id,
 						parent_step_key: result.step_key,
 					});
+					acceptedDeliveries.add(`child:${result.execution_id}`);
 
 					// Set parent to wait
 					exec.state = "pending";
@@ -784,6 +782,7 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 
 			exec.updated_at = now;
 		}
+		return acceptedDeliveries;
 	}
 
 	async removeExecutions(
@@ -1005,20 +1004,47 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 
 	async cancelExecution(
 		executionId: string,
-		options: { reason?: string },
+		options: { reason?: string } = {},
 		_opts?: { signal?: AbortSignal },
 	): Promise<boolean> {
 		const exec = this.executions.get(executionId);
-		if (!exec) return false;
+		if (!exec || exec.state === "completed" || exec.state === "failed") return false;
 
-		exec.cancelled = true;
-		exec.last_error = options.reason || "Execution was cancelled";
-
+		const reason = options.reason || "Cancelled by user";
 		if (exec.state === "running") {
+			if (exec.cancelled) return false;
 			exec.cancelled = true;
+			exec.last_error = reason;
+			this.deleteExecutionWaits(executionId);
+			return true;
 		}
-		this.deleteExecutionWaits(executionId);
 
+		if (exec.waiting_on_execution_id) {
+			const child = this.executions.get(exec.waiting_on_execution_id);
+			if (child && child.state === "pending") {
+				child.state = "failed";
+				child.failed_at = this.getInternalTime();
+				child.last_error = "Cancelled: parent execution was cancelled";
+				child.orchestrator_id = null;
+				child.waiting_on_execution_id = null;
+				child.waiting_step_key = null;
+				child.waiting_timeout_at = null;
+				this.deleteExecutionWaits(child.id);
+			} else if (child && child.state === "running" && !child.cancelled) {
+				child.cancelled = true;
+				child.last_error = reason;
+				this.deleteExecutionWaits(child.id);
+			}
+		}
+
+		exec.state = "failed";
+		exec.failed_at = this.getInternalTime();
+		exec.last_error = reason;
+		exec.orchestrator_id = null;
+		exec.waiting_on_execution_id = null;
+		exec.waiting_step_key = null;
+		exec.waiting_timeout_at = null;
+		this.deleteExecutionWaits(executionId);
 		return true;
 	}
 
@@ -1370,8 +1396,8 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 		error: string,
 		now: Date,
 		traceContext?: Execution["trace_context"],
-	): void {
-		if (!task?.dead_letter_queue || exec.cancelled) return;
+	): boolean {
+		if (!task?.dead_letter_queue || exec.cancelled) return false;
 		const destinationTaskKey = task.dead_letter_task_key || exec.task_key;
 		const duplicate = Array.from(this.executions.values()).some(
 			(destination) =>
@@ -1379,7 +1405,7 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 				destination.queue === task.dead_letter_queue &&
 				destination.task_key === destinationTaskKey,
 		);
-		if (duplicate) return;
+		if (duplicate) return true;
 		const id = this.generateId();
 		this.executions.set(id, {
 			id,
@@ -1416,6 +1442,7 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 			dead_letter_failed_at: now,
 			trace_context: traceContext || null,
 		});
+		return true;
 	}
 
 	// Helpers

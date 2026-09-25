@@ -212,7 +212,7 @@ describe("execution foundations", () => {
 					queue: child.queue,
 					orchestrator_id: child.locked_by,
 					task_key: child.task_key,
-					status: "permanently_failed",
+					status: "failed",
 					error: "child failed",
 				},
 			],
@@ -304,7 +304,7 @@ describe("execution foundations", () => {
 					queue: child.queue,
 					orchestrator_id: child.locked_by,
 					task_key: child.task_key,
-					status: "permanently_failed",
+					status: "failed",
 					error: "child failed",
 				},
 			],
@@ -374,6 +374,91 @@ describe("execution foundations", () => {
 		expect(outcome[0]?.last_error).toBe("cancelled before flush");
 	});
 
+	test("cancellation overrides buffered release and child invocation results", async () => {
+		const db = await database();
+		await db.client.registerWorker({
+			queueName: "cancel-other-results",
+			taskSpecs: [
+				{ key: "cancelled", queue: "cancel-other-results", maxAttempts: 5 },
+				{ key: "child", queue: "cancel-other-results" },
+			],
+			cronSchedules: [],
+			eventSubscriptions: [],
+		});
+		const orchestratorId = crypto.randomUUID();
+		await db.client.orchestratorHeartbeat({ orchestratorId, version: "test", migrationNumber: 1 });
+		const releasedId = await db.client.invoke({
+			task_key: "cancelled",
+			queue: "cancel-other-results",
+		});
+		const invokeChildId = await db.client.invoke({
+			task_key: "cancelled",
+			queue: "cancel-other-results",
+		});
+		if (!releasedId || !invokeChildId) throw new Error("expected executions");
+		const claims = await db.client.getExecutions({
+			orchestratorId,
+			queueName: "cancel-other-results",
+			batchSize: 2,
+			filterTaskKeys: [],
+		});
+		const released = claims.find((claim) => claim.id === releasedId);
+		const invokeChild = claims.find((claim) => claim.id === invokeChildId);
+		if (!released || !invokeChild) throw new Error("expected claims");
+		await db.client.cancelExecution(releasedId);
+		await db.client.cancelExecution(invokeChildId);
+
+		const acceptedDeliveries = await db.client.returnExecutions({
+			count: 2,
+			orchestratorId,
+			completed: [],
+			failed: [],
+			released: [
+				{
+					execution_id: released.id,
+					queue: released.queue,
+					orchestrator_id: released.locked_by,
+					task_key: released.task_key,
+					status: "released",
+					reschedule_in_ms: 0,
+				},
+			],
+			invokeChild: [
+				{
+					execution_id: invokeChild.id,
+					queue: invokeChild.queue,
+					orchestrator_id: invokeChild.locked_by,
+					task_key: invokeChild.task_key,
+					status: "invoke_child",
+					timeout_ms: "infinity",
+					step_key: "child-step",
+					child_task_name: "child",
+					child_task_queue: "cancel-other-results",
+					child_payload: null,
+				},
+			],
+			taskKeys: new Set(["cancelled"]),
+		});
+
+		const outcomes = await db.sql<
+			{ id: string; failed_at: Date | null; locked_by: string | null }[]
+		>`
+			select id, failed_at, locked_by
+			from pgconductor._private_executions
+			where id in (${releasedId}::uuid, ${invokeChildId}::uuid)
+		`;
+		expect(outcomes).toHaveLength(2);
+		expect(outcomes.every((outcome) => outcome.failed_at !== null)).toBe(true);
+		expect(outcomes.every((outcome) => outcome.locked_by === null)).toBe(true);
+		const children = await db.sql<{ count: number }[]>`
+			select count(*)::int as count
+			from pgconductor._private_executions
+			where parent_execution_id = ${invokeChildId}::uuid
+		`;
+		expect(children[0]?.count).toBe(0);
+		expect(acceptedDeliveries.size).toBe(0);
+	});
+
 	test("cancelling a waiting parent permanently fails its pending child", async () => {
 		const db = await database();
 		await db.client.registerWorker({
@@ -399,7 +484,7 @@ describe("execution foundations", () => {
 			})
 		)[0];
 		if (!parent) throw new Error("expected parent claim");
-		await db.client.returnExecutions({
+		const acceptedDeliveries = await db.client.returnExecutions({
 			count: 1,
 			orchestratorId: parent.locked_by,
 			completed: [],
@@ -421,6 +506,7 @@ describe("execution foundations", () => {
 			],
 			taskKeys: new Set([parent.task_key]),
 		});
+		expect(acceptedDeliveries).toEqual(new Set([`child:${parent.id}`]));
 		const childId = (
 			await db.sql<{ id: string }[]>`
 			select id from pgconductor._private_executions where parent_execution_id = ${parentId}::uuid

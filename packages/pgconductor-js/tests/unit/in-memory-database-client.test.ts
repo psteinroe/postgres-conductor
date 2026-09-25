@@ -298,9 +298,10 @@ describe("InMemoryDatabaseClient", () => {
 
 			expect(db.getCronSchedules("cron-task").length).toBe(0);
 
-			// Pending execution should be cancelled
+			// PostgreSQL immediately terminalizes an unclaimed cancellation.
 			const exec = db.getExecution(id!);
-			expect(exec?.cancelled).toBe(true);
+			expect(exec?.state).toBe("failed");
+			expect(exec?.cancelled).toBe(false);
 		});
 
 		test("CRITICAL: unschedule prevents retry re-insertion", async () => {

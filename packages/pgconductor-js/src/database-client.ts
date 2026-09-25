@@ -21,7 +21,7 @@ import {
 	type RegisterEventWaitArgs,
 } from "./query-builder";
 import { makeChildLogger, type Logger } from "./lib/logger";
-import type { PersistedTraceContext, TraceContextCarrier } from "./telemetry";
+import type { PersistedTraceContext } from "./telemetry";
 
 export type JsonValue = string | number | boolean | null | Payload | JsonValue[];
 export type Payload = { [key: string]: JsonValue };
@@ -100,17 +100,17 @@ export type ExecutionResult =
 	| ExecutionCompleted
 	| ExecutionFailed
 	| ExecutionReleased
-	| ExecutionPermamentlyFailed
 	| ExecutionInvokeChild;
 
 export type GroupedExecutionResults = {
 	count: number;
 	orchestratorId: string;
 	completed: ExecutionCompleted[];
-	failed: (ExecutionFailed | ExecutionPermamentlyFailed)[];
+	failed: ExecutionFailed[];
 	released: ExecutionReleased[];
 	invokeChild: ExecutionInvokeChild[];
 	taskKeys: Set<string>;
+	deliveryTraceContexts?: Record<string, PersistedTraceContext>;
 };
 
 export interface ExecutionCompleted {
@@ -121,12 +121,6 @@ export interface ExecutionCompleted {
 	status: "completed";
 	result?: Payload;
 }
-
-export type PendingDeadLetterDelivery = {
-	sourceExecutionId: string;
-	queue: string;
-	taskKey: string;
-};
 
 export interface ExecutionFailed {
 	execution_id: string;
@@ -147,21 +141,7 @@ export interface ExecutionReleased {
 	step_key?: string;
 }
 
-export interface ExecutionPermamentlyFailed {
-	producerParent?: TraceContextCarrier | null;
-	deadLetterDeliveries?: PendingDeadLetterDelivery[];
-	dead_letter_trace_contexts?: Record<string, PersistedTraceContext>;
-	execution_id: string;
-	queue: string;
-	orchestrator_id: string;
-	task_key: string;
-	status: "permanently_failed";
-	error: string;
-}
-
 export interface ExecutionInvokeChild {
-	producerParent?: TraceContextCarrier | null;
-	trace_context?: PersistedTraceContext | null;
 	group?: string | null;
 	execution_id: string;
 	queue: string;
@@ -520,10 +500,11 @@ export class DatabaseClient {
 	async returnExecutions(
 		grouped: GroupedExecutionResults,
 		opts?: QueryMethodOptions,
-	): Promise<void> {
+	): Promise<ReadonlySet<string>> {
 		const query = this.builder.buildReturnExecutions(grouped);
-		if (!query) return;
-		await this.query(() => query, { label: "returnExecutions", ...opts });
+		if (!query) return new Set();
+		const rows = await this.query(() => query, { label: "returnExecutions", ...opts });
+		return new Set(rows.map((row: { delivery_key: string }) => row.delivery_key));
 	}
 
 	async removeExecutions(args: RemoveExecutionsArgs, opts?: QueryMethodOptions): Promise<boolean> {

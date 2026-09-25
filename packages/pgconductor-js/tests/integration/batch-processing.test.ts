@@ -6,6 +6,7 @@ import { defineTask } from "../../src/task-definition";
 import { TestDatabasePool } from "../fixtures/test-database";
 import type { TestDatabase } from "../fixtures/test-database";
 import { TaskSchemas } from "../../src/schemas";
+import { waitForCondition } from "../test-utils";
 
 describe("Batch Processing", () => {
 	let pool: TestDatabasePool;
@@ -320,6 +321,112 @@ describe("Batch Processing", () => {
 		expect(batchedProcessed[0]?.sort()).toEqual([2, 3]);
 	}, 30000);
 
+	test("settles a cancellation without blocking an active batch execution", async () => {
+		const db = await pool.child();
+		databases.push(db);
+		const definition = defineTask({
+			name: "batch-partial-cancellation",
+			payload: z.object({ value: z.number() }),
+		});
+		const conductor = Conductor.create({
+			sql: db.sql,
+			tasks: TaskSchemas.fromSchema([definition]),
+			context: {},
+		});
+		const processed: number[] = [];
+		const task = conductor.createTask(
+			{ name: definition.name, batch: { size: 2, timeoutMs: 10 } },
+			{ invocable: true },
+			async (events) => {
+				processed.push(...events.map((event) => event.payload.value));
+			},
+		);
+		const orchestrator = Orchestrator.create({
+			conductor,
+			tasks: [task],
+			defaultWorker: { pollIntervalMs: 10, flushIntervalMs: 10 },
+		});
+		await conductor.ensureInstalled();
+		const cancelledId = await conductor.invoke({ name: definition.name }, { value: 1 });
+		const activeId = await conductor.invoke({ name: definition.name }, { value: 2 });
+		if (!cancelledId || !activeId) throw new Error("expected execution ids");
+		await db.client.cancelExecution(cancelledId);
+
+		await orchestrator.drain();
+
+		const rows = await db.sql<
+			{ id: string; completed_at: Date | null; failed_at: Date | null; locked_by: string | null }[]
+		>`
+			select id, completed_at, failed_at, locked_by
+			from pgconductor._private_executions
+			where id in (${cancelledId}::uuid, ${activeId}::uuid)
+		`;
+		const cancelled = rows.find((row) => row.id === cancelledId);
+		const active = rows.find((row) => row.id === activeId);
+		expect(processed).toEqual([2]);
+		expect(cancelled?.failed_at).not.toBeNull();
+		expect(cancelled?.locked_by).toBeNull();
+		expect(active?.completed_at).not.toBeNull();
+		expect(active?.locked_by).toBeNull();
+	}, 30000);
+
+	test("shutdown releases a queued partial batch without invoking its handler", async () => {
+		const db = await pool.child();
+		databases.push(db);
+		const definition = defineTask({
+			name: "batch-shutdown",
+			payload: z.object({ value: z.number() }),
+		});
+		const conductor = Conductor.create({
+			sql: db.sql,
+			tasks: TaskSchemas.fromSchema([definition]),
+			context: {},
+		});
+		let executed = false;
+		const task = conductor.createTask(
+			{ name: definition.name, batch: { size: 10, timeoutMs: 10000 } },
+			{ invocable: true },
+			async () => {
+				executed = true;
+			},
+		);
+		const orchestrator = Orchestrator.create({
+			conductor,
+			tasks: [task],
+			defaultWorker: { pollIntervalMs: 10, flushIntervalMs: 10 },
+		});
+		await orchestrator.start();
+		const executionId = await conductor.invoke({ name: definition.name }, { value: 1 });
+		if (!executionId) throw new Error("expected execution id");
+		await waitForCondition(async () => {
+			const rows = await db.sql<{ locked_by: string | null }[]>`
+				select locked_by from pgconductor._private_executions where id = ${executionId}::uuid
+			`;
+			return rows[0]?.locked_by !== null;
+		});
+
+		await orchestrator.stop();
+
+		const rows = await db.sql<
+			{
+				completed_at: Date | null;
+				failed_at: Date | null;
+				locked_by: string | null;
+				attempts: number;
+			}[]
+		>`
+			select completed_at, failed_at, locked_by, attempts
+			from pgconductor._private_executions where id = ${executionId}::uuid
+		`;
+		expect(executed).toBe(false);
+		expect(rows[0]).toEqual({
+			completed_at: null,
+			failed_at: null,
+			locked_by: null,
+			attempts: 0,
+		});
+	}, 30000);
+
 	test("single item doesn't wait for batch size", async () => {
 		const db = await pool.child();
 		databases.push(db);
@@ -340,7 +447,7 @@ describe("Batch Processing", () => {
 		const batchTask = conductor.createTask(
 			{
 				name: "batch-single",
-				batch: { size: 10, timeoutMs: 10000 }, // Large batch size and timeout
+				batch: { size: 10, timeoutMs: 100 },
 			},
 			{ invocable: true },
 			async (events, ctx) => {
@@ -361,8 +468,8 @@ describe("Batch Processing", () => {
 		// Invoke just one task
 		await conductor.invoke({ name: "batch-single" }, { value: 1 });
 
-		// Wait longer to ensure worker has fetched the execution
-		await new Promise((r) => setTimeout(r, 500));
+		// A partial batch runs when its timeout elapses.
+		await waitForCondition(async () => executed);
 
 		await orchestrator.stop();
 

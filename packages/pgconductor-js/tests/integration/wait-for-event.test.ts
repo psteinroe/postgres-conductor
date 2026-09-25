@@ -448,8 +448,12 @@ describe.serial("waitForEvent", () => {
 		const database = await db();
 		const { conductor, orchestrator } = await setup(database, async () => {}, orchestrators);
 		await orchestrator.stop();
+		await database.sql`
+			update pgconductor._private_tasks set max_attempts = 1
+			where queue = 'default' and key = 'wait.task'
+		`;
 
-		for (const status of ["completed", "permanently_failed"] as const) {
+		for (const status of ["completed", "failed"] as const) {
 			const executionId = await conductor.invoke({ name: "wait.task" }, { id: status });
 			if (!executionId) throw new Error("invoke did not return an execution id");
 
@@ -485,7 +489,7 @@ describe.serial("waitForEvent", () => {
 				count: 1,
 				orchestratorId,
 				completed: status === "completed" ? [{ ...result, status }] : [],
-				failed: status === "permanently_failed" ? [{ ...result, status, error: "failed" }] : [],
+				failed: status === "failed" ? [{ ...result, status, error: "failed" }] : [],
 				released: [],
 				invokeChild: [],
 				taskKeys: new Set(["wait.task"]),

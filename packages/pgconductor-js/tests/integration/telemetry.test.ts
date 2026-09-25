@@ -307,10 +307,12 @@ describe.serial("OpenTelemetry instrumentation", () => {
 		(db as any).returnExecutions = async () => {
 			throw new Error("database unavailable");
 		};
-		await makeWorker(
-			db,
-			makeTask("settle-error", async () => undefined),
-		).drain("worker");
+		await expect(
+			makeWorker(
+				db,
+				makeTask("settle-error", async () => undefined),
+			).drain("worker"),
+		).rejects.toThrow("database unavailable");
 		const settle = spans(exporter, "settle default")[0]!;
 		expect(settle.status.code).toBe(SpanStatusCode.ERROR);
 		expect(settle.attributes["error.type"]).toBe("Error");

@@ -55,22 +55,26 @@ type ProcessTraceOptions<T> = {
 	run: (span: TelemetrySpan) => Promise<T> | T;
 };
 
-type SettleTraceOptions<T> = {
-	queue: string;
-	batchMessageCount: number;
-	run: () => Promise<T> | T;
-};
-
-type DurableMessage = {
+export type DurableMessage = {
 	key: string;
 	queue: string;
 	taskKey: string;
 	parent?: TraceContextCarrier | null;
 };
 
+type SettleTraceOptions = {
+	queue: string;
+	batchMessageCount: number;
+	deliveries: readonly DurableMessage[];
+	run: (
+		traceStates: ReadonlyMap<string, PersistedTraceContext | null>,
+	) => Promise<ReadonlySet<string>> | ReadonlySet<string>;
+};
+
 type ProduceOptions<T> = {
 	messages: readonly DurableMessage[];
 	run: (traceStates: ReadonlyMap<string, PersistedTraceContext | null>) => Promise<T> | T;
+	isAccepted?: (result: T, message: DurableMessage) => boolean;
 };
 
 export class TelemetrySpan {
@@ -104,6 +108,13 @@ export class TelemetrySpan {
 		this.span.recordException(exception);
 		this.span.setAttribute("error.type", errorType);
 		this.span.setStatus({ code: SpanStatusCode.ERROR });
+	}
+
+	markDeliveryNotPersisted(): void {
+		this.span?.setStatus({
+			code: SpanStatusCode.ERROR,
+			message: "Delivery was not persisted",
+		});
 	}
 }
 
@@ -231,25 +242,37 @@ export class Telemetry {
 		});
 	}
 
-	settle<T>({ queue, batchMessageCount, run }: SettleTraceOptions<T>): Promise<T> {
-		return this.message({
-			name: `settle ${queue}`,
-			kind: SpanKind.CLIENT,
-			queue,
-			operation: "settle",
-			batchMessageCount,
-			parent: ROOT_CONTEXT,
-			run: () => run(),
+	settle({
+		queue,
+		batchMessageCount,
+		deliveries,
+		run,
+	}: SettleTraceOptions): Promise<ReadonlySet<string>> {
+		return this.produce({
+			messages: deliveries,
+			isAccepted: (accepted, message) => accepted.has(message.key),
+			run: (traceStates) =>
+				this.message({
+					name: `settle ${queue}`,
+					kind: SpanKind.CLIENT,
+					queue,
+					operation: "settle",
+					batchMessageCount,
+					parent: ROOT_CONTEXT,
+					run: () => run(traceStates),
+				}),
 		});
 	}
 
-	async produce<T>({ messages, run }: ProduceOptions<T>): Promise<T> {
-		const uniqueMessages = new Map(messages.map((message) => [message.key, message])).values();
+	async produce<T>({ messages, run, isAccepted }: ProduceOptions<T>): Promise<T> {
+		const uniqueMessages = Array.from(
+			new Map(messages.map((message) => [message.key, message])).values(),
+		);
 		if (!this.enabled) {
-			return run(new Map(Array.from(uniqueMessages, ({ key }) => [key, null])));
+			return run(new Map(uniqueMessages.map(({ key }) => [key, null])));
 		}
 
-		const pending = Array.from(uniqueMessages, (message) => {
+		const pending = uniqueMessages.map((message) => {
 			const parent = this.extractTraceContext(message.parent);
 			const span = trace.getTracer(INSTRUMENTATION_NAME).startSpan(
 				`send ${message.queue}`,
@@ -275,7 +298,13 @@ export class Telemetry {
 		);
 
 		try {
-			return await run(traceStateByMessageKey);
+			const result = await run(traceStateByMessageKey);
+			if (isAccepted) {
+				for (const { message, telemetrySpan } of pending) {
+					if (!isAccepted(result, message)) telemetrySpan.markDeliveryNotPersisted();
+				}
+			}
+			return result;
 		} catch (error) {
 			for (const { telemetrySpan } of pending) telemetrySpan.recordError(error);
 			throw error;

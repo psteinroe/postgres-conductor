@@ -4,12 +4,11 @@ import type {
 	Execution,
 	ExecutionResult,
 	ExecutionSpec,
+	GroupedExecutionResults,
 	ExecutionCompleted,
 	ExecutionFailed,
-	ExecutionPermamentlyFailed,
 	ExecutionReleased,
 	ExecutionInvokeChild,
-	PendingDeadLetterDelivery,
 } from "./database-client";
 import type { AnyTask, BatchConfig } from "./task";
 import type { TaskDefinition } from "./task-definition";
@@ -33,7 +32,12 @@ import { makeChildLogger, type Logger } from "./lib/logger";
 import type { EventDefinition } from "./event-definition";
 import { coerceError } from "./lib/coerce-error";
 import type { TypedAbortController } from "./lib/typed-abort-controller";
-import { Telemetry, type TraceContextCarrier } from "./telemetry";
+import {
+	Telemetry,
+	type DurableMessage,
+	type PersistedTraceContext,
+	type TraceContextCarrier,
+} from "./telemetry";
 
 /**
  * The configuration options for the Worker.
@@ -60,18 +64,35 @@ export const DEFAULT_WORKER_CONFIG: WorkerConfig = {
 /**
  * Encapsulates buffered execution results with internal counting and task key tracking.
  */
+type DeliveryPlan = DurableMessage;
+
+type ExecutionOutcome = {
+	result: ExecutionResult;
+	deliveries: DeliveryPlan[];
+};
+
+function executionOutcome(
+	result: ExecutionResult,
+	deliveries: DeliveryPlan[] = [],
+): ExecutionOutcome {
+	return { result, deliveries };
+}
+
 class BufferState {
 	orchestratorId = "";
 	completed: ExecutionCompleted[] = [];
-	failed: (ExecutionFailed | ExecutionPermamentlyFailed)[] = [];
+	failed: ExecutionFailed[] = [];
 	released: ExecutionReleased[] = [];
 	invokeChild: ExecutionInvokeChild[] = [];
+	deliveries: DeliveryPlan[] = [];
 	taskKeys = new Set<string>();
 	count = 0;
 
-	add(result: ExecutionResult): void {
+	add(outcome: ExecutionOutcome): void {
+		const { result } = outcome;
 		this.orchestratorId = result.orchestrator_id || this.orchestratorId;
 		this.taskKeys.add(result.task_key);
+		this.deliveries.push(...outcome.deliveries);
 		this.count++;
 
 		switch (result.status) {
@@ -79,7 +100,6 @@ class BufferState {
 				this.completed.push(result);
 				break;
 			case "failed":
-			case "permanently_failed":
 				this.failed.push(result);
 				break;
 			case "released":
@@ -91,52 +111,62 @@ class BufferState {
 		}
 	}
 
-	clear(): void {
-		this.completed = [];
-		this.failed = [];
-		this.released = [];
-		this.invokeChild = [];
-		this.taskKeys.clear();
-		this.count = 0;
-	}
-
 	restore(other: BufferState): void {
 		this.completed.push(...other.completed);
 		this.failed.push(...other.failed);
 		this.released.push(...other.released);
 		this.invokeChild.push(...other.invokeChild);
+		this.deliveries.push(...other.deliveries);
 		this.orchestratorId = this.orchestratorId || other.orchestratorId;
 		this.count += other.count;
 		for (const key of other.taskKeys) {
 			this.taskKeys.add(key);
 		}
 	}
+
+	toGroupedResults(
+		traceStates: ReadonlyMap<string, PersistedTraceContext | null>,
+	): GroupedExecutionResults {
+		const deliveryTraceContexts: Record<string, PersistedTraceContext> = {};
+		for (const [key, traceState] of traceStates) {
+			if (traceState) deliveryTraceContexts[key] = traceState;
+		}
+		return {
+			count: this.count,
+			orchestratorId: this.orchestratorId,
+			completed: this.completed,
+			failed: this.failed,
+			released: this.released,
+			invokeChild: this.invokeChild,
+			taskKeys: this.taskKeys,
+			deliveryTraceContexts,
+		};
+	}
 }
 
-function planDeadLetterDeliveries(
-	task: AnyTask,
-	execution: Execution,
-): PendingDeadLetterDelivery[] {
-	const deliveries: PendingDeadLetterDelivery[] = [];
-	if (task.deadLetter?.queue) {
-		deliveries.push({
-			sourceExecutionId: execution.id,
-			queue: task.deadLetter.queue,
-			taskKey: task.deadLetter.task?.name || execution.task_key,
+function taskAbortPromise(
+	controller: TypedAbortController<TaskAbortReasons>,
+): Promise<TaskAbortReasons> {
+	if (controller.signal.aborted) return Promise.resolve(controller.signal.reason);
+	return new Promise((resolve) => {
+		controller.signal.addEventListener("abort", () => resolve(controller.signal.reason), {
+			once: true,
 		});
-	}
-	if (execution.parent_execution_id && execution.parent_dead_letter_queue) {
-		deliveries.push({
-			sourceExecutionId: execution.parent_execution_id,
-			queue: execution.parent_dead_letter_queue,
-			taskKey:
-				execution.parent_dead_letter_task_key || execution.parent_task_key || execution.task_key,
-		});
-	}
-	return deliveries;
+	});
 }
 
-function failedExecutionResult({
+function cancellationOutcome(execution: Execution, taskKey = execution.task_key): ExecutionOutcome {
+	return executionOutcome({
+		execution_id: execution.id,
+		orchestrator_id: execution.locked_by,
+		queue: execution.queue,
+		task_key: taskKey,
+		status: "failed",
+		error: execution.last_error || "Execution was cancelled",
+	});
+}
+
+function failureOutcome({
 	task,
 	execution,
 	error,
@@ -146,23 +176,38 @@ function failedExecutionResult({
 	execution: Execution;
 	error: string;
 	producerParent: TraceContextCarrier | null;
-}): ExecutionFailed | ExecutionPermamentlyFailed {
-	const result = {
+}): ExecutionOutcome {
+	const result: ExecutionFailed = {
 		execution_id: execution.id,
 		orchestrator_id: execution.locked_by,
 		queue: execution.queue,
 		task_key: execution.task_key,
+		status: "failed",
 		error,
 	};
-	if (execution.attempts < (task.maxAttempts || 3)) {
-		return { ...result, status: "failed" };
+	if (execution.cancelled || execution.attempts < (task.maxAttempts || 3)) {
+		return executionOutcome(result);
 	}
-	return {
-		...result,
-		status: "permanently_failed",
-		producerParent,
-		deadLetterDeliveries: planDeadLetterDeliveries(task, execution),
-	};
+
+	const deliveries: DeliveryPlan[] = [];
+	if (task.deadLetter?.queue) {
+		deliveries.push({
+			key: `dlq:${execution.id}`,
+			queue: task.deadLetter.queue,
+			taskKey: task.deadLetter.task?.name || execution.task_key,
+			parent: producerParent,
+		});
+	}
+	if (execution.parent_execution_id && execution.parent_dead_letter_queue) {
+		deliveries.push({
+			key: `dlq:${execution.parent_execution_id}`,
+			queue: execution.parent_dead_letter_queue,
+			taskKey:
+				execution.parent_dead_letter_task_key || execution.parent_task_key || execution.task_key,
+			parent: producerParent,
+		});
+	}
+	return executionOutcome(result, deliveries);
 }
 
 function taskEventFor(execution: Execution): { name: string; payload?: unknown } {
@@ -306,6 +351,7 @@ export class Worker<
 		this.orchestratorId = orchestratorId;
 		this._startDeferred = new Deferred<void>();
 		this._stopDeferred = new Deferred<void>();
+		this._stopDeferred.promise.catch(() => {});
 		this._abortController = new AbortController();
 
 		// Startup failures reject both lifecycle promises; callers must never
@@ -349,6 +395,9 @@ export class Worker<
 				await this.flushResults(this.executeTasks(queue));
 			} catch (error) {
 				this.logger.error("Worker pipeline error:", error);
+				if (this._stopDeferred && !this._stopDeferred.isSettled) {
+					this._stopDeferred.reject(error);
+				}
 			} finally {
 				queue.close();
 				if (this._stopDeferred && !this._stopDeferred.isSettled) this._stopDeferred.resolve();
@@ -381,9 +430,7 @@ export class Worker<
 
 		currentAbortController.abort();
 
-		try {
-			await currentStopDeferred.promise;
-		} catch {}
+		await currentStopDeferred.promise;
 	}
 
 	/**
@@ -566,37 +613,31 @@ export class Worker<
 	// --- Stage 2: Execute tasks concurrently ---
 	private async *executeTasks(
 		source: PollableAsyncIterable<BatchGroup<Execution>>,
-	): AsyncGenerator<ExecutionResult> {
+	): AsyncGenerator<ExecutionOutcome> {
 		for await (const result of mapConcurrent(
 			source,
 			this.concurrency,
-			async ({ taskKey, items: executions }): Promise<ExecutionResult | ExecutionResult[]> => {
+			async ({ taskKey, items: executions }): Promise<ExecutionOutcome | ExecutionOutcome[]> => {
 				// Dispatch to correct task based on task_key
 				const task = this.tasks.get(taskKey);
 				if (!task) {
-					return executions.map((exec) => ({
-						queue: exec.queue,
-						execution_id: exec.id,
-						orchestrator_id: exec.locked_by,
-						task_key: taskKey,
-						status: "failed",
-						error: `Task not found: ${taskKey}`,
-					})) as ExecutionResult[];
+					return executions.map((exec) =>
+						executionOutcome({
+							queue: exec.queue,
+							execution_id: exec.id,
+							orchestrator_id: exec.locked_by,
+							task_key: taskKey,
+							status: "failed",
+							error: `Task not found: ${taskKey}`,
+						}),
+					);
 				}
 
 				// Safety check: don't execute already-cancelled tasks
-				const cancelledExecs = executions.filter((e) => e.cancelled);
-				if (cancelledExecs.length === executions.length) {
-					// All cancelled - return failures for all
-					return executions.map((exec) => ({
-						execution_id: exec.id,
-						orchestrator_id: exec.locked_by,
-						queue: exec.queue,
-						task_key: taskKey,
-						status: "permanently_failed",
-						error: exec.last_error || "Execution was cancelled",
-					})) as ExecutionResult[];
-				}
+				const cancelledOutcomes = executions
+					.filter((execution) => execution.cancelled)
+					.map((execution) => cancellationOutcome(execution, taskKey));
+				if (cancelledOutcomes.length === executions.length) return cancelledOutcomes;
 
 				// Note: We intentionally do NOT check this.signal.aborted here.
 				// When shutdown occurs, fetchExecutions closes the queue which flushes
@@ -615,13 +656,15 @@ export class Worker<
 
 				// If task has batch config, always use batch execution (even for single items)
 				if (task.batch) {
-					return this.executeBatchTask(task, taskKey, activeExecs);
+					const activeOutcomes = await this.executeBatchTask(task, taskKey, activeExecs);
+					return [...cancelledOutcomes, ...activeOutcomes];
 				}
 
 				// Execute single (non-batched tasks)
 				const singleExec = activeExecs[0];
 				assert.ok(singleExec, "activeExecs must have at least one item");
-				return this.executeSingleTask(task, singleExec);
+				const activeOutcome = await this.executeSingleTask(task, singleExec);
+				return cancelledOutcomes.length > 0 ? [...cancelledOutcomes, activeOutcome] : activeOutcome;
 			},
 		)) {
 			// Yield results (may be single or array)
@@ -639,15 +682,11 @@ export class Worker<
 	 * @param task - The task to execute
 	 * @param exec - The execution details
 	 */
-	private async executeSingleTask(task: AnyTask, exec: Execution): Promise<ExecutionResult> {
+	private async executeSingleTask(task: AnyTask, exec: Execution): Promise<ExecutionOutcome> {
 		const taskAbortController = createTaskSignal(this.signal);
 		this._runningTasks.set(exec.id, taskAbortController);
 
-		const abortPromise = new Promise<TaskAbortReasons>((resolve) => {
-			taskAbortController.signal.addEventListener("abort", () => {
-				resolve(taskAbortController.signal.reason);
-			});
-		});
+		const abortPromise = taskAbortPromise(taskAbortController);
 		const taskEvent = taskEventFor(exec);
 
 		// Pass db and tasks as extra context to maintenance task
@@ -659,69 +698,82 @@ export class Worker<
 		let processTraceContext: TraceContextCarrier | null = null;
 		return this.scheduleNextExecution(exec)
 			.then(async () => {
-				const output = await this.telemetry.process({
-					taskKey: exec.task_key,
-					queue: exec.queue,
-					messageId: exec.id,
-					traceStates: [exec.trace_context],
-					run: (span) => {
-						processTraceContext = span.traceContext();
-						return Promise.race([
-							task.execute(
-								taskEvent,
-								TaskContext.create<Tasks, Events, typeof extraContext>(
-									{
-										db: this.db,
-										clock: this.clock,
-										abortController: taskAbortController,
-										execution: exec,
-										logger: makeChildLogger(this.logger, {
-											execution_id: exec.id,
-											orchestrator_id: exec.locked_by,
-											task_key: exec.task_key,
-											queue: exec.queue,
-										}),
-										eventDefinitions: task.eventDefinitions,
-										window: task.window,
-										telemetry: this.telemetry,
-									},
-									extraContext,
-								),
-							),
-							abortPromise,
-						]);
-					},
-				});
+				const output = taskAbortController.signal.aborted
+					? taskAbortController.signal.reason
+					: await this.telemetry.process({
+							taskKey: exec.task_key,
+							queue: exec.queue,
+							messageId: exec.id,
+							traceStates: [exec.trace_context],
+							run: (span) => {
+								processTraceContext = span.traceContext();
+								return Promise.race([
+									task.execute(
+										taskEvent,
+										TaskContext.create<Tasks, Events, typeof extraContext>(
+											{
+												db: this.db,
+												clock: this.clock,
+												abortController: taskAbortController,
+												execution: exec,
+												logger: makeChildLogger(this.logger, {
+													execution_id: exec.id,
+													orchestrator_id: exec.locked_by,
+													task_key: exec.task_key,
+													queue: exec.queue,
+												}),
+												eventDefinitions: task.eventDefinitions,
+												window: task.window,
+												telemetry: this.telemetry,
+											},
+											extraContext,
+										),
+									),
+									abortPromise,
+								]);
+							},
+						});
 
 				if (isTaskAbortReason(output)) {
 					switch (output.reason) {
-						case "child-invocation":
-							return {
-								execution_id: exec.id,
-								orchestrator_id: exec.locked_by,
-								queue: exec.queue,
-								task_key: exec.task_key,
-								status: "invoke_child",
-								timeout_ms: output.timeout_ms,
-								step_key: output.step_key,
-								child_task_name: output.task.name,
-								child_task_queue: output.task.queue || "default",
-								child_payload: output.payload,
-								group: output.group,
-								producerParent: output.producerParent,
-							} as const;
+						case "child-invocation": {
+							const childQueue = output.task.queue || "default";
+							return executionOutcome(
+								{
+									execution_id: exec.id,
+									orchestrator_id: exec.locked_by,
+									queue: exec.queue,
+									task_key: exec.task_key,
+									status: "invoke_child",
+									timeout_ms: output.timeout_ms,
+									step_key: output.step_key,
+									child_task_name: output.task.name,
+									child_task_queue: childQueue,
+									child_payload: output.payload,
+									group: output.group,
+								},
+								[
+									{
+										key: `child:${exec.id}`,
+										queue: childQueue,
+										taskKey: output.task.name,
+										parent: output.producerParent,
+									},
+								],
+							);
+						}
 						case "cancelled":
-							return {
+							return executionOutcome({
 								execution_id: exec.id,
 								orchestrator_id: exec.locked_by,
 								queue: exec.queue,
 								task_key: exec.task_key,
-								status: "permanently_failed",
+								status: "failed",
 								error: exec.last_error || "Task was cancelled",
-							} as const;
+							});
 						case "released":
 						case "parent-aborted":
-							return {
+							return executionOutcome({
 								execution_id: exec.id,
 								orchestrator_id: exec.locked_by,
 								queue: exec.queue,
@@ -730,28 +782,29 @@ export class Worker<
 								step_key: output.reason === "released" ? output.step_key : undefined,
 								task_key: exec.task_key,
 								status: "released",
-							} as const;
+							});
 						default:
 							assert.never(output);
 					}
 				}
 
-				return {
+				return executionOutcome({
 					execution_id: exec.id,
 					orchestrator_id: exec.locked_by,
 					queue: exec.queue,
 					task_key: exec.task_key,
 					status: "completed",
 					result: output,
-				} as const;
+				});
 			})
-			.catch((err): ExecutionFailed | ExecutionPermamentlyFailed =>
-				failedExecutionResult({
-					task,
-					execution: exec,
-					error: coerceError(err).message,
-					producerParent: processTraceContext,
-				}),
+			.catch(
+				(err): ExecutionOutcome =>
+					failureOutcome({
+						task,
+						execution: exec,
+						error: coerceError(err).message,
+						producerParent: processTraceContext,
+					}),
 			)
 			.finally(() => this._runningTasks.delete(exec.id));
 	}
@@ -767,7 +820,7 @@ export class Worker<
 		task: AnyTask,
 		taskKey: string,
 		executions: Execution[],
-	): Promise<ExecutionResult[]> {
+	): Promise<ExecutionOutcome[]> {
 		const events = executions.map((exec) => {
 			return {
 				...taskEventFor(exec),
@@ -781,6 +834,9 @@ export class Worker<
 		});
 
 		const taskAbortController = createTaskSignal(this.signal);
+		for (const execution of executions) {
+			this._runningTasks.set(execution.id, taskAbortController);
+		}
 
 		// Create batch context
 		const batchContext = new BatchTaskContext(
@@ -792,17 +848,14 @@ export class Worker<
 			}),
 		);
 
-		const abortPromise = new Promise<TaskAbortReasons>((resolve) => {
-			taskAbortController.signal.addEventListener("abort", () => {
-				resolve(taskAbortController.signal.reason);
-			});
-		});
+		const abortPromise = taskAbortPromise(taskAbortController);
 
 		let processTraceContext: TraceContextCarrier | null = null;
 		// Schedule recurring executions before passing the batch to the application handler.
 		return Promise.all(executions.map((exec) => this.scheduleNextExecution(exec)))
-			.then(() =>
-				this.telemetry.process({
+			.then(() => {
+				if (taskAbortController.signal.aborted) return taskAbortController.signal.reason;
+				return this.telemetry.process({
 					taskKey,
 					queue: this.queueName,
 					batchMessageCount: executions.length,
@@ -822,68 +875,90 @@ export class Worker<
 						}
 						return result;
 					},
-				}),
-			)
+				});
+			})
 			.then((result) => {
 				// Handle abort reasons
 				if (isTaskAbortReason(result)) {
-					if (result.reason === "released") {
-						// Batch sleep - reschedule all
-						return executions.map((exec) => ({
-							execution_id: exec.id,
-							orchestrator_id: exec.locked_by,
-							queue: exec.queue,
-							task_key: taskKey,
-							status: "released" as const,
-							reschedule_in_ms: result.reschedule_in_ms,
-							step_key: result.step_key,
-						}));
+					if (result.reason === "released" || result.reason === "parent-aborted") {
+						// Batch sleep and worker shutdown both release the claimed executions.
+						return executions.map((exec) =>
+							executionOutcome({
+								execution_id: exec.id,
+								orchestrator_id: exec.locked_by,
+								queue: exec.queue,
+								task_key: taskKey,
+								status: "released",
+								reschedule_in_ms:
+									result.reason === "released" ? result.reschedule_in_ms : undefined,
+								step_key: result.reason === "released" ? result.step_key : undefined,
+							}),
+						);
 					}
 
-					// Other abort reasons
-					return executions.map((exec) => ({
-						execution_id: exec.id,
-						orchestrator_id: exec.locked_by,
-						queue: exec.queue,
-						task_key: taskKey,
-						status: "failed" as const,
-						error: `Task aborted: ${result.reason}`,
-					}));
+					const error = `Task aborted: ${result.reason}`;
+					if (result.reason === "cancelled") {
+						return executions.map((exec) =>
+							executionOutcome({
+								execution_id: exec.id,
+								orchestrator_id: exec.locked_by,
+								queue: exec.queue,
+								task_key: taskKey,
+								status: "failed",
+								error,
+							}),
+						);
+					}
+					return executions.map((execution) =>
+						failureOutcome({
+							task,
+							execution,
+							error,
+							producerParent: processTraceContext,
+						}),
+					);
 				}
 
 				// Void tasks: all succeed
 				if (result === undefined) {
-					return executions.map((exec) => ({
+					return executions.map((exec) =>
+						executionOutcome({
+							execution_id: exec.id,
+							orchestrator_id: exec.locked_by,
+							queue: exec.queue,
+							task_key: taskKey,
+							status: "completed",
+							result: undefined,
+						}),
+					);
+				}
+
+				// Individual results
+				return executions.map((exec, i) =>
+					executionOutcome({
 						execution_id: exec.id,
 						orchestrator_id: exec.locked_by,
 						queue: exec.queue,
 						task_key: taskKey,
-						status: "completed" as const,
-						result: undefined,
-					}));
-				}
-
-				// Individual results
-				return executions.map((exec, i) => ({
-					execution_id: exec.id,
-					orchestrator_id: exec.locked_by,
-					queue: exec.queue,
-					task_key: taskKey,
-					status: "completed" as const,
-					result: result[i],
-				}));
+						status: "completed",
+						result: result[i],
+					}),
+				);
 			})
 			.catch((err) => {
 				// Handler threw: all fail together
 				const error = coerceError(err).message;
 				return executions.map((execution) =>
-					failedExecutionResult({
+					failureOutcome({
 						task,
 						execution,
 						error,
 						producerParent: processTraceContext,
 					}),
 				);
+			})
+			.finally(() => {
+				for (const execution of executions) this._runningTasks.delete(execution.id);
 			});
 	}
 
@@ -929,7 +1004,7 @@ export class Worker<
 	}
 
 	// --- Stage 3: Flush results to database ---
-	private async flushResults(source: AsyncIterable<ExecutionResult>): Promise<void> {
+	private async flushResults(source: AsyncIterable<ExecutionOutcome>): Promise<void> {
 		let buffer = new BufferState();
 		let flushTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -945,51 +1020,24 @@ export class Worker<
 			}
 
 			batch.orchestratorId = this.orchestratorId || batch.orchestratorId;
-			const pendingDeliveries = [
-				...batch.invokeChild.map((result) => ({
-					key: result.execution_id,
-					queue: result.child_task_queue,
-					taskKey: result.child_task_name,
-					parent: result.producerParent,
-				})),
-				...batch.failed.flatMap((result) =>
-					result.status === "permanently_failed"
-						? (result.deadLetterDeliveries || []).map((delivery) => ({
-								key: delivery.sourceExecutionId,
-								queue: delivery.queue,
-								taskKey: delivery.taskKey,
-								parent: result.producerParent,
-							}))
-						: [],
-				),
-			];
-
 			await this.telemetry
-				.produce({
-					messages: pendingDeliveries,
-					run: (traceStateBySourceExecutionId) => {
-						for (const result of batch.invokeChild) {
-							result.trace_context = traceStateBySourceExecutionId.get(result.execution_id) || null;
-						}
-						for (const result of batch.failed) {
-							if (result.status !== "permanently_failed") continue;
-							result.dead_letter_trace_contexts = Object.fromEntries(
-								(result.deadLetterDeliveries || []).flatMap((delivery) => {
-									const traceState = traceStateBySourceExecutionId.get(delivery.sourceExecutionId);
-									return traceState ? [[delivery.sourceExecutionId, traceState]] : [];
-								}),
-							);
-						}
-						return this.telemetry.settle({
-							queue: this.queueName,
-							batchMessageCount: batch.count,
-							run: () => this.db.returnExecutions(batch, { signal: this.signal }),
-						});
-					},
+				.settle({
+					queue: this.queueName,
+					batchMessageCount: batch.count,
+					deliveries: batch.deliveries,
+					run: (traceStates) =>
+						this.db.returnExecutions(
+							batch.toGroupedResults(traceStates),
+							isCleanup ? undefined : { signal: this.signal },
+						),
 				})
 				.catch((err) => {
 					this.logger.error("Error flushing results:", err);
-					if (!isCleanup) buffer.restore(batch);
+					if (!isCleanup) {
+						buffer.restore(batch);
+						return;
+					}
+					throw err;
 				});
 		};
 
@@ -997,6 +1045,7 @@ export class Worker<
 			if (flushTimer) clearTimeout(flushTimer);
 			flushTimer = setTimeout(async () => {
 				await flushNow();
+				if (buffer.count > 0 && !this.signal.aborted) scheduleFlush();
 			}, this.flushIntervalMs);
 		};
 

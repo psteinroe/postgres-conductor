@@ -17,7 +17,7 @@ export class MockDatabaseClient implements IDatabaseClient {
 	countActiveOrchestratorsBelow = mock(async () => 0);
 	orchestratorShutdown = mock(async () => {});
 	getExecutions = mock(async () => []);
-	returnExecutions = mock(async (_results) => {});
+	returnExecutions = mock(async (_results) => new Set<string>());
 	removeExecutions = mock(async () => false);
 	registerWorker = mock(async () => {});
 	scheduleCronExecution = mock(async () => "mock-cron-id");

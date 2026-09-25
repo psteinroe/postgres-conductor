@@ -5,6 +5,7 @@ import {
 	propagation,
 	ROOT_CONTEXT,
 	SpanKind,
+	SpanStatusCode,
 	trace,
 	type Attributes,
 	type Context,
@@ -609,6 +610,42 @@ describe.serial("OpenTelemetry trace propagation feature paths", () => {
 		await cleanupProvider(provider);
 	});
 
+	test("terminal batch failures create a producer carrier for every DLQ execution", async () => {
+		const { exporter, provider } = installProvider();
+		const db = new InMemoryDatabaseClient();
+		const dlq = makeTask("feature-batch-dlq", async () => undefined);
+		const batch = makeTask(
+			"feature-batch-terminal",
+			async () => {
+				throw new Error("batch terminal");
+			},
+			{
+				batch: { size: 2, timeoutMs: 1 },
+				maxAttempts: 1,
+				deadLetter: { queue: "default", task: dlq },
+			},
+		);
+		await db.invokeBatch([
+			{ task_key: batch.name, queue: "default", payload: { id: 1 } },
+			{ task_key: batch.name, queue: "default", payload: { id: 2 } },
+		]);
+		await makeWorker(db, [batch, dlq]).drain("batch-terminal");
+
+		const deadLetters = db
+			.getAllExecutions()
+			.filter((execution) => execution.task_key === dlq.name);
+		const sends = namedSpans(exporter, "send default").filter(
+			(span) => span.attributes["pgconductor.task.name"] === dlq.name,
+		);
+		expect(deadLetters).toHaveLength(2);
+		expect(deadLetters.every((execution) => execution.trace_context?.parent)).toBe(true);
+		expect(
+			new Set(deadLetters.map((execution) => execution.trace_context?.parent?.traceparent)),
+		).toHaveLength(2);
+		expect(sends).toHaveLength(2);
+		await cleanupProvider(provider);
+	});
+
 	test("dedupe replacement propagates the latest accepted producer context", async () => {
 		const { exporter, provider } = installProvider();
 		const db = new InMemoryDatabaseClient();
@@ -665,23 +702,78 @@ describe.serial("OpenTelemetry trace propagation feature paths", () => {
 		await cleanupProvider(provider);
 	});
 
-	test("settlement failure still closes durable producer spans", async () => {
+	test("settlement marks a suppressed delivery producer as unsuccessful", async () => {
+		const { exporter, provider } = installProvider();
+		const telemetry = new Telemetry(true);
+
+		await telemetry.settle({
+			queue: "default",
+			batchMessageCount: 1,
+			deliveries: [{ key: "child:suppressed", queue: "default", taskKey: "child" }],
+			run: () => new Set(),
+		});
+
+		const send = namedSpans(exporter, "send default")[0];
+		expect(send?.status.code).toBe(SpanStatusCode.ERROR);
+		expect(send?.status.message).toBe("Delivery was not persisted");
+		await cleanupProvider(provider);
+	});
+
+	test("settlement failure restores delivery plans and retries with a fresh carrier", async () => {
 		const { exporter, provider } = installProvider();
 		const db = new InMemoryDatabaseClient();
 		const child = makeTask("settle-child", async () => undefined);
 		const parent = makeTask("settle-parent", async (_event, ctx) => ctx.invoke("child", child, {}));
 		await db.invoke({ task_key: parent.name, queue: "default", payload: {} });
-		(db as any).returnExecutions = async () => {
-			throw new Error("settlement failed");
+
+		const originalReturnExecutions = db.returnExecutions.bind(db);
+		const traceparents: string[] = [];
+		let attempts = 0;
+		(db as any).returnExecutions = async (results: any, options: any) => {
+			const settlesChildInvocation = results.invokeChild.some(
+				(result: { task_key: string }) => result.task_key === parent.name,
+			);
+			if (settlesChildInvocation) {
+				attempts++;
+				const carrier = Object.values(results.deliveryTraceContexts || {})[0] as
+					| { parent?: TraceContextCarrier }
+					| undefined;
+				if (carrier?.parent) traceparents.push(carrier.parent.traceparent);
+				if (attempts === 1) throw new Error("settlement failed");
+			}
+			return originalReturnExecutions(results, options);
 		};
-		await makeWorker(db, [parent, child]).drain("settle-failure");
-		expect(
-			namedSpans(exporter, "send default").some(
-				(span) => span.attributes["pgconductor.task.name"] === child.name,
-			),
-		).toBe(true);
+
+		const worker = makeWorker(db, [parent, child]);
+		await worker.start("settle-failure");
+		await waitForCondition(async () => attempts >= 2);
+		await worker.stop();
+
+		const sends = namedSpans(exporter, "send default").filter(
+			(span) => span.attributes["pgconductor.task.name"] === child.name,
+		);
+		expect(attempts).toBe(2);
+		expect(sends).toHaveLength(2);
+		expect(new Set(traceparents)).toHaveLength(2);
+		expect(db.getAllExecutions().some((execution) => execution.task_key === child.name)).toBe(true);
 		expect(exporter.getFinishedSpans().every((span) => span.endTime[0] !== 0)).toBe(true);
 		await cleanupProvider(provider);
+	});
+
+	test("final settlement failure rejects worker shutdown", async () => {
+		const db = new InMemoryDatabaseClient();
+		const task = makeTask("settle-final-failure", async () => undefined);
+		await db.invoke({ task_key: task.name, queue: "default", payload: {} });
+		let attempts = 0;
+		(db as any).returnExecutions = async () => {
+			attempts++;
+			throw new Error("database unavailable during shutdown");
+		};
+		const worker = makeWorker(db, [task], false);
+		await worker.start("settle-final-failure");
+		await waitForCondition(async () => attempts > 0);
+
+		await expect(worker.stop()).rejects.toThrow("database unavailable during shutdown");
 	});
 });
 
