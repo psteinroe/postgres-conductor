@@ -1,4 +1,5 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
+import postgres from "postgres";
 import { Conductor } from "../../src/conductor";
 import { TestDatabasePool, type TestDatabase } from "../fixtures/test-database";
 
@@ -137,6 +138,163 @@ describe("execution foundations", () => {
 		expect([...remaining]).toHaveLength(1);
 		expect(remaining[0]?.queue).toBe("queue-b");
 		expect(remaining[0]?.completed_at).not.toBeNull();
+	});
+
+	test("retention cleanup scopes duplicate execution IDs to the requested queue", async () => {
+		const db = await database();
+
+		for (const queue of ["queue-a", "queue-b"]) {
+			await db.client.registerWorker({
+				queueName: queue,
+				taskSpecs: [{ key: "retained-task", queue, removeOnCompleteDays: 1 }],
+				cronSchedules: [],
+				eventSubscriptions: [],
+			});
+		}
+
+		const executionId = await db.client.invoke({ task_key: "retained-task", queue: "queue-a" });
+		const duplicateId = await db.client.invoke({ task_key: "retained-task", queue: "queue-b" });
+		if (!executionId || !duplicateId) throw new Error("expected both executions");
+
+		await db.sql`
+			update pgconductor._private_executions
+			set id = ${executionId}::uuid,
+				completed_at = pgconductor._private_current_time() - interval '2 days'
+			where id = ${duplicateId}::uuid and queue = 'queue-b'
+		`;
+		await db.sql`
+			update pgconductor._private_executions
+			set completed_at = pgconductor._private_current_time() - interval '2 days'
+			where id = ${executionId}::uuid and queue = 'queue-a'
+		`;
+
+		await db.client.removeExecutions({ queueName: "queue-a", batchSize: 1 });
+
+		const remaining = await db.sql<{ queue: string }[]>`
+			select queue
+			from pgconductor._private_executions
+			where id = ${executionId}::uuid
+			order by queue
+		`;
+		expect([...remaining]).toEqual([{ queue: "queue-b" }]);
+	});
+
+	test("retention cleanup removes the oldest terminal execution first", async () => {
+		const db = await database();
+
+		await db.client.registerWorker({
+			queueName: "retention-order",
+			taskSpecs: [
+				{
+					key: "retained-task",
+					queue: "retention-order",
+					removeOnCompleteDays: 1,
+					removeOnFailDays: 1,
+				},
+			],
+			cronSchedules: [],
+			eventSubscriptions: [],
+		});
+
+		const newerId = await db.client.invoke({
+			task_key: "retained-task",
+			queue: "retention-order",
+		});
+		const olderId = await db.client.invoke({
+			task_key: "retained-task",
+			queue: "retention-order",
+		});
+		if (!newerId || !olderId) throw new Error("expected both executions");
+
+		await db.sql`
+			update pgconductor._private_executions
+			set failed_at = pgconductor._private_current_time() - interval '2 days'
+			where id = ${newerId}::uuid and queue = 'retention-order'
+		`;
+		await db.sql`
+			update pgconductor._private_executions
+			set completed_at = pgconductor._private_current_time() - interval '3 days'
+			where id = ${olderId}::uuid and queue = 'retention-order'
+		`;
+
+		await db.client.removeExecutions({ queueName: "retention-order", batchSize: 1 });
+
+		const remaining = await db.sql<{ id: string }[]>`
+			select id
+			from pgconductor._private_executions
+			where queue = 'retention-order'
+		`;
+		expect([...remaining]).toEqual([{ id: newerId }]);
+	});
+
+	test("retention cleanup skips locked executions without ending the cleanup loop", async () => {
+		const db = await database();
+
+		await db.client.registerWorker({
+			queueName: "retention-lock",
+			taskSpecs: [{ key: "retained-task", queue: "retention-lock", removeOnCompleteDays: 1 }],
+			cronSchedules: [],
+			eventSubscriptions: [],
+		});
+
+		const oldestId = await db.client.invoke({
+			task_key: "retained-task",
+			queue: "retention-lock",
+		});
+		const nextId = await db.client.invoke({
+			task_key: "retained-task",
+			queue: "retention-lock",
+		});
+		if (!oldestId || !nextId) throw new Error("expected both executions");
+
+		await db.sql`
+			update pgconductor._private_executions
+			set completed_at = case id
+				when ${oldestId}::uuid then pgconductor._private_current_time() - interval '3 days'
+				else pgconductor._private_current_time() - interval '2 days'
+			end
+			where id = any(${[oldestId, nextId]}::uuid[]) and queue = 'retention-lock'
+		`;
+
+		const blockerSql = postgres(db.url, { max: 1 });
+		let releaseLock = () => {};
+		let markLocked = () => {};
+		const lockRelease = new Promise<void>((resolve) => {
+			releaseLock = resolve;
+		});
+		const locked = new Promise<void>((resolve) => {
+			markLocked = resolve;
+		});
+		const blocker = blockerSql.begin(async (transaction) => {
+			await transaction`
+				select id
+				from pgconductor._private_executions
+				where id = ${oldestId}::uuid and queue = 'retention-lock'
+				for update
+			`;
+			markLocked();
+			await lockRelease;
+		});
+
+		try {
+			await locked;
+			const hasMore = await db.client.removeExecutions({
+				queueName: "retention-lock",
+				batchSize: 1,
+			});
+			expect(hasMore).toBe(true);
+
+			const remaining = await db.sql<{ id: string }[]>`
+				select id
+				from pgconductor._private_executions
+				where queue = 'retention-lock'
+			`;
+			expect([...remaining]).toEqual([{ id: oldestId }]);
+		} finally {
+			releaseLock();
+			await blocker;
+			await blockerSql.end();
+		}
 	});
 
 	test("retains a parent when its permanently failed child is configured for removal", async () => {

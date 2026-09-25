@@ -728,22 +728,49 @@ export class QueryBuilder {
 		batchSize,
 	}: RemoveExecutionsArgs): PendingQuery<{ deleted_count: number }[]> {
 		return this.sql<{ deleted_count: number }[]>`
-			with batch as (
-				select e.id
+			with cleanup_clock as materialized (
+				select pgconductor._private_current_time() as now_ts
+			),
+			completed_candidates as (
+				select e.id, e.queue, e.completed_at as terminal_at
 				from pgconductor._private_executions e
 				join pgconductor._private_tasks t on t.key = e.task_key and t.queue = e.queue
+				cross join cleanup_clock c
 				where e.queue = ${queueName}
-					and (
-						(e.completed_at is not null and t.remove_on_complete_days > 0 and e.completed_at < pgconductor._private_current_time() - t.remove_on_complete_days * interval '1 day')
-						or
-						(e.failed_at is not null and t.remove_on_fail_days > 0 and e.failed_at < pgconductor._private_current_time() - t.remove_on_fail_days * interval '1 day')
-					)
+					and e.completed_at is not null
+					and t.remove_on_complete_days > 0
+					and e.completed_at < c.now_ts - t.remove_on_complete_days * interval '1 day'
+				order by e.completed_at, e.id
+				limit ${batchSize}
+				for update of e skip locked
+			),
+			failed_candidates as (
+				select e.id, e.queue, e.failed_at as terminal_at
+				from pgconductor._private_executions e
+				join pgconductor._private_tasks t on t.key = e.task_key and t.queue = e.queue
+				cross join cleanup_clock c
+				where e.queue = ${queueName}
+					and e.failed_at is not null
+					and t.remove_on_fail_days > 0
+					and e.failed_at < c.now_ts - t.remove_on_fail_days * interval '1 day'
+				order by e.failed_at, e.id
+				limit ${batchSize}
+				for update of e skip locked
+			),
+			batch as (
+				select id, queue
+				from (
+					select id, queue, terminal_at from completed_candidates
+					union all
+					select id, queue, terminal_at from failed_candidates
+				) candidates
+				order by terminal_at, id, queue
 				limit ${batchSize}
 			),
 			deleted as (
-				delete from pgconductor._private_executions
+				delete from pgconductor._private_executions e
 				using batch
-				where pgconductor._private_executions.id = batch.id
+				where e.id = batch.id and e.queue = batch.queue
 				returning 1
 			)
 			select count(*)::int as deleted_count from deleted
