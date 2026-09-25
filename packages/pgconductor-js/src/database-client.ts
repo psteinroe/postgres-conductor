@@ -21,7 +21,7 @@ import {
 	type RegisterEventWaitArgs,
 } from "./query-builder";
 import { makeChildLogger, type Logger } from "./lib/logger";
-import type { TraceContextCarrier } from "./telemetry";
+import type { PersistedTraceContext } from "./telemetry";
 
 export type JsonValue = string | number | boolean | null | Payload | JsonValue[];
 export type Payload = { [key: string]: JsonValue };
@@ -40,7 +40,7 @@ export interface ExecutionSpec {
 	parent_execution_id?: string | null;
 	parent_step_key?: string | null;
 	parent_timeout_ms?: number | null;
-	trace_context?: TraceContextCarrier | null;
+	trace_context?: PersistedTraceContext | null;
 }
 
 export interface TaskSpec {
@@ -73,6 +73,7 @@ export interface Execution {
 	waiting_on_execution_id: string | null;
 	waiting_step_key: string | null;
 	locked_by: string;
+	attempts: number;
 	cancelled: boolean;
 	last_error: string | null;
 	dedupe_key?: string | null;
@@ -85,7 +86,12 @@ export interface Execution {
 	dead_letter_error?: string | null;
 	dead_letter_attempts?: number | null;
 	dead_letter_failed_at?: Date | null;
-	trace_context?: TraceContextCarrier | null;
+	trace_context?: PersistedTraceContext | null;
+	parent_execution_id?: string | null;
+	parent_queue?: string | null;
+	parent_task_key?: string | null;
+	parent_dead_letter_queue?: string | null;
+	parent_dead_letter_task_key?: string | null;
 }
 
 // todo: move all of this to query-builder too or create new types.ts file
@@ -94,17 +100,17 @@ export type ExecutionResult =
 	| ExecutionCompleted
 	| ExecutionFailed
 	| ExecutionReleased
-	| ExecutionPermamentlyFailed
 	| ExecutionInvokeChild;
 
 export type GroupedExecutionResults = {
 	count: number;
 	orchestratorId: string;
 	completed: ExecutionCompleted[];
-	failed: (ExecutionFailed | ExecutionPermamentlyFailed)[];
+	failed: ExecutionFailed[];
 	released: ExecutionReleased[];
 	invokeChild: ExecutionInvokeChild[];
 	taskKeys: Set<string>;
+	deliveryTraceContexts?: Record<string, PersistedTraceContext>;
 };
 
 export interface ExecutionCompleted {
@@ -133,15 +139,6 @@ export interface ExecutionReleased {
 	status: "released";
 	reschedule_in_ms?: number | "infinity";
 	step_key?: string;
-}
-
-export interface ExecutionPermamentlyFailed {
-	execution_id: string;
-	queue: string;
-	orchestrator_id: string;
-	task_key: string;
-	status: "permanently_failed";
-	error: string;
 }
 
 export interface ExecutionInvokeChild {
@@ -503,14 +500,11 @@ export class DatabaseClient {
 	async returnExecutions(
 		grouped: GroupedExecutionResults,
 		opts?: QueryMethodOptions,
-	): Promise<void> {
+	): Promise<ReadonlySet<string>> {
 		const query = this.builder.buildReturnExecutions(grouped);
-
-		if (!query) {
-			return;
-		}
-
-		await this.query(() => query, { label: "returnExecutions", ...opts });
+		if (!query) return new Set();
+		const rows = await this.query(() => query, { label: "returnExecutions", ...opts });
+		return new Set(rows.map((row: { delivery_key: string }) => row.delivery_key));
 	}
 
 	async removeExecutions(args: RemoveExecutionsArgs, opts?: QueryMethodOptions): Promise<boolean> {

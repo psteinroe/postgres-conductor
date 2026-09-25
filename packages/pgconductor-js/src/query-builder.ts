@@ -1,9 +1,10 @@
 import type { PendingQuery, Row, RowList, Sql } from "postgres";
-import type { GroupedExecutionResults } from "./database-client";
 import * as assert from "./lib/assert";
+import type { PersistedTraceContext } from "./telemetry";
 import type {
 	Execution,
 	ExecutionSpec,
+	GroupedExecutionResults,
 	EventFilterTerm,
 	EventSubscriptionSpec,
 	Payload,
@@ -92,6 +93,7 @@ export type ClearWaitingStateArgs = {
 export type EmitEventArgs = {
 	eventKey: string;
 	payload?: Payload;
+	trace_context?: PersistedTraceContext | null;
 };
 
 export type RegisterEventWaitArgs = {
@@ -284,7 +286,7 @@ export class QueryBuilder {
 						and (t.concurrency_limit is not null or t.group_concurrency_limit is not null)
 				) as enabled
 			), unconstrained_candidates as (
-				select e.id
+				select e.id, e.trace_context
 				from pgconductor._private_executions e
 				where not (select enabled from task_limits)
 					and e.queue = ${queueName}::text
@@ -334,6 +336,7 @@ export class QueryBuilder {
 					e.run_at,
 					e.created_at,
 					e."group",
+					e.trace_context,
 					t.concurrency_limit,
 					t.group_concurrency_limit,
 					t.active_task_count,
@@ -372,37 +375,48 @@ export class QueryBuilder {
 					or r."group" is null
 					or r.active_group_count + r.group_rank <= r.group_concurrency_limit
 			), eligible as (
-				select r.id
+				select r.id, r.trace_context
 				from group_eligible r
 				where r.concurrency_limit is null
 					or r.active_task_count + r.task_rank <= r.concurrency_limit
-			), claimable as (
-				select id from unconstrained_candidates
+			), claimable as materialized (
+				select id, trace_context from unconstrained_candidates
 				union all
-				select id from eligible
+				select id, trace_context from eligible
 			), claimed as (
 				update pgconductor._private_executions e
 				set
 					attempts = e.attempts + 1,
 					locked_by = ${orchestratorId}::uuid,
-					locked_at = pgconductor._private_current_time()
-				from claimable c
-				where e.id = c.id and e.queue = ${queueName}::text and e.is_available = true
+					locked_at = pgconductor._private_current_time(),
+					trace_context = candidate.trace_context - 'link'
+				from claimable candidate
+				where e.id = candidate.id and e.queue = ${queueName}::text and e.is_available = true
 				returning e.id, e.task_key, e.queue, e.payload, e.waiting_on_execution_id,
-					e.waiting_step_key, e.cancelled, e.last_error, e.dedupe_key, e.cron_expression,
-					e.locked_by, e."group", e.priority, e.run_at, e.created_at,
-					e.subscription_id, e.trace_context,
-					e.dead_letter_source_execution_id, e.dead_letter_source_queue,
-					e.dead_letter_source_task_key, e.dead_letter_error,
+					e.waiting_step_key, e.attempts, e.cancelled, e.last_error, e.dedupe_key,
+					e.cron_expression, e.locked_by, e."group", e.priority, e.run_at, e.created_at,
+					e.subscription_id, candidate.trace_context,
+					e.parent_execution_id, e.dead_letter_source_execution_id,
+					e.dead_letter_source_queue, e.dead_letter_source_task_key, e.dead_letter_error,
 					e.dead_letter_attempts, e.dead_letter_failed_at
 			)
-			select id, task_key, queue, payload, waiting_on_execution_id, waiting_step_key,
-				cancelled, last_error, dedupe_key, cron_expression, locked_by, "group",
-				subscription_id, trace_context,
-				dead_letter_source_execution_id, dead_letter_source_queue,
-				dead_letter_source_task_key, dead_letter_error, dead_letter_attempts, dead_letter_failed_at
+			select claimed.id, claimed.task_key, claimed.queue, claimed.payload,
+				claimed.waiting_on_execution_id, claimed.waiting_step_key, claimed.attempts,
+				claimed.cancelled, claimed.last_error, claimed.dedupe_key, claimed.cron_expression,
+				claimed.locked_by, claimed."group", claimed.subscription_id, claimed.trace_context,
+				claimed.parent_execution_id,
+				parent.queue as parent_queue, parent.task_key as parent_task_key,
+				parent_task.dead_letter_queue as parent_dead_letter_queue,
+				parent_task.dead_letter_task_key as parent_dead_letter_task_key,
+				claimed.dead_letter_source_execution_id, claimed.dead_letter_source_queue,
+				claimed.dead_letter_source_task_key, claimed.dead_letter_error,
+				claimed.dead_letter_attempts, claimed.dead_letter_failed_at
 			from claimed
-			order by priority asc, run_at asc, created_at asc, id asc
+			left join pgconductor._private_executions parent
+				on parent.id = claimed.parent_execution_id
+			left join pgconductor._private_tasks parent_task
+				on parent_task.queue = parent.queue and parent_task.key = parent.task_key
+			order by claimed.priority asc, claimed.run_at asc, claimed.created_at asc, claimed.id asc
 		`;
 	}
 
@@ -427,6 +441,9 @@ export class QueryBuilder {
 				child_task_name text, child_task_queue text, child_payload jsonb,
 				"group" text
 			)
+		)`);
+		ctes.push(this.sql`delivery_trace_contexts as (
+			select ${this.sql.json(grouped.deliveryTraceContexts || {})}::jsonb as value
 		)`);
 		// Lock the claimed rows for the whole statement. This prevents recovery or a
 		// new claim from racing the side effects below.
@@ -455,14 +472,13 @@ export class QueryBuilder {
 		)`);
 		ctes.push(this.sql`failed_results as (
 			select * from valid_results
-			where status in ('failed', 'permanently_failed')
-				or (status = 'completed' and execution_cancelled)
+			where status = 'failed' or execution_cancelled
 		)`);
 		ctes.push(this.sql`released_results as (
-			select * from valid_results where status = 'released'
+			select * from valid_results where status = 'released' and not execution_cancelled
 		)`);
 		ctes.push(this.sql`invoke_child_data as (
-			select * from valid_results where status = 'invoke_child'
+			select * from valid_results where status = 'invoke_child' and not execution_cancelled
 		)`);
 
 		// A completed child may wake only a parent which is still waiting and is not
@@ -545,7 +561,6 @@ export class QueryBuilder {
 			join pgconductor._private_executions e on e.id = r.execution_id and e.queue = r.queue
 			join task_configs tc on tc.key = r.task_key and tc.queue = r.queue
 			where e.attempts >= tc.max_attempts
-				or r.status = 'permanently_failed'
 				or r.execution_cancelled
 		)`);
 		ctes.push(this.sql`failed_parent_targets as materialized (
@@ -568,28 +583,32 @@ export class QueryBuilder {
 		)`);
 		ctes.push(this.sql`terminal_failures as materialized (
 			select p.execution_id, p.queue, p.task_key, p.execution_group, p.execution_payload as payload,
+				c.value -> ('dlq:' || p.execution_id::text) as dead_letter_trace_context,
 				p.child_error as failure_error, p.execution_attempts as failure_attempts,
 				p.execution_cancelled, p.dead_letter_queue, p.dead_letter_task_key
 			from permanently_failed_children p
+			cross join delivery_trace_contexts c
 			union all
 			select p.parent_id, p.parent_queue, p.parent_task_key, p.parent_group, p.parent_payload,
+				c.value -> ('dlq:' || p.parent_id::text),
 				'Child execution failed: ' || p.child_error, p.parent_attempts, p.child_cancelled,
 				p.parent_dead_letter_queue, p.parent_dead_letter_task_key
 			from failed_parent_targets p
+			cross join delivery_trace_contexts c
 		)`);
 		ctes.push(this.sql`dead_lettered as materialized (
 			insert into pgconductor._private_executions (
 				task_key, queue, payload, run_at, "group",
 				dead_letter_source_execution_id, dead_letter_source_queue,
 				dead_letter_source_task_key, dead_letter_error,
-				dead_letter_attempts, dead_letter_failed_at
+				dead_letter_attempts, dead_letter_failed_at, trace_context
 			)
 			select
 				coalesce(p.dead_letter_task_key, p.task_key),
 				coalesce(p.dead_letter_queue, p.queue),
 				p.payload, nt.ts, p.execution_group,
 				p.execution_id, p.queue, p.task_key, p.failure_error,
-				p.failure_attempts, nt.ts
+				p.failure_attempts, nt.ts, p.dead_letter_trace_context
 			from terminal_failures p
 			cross join now_ts nt
 			where p.dead_letter_queue is not null
@@ -667,7 +686,6 @@ export class QueryBuilder {
 			where e.id = r.execution_id and e.queue = r.queue
 				and e.locked_by = r.orchestrator_id
 				and tc.key = r.task_key and tc.queue = r.queue
-				and r.status <> 'permanently_failed'
 				and not r.execution_cancelled
 				and e.attempts < tc.max_attempts
 			returning e.id
@@ -695,9 +713,13 @@ export class QueryBuilder {
 		)`);
 
 		ctes.push(this.sql`inserted_children as (
-			insert into pgconductor._private_executions (id, task_key, queue, payload, run_at, parent_execution_id, "group")
-			select pgconductor._private_portable_uuidv7(), r.child_task_name, r.child_task_queue, r.child_payload, nt.ts, r.execution_id, r."group"
-			from invoke_child_data r, now_ts nt
+			insert into pgconductor._private_executions (
+				id, task_key, queue, payload, run_at, parent_execution_id, "group", trace_context
+			)
+			select pgconductor._private_portable_uuidv7(), r.child_task_name, r.child_task_queue,
+				r.child_payload, nt.ts, r.execution_id, r."group",
+				c.value -> ('child:' || r.execution_id::text)
+			from invoke_child_data r, now_ts nt, delivery_trace_contexts c
 			where exists (
 				select 1 from pgconductor._private_executions parent
 				where parent.id = r.execution_id and parent.queue = r.queue
@@ -721,7 +743,12 @@ export class QueryBuilder {
 		)`);
 
 		const combined = ctes.reduce((acc, cte, i) => (i === 0 ? cte : this.sql`${acc}, ${cte}`));
-		return this.sql<[{ result: number }]>`with ${combined} select 1 as result`;
+		return this.sql<{ delivery_key: string }[]>`
+			with ${combined}
+			select 'child:' || parent_execution_id::text as delivery_key from inserted_children
+			union all
+			select 'dlq:' || dead_letter_source_execution_id::text from dead_lettered
+		`;
 	}
 	buildRemoveExecutions({
 		queueName,
@@ -809,6 +836,7 @@ export class QueryBuilder {
 				cron_expression: spec.cron_expression,
 				priority: spec.priority || null,
 				group: spec.group || null,
+				trace_context: spec.trace_context || null,
 			};
 		});
 
@@ -901,6 +929,7 @@ export class QueryBuilder {
 				p_dedupe_next_slot := false::boolean,
 				p_cron_expression := ${cronExpression}::text,
 				p_priority := ${spec.priority || 0}::integer,
+				p_trace_context := ${spec.trace_context ? this.sql.json(spec.trace_context) : null}::jsonb,
 				p_group := ${spec.group || null}::text
 			)
 		`;
@@ -1167,6 +1196,7 @@ export class QueryBuilder {
 					source.id as event_id,
 					source.payload ->> 'eventKey' as event_key,
 					source.payload -> 'payload' as event_payload,
+					source.trace_context,
 					source.created_at
 				from pgconductor._private_executions source
 				where source.id = any(${this.sql.array(eventIds, 2951)}::uuid[])
@@ -1318,7 +1348,8 @@ export class QueryBuilder {
 					on task.key = subscription.task_key and task.queue = subscription.queue
 			), inserted_destinations as (
 				insert into pgconductor._private_executions (
-					id, task_key, queue, payload, parent_execution_id, subscription_id
+					id, task_key, queue, payload, parent_execution_id, subscription_id,
+					trace_context
 				)
 				select
 					pgconductor._private_portable_uuidv7(),
@@ -1336,7 +1367,8 @@ export class QueryBuilder {
 						end
 					),
 					candidate.event_id,
-					candidate.subscription_id
+					candidate.subscription_id,
+					source.trace_context
 				from candidates candidate
 				join sources source on source.event_id = candidate.event_id
 				order by candidate.event_id, candidate.subscription_id
@@ -1351,7 +1383,8 @@ export class QueryBuilder {
 					subscription.queue,
 					subscription.step_key,
 					source.event_key,
-					source.event_payload
+					source.event_payload,
+					source.trace_context
 				from matched_subscriptions matched
 				join pgconductor._private_custom_event_subscriptions subscription
 					on subscription.id = matched.subscription_id
@@ -1401,8 +1434,18 @@ export class QueryBuilder {
 				update pgconductor._private_executions execution
 				set run_at = pgconductor._private_current_time(),
 					waiting_on_execution_id = null,
-					waiting_step_key = null
+					waiting_step_key = null,
+					trace_context = case
+						when selected.trace_context -> 'parent' is null then execution.trace_context
+						else jsonb_set(
+							coalesce(execution.trace_context, '{}'::jsonb),
+							'{link}',
+							selected.trace_context -> 'parent'
+						)
+					end
 				from deleted_waits wait
+				join selected_waits selected
+					on selected.execution_id = wait.execution_id and selected.queue = wait.queue
 				where execution.id = wait.execution_id and execution.queue = wait.queue
 				returning execution.id
 			)
@@ -1412,11 +1455,16 @@ export class QueryBuilder {
 		`;
 	}
 
-	buildEmitEvent({ eventKey, payload }: EmitEventArgs): PendingQuery<{ id: string }[]> {
+	buildEmitEvent({
+		eventKey,
+		payload,
+		trace_context,
+	}: EmitEventArgs): PendingQuery<{ id: string }[]> {
 		return this.sql<{ id: string }[]>`
 			select pgconductor.emit_event(
 				${eventKey}::text,
-				${this.sql.json(payload || {})}::jsonb
+				${this.sql.json(payload || {})}::jsonb,
+				${trace_context ? this.sql.json(trace_context) : null}::jsonb
 			) as id
 		`;
 	}

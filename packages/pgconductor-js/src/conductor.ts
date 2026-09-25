@@ -27,7 +27,6 @@ import { Worker, type WorkerConfig } from "./worker";
 import { DefaultLogger, type Logger } from "./lib/logger";
 import { SchemaManager } from "./schema-manager";
 import { Telemetry } from "./telemetry";
-import { SpanKind } from "@opentelemetry/api";
 import type {
 	EventDefinition,
 	EventName,
@@ -280,15 +279,12 @@ export class Conductor<
 		const queue = task.queue || "default";
 
 		if (Array.isArray(payloadOrItems)) {
-			return this.telemetry.message({
-				name: `send ${queue}`,
-				kind: SpanKind.PRODUCER,
+			return this.telemetry.send({
 				taskKey: taskName,
 				queue,
-				operation: "send",
 				batchMessageCount: payloadOrItems.length,
 				run: async (span) => {
-					const traceContext = span.traceContext();
+					const traceContext = span.persistedTraceContext();
 					return this.db.invokeBatch(
 						payloadOrItems.map((item) => ({
 							task_key: taskName,
@@ -308,19 +304,16 @@ export class Conductor<
 			});
 		}
 
-		return this.telemetry.message({
-			name: `send ${queue}`,
-			kind: SpanKind.PRODUCER,
+		return this.telemetry.send({
 			taskKey: taskName,
 			queue,
-			operation: "send",
 			run: async (span) => {
 				const id = await this.db.invoke({
 					task_key: taskName,
 					queue,
 					payload: payloadOrItems,
 					...opts,
-					trace_context: span.traceContext(),
+					trace_context: span.persistedTraceContext(),
 				});
 				if (id) span.setAttribute("messaging.message.id", id);
 				return id;
@@ -352,9 +345,19 @@ export class Conductor<
 			payload = ((result as any)?.value ?? payload) as InferEventPayload<TDef>;
 		}
 
-		return this.db.emitEvent({
-			eventKey: event,
-			payload: payload as any,
+		return this.telemetry.send({
+			name: `send event ${String(event)}`,
+			queue: String(event),
+			run: async (span) => {
+				const id = await this.db.emitEvent({
+					eventKey: event,
+					payload: payload as any,
+					trace_context: span.persistedTraceContext(),
+				});
+				span.setAttribute("pgconductor.event.name", String(event));
+				span.setAttribute("messaging.message.id", id);
+				return id;
+			},
 		});
 	}
 
