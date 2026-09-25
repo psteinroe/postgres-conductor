@@ -67,25 +67,45 @@ type SettleTraceOptions = {
 	batchMessageCount: number;
 	deliveries: readonly DurableMessage[];
 	run: (
-		traceStates: ReadonlyMap<string, PersistedTraceContext | null>,
+		traceStates: Readonly<Record<string, PersistedTraceContext | null>>,
 	) => Promise<ReadonlySet<string>> | ReadonlySet<string>;
 };
 
 type ProduceOptions<T> = {
 	messages: readonly DurableMessage[];
-	run: (traceStates: ReadonlyMap<string, PersistedTraceContext | null>) => Promise<T> | T;
+	run: (traceStates: Readonly<Record<string, PersistedTraceContext | null>>) => Promise<T> | T;
 	isAccepted?: (result: T, message: DurableMessage) => boolean;
 };
 
 export class TelemetrySpan {
-	constructor(private readonly span: Span | null) {}
+	constructor(
+		private readonly span: Span | null,
+		private readonly injectionContext?: Context,
+	) {}
 
 	traceContext(): TraceContextCarrier | null {
-		if (!this.span) return null;
+		if (!this.span && !this.injectionContext) return null;
 		try {
-			const carrier: Record<string, string> = {};
-			propagation.inject(trace.setSpan(context.active(), this.span), carrier);
-			return normalizeTraceContext(carrier);
+			const carrier: Record<string, unknown> = {};
+			const injectionContext =
+				this.injectionContext ||
+				(this.span ? trace.setSpan(context.active(), this.span) : ROOT_CONTEXT);
+			propagation.inject(injectionContext, carrier);
+			const { traceparent, tracestate } = carrier;
+			if (
+				typeof traceparent !== "string" ||
+				traceparent.length === 0 ||
+				Buffer.byteLength(traceparent) > MAX_TRACE_HEADER_LENGTH
+			) {
+				return null;
+			}
+			return {
+				traceparent,
+				...(typeof tracestate === "string" &&
+				Buffer.byteLength(tracestate) <= MAX_TRACE_HEADER_LENGTH
+					? { tracestate }
+					: {}),
+			};
 		} catch {
 			return null;
 		}
@@ -109,43 +129,6 @@ export class TelemetrySpan {
 		this.span.setAttribute("error.type", errorType);
 		this.span.setStatus({ code: SpanStatusCode.ERROR });
 	}
-
-	markDeliveryNotPersisted(): void {
-		this.span?.setStatus({
-			code: SpanStatusCode.ERROR,
-			message: "Delivery was not persisted",
-		});
-	}
-}
-
-function normalizeTraceContext(carrier: unknown): TraceContextCarrier | null {
-	if (!carrier || typeof carrier !== "object") return null;
-	const { traceparent, tracestate } = carrier as Record<string, unknown>;
-	if (
-		typeof traceparent !== "string" ||
-		traceparent.length === 0 ||
-		traceparent.length > MAX_TRACE_HEADER_LENGTH
-	) {
-		return null;
-	}
-	return {
-		traceparent,
-		...(typeof tracestate === "string" && tracestate.length <= MAX_TRACE_HEADER_LENGTH
-			? { tracestate }
-			: {}),
-	};
-}
-
-function normalizePersistedTraceContext(state: unknown): PersistedTraceContext | null {
-	if (!state || typeof state !== "object") return null;
-	const value = state as Record<string, unknown>;
-	const parent = normalizeTraceContext(value.parent);
-	const link = normalizeTraceContext(value.link);
-	if (!parent && !link) return null;
-	return {
-		...(parent ? { parent } : {}),
-		...(link ? { link } : {}),
-	};
 }
 
 const NOOP_SPAN = new TelemetrySpan(null);
@@ -214,9 +197,8 @@ export class Telemetry {
 		traceStates,
 		run,
 	}: ProcessTraceOptions<T>): Promise<T> {
-		const normalizedStates = traceStates.map(normalizePersistedTraceContext);
 		const isBatch = batchMessageCount !== undefined;
-		const linkedContexts = normalizedStates.flatMap((state) =>
+		const linkedContexts = traceStates.flatMap((state) =>
 			(isBatch ? [state?.parent, state?.link] : [state?.link]).map((carrier) =>
 				this.extractTraceContext(carrier),
 			),
@@ -236,7 +218,7 @@ export class Telemetry {
 			operation: "process",
 			messageId,
 			batchMessageCount,
-			parent: isBatch ? ROOT_CONTEXT : this.extractTraceContext(normalizedStates[0]?.parent),
+			parent: isBatch ? ROOT_CONTEXT : this.extractTraceContext(traceStates[0]?.parent),
 			links,
 			run: (span) => run(span),
 		});
@@ -269,7 +251,7 @@ export class Telemetry {
 			new Map(messages.map((message) => [message.key, message])).values(),
 		);
 		if (!this.enabled) {
-			return run(new Map(uniqueMessages.map(({ key }) => [key, null])));
+			return run(Object.fromEntries(uniqueMessages.map(({ key }) => [key, null] as const)));
 		}
 
 		const pending = uniqueMessages.map((message) => {
@@ -290,18 +272,23 @@ export class Telemetry {
 			);
 			return { message, span, telemetrySpan: new TelemetrySpan(span) };
 		});
-		const traceStateByMessageKey = new Map(
-			pending.map(({ message, telemetrySpan }) => [
-				message.key,
-				telemetrySpan.persistedTraceContext(),
-			]),
+		const traceStateByMessageKey = Object.fromEntries(
+			pending.map(
+				({ message, telemetrySpan }) =>
+					[message.key, telemetrySpan.persistedTraceContext()] as const,
+			),
 		);
 
 		try {
 			const result = await run(traceStateByMessageKey);
 			if (isAccepted) {
-				for (const { message, telemetrySpan } of pending) {
-					if (!isAccepted(result, message)) telemetrySpan.markDeliveryNotPersisted();
+				for (const { message, span } of pending) {
+					if (!isAccepted(result, message)) {
+						span.setStatus({
+							code: SpanStatusCode.ERROR,
+							message: "Delivery was not persisted",
+						});
+					}
 				}
 			}
 			return result;
@@ -316,20 +303,32 @@ export class Telemetry {
 	traceContext(): TraceContextCarrier | null {
 		if (!this.enabled) return null;
 		try {
-			const carrier: Record<string, string> = {};
-			propagation.inject(context.active(), carrier);
-			return normalizeTraceContext(carrier);
+			const activeContext = context.active();
+			return new TelemetrySpan(trace.getSpan(activeContext) || null, activeContext).traceContext();
 		} catch {
 			return null;
 		}
 	}
 
-	extractTraceContext(carrier?: TraceContextCarrier | null): Context {
-		if (!this.enabled) return ROOT_CONTEXT;
-		const normalized = normalizeTraceContext(carrier);
-		if (!normalized) return ROOT_CONTEXT;
+	extractTraceContext(carrier: unknown): Context {
+		if (!this.enabled || !carrier || typeof carrier !== "object") return ROOT_CONTEXT;
+		const traceparent = "traceparent" in carrier ? carrier.traceparent : undefined;
+		if (
+			typeof traceparent !== "string" ||
+			traceparent.length === 0 ||
+			Buffer.byteLength(traceparent) > MAX_TRACE_HEADER_LENGTH
+		) {
+			return ROOT_CONTEXT;
+		}
+		const tracestate = "tracestate" in carrier ? carrier.tracestate : undefined;
+		const boundedCarrier = {
+			traceparent,
+			...(typeof tracestate === "string" && Buffer.byteLength(tracestate) <= MAX_TRACE_HEADER_LENGTH
+				? { tracestate }
+				: {}),
+		};
 		try {
-			return propagation.extract(ROOT_CONTEXT, normalized);
+			return propagation.extract(ROOT_CONTEXT, boundedCarrier);
 		} catch {
 			return ROOT_CONTEXT;
 		}

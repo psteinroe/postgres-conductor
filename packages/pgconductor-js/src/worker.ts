@@ -64,16 +64,14 @@ export const DEFAULT_WORKER_CONFIG: WorkerConfig = {
 /**
  * Encapsulates buffered execution results with internal counting and task key tracking.
  */
-type DeliveryPlan = DurableMessage;
-
 type ExecutionOutcome = {
 	result: ExecutionResult;
-	deliveries: DeliveryPlan[];
+	deliveries: DurableMessage[];
 };
 
 function executionOutcome(
 	result: ExecutionResult,
-	deliveries: DeliveryPlan[] = [],
+	deliveries: DurableMessage[] = [],
 ): ExecutionOutcome {
 	return { result, deliveries };
 }
@@ -84,7 +82,7 @@ class BufferState {
 	failed: ExecutionFailed[] = [];
 	released: ExecutionReleased[] = [];
 	invokeChild: ExecutionInvokeChild[] = [];
-	deliveries: DeliveryPlan[] = [];
+	deliveries: DurableMessage[] = [];
 	taskKeys = new Set<string>();
 	count = 0;
 
@@ -125,12 +123,8 @@ class BufferState {
 	}
 
 	toGroupedResults(
-		traceStates: ReadonlyMap<string, PersistedTraceContext | null>,
+		traceStates: Readonly<Record<string, PersistedTraceContext | null>>,
 	): GroupedExecutionResults {
-		const deliveryTraceContexts: Record<string, PersistedTraceContext> = {};
-		for (const [key, traceState] of traceStates) {
-			if (traceState) deliveryTraceContexts[key] = traceState;
-		}
 		return {
 			count: this.count,
 			orchestratorId: this.orchestratorId,
@@ -139,7 +133,11 @@ class BufferState {
 			released: this.released,
 			invokeChild: this.invokeChild,
 			taskKeys: this.taskKeys,
-			deliveryTraceContexts,
+			deliveryTraceContexts: Object.fromEntries(
+				Object.entries(traceStates).filter(
+					(entry): entry is [string, PersistedTraceContext] => entry[1] !== null,
+				),
+			),
 		};
 	}
 }
@@ -189,7 +187,7 @@ function failureOutcome({
 		return executionOutcome(result);
 	}
 
-	const deliveries: DeliveryPlan[] = [];
+	const deliveries: DurableMessage[] = [];
 	if (task.deadLetter?.queue) {
 		deliveries.push({
 			key: `dlq:${execution.id}`,
@@ -525,7 +523,7 @@ export class Worker<
 			run: (traceStateBySchedule) => {
 				for (const schedule of cronSchedules) {
 					const key = schedule.dedupe_key || `${schedule.queue}:${schedule.task_key}`;
-					schedule.trace_context = traceStateBySchedule.get(key) || null;
+					schedule.trace_context = traceStateBySchedule[key] || null;
 				}
 				return register();
 			},

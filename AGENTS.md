@@ -135,9 +135,7 @@ The migration file contains:
 - Implements async pipeline: fetch → execute → flush
 - Polls database for ready executions using `get_executions()`
 - Executes tasks with concurrency control (via `mapConcurrent`)
-- Represents each outcome as database lifecycle facts plus transient child/DLQ delivery plans
-- Generates producer carriers during flush and persists them with results in one settlement statement
-- Restores both results and delivery plans when settlement must retry
+- Keeps results and child/DLQ delivery intent together across atomic settlement retries, generating fresh producer carriers for each attempt
 - Handles graceful shutdown via AbortController
 
 **TaskContext** (`task-context.ts`)
