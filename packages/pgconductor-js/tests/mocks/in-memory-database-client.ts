@@ -1080,7 +1080,6 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 		args: LoadStepArgs,
 		_opts?: { signal?: AbortSignal },
 	): Promise<Payload | null | undefined> {
-		if (!this.ownsClaim(args)) return undefined;
 		const execSteps = this.steps.get(args.executionId);
 		if (!execSteps) return undefined;
 		const step = execSteps.get(args.key);

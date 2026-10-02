@@ -238,7 +238,6 @@ export class TaskContext<
 			{
 				executionId: this.opts.execution.id,
 				queue: this.opts.execution.queue,
-				orchestratorId: this.opts.execution.locked_by,
 				key: name,
 			},
 			{ signal: this.signal },
@@ -304,7 +303,6 @@ export class TaskContext<
 			{
 				executionId: this.opts.execution.id,
 				queue: this.opts.execution.queue,
-				orchestratorId: this.opts.execution.locked_by,
 				key: id,
 			},
 			{ signal: this.signal },
@@ -337,7 +335,6 @@ export class TaskContext<
 			{
 				executionId: this.opts.execution.id,
 				queue: this.opts.execution.queue,
-				orchestratorId: this.opts.execution.locked_by,
 				key: stepKey,
 			},
 			{ signal: this.signal },
@@ -396,7 +393,6 @@ export class TaskContext<
 			{
 				executionId: this.opts.execution.id,
 				queue: this.opts.execution.queue,
-				orchestratorId: this.opts.execution.locked_by,
 				key,
 			},
 			{ signal: this.signal },

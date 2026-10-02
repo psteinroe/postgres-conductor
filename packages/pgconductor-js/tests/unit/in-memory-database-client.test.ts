@@ -721,7 +721,6 @@ describe("InMemoryDatabaseClient", () => {
 			const result = await db.loadStep({
 				executionId: execId!,
 				queue: claimed.queue,
-				orchestratorId: claimed.locked_by,
 				key: "step1",
 			});
 
@@ -734,7 +733,6 @@ describe("InMemoryDatabaseClient", () => {
 			const result = await db.loadStep({
 				executionId: "nonexistent",
 				queue: "default",
-				orchestratorId: "test-orch",
 				key: "step1",
 			});
 
