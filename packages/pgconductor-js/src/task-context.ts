@@ -171,7 +171,7 @@ export class TaskContext<
 
 		// Check window boundaries
 		if (this.windowChecker) {
-			const now = await this.getNow();
+			const now = this.opts.clock.now();
 			if (!this.windowChecker.isWithinWindow(now)) {
 				const nextRunAt = this.windowChecker.getNextValidRunAt(now);
 				const delay = Math.max(nextRunAt.getTime() - now.getTime(), 0);
@@ -234,7 +234,7 @@ export class TaskContext<
 
 		// Check window boundaries
 		if (this.windowChecker) {
-			const now = await this.getNow();
+			const now = this.opts.clock.now();
 			if (!this.windowChecker.isWithinWindow(now)) {
 				const nextRunAt = this.windowChecker.getNextValidRunAt(now);
 				const delay = Math.max(nextRunAt.getTime() - now.getTime(), 0);
@@ -479,14 +479,6 @@ export class TaskContext<
 			},
 			{ signal: this.signal },
 		);
-	}
-
-	/**
-	 * Get current time.
-	 * DatabaseClient handles test vs production: returns fake time in tests, system time in production.
-	 */
-	private async getNow(): Promise<Date> {
-		return this.opts.db.getCurrentTime({ signal: this.signal });
 	}
 
 	/**

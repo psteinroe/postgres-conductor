@@ -1,5 +1,14 @@
 import { z } from "zod";
-import { test, expect, describe, beforeAll, afterAll, afterEach, mock } from "bun:test";
+import {
+	test,
+	expect,
+	describe,
+	beforeAll,
+	afterAll,
+	afterEach,
+	mock,
+	setSystemTime,
+} from "bun:test";
 import { Conductor } from "../../src/conductor";
 import { Orchestrator } from "../../src/orchestrator";
 import { defineTask } from "../../src/task-definition";
@@ -16,6 +25,7 @@ describe("Window Execution", () => {
 	}, 60000);
 
 	afterEach(async () => {
+		setSystemTime();
 		await Promise.all(databases.map((db) => db.destroy()));
 		databases.length = 0;
 	});
@@ -52,9 +62,10 @@ describe("Window Execution", () => {
 			{ invocable: true },
 			async (event, ctx) => {
 				if (event.name === "pgconductor.invoke") {
-					// Advance time to outside window BEFORE calling ctx.step()
-					// This simulates the scenario where time passes during execution
+					// Advance time to outside window BEFORE calling ctx.step(). The worker
+					// clock follows local time between database samples, so move both.
 					await ctx.dbClient.setFakeTime({ date: new Date("2024-01-01T18:00:00Z") });
+					setSystemTime(new Date(Date.now() + 8 * 60 * 60 * 1000));
 
 					// This step will trigger release (we're now outside window)
 					const result = await ctx.step("step1", () => {
@@ -93,9 +104,10 @@ describe("Window Execution", () => {
 		if (!execution) throw new Error("execution not found");
 		expect(execution.completed_at).toBeNull();
 
-		// run_at should be scheduled for next day at 09:00
+		// run_at should be scheduled for next day at 09:00. The worker clock keeps
+		// ticking while the database fake time is frozen, so allow for elapsed time.
 		const nextDay9AM = new Date("2024-01-02T09:00:00Z");
-		expect(execution.run_at.getTime()).toBeGreaterThanOrEqual(nextDay9AM.getTime());
+		expect(Math.abs(execution.run_at.getTime() - nextDay9AM.getTime())).toBeLessThan(1000);
 
 		await orchestrator.stop();
 	}, 30000);
@@ -133,6 +145,7 @@ describe("Window Execution", () => {
 
 					// Advance time to outside window BEFORE calling ctx.checkpoint()
 					await ctx.dbClient.setFakeTime({ date: new Date("2024-01-01T17:30:00Z") });
+					setSystemTime(new Date(Date.now() + 7.5 * 60 * 60 * 1000));
 
 					// Checkpoint should trigger release (we're now outside window)
 					await ctx.checkpoint();

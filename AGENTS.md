@@ -266,6 +266,8 @@ await db.client.clearFakeTime();
 
 Useful for sleeps, timeouts, backoff schedules and time windows. Always clean up fake time at the end of tests.
 
+Cron scheduling and time windows (worker fetch filtering, `ctx.step()` and `ctx.checkpoint()`) use the worker's `Clock` (`src/lib/clock.ts`): local time corrected by an offset sampled from the database when the worker starts and every 10 minutes. Set fake time before starting the orchestrator. To move time while a worker runs, restart the orchestrator or also shift the local clock with `setSystemTime` from `bun:test` (see `tests/integration/window-execution.test.ts`).
+
 ## Development Environment
 
 This project uses Bun for running TypeScript, tests, and package management.
