@@ -45,6 +45,7 @@ export class SchemaManager {
 		let migrated = false;
 
 		while (true) {
+			signal.throwIfAborted();
 			const nextMigration = this.migrationStore.getMigration(installedVersion + 1);
 			if (!nextMigration) {
 				return { migrated, shouldShutdown: false };
@@ -83,6 +84,7 @@ export class SchemaManager {
 		const start = Date.now();
 
 		while (Date.now() - start < maxWaitMs) {
+			signal.throwIfAborted();
 			const remaining = await this.db.countActiveOrchestratorsBelow(
 				{
 					version: targetVersion,

@@ -1,4 +1,5 @@
 import { afterAll, afterEach, beforeAll, test, expect, jest } from "bun:test";
+import postgres from "postgres";
 import { TestDatabasePool } from "../fixtures/test-database";
 import type { TestDatabase } from "../fixtures/test-database";
 import { Conductor } from "../../src/conductor";
@@ -6,6 +7,7 @@ import { Orchestrator } from "../../src/orchestrator";
 import { TaskSchemas } from "../../src/schemas";
 import { defineTask } from "../../src/task-definition";
 import { Deferred } from "../../src/lib/deferred";
+import { waitFor } from "../../src/lib/wait-for";
 
 let pool: TestDatabasePool;
 const databases: TestDatabase[] = [];
@@ -435,4 +437,43 @@ test("stop() leaves a conductor with an owned connection usable until close()", 
 	await conductor.close();
 
 	expect(conductor.invoke({ name: "noop" }, {})).rejects.toThrow();
+});
+
+test("stop() while another session holds the migration lock does not migrate", async () => {
+	const db = await pool.child();
+	databases.push(db);
+
+	const holder = postgres(db.url, { max: 1 });
+	const release = new Deferred<void>();
+	const locked = new Deferred<void>();
+	const holding = holder.begin(async (tx) => {
+		await tx`select pg_advisory_xact_lock(hashtext('pgconductor:migrations'))`;
+		locked.resolve();
+		await release.promise;
+	});
+	await locked.promise;
+
+	const conductor = Conductor.create({
+		sql: db.sql,
+		context: {},
+	});
+	const orch = Orchestrator.create({ conductor });
+
+	try {
+		const started = orch.start();
+		started.catch(() => {});
+		await waitFor(300);
+
+		const stopped = orch.stop().then(() => "stopped");
+		const outcome = await Promise.race([stopped, waitFor(1000).then(() => "still running")]);
+		expect(outcome).toBe("stopped");
+		await expect(started).rejects.toThrow();
+	} finally {
+		release.resolve();
+		await holding;
+		await holder.end();
+	}
+
+	expect(orch.isStopped).toBe(true);
+	expect(await conductor.db.getInstalledMigrationNumber()).toBe(-1);
 });

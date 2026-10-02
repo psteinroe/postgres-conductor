@@ -115,8 +115,8 @@ describe("DatabaseClient retry behavior", () => {
 
 		const controller = new AbortController();
 
-		// Abort after first retry
-		setTimeout(() => controller.abort(), 150);
+		// Abort during the first backoff
+		setTimeout(() => controller.abort(), 20);
 
 		try {
 			await db.invoke(
@@ -130,9 +130,7 @@ describe("DatabaseClient retry behavior", () => {
 			expect.unreachable("Should have thrown");
 		} catch (err) {
 			expect((err as Error).message).toBe("Deadlock detected");
-			// Should have tried at least once but stopped due to abort
-			expect(attemptCount).toBeGreaterThanOrEqual(1);
-			expect(attemptCount).toBeLessThan(5); // Should not retry many times
+			expect(attemptCount).toBe(1);
 		}
 	});
 
