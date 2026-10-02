@@ -72,7 +72,6 @@ test("cleanup releases locked executions", async () => {
 	const conductorSql = postgres(db.url, { max: 5 }); // Allow concurrent queries
 
 	// Define task
-	const blockForever = new Deferred<void>();
 	const taskDefinition = defineTask({
 		name: "blocking-task",
 		payload: z.object({}),
@@ -86,11 +85,11 @@ test("cleanup releases locked executions", async () => {
 
 	await conductor.ensureInstalled();
 
-	// Create task handler
-	const task = conductor.createTask(taskDefinition, { invocable: true }, async (event, _ctx) => {
-		if (event.name === "pgconductor.invoke") {
-			await blockForever.promise;
-		}
+	// Create task handler that blocks until shutdown
+	const task = conductor.createTask(taskDefinition, { invocable: true }, async (_event, ctx) => {
+		await new Promise((_resolve, reject) => {
+			ctx.signal.addEventListener("abort", () => reject(new Error("Task was stopped")));
+		});
 	});
 
 	const orch = Orchestrator.create({
@@ -135,7 +134,6 @@ test("cleanup releases locked executions", async () => {
 	expect(execution?.locked_by).toBe(null);
 
 	// Cleanup
-	blockForever.resolve();
 	await conductorSql.end();
 });
 

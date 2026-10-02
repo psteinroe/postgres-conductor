@@ -90,6 +90,8 @@ Checkpoints enable zero-downtime deployments. When a worker receives a shutdown 
 
 This ensures no work is lost during deployments or scale-downs.
 
+`ctx.signal` is aborted when shutdown starts. A task that throws because it saw the signal is released, not failed, so it does not use up an attempt.
+
 ## Time Windows
 
 Time windows restrict tasks to specific hours. Tasks outside their window pause at checkpoint or step boundaries:

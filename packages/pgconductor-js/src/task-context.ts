@@ -17,7 +17,7 @@ import type {
 import type { TaskIdentifier } from "./task";
 import type { Logger } from "./lib/logger";
 import { WindowChecker } from "./lib/window-checker";
-import { TypedAbortController } from "./lib/typed-abort-controller";
+import type { TypedAbortController } from "./lib/typed-abort-controller";
 import { parseDuration, type DurationInput } from "./lib/duration";
 import { SpanKind } from "@opentelemetry/api";
 import type { Telemetry, TraceContextCarrier } from "./telemetry";
@@ -43,8 +43,6 @@ export type TaskAbortReasons =
 			step_key?: string;
 			__pgconductorTaskAborted: true;
 	  }
-	// the worker wants to shut down
-	| { reason: "parent-aborted"; __pgconductorTaskAborted: true }
 	// the task invoked a child
 	| {
 			reason: "child-invocation";
@@ -68,28 +66,6 @@ export function isTaskAbortReason(result: unknown): result is TaskAbortReasons {
 	);
 }
 
-export function createTaskSignal(
-	parentSignal: AbortSignal,
-): TypedAbortController<TaskAbortReasons> {
-	const controller = new TypedAbortController<TaskAbortReasons>();
-
-	if (parentSignal.aborted) {
-		controller.abort({
-			__pgconductorTaskAborted: true,
-			reason: "parent-aborted",
-		});
-	} else {
-		parentSignal.addEventListener("abort", () => {
-			controller.abort({
-				__pgconductorTaskAborted: true,
-				reason: "parent-aborted",
-			});
-		});
-	}
-
-	return controller;
-}
-
 export class WaitForEventTimeoutError extends Error {
 	readonly code = "PGCONDUCTOR_WAIT_FOR_EVENT_TIMEOUT";
 	constructor(public readonly stepKey: string) {
@@ -100,6 +76,7 @@ export class WaitForEventTimeoutError extends Error {
 
 export type TaskContextOptions = {
 	abortController: TypedAbortController<TaskAbortReasons>;
+	signal: AbortSignal;
 	db: DatabaseClient;
 	clock: Clock;
 	execution: Execution;
@@ -151,7 +128,7 @@ export class TaskContext<
 	}
 
 	get signal(): AbortSignal {
-		return this.opts.abortController.signal;
+		return this.opts.signal;
 	}
 
 	/** Metadata describing the source execution when this is a DLQ delivery. */
@@ -508,14 +485,11 @@ export type BatchTaskEvent<Event extends object> = Event & {
 export class BatchTaskContext {
 	constructor(
 		private readonly abortController: TypedAbortController<TaskAbortReasons>,
+		public readonly signal: AbortSignal,
 		public readonly logger: Logger,
 		private readonly db: Pick<DatabaseClient, "countSteps">,
 		private readonly executions: Execution[],
 	) {}
-
-	get signal(): AbortSignal {
-		return this.abortController.signal;
-	}
 
 	/**
 	 * Sleep reschedules ALL executions in the batch.

@@ -19,7 +19,6 @@ import { BatchingAsyncQueue } from "./lib/batching-async-queue";
 import { nextCronOccurrence } from "./lib/cron";
 import { Clock } from "./lib/clock";
 import {
-	createTaskSignal,
 	isTaskAbortReason,
 	TaskContext,
 	BatchTaskContext,
@@ -30,7 +29,7 @@ import { createMaintenanceTask } from "./maintenance-task";
 import { makeChildLogger, type Logger } from "./lib/logger";
 import type { EventDefinition } from "./event-definition";
 import { coerceError } from "./lib/coerce-error";
-import type { TypedAbortController } from "./lib/typed-abort-controller";
+import { TypedAbortController } from "./lib/typed-abort-controller";
 import { Telemetry } from "./telemetry";
 import { noop } from "./lib/noop";
 
@@ -500,6 +499,19 @@ export class Worker<
 					return cancelled;
 				}
 
+				// Don't start executions claimed before shutdown
+				if (this.signal.aborted) {
+					return [
+						...cancelled,
+						...activeExecs.map((exec) => ({
+							execution_id: exec.id,
+							queue: exec.queue,
+							task_key: taskKey,
+							status: "released" as const,
+						})),
+					];
+				}
+
 				// If task has batch config, always use batch execution (even for single items)
 				if (task.batch) {
 					return [...cancelled, ...(await this.executeBatchTask(task, taskKey, activeExecs))];
@@ -532,7 +544,8 @@ export class Worker<
 		task: AnyTask,
 		exec: Execution,
 	): Promise<ExecutionResult | ExecutionResult[]> {
-		const taskAbortController = createTaskSignal(this.signal);
+		const taskAbortController = new TypedAbortController<TaskAbortReasons>();
+		const signal = AbortSignal.any([taskAbortController.signal, this.signal]);
 		this._runningTasks.set(exec.id, taskAbortController);
 
 		const abortPromise = new Promise<TaskAbortReasons>((resolve) => {
@@ -565,6 +578,7 @@ export class Worker<
 									db: this.db,
 									clock: this.clock,
 									abortController: taskAbortController,
+									signal,
 									execution: exec,
 									logger: makeChildLogger(this.logger, {
 										execution_id: exec.id,
@@ -610,12 +624,11 @@ export class Worker<
 					case "suspended":
 						return [];
 					case "released":
-					case "parent-aborted":
 						return {
 							execution_id: exec.id,
 							queue: exec.queue,
-							reschedule_in_ms: output.reason === "released" ? output.reschedule_in_ms : undefined,
-							step_key: output.reason === "released" ? output.step_key : undefined,
+							reschedule_in_ms: output.reschedule_in_ms,
+							step_key: output.step_key,
 							task_key: exec.task_key,
 							status: "released",
 						} as const;
@@ -632,6 +645,15 @@ export class Worker<
 				result: output,
 			} as const;
 		} catch (err) {
+			// A handler that stops on ctx.signal during shutdown is released, not failed
+			if (this.signal.aborted) {
+				return {
+					execution_id: exec.id,
+					queue: exec.queue,
+					task_key: exec.task_key,
+					status: "released",
+				} as const;
+			}
 			return {
 				execution_id: exec.id,
 				queue: exec.queue,
@@ -668,11 +690,12 @@ export class Worker<
 			};
 		});
 
-		const taskAbortController = createTaskSignal(this.signal);
+		const taskAbortController = new TypedAbortController<TaskAbortReasons>();
 
 		// Create batch context
 		const batchContext = new BatchTaskContext(
 			taskAbortController,
+			AbortSignal.any([taskAbortController.signal, this.signal]),
 			makeChildLogger(this.logger, {
 				task_key: taskKey,
 				queue: this.queueName,
@@ -757,6 +780,15 @@ export class Worker<
 				result: result[i],
 			}));
 		} catch (err) {
+			if (this.signal.aborted) {
+				return executions.map((exec) => ({
+					execution_id: exec.id,
+					queue: exec.queue,
+					task_key: taskKey,
+					status: "released" as const,
+				}));
+			}
+
 			// Handler threw: all fail together
 			const error = coerceError(err).message;
 			return executions.map((exec) => ({

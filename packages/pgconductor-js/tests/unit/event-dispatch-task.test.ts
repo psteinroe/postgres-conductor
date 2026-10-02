@@ -5,11 +5,14 @@ import {
 	EVENT_DISPATCH_TASK,
 } from "../../src/event-dispatch-task";
 import { DefaultLogger } from "../../src/lib/logger";
-import { BatchTaskContext, createTaskSignal } from "../../src/task-context";
+import { BatchTaskContext, type TaskAbortReasons } from "../../src/task-context";
+import { TypedAbortController } from "../../src/lib/typed-abort-controller";
 
 function context() {
+	const abortController = new TypedAbortController<TaskAbortReasons>();
 	return new BatchTaskContext(
-		createTaskSignal(new AbortController().signal),
+		abortController,
+		abortController.signal,
 		new DefaultLogger(),
 		{ countSteps: mock(async () => 0) },
 		[],

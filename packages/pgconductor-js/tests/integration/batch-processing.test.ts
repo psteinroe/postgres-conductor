@@ -423,15 +423,12 @@ describe("Batch Processing", () => {
 			defaultWorker: { pollIntervalMs: 50, flushIntervalMs: 50 },
 		});
 
-		await orchestrator.start();
+		await conductor.ensureInstalled();
 
 		// Invoke just one task
 		await conductor.invoke({ name: "batch-single" }, { value: 1 });
 
-		// Wait longer to ensure worker has fetched the execution
-		await new Promise((r) => setTimeout(r, 500));
-
-		await orchestrator.stop();
+		await orchestrator.drain();
 
 		expect(executed).toBe(true);
 	}, 30000);
