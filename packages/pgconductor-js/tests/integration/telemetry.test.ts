@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { AsyncLocalStorage } from "node:async_hooks";
 import {
 	context,
@@ -25,11 +25,35 @@ import { Orchestrator } from "../../src/orchestrator";
 import { Task } from "../../src/task";
 import { Worker } from "../../src/worker";
 import { DefaultLogger } from "../../src/lib/logger";
-import { InMemoryDatabaseClient } from "../mocks/in-memory-database-client";
 import type { DatabaseClient } from "../../src/database-client";
+import { TestDatabasePool } from "../fixtures/test-database";
 import { Telemetry, type TraceContextCarrier } from "../../src/telemetry";
 
 const logger = new DefaultLogger();
+const orchestratorId = crypto.randomUUID();
+
+let pool: TestDatabasePool;
+
+beforeAll(async () => {
+	pool = await TestDatabasePool.create();
+}, 60000);
+
+afterAll(async () => {
+	await pool?.destroy();
+});
+
+async function createDb() {
+	const db = await pool.child();
+	await Conductor.create({ sql: db.sql, context: {} }).ensureInstalled();
+	return db;
+}
+
+async function getExecution(sql: Sql, id: string) {
+	const [execution] = await sql`
+		select completed_at, trace_context from pgconductor._private_executions where id = ${id}
+	`;
+	return execution;
+}
 
 // sdk-trace-base deliberately does not install a context manager. Use the
 // platform async context manager so worker/user-child assertions exercise the
@@ -87,15 +111,16 @@ function makeTask(
 	name: string,
 	execute: (event: any, ctx: any) => Promise<any>,
 	config: Record<string, unknown> = {},
+	triggers: object = { invocable: true },
 ) {
-	return Task.create({ name, ...config } as any, { invocable: true } as any, execute as any);
+	return Task.create({ name, ...config } as any, triggers as any, execute as any);
 }
 
-function makeWorker(db: InMemoryDatabaseClient, task: any, telemetry = true) {
+function makeWorker(db: DatabaseClient, task: any, telemetry = true) {
 	return new Worker(
 		"default",
 		[task],
-		db as unknown as DatabaseClient,
+		db,
 		logger,
 		{ pollIntervalMs: 1, flushIntervalMs: 1, fetchBatchSize: 10, flushBatchSize: 10 },
 		{},
@@ -122,22 +147,20 @@ describe.serial("OpenTelemetry instrumentation", () => {
 
 	test("telemetry false emits no spans and persists null carrier", async () => {
 		const { exporter, provider } = installProvider();
-		const db = new InMemoryDatabaseClient();
-		const conductor = Conductor.create({ sql: fakeSql, context: {}, telemetry: false });
-		(conductor as any).db = db;
+		const { sql } = await createDb();
+		const conductor = Conductor.create({ sql, context: {}, telemetry: false });
 		const id = (await conductor.invoke({ name: "disabled" }, {
 			secret: "payload",
 		} as any)) as unknown as string;
 		expect(exporter.getFinishedSpans()).toHaveLength(0);
-		expect(db.getExecution(id)?.trace_context).toBeNull();
+		expect((await getExecution(sql, id))?.trace_context).toBeNull();
 		await cleanup(provider);
 	});
 
 	test("the orchestrator passes telemetry opt-out to its default worker", async () => {
 		const { exporter, provider } = installProvider();
-		const db = new InMemoryDatabaseClient();
-		const conductor = Conductor.create({ sql: fakeSql, context: {}, telemetry: false });
-		(conductor as any).db = db;
+		const { sql } = await createDb();
+		const conductor = Conductor.create({ sql, context: {}, telemetry: false });
 		const task = makeTask("orchestrator-disabled", async () => undefined);
 		const id = (await conductor.invoke({ name: "orchestrator-disabled" }, {
 			secret: "payload",
@@ -149,26 +172,26 @@ describe.serial("OpenTelemetry instrumentation", () => {
 		} as any);
 
 		await orchestrator.drain();
-		expect(db.getExecution(id)?.state).toBe("completed");
+		const execution = await getExecution(sql, id);
+		expect(execution?.completed_at).not.toBeNull();
 		expect(exporter.getFinishedSpans()).toHaveLength(0);
-		expect(db.getExecution(id)?.trace_context).toBeNull();
+		expect(execution?.trace_context).toBeNull();
 		await cleanup(provider);
 	});
 
 	test("telemetry opt-out includes the internal event-dispatch worker", async () => {
 		const { exporter, provider } = installProvider();
-		const db = new InMemoryDatabaseClient();
+		const { client: db, sql } = await createDb();
 		const conductor = Conductor.create({
-			sql: fakeSql,
+			sql,
 			events: EventSchemas.fromSchema([
 				defineEvent({ name: "disabled.event", payload: z.object({}) }),
 			]),
 			context: {},
 			telemetry: false,
 		});
-		(conductor as any).db = db;
 		const eventId = await db.emitEvent({ eventKey: "disabled.event", payload: {} });
-		expect(db.getExecution(eventId)?.state).toBe("pending");
+		expect((await getExecution(sql, eventId))?.completed_at).toBeNull();
 		const orchestrator = Orchestrator.create({
 			conductor,
 			tasks: [],
@@ -176,14 +199,14 @@ describe.serial("OpenTelemetry instrumentation", () => {
 		} as any);
 
 		await orchestrator.drain();
-		expect(db.getExecution(eventId)).toBeUndefined();
+		expect(await getExecution(sql, eventId)).toBeUndefined();
 		expect(exporter.getFinishedSpans()).toHaveLength(0);
 		await cleanup(provider);
 	});
 
 	test("producer carrier becomes the real worker consumer parent", async () => {
 		const { exporter, provider } = installProvider();
-		const db = new InMemoryDatabaseClient();
+		const { client: db } = await createDb();
 		const { carrier, producer } = producerCarrier("send-parent");
 		await db.invoke({
 			task_key: "parented",
@@ -192,7 +215,7 @@ describe.serial("OpenTelemetry instrumentation", () => {
 			trace_context: carrier,
 		});
 		const task = makeTask("parented", async () => undefined);
-		await makeWorker(db, task).drain("worker");
+		await makeWorker(db, task).drain(orchestratorId);
 		const consumer = spans(exporter, "process default")[0]!;
 		expect(consumer.parentSpanId).toBe(producer.spanContext().spanId);
 		expect(consumer.spanContext().traceId).toBe(producer.spanContext().traceId);
@@ -204,7 +227,7 @@ describe.serial("OpenTelemetry instrumentation", () => {
 
 	test("batch consumer links every producer context", async () => {
 		const { exporter, provider } = installProvider();
-		const db = new InMemoryDatabaseClient();
+		const { client: db } = await createDb();
 		const first = producerCarrier("batch-one");
 		const second = producerCarrier("batch-two");
 		await db.invokeBatch([
@@ -213,7 +236,7 @@ describe.serial("OpenTelemetry instrumentation", () => {
 			{ task_key: "batched", queue: "default", payload: {}, trace_context: first.carrier },
 		]);
 		const task = makeTask("batched", async () => [], { batch: { size: 10, timeoutMs: 1 } });
-		await makeWorker(db, task).drain("worker");
+		await makeWorker(db, task).drain(orchestratorId);
 		const consumer = spans(exporter, "process default")[0]!;
 		expect(consumer.links.map((link) => link.context.spanId)).toEqual(
 			expect.arrayContaining([
@@ -227,7 +250,7 @@ describe.serial("OpenTelemetry instrumentation", () => {
 
 	test("retry attempts have finite, separate process spans", async () => {
 		const { exporter, provider } = installProvider();
-		const db = new InMemoryDatabaseClient();
+		const { client: db, sql } = await createDb();
 		let attempts = 0;
 		const task = makeTask("retry-span", async () => {
 			if (++attempts === 1) throw new Error("try again");
@@ -235,27 +258,27 @@ describe.serial("OpenTelemetry instrumentation", () => {
 		(task as any).maxAttempts = 2;
 		const id = await db.invoke({ task_key: "retry-span", queue: "default", payload: {} });
 		const worker = makeWorker(db, task);
-		await worker.drain("worker");
-		db.advanceTime(16000);
-		await worker.drain("worker");
+		await worker.drain(orchestratorId);
+		await db.setFakeTime({ date: new Date(Date.now() + 16000) });
+		await worker.drain(orchestratorId);
 		const processSpans = spans(exporter, "process default");
 		expect(processSpans).toHaveLength(2);
 		expect(new Set(processSpans.map((span) => span.spanContext().spanId)).size).toBe(2);
 		expect(processSpans[0]!.status.code).toBe(SpanStatusCode.ERROR);
 		expect(processSpans[0]!.attributes["error.type"]).toBe("Error");
-		expect(db.getExecution(id!)?.state).toBe("completed");
+		expect((await getExecution(sql, id!))?.completed_at).not.toBeNull();
 		await cleanup(provider);
 	});
 
 	test("a user-created active child is a child of process", async () => {
 		const { exporter, provider } = installProvider();
-		const db = new InMemoryDatabaseClient();
+		const { client: db } = await createDb();
 		const task = makeTask("active-child", async () => {
 			const child = trace.getTracer("user").startSpan("user child");
 			child.end();
 		});
 		await db.invoke({ task_key: "active-child", queue: "default", payload: {} });
-		await makeWorker(db, task).drain("worker");
+		await makeWorker(db, task).drain(orchestratorId);
 		const parent = spans(exporter, "process default")[0]!;
 		const child = spans(exporter, "user child")[0]!;
 		expect(child.parentSpanId).toBe(parent.spanContext().spanId);
@@ -264,7 +287,7 @@ describe.serial("OpenTelemetry instrumentation", () => {
 
 	test("process spans cover the application handler, not recurring-task scheduling", async () => {
 		const { exporter, provider } = installProvider();
-		const db = new InMemoryDatabaseClient();
+		const { client: db } = await createDb();
 		await db.invoke({
 			task_key: "handler-boundary",
 			queue: "default",
@@ -281,10 +304,15 @@ describe.serial("OpenTelemetry instrumentation", () => {
 		let handlerSpanId: string | undefined;
 		await makeWorker(
 			db,
-			makeTask("handler-boundary", async () => {
-				handlerSpanId = trace.getSpan(context.active())?.spanContext().spanId;
-			}),
-		).drain("worker");
+			makeTask(
+				"handler-boundary",
+				async () => {
+					handlerSpanId = trace.getSpan(context.active())?.spanContext().spanId;
+				},
+				{},
+				{ cron: "* * * * *", name: "boundary" },
+			),
+		).drain(orchestratorId);
 		const process = spans(exporter, "process default")[0]!;
 		expect(schedulingSpanId).toBeUndefined();
 		expect(handlerSpanId).toBe(process.spanContext().spanId);
@@ -293,7 +321,7 @@ describe.serial("OpenTelemetry instrumentation", () => {
 
 	test("settle records database errors", async () => {
 		const { exporter, provider } = installProvider();
-		const db = new InMemoryDatabaseClient();
+		const { client: db } = await createDb();
 		await db.invoke({ task_key: "settle-error", queue: "default", payload: {} });
 		const original = db.returnExecutions.bind(db);
 		(db as any).returnExecutions = async () => {
@@ -302,7 +330,7 @@ describe.serial("OpenTelemetry instrumentation", () => {
 		await makeWorker(
 			db,
 			makeTask("settle-error", async () => undefined),
-		).drain("worker");
+		).drain(orchestratorId);
 		const settle = spans(exporter, "settle default")[0]!;
 		expect(settle.status.code).toBe(SpanStatusCode.ERROR);
 		expect(settle.attributes["error.type"]).toBe("Error");
@@ -312,7 +340,7 @@ describe.serial("OpenTelemetry instrumentation", () => {
 
 	test("step callback is one span and cached replay creates none", async () => {
 		const { exporter, provider } = installProvider();
-		const db = new InMemoryDatabaseClient();
+		const { client: db } = await createDb();
 		let attempts = 0;
 		const task = makeTask("step-cache", async (_event, ctx) => {
 			const value = await ctx.step("once", async () => 42);
@@ -327,9 +355,9 @@ describe.serial("OpenTelemetry instrumentation", () => {
 		});
 		await db.invoke({ task_key: "step-cache", queue: "default", payload: {} });
 		const worker = makeWorker(db, task);
-		await worker.drain("worker");
-		db.advanceTime(16000);
-		await worker.drain("worker");
+		await worker.drain(orchestratorId);
+		await db.setFakeTime({ date: new Date(Date.now() + 16000) });
+		await worker.drain(orchestratorId);
 		const stepSpan = spans(exporter, "step step-cache")[0]!;
 		expect(spans(exporter, "step step-cache")).toHaveLength(1);
 		expect(stepSpan.parentSpanId).toBe(spans(exporter, "process default")[0]!.spanContext().spanId);
@@ -338,7 +366,7 @@ describe.serial("OpenTelemetry instrumentation", () => {
 
 	test("cron and event executions are root process spans", async () => {
 		const { exporter, provider } = installProvider();
-		const db = new InMemoryDatabaseClient();
+		const { client: db, sql } = await createDb();
 		await db.invoke({
 			task_key: "root-cron",
 			queue: "default",
@@ -351,17 +379,24 @@ describe.serial("OpenTelemetry instrumentation", () => {
 			queue: "default",
 			payload: { event: "user.created", payload: { id: 1 } },
 		});
-		db.getExecution(eventId!)!.subscription_id = "event-subscription";
+		await sql`
+			update pgconductor._private_executions
+			set subscription_id = ${crypto.randomUUID()}, parent_execution_id = ${crypto.randomUUID()}
+			where id = ${eventId}
+		`;
 		const worker = new Worker(
 			"default",
-			[makeTask("root-cron", async () => undefined), makeTask("root-event", async () => undefined)],
-			db as unknown as DatabaseClient,
+			[
+				makeTask("root-cron", async () => undefined, {}, { cron: "* * * * *", name: "nightly" }),
+				makeTask("root-event", async () => undefined),
+			],
+			db,
 			logger,
 			{ pollIntervalMs: 1, flushIntervalMs: 1 },
 			{},
 			new Telemetry(),
 		);
-		await worker.drain("worker");
+		await worker.drain(orchestratorId);
 		const processSpans = spans(exporter, "process default");
 		expect(processSpans.map((span) => span.attributes["pgconductor.task.name"])).toEqual(
 			expect.arrayContaining(["root-cron", "root-event"]),
@@ -372,7 +407,7 @@ describe.serial("OpenTelemetry instrumentation", () => {
 
 	test("malformed context starts a root span without recording payloads", async () => {
 		const { exporter, provider } = installProvider();
-		const db = new InMemoryDatabaseClient();
+		const { client: db } = await createDb();
 		await db.invoke({
 			task_key: "safe",
 			queue: "default",
@@ -382,7 +417,7 @@ describe.serial("OpenTelemetry instrumentation", () => {
 		await makeWorker(
 			db,
 			makeTask("safe", async () => undefined),
-		).drain("worker");
+		).drain(orchestratorId);
 		const processSpan = spans(exporter, "process default")[0]!;
 		expect(processSpan.parentSpanId).toBeUndefined();
 		for (const span of exporter.getFinishedSpans()) {
