@@ -103,6 +103,9 @@ export interface Execution {
 	dead_letter?: (Omit<DeadLetterMetadata, "failedAt"> & { failedAt: string }) | null;
 	trace_context?: TraceContextCarrier | null;
 	metadata?: Payload | null;
+	attempts: number;
+	parent_execution_id: string | null;
+	resumed: boolean;
 }
 
 // todo: move all of this to query-builder too or create new types.ts file

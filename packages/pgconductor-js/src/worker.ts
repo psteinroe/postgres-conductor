@@ -32,6 +32,7 @@ import { coerceError } from "./lib/coerce-error";
 import { TypedAbortController } from "./lib/typed-abort-controller";
 import { Telemetry } from "./telemetry";
 import { noop } from "./lib/noop";
+import type { Middleware, MiddlewareResult } from "./middleware";
 
 /**
  * The configuration options for the Worker.
@@ -157,6 +158,7 @@ export class Worker<
 		config: Partial<WorkerConfig> = {},
 		private readonly extraContext: object = {},
 		private readonly telemetry = new Telemetry(),
+		private readonly middleware: readonly Middleware<any, any>[] = [],
 	) {
 		const maintenanceTask = createMaintenanceTask(this.queueName);
 		this.tasks = tasks.reduce(
@@ -531,11 +533,52 @@ export class Worker<
 		});
 		const taskEvent = taskEventFor(exec);
 
-		// Pass db and tasks as extra context to maintenance task
-		const extraContext =
-			task.name === "pgconductor.maintenance"
-				? { ...this.extraContext, db: this.db, tasks: this.tasks }
-				: this.extraContext;
+		// Pass db and tasks as extra context to maintenance task, which skips middleware
+		const isMaintenance = task.name === "pgconductor.maintenance";
+		const extraContext = isMaintenance
+			? { ...this.extraContext, db: this.db, tasks: this.tasks }
+			: this.extraContext;
+		const context = TaskContext.create<Tasks, Events, typeof extraContext>(
+			{
+				db: this.db,
+				clock: this.clock,
+				abortController: taskAbortController,
+				signal,
+				execution: exec,
+				logger: makeChildLogger(this.logger, {
+					execution_id: exec.id,
+					orchestrator_id: exec.locked_by,
+					task_key: exec.task_key,
+					queue: exec.queue,
+				}),
+				eventDefinitions: task.eventDefinitions,
+				metadataSchema: task.metadataSchema,
+				window: task.window,
+				telemetry: this.telemetry,
+			},
+			extraContext,
+		);
+		const execution = {
+			id: exec.id,
+			task_key: exec.task_key,
+			queue: exec.queue,
+			attempt: exec.attempts,
+			parent_execution_id: exec.parent_execution_id,
+			resumed: exec.resumed,
+			metadata: exec.metadata || undefined,
+		};
+		// next() also settles when the handler suspends, so middleware finally blocks run.
+		// The outer race below sees the abort first, so middleware cannot turn it into a result.
+		const run = (isMaintenance ? [] : this.middleware).reduceRight<
+			() => ReturnType<AnyTask["execute"]>
+		>(
+			(next, middleware) => () =>
+				middleware({ execution, ctx: context }, <TNext extends object>(added: TNext) => {
+					Object.assign(context, added);
+					return next() as Promise<MiddlewareResult<TNext>>;
+				}),
+			() => Promise.race([task.execute(taskEvent, context), abortPromise]),
+		);
 
 		try {
 			await this.scheduleNextExecution(exec);
@@ -545,33 +588,7 @@ export class Worker<
 				queue: exec.queue,
 				messageId: exec.id,
 				traceContexts: [exec.trace_context],
-				run: () =>
-					Promise.race([
-						task.execute(
-							taskEvent,
-							TaskContext.create<Tasks, Events, typeof extraContext>(
-								{
-									db: this.db,
-									clock: this.clock,
-									abortController: taskAbortController,
-									signal,
-									execution: exec,
-									logger: makeChildLogger(this.logger, {
-										execution_id: exec.id,
-										orchestrator_id: exec.locked_by,
-										task_key: exec.task_key,
-										queue: exec.queue,
-									}),
-									eventDefinitions: task.eventDefinitions,
-									metadataSchema: task.metadataSchema,
-									window: task.window,
-									telemetry: this.telemetry,
-								},
-								extraContext,
-							),
-						),
-						abortPromise,
-					]),
+				run: () => Promise.race([run(), abortPromise]),
 			});
 
 			if (isTaskAbortReason(output)) {
