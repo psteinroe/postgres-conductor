@@ -422,6 +422,7 @@ describe.serial("waitForEvent", () => {
 			timeoutMs: null,
 			orchestratorId: crypto.randomUUID(),
 			suspend: true,
+			claimToken: crypto.randomUUID(),
 		});
 		await expect(result).rejects.toThrow("is not claimed");
 		const rows = await database.sql<{ n: number; waiting_step_key: string | null }[]>`
@@ -442,12 +443,13 @@ describe.serial("waitForEvent", () => {
 		if (!executionId) throw new Error("invoke did not return an execution id");
 
 		const orchestratorId = crypto.randomUUID();
-		await database.client.getExecutions({
+		const [claimed] = await database.client.getExecutions({
 			orchestratorId,
 			queueName: "default",
 			batchSize: 1,
 			taskKeys: ["wait.task"],
 		});
+		if (!claimed) throw new Error("expected claim");
 		const args = {
 			executionId,
 			queue: "default",
@@ -459,6 +461,7 @@ describe.serial("waitForEvent", () => {
 			timeoutMs: 5_000,
 			orchestratorId,
 			suspend: true,
+			claimToken: claimed.claim_token,
 		};
 		const execution = async () => {
 			const [row] = await database.sql<{ run_at: Date; locked_by: string | null }[]>`
@@ -473,15 +476,74 @@ describe.serial("waitForEvent", () => {
 		expect(first?.locked_by).toBeNull();
 
 		await Bun.sleep(50);
+		const claimToken = crypto.randomUUID();
 		await database.sql`
 			update pgconductor._private_executions
-			set locked_by = ${orchestratorId}::uuid, run_at = pgconductor._private_current_time()
+			set locked_by = ${orchestratorId}::uuid, claim_token = ${claimToken}::uuid,
+				run_at = pgconductor._private_current_time()
 			where id = ${executionId}::uuid
 		`;
-		expect(await database.client.registerEventWait(args)).toBeNull();
+		expect(await database.client.registerEventWait({ ...args, claimToken })).toBeNull();
 		const second = await execution();
 		expect(second?.locked_by).toBeNull();
 		expect(second?.run_at).toEqual(first?.run_at);
+	});
+
+	test.serial("does not let a replayed registration release a later claim", async () => {
+		const database = await db();
+		const { conductor, orchestrator } = await setup(database, async () => {}, orchestrators);
+		await orchestrator.stop();
+		const executionId = await conductor.invoke({ name: "wait.task" }, { id: "replayed" });
+		if (!executionId) throw new Error("invoke did not return an execution id");
+
+		const orchestratorId = crypto.randomUUID();
+		const claim = async () => {
+			const [execution] = await database.client.getExecutions({
+				orchestratorId,
+				queueName: "default",
+				batchSize: 1,
+				taskKeys: ["wait.task"],
+			});
+			if (!execution) throw new Error("expected claim");
+			return execution;
+		};
+		const register = (claimToken: string) =>
+			database.client.registerEventWait({
+				executionId,
+				queue: "default",
+				taskKey: "wait.task",
+				eventKey: event.name,
+				stepKey: "replayed:wait",
+				requiredFieldCount: 0,
+				terms: [],
+				timeoutMs: 1_000,
+				orchestratorId,
+				claimToken,
+				suspend: true,
+			});
+
+		await database.client.setFakeTime({ date: new Date("2100-01-01T12:00:00Z") });
+		const first = await claim();
+		expect(await register(first.claim_token)).toBeNull();
+
+		await database.client.setFakeTime({ date: new Date("2100-01-01T12:00:02Z") });
+		const second = await claim();
+		expect(await register(second.claim_token)).toEqual({ status: "timed_out" });
+
+		// A retry of the first registration after a lost commit acknowledgement.
+		await expect(register(first.claim_token)).rejects.toThrow("is not claimed");
+		await database.client.clearFakeTime();
+
+		const [row] = await database.sql<{ locked_by: string | null; subscriptions: number }[]>`
+			select e.locked_by, (
+				select count(*)::int from pgconductor._private_custom_event_subscriptions s
+				where s.execution_id = e.id
+			) as subscriptions
+			from pgconductor._private_executions e
+			where e.id = ${executionId}::uuid
+		`;
+		expect(row?.locked_by).toBe(orchestratorId);
+		expect(row?.subscriptions).toBe(0);
 	});
 
 	test.serial("cleans abandoned waits when executions settle", async () => {
@@ -500,7 +562,8 @@ describe.serial("waitForEvent", () => {
 				batchSize: 1,
 				taskKeys: ["wait.task"],
 			});
-			expect(execution?.id).toBe(executionId);
+			if (!execution) throw new Error("expected claim");
+			expect(execution.id).toBe(executionId);
 			expect(
 				await database.client.registerEventWait({
 					executionId,
@@ -513,6 +576,7 @@ describe.serial("waitForEvent", () => {
 					timeoutMs: null,
 					orchestratorId,
 					suspend: true,
+					claimToken: execution.claim_token,
 				}),
 			).toBeNull();
 			await database.sql`
@@ -523,6 +587,7 @@ describe.serial("waitForEvent", () => {
 
 			const result = {
 				execution_id: executionId,
+				claim_token: execution.claim_token,
 				queue: "default",
 				task_key: "wait.task",
 			};
@@ -925,16 +990,19 @@ describe.serial("waitForEvent", () => {
 			suspend: true,
 		};
 
-		await claim("default", "wait.task");
-		expect(await database.client.registerEventWait(args)).toBeNull();
+		const [first] = await claim("default", "wait.task");
+		if (!first) throw new Error("expected claim");
+		expect(
+			await database.client.registerEventWait({ ...args, claimToken: first.claim_token }),
+		).toBeNull();
 		await database.client.emitEvent({
 			eventKey: event.name,
 			payload: { id: "claimed", kind: "match" },
 		});
 		await Bun.sleep(150);
-		expect((await claim("default", "wait.task")).map((execution) => execution.id)).toEqual([
-			executionId,
-		]);
+		const [second] = await claim("default", "wait.task");
+		expect(second?.id).toBe(executionId);
+		if (!second) throw new Error("expected claim");
 		const events = await claim("pgconductor.internal", "pgconductor.event-dispatch");
 		await database.client.dispatchCustomEvents({
 			eventIds: events.map((execution) => execution.id),
@@ -945,7 +1013,9 @@ describe.serial("waitForEvent", () => {
 			select locked_by from pgconductor._private_executions where id = ${executionId}::uuid
 		`;
 		expect(row?.locked_by).toBe(orchestratorId);
-		expect(await database.client.registerEventWait(args)).toEqual({
+		expect(
+			await database.client.registerEventWait({ ...args, claimToken: second.claim_token }),
+		).toEqual({
 			status: "resolved",
 			event: { name: "wait.order", payload: { id: "claimed", kind: "match" } },
 		});
@@ -976,7 +1046,8 @@ describe.serial("waitForEvent", () => {
 				return row?.run_at;
 			};
 
-			await claim("default", "wait.task");
+			const [first] = await claim("default", "wait.task");
+			if (!first) throw new Error("expected claim");
 			expect(
 				await database.client.registerEventWait({
 					executionId,
@@ -988,6 +1059,7 @@ describe.serial("waitForEvent", () => {
 					terms: [],
 					timeoutMs: 100,
 					orchestratorId,
+					claimToken: first.claim_token,
 					suspend: true,
 				}),
 			).toBeNull();
@@ -996,15 +1068,16 @@ describe.serial("waitForEvent", () => {
 				payload: { id: "late", kind: "match" },
 			});
 			await Bun.sleep(150);
-			expect((await claim("default", "wait.task")).map((execution) => execution.id)).toEqual([
-				executionId,
-			]);
+			const [second] = await claim("default", "wait.task");
+			expect(second?.id).toBe(executionId);
+			if (!second) throw new Error("expected claim");
 			await database.client.returnExecutions({
 				orchestratorId,
 				completed: [],
 				failed: [
 					{
 						execution_id: executionId,
+						claim_token: second.claim_token,
 						queue: "default",
 						task_key: "wait.task",
 						status: "failed",

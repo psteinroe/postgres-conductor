@@ -318,6 +318,7 @@ export class Orchestrator {
 	 * - Updates last_heartbeat_at every heartbeat
 	 * - Checks for version mismatch shutdowns from database
 	 * - Stops when another orchestrator recovered us as stale
+	 * - Releases claims the workers do not hold, such as a claim whose response was lost
 	 * - Recovers stale orchestrators periodically (every 8th heartbeat)
 	 */
 	private async runHeartbeats(signal: AbortSignal): Promise<void> {
@@ -341,6 +342,10 @@ export class Orchestrator {
 						orchestratorId: this.orchestratorId,
 						version: PACKAGE_VERSION,
 						migrationNumber: this.migrationStore.getLatestMigrationNumber(),
+						held: {
+							executionIds: this.workers.flatMap((worker) => worker.heldExecutionIds),
+							claimGrace: `${HEARTBEAT_INTERVAL_MS} milliseconds`,
+						},
 					},
 					{ signal },
 				);

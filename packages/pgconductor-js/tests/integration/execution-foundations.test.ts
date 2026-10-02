@@ -1,7 +1,10 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
 import postgres from "postgres";
 import { Conductor } from "../../src/conductor";
+import { DatabaseClient } from "../../src/database-client";
+import { DefaultLogger } from "../../src/lib/logger";
 import { TestDatabasePool, type TestDatabase } from "../fixtures/test-database";
+import { waitForCondition } from "../test-utils";
 
 describe("execution foundations", () => {
 	let pool: TestDatabasePool;
@@ -112,6 +115,7 @@ describe("execution foundations", () => {
 		await db.client.returnExecutions(
 			grouped(first.locked_by, {
 				execution_id: first.id,
+				claim_token: first.claim_token,
 				queue: first.queue,
 				task_key: first.task_key,
 				status: "completed",
@@ -120,6 +124,7 @@ describe("execution foundations", () => {
 		await db.client.returnExecutions(
 			grouped(second.locked_by, {
 				execution_id: second.id,
+				claim_token: second.claim_token,
 				queue: second.queue,
 				task_key: second.task_key,
 				status: "completed",
@@ -325,6 +330,7 @@ describe("execution foundations", () => {
 			invokeChild: [
 				{
 					execution_id: parent.id,
+					claim_token: parent.claim_token,
 					queue: parent.queue,
 					task_key: parent.task_key,
 					status: "invoke_child",
@@ -360,6 +366,7 @@ describe("execution foundations", () => {
 			failed: [
 				{
 					execution_id: child.id,
+					claim_token: child.claim_token,
 					queue: child.queue,
 					task_key: child.task_key,
 					status: "permanently_failed",
@@ -419,6 +426,7 @@ describe("execution foundations", () => {
 			invokeChild: [
 				{
 					execution_id: parent.id,
+					claim_token: parent.claim_token,
 					queue: parent.queue,
 					task_key: parent.task_key,
 					status: "invoke_child",
@@ -446,6 +454,7 @@ describe("execution foundations", () => {
 			failed: [
 				{
 					execution_id: child.id,
+					claim_token: child.claim_token,
 					queue: child.queue,
 					task_key: child.task_key,
 					status: "permanently_failed",
@@ -490,6 +499,7 @@ describe("execution foundations", () => {
 		await db.client.returnExecutions(
 			grouped(claimed.locked_by, {
 				execution_id: claimed.id,
+				claim_token: claimed.claim_token,
 				queue: claimed.queue,
 				task_key: claimed.task_key,
 				status: "completed",
@@ -514,6 +524,124 @@ describe("execution foundations", () => {
 		expect(outcome[0]?.locked_by).toBeNull();
 		expect(outcome[0]?.attempts).toBe(1);
 		expect(outcome[0]?.last_error).toBe("cancelled before flush");
+	});
+
+	test("fences a replayed release after the same orchestrator re-claims the execution", async () => {
+		const db = await database();
+		await db.client.registerWorker({
+			queueName: "replayed",
+			taskSpecs: [{ key: "replayed-task", queue: "replayed", maxAttempts: 3 }],
+			cronSchedules: [],
+			eventSubscriptions: [],
+		});
+		const executionId = await db.client.invoke({ task_key: "replayed-task", queue: "replayed" });
+		if (!executionId) throw new Error("expected execution id");
+
+		const orchestratorId = crypto.randomUUID();
+		const claim = async () => {
+			const [execution] = await db.client.getExecutions({
+				orchestratorId,
+				queueName: "replayed",
+				batchSize: 1,
+				taskKeys: ["replayed-task"],
+			});
+			if (!execution) throw new Error("expected claim");
+			return execution;
+		};
+
+		const first = await claim();
+		const release = {
+			orchestratorId,
+			completed: [],
+			failed: [],
+			released: [
+				{
+					execution_id: first.id,
+					claim_token: first.claim_token,
+					queue: first.queue,
+					task_key: first.task_key,
+					status: "released" as const,
+					reschedule_in_ms: 0,
+				},
+			],
+			invokeChild: [],
+		};
+		await db.client.returnExecutions(release);
+		await claim();
+
+		// A retry after a lost commit acknowledgement sends the same statement again.
+		await db.client.returnExecutions(release);
+
+		const [row] = await db.sql<{ locked_by: string | null; attempts: number }[]>`
+			select locked_by, attempts from pgconductor._private_executions
+			where id = ${executionId}::uuid
+		`;
+		expect(row?.locked_by).toBe(orchestratorId);
+		expect(row?.attempts).toBe(1);
+	});
+
+	test("retries a settlement whose connection was terminated", async () => {
+		const db = await database();
+		await db.client.registerWorker({
+			queueName: "retried-settlement",
+			taskSpecs: [{ key: "retried-settlement-task", queue: "retried-settlement" }],
+			cronSchedules: [],
+			eventSubscriptions: [],
+		});
+		await db.client.invoke({ task_key: "retried-settlement-task", queue: "retried-settlement" });
+		const [claimed] = await db.client.getExecutions({
+			orchestratorId: crypto.randomUUID(),
+			queueName: "retried-settlement",
+			batchSize: 1,
+			taskKeys: ["retried-settlement-task"],
+		});
+		if (!claimed) throw new Error("expected claim");
+
+		const blockerSql = postgres(db.url, { max: 1 });
+		const settlerSql = postgres(db.url, { max: 1 });
+		const settler = new DatabaseClient({ sql: settlerSql, logger: new DefaultLogger() });
+		const abort = new AbortController();
+		try {
+			await blockerSql`begin`;
+			await blockerSql`select 1 from pgconductor._private_executions where id = ${claimed.id}::uuid for update`;
+			const settled = settler.returnExecutions(
+				grouped(claimed.locked_by, {
+					execution_id: claimed.id,
+					claim_token: claimed.claim_token,
+					queue: claimed.queue,
+					task_key: claimed.task_key,
+					status: "completed",
+				}),
+				{ signal: abort.signal },
+			);
+			await waitForCondition(async () => {
+				const [blocked] = await db.sql<{ count: number }[]>`
+					select count(*)::int as count from pg_stat_activity
+					where datname = current_database() and wait_event_type = 'Lock'
+				`;
+				return blocked?.count === 1;
+			});
+			await db.sql`
+				select pg_terminate_backend(pid) from pg_stat_activity
+				where datname = current_database() and wait_event_type = 'Lock'
+			`;
+			await blockerSql`commit`;
+
+			await Promise.race([
+				settled,
+				Bun.sleep(5_000).then(() => {
+					throw new Error("settlement was not retried");
+				}),
+			]);
+		} finally {
+			abort.abort();
+			await Promise.all([blockerSql.end(), settlerSql.end()]);
+		}
+
+		const [row] = await db.sql<{ completed_at: Date | null }[]>`
+			select completed_at from pgconductor._private_executions where id = ${claimed.id}::uuid
+		`;
+		expect(row?.completed_at).not.toBeNull();
 	});
 
 	test("cancelling a waiting parent permanently fails its pending child", async () => {
@@ -549,6 +677,7 @@ describe("execution foundations", () => {
 			invokeChild: [
 				{
 					execution_id: parent.id,
+					claim_token: parent.claim_token,
 					queue: parent.queue,
 					task_key: parent.task_key,
 					status: "invoke_child",
@@ -686,6 +815,7 @@ describe("execution foundations", () => {
 
 		const staleBase = {
 			execution_id: executionId,
+			claim_token: oldClaim.claim_token,
 			queue: "fenced",
 			task_key: "fenced-task",
 		};
@@ -715,6 +845,7 @@ describe("execution foundations", () => {
 		await db.client.returnExecutions(
 			grouped(currentClaim.locked_by, {
 				execution_id: currentClaim.id,
+				claim_token: currentClaim.claim_token,
 				queue: currentClaim.queue,
 				task_key: currentClaim.task_key,
 				status: "completed",
