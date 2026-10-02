@@ -391,16 +391,11 @@ export class QueryBuilder {
 				returning e.id, e.task_key, e.queue, e.payload, e.waiting_on_execution_id,
 					e.waiting_step_key, e.cancelled, e.last_error, e.dedupe_key, e.cron_expression,
 					e.locked_by, e."group", e.priority, e.run_at, e.created_at,
-					e.subscription_id, e.trace_context,
-					e.dead_letter_source_execution_id, e.dead_letter_source_queue,
-					e.dead_letter_source_task_key, e.dead_letter_error,
-					e.dead_letter_attempts, e.dead_letter_failed_at
+					e.subscription_id, e.trace_context, e.dead_letter
 			)
 			select id, task_key, queue, payload, waiting_on_execution_id, waiting_step_key,
 				cancelled, last_error, dedupe_key, cron_expression, locked_by, "group",
-				subscription_id, trace_context,
-				dead_letter_source_execution_id, dead_letter_source_queue,
-				dead_letter_source_task_key, dead_letter_error, dead_letter_attempts, dead_letter_failed_at
+				subscription_id, trace_context, dead_letter
 			from claimed
 			order by priority asc, run_at asc, created_at asc, id asc
 		`;
@@ -578,26 +573,26 @@ export class QueryBuilder {
 			from failed_parent_targets p
 		)`);
 		ctes.push(this.sql`dead_lettered as materialized (
-			insert into pgconductor._private_executions (
-				task_key, queue, payload, run_at, "group",
-				dead_letter_source_execution_id, dead_letter_source_queue,
-				dead_letter_source_task_key, dead_letter_error,
-				dead_letter_attempts, dead_letter_failed_at
-			)
+			insert into pgconductor._private_executions (task_key, queue, payload, run_at, "group", dead_letter)
 			select
 				coalesce(p.dead_letter_task_key, p.task_key),
 				coalesce(p.dead_letter_queue, p.queue),
 				p.payload, nt.ts, p.execution_group,
-				p.execution_id, p.queue, p.task_key, p.failure_error,
-				p.failure_attempts, nt.ts
+				jsonb_build_object(
+					'sourceExecutionId', p.execution_id,
+					'sourceQueue', p.queue,
+					'sourceTaskKey', p.task_key,
+					'error', p.failure_error,
+					'attempts', p.failure_attempts,
+					'failedAt', nt.ts
+				)
 			from terminal_failures p
 			cross join now_ts nt
 			where p.dead_letter_queue is not null
 				and not p.execution_cancelled
-			on conflict (dead_letter_source_execution_id, queue, task_key)
-				where dead_letter_source_execution_id is not null
-				do update set dead_letter_source_execution_id = excluded.dead_letter_source_execution_id
-			returning id, dead_letter_source_execution_id
+			on conflict ((dead_letter->>'sourceExecutionId'), queue, task_key) where dead_letter is not null
+				do update set dead_letter = _private_executions.dead_letter
+			returning (dead_letter->>'sourceExecutionId')::uuid as source_execution_id
 		)`);
 		ctes.push(this.sql`failed_updates as (
 			select p.execution_id as target_id, p.queue, p.child_error, true as is_child
@@ -615,7 +610,7 @@ export class QueryBuilder {
 				and (
 					p.execution_cancelled
 					or p.dead_letter_queue is null
-					or exists (select 1 from dead_lettered d where d.dead_letter_source_execution_id = p.execution_id)
+					or exists (select 1 from dead_lettered d where d.source_execution_id = p.execution_id)
 				)
 			union all
 			select p.parent_id, p.parent_queue, null::uuid
@@ -624,7 +619,7 @@ export class QueryBuilder {
 				and (
 					p.child_cancelled
 					or p.parent_dead_letter_queue is null
-					or exists (select 1 from dead_lettered d where d.dead_letter_source_execution_id = p.parent_id)
+					or exists (select 1 from dead_lettered d where d.source_execution_id = p.parent_id)
 				)
 		)`);
 		ctes.push(this.sql`deleted_failed as (

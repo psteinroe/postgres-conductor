@@ -79,12 +79,7 @@ export interface Execution {
 	cron_expression?: string | null;
 	group?: string | null;
 	subscription_id?: string | null;
-	dead_letter_source_execution_id?: string | null;
-	dead_letter_source_queue?: string | null;
-	dead_letter_source_task_key?: string | null;
-	dead_letter_error?: string | null;
-	dead_letter_attempts?: number | null;
-	dead_letter_failed_at?: Date | null;
+	dead_letter?: (Omit<DeadLetterMetadata, "failedAt"> & { failedAt: string }) | null;
 	trace_context?: TraceContextCarrier | null;
 }
 

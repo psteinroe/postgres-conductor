@@ -67,12 +67,7 @@ interface StoredExecution {
 	updated_at: Date;
 	failed_at: Date | null;
 	subscription_id: string | null;
-	dead_letter_source_execution_id: string | null;
-	dead_letter_source_queue: string | null;
-	dead_letter_source_task_key: string | null;
-	dead_letter_error: string | null;
-	dead_letter_attempts: number | null;
-	dead_letter_failed_at: Date | null;
+	dead_letter: Execution["dead_letter"];
 	trace_context: Execution["trace_context"];
 }
 
@@ -202,12 +197,7 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 			updated_at: now,
 			failed_at: null,
 			subscription_id: null,
-			dead_letter_source_execution_id: null,
-			dead_letter_source_queue: null,
-			dead_letter_source_task_key: null,
-			dead_letter_error: null,
-			dead_letter_attempts: null,
-			dead_letter_failed_at: null,
+			dead_letter: null,
 			trace_context: spec.trace_context || null,
 		});
 		return id;
@@ -492,12 +482,7 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 				cron_expression: exec.cron_expression || undefined,
 				group: exec.group,
 				subscription_id: exec.subscription_id,
-				dead_letter_source_execution_id: exec.dead_letter_source_execution_id,
-				dead_letter_source_queue: exec.dead_letter_source_queue,
-				dead_letter_source_task_key: exec.dead_letter_source_task_key,
-				dead_letter_error: exec.dead_letter_error,
-				dead_letter_attempts: exec.dead_letter_attempts,
-				dead_letter_failed_at: exec.dead_letter_failed_at,
+				dead_letter: exec.dead_letter,
 				trace_context: exec.trace_context,
 				locked_by: exec.orchestrator_id || "",
 			});
@@ -1343,7 +1328,7 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 		const destinationTaskKey = task.dead_letter_task_key || exec.task_key;
 		const duplicate = Array.from(this.executions.values()).some(
 			(destination) =>
-				destination.dead_letter_source_execution_id === exec.id &&
+				destination.dead_letter?.sourceExecutionId === exec.id &&
 				destination.queue === task.dead_letter_queue &&
 				destination.task_key === destinationTaskKey,
 		);
@@ -1376,12 +1361,14 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 			updated_at: now,
 			failed_at: null,
 			subscription_id: null,
-			dead_letter_source_execution_id: exec.id,
-			dead_letter_source_queue: exec.queue,
-			dead_letter_source_task_key: exec.task_key,
-			dead_letter_error: error,
-			dead_letter_attempts: exec.attempts,
-			dead_letter_failed_at: now,
+			dead_letter: {
+				sourceExecutionId: exec.id,
+				sourceQueue: exec.queue,
+				sourceTaskKey: exec.task_key,
+				error,
+				attempts: exec.attempts,
+				failedAt: now.toISOString(),
+			},
 			trace_context: null,
 		});
 	}

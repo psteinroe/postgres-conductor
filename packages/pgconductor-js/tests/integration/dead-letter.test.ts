@@ -41,9 +41,11 @@ describe("dead-letter queues (Postgres integration)", () => {
 		});
 		const seen: Array<{
 			value: string;
+			sourceQueue: string;
 			sourceTask: string;
 			attempts: number;
 			error: string | null;
+			failedAt: Date;
 		}> = [];
 		const destination = conductor.createTask(
 			{ name: "alternate-failure", queue: "dlq" },
@@ -53,9 +55,11 @@ describe("dead-letter queues (Postgres integration)", () => {
 					if (!ctx.deadLetter) throw new Error("missing dead-letter metadata");
 					seen.push({
 						value: event.payload.value,
+						sourceQueue: ctx.deadLetter.sourceQueue,
 						sourceTask: ctx.deadLetter.sourceTaskKey,
 						attempts: ctx.deadLetter.attempts,
 						error: ctx.deadLetter.error,
+						failedAt: ctx.deadLetter.failedAt,
 					});
 				}
 			},
@@ -92,12 +96,13 @@ describe("dead-letter queues (Postgres integration)", () => {
 			where task_key = 'charge'
 		`;
 		if (!retry) throw new Error("expected persisted retry");
-		await db.client.setFakeTime({ date: new Date(retry.run_at.getTime() + 1) });
+		const failedAt = new Date(retry.run_at.getTime() + 1);
+		await db.client.setFakeTime({ date: failedAt });
 		await waitForCondition(async () => {
 			const rows = await db.sql<{ count: string }[]>`
 				select count(*)::text as count from pgconductor._private_executions
 				where queue = 'dlq'
-				and dead_letter_source_task_key = 'charge'
+				and dead_letter->>'sourceTaskKey' = 'charge'
 			`;
 			return rows[0]?.count === "1";
 		});
@@ -123,7 +128,14 @@ describe("dead-letter queues (Postgres integration)", () => {
 		await waitForCondition(async () => seen.length === 1);
 		await destinationOrchestrator.stop();
 		expect(seen).toEqual([
-			{ value: "order-42", sourceTask: "charge", attempts: 2, error: "card declined" },
+			{
+				value: "order-42",
+				sourceQueue: "default",
+				sourceTask: "charge",
+				attempts: 2,
+				error: "card declined",
+				failedAt,
+			},
 		]);
 	}, 60_000);
 
@@ -198,7 +210,7 @@ describe("dead-letter queues (Postgres integration)", () => {
 			taskKeys: new Set([execution.task_key]),
 		});
 		const rows = await db.sql<{ count: string; source: string | null }[]>`
-			select count(*)::text as count, min(dead_letter_source_execution_id::text) as source
+			select count(*)::text as count, min(dead_letter->>'sourceExecutionId') as source
 			from pgconductor._private_executions where queue = 'dlq'
 		`;
 		expect(rows[0]).toEqual({ count: "1", source: executionId });
@@ -569,7 +581,7 @@ describe("dead-letter queues (Postgres integration)", () => {
 			taskKeys: new Set([execution.task_key]),
 		});
 		const finalRows = await db.sql<{ source: string | null; source_failed: string }[]>`
-			select dead_letter_source_execution_id::text as source, (select failed_at is not null from pgconductor._private_executions where id = ${id}::uuid)::text as source_failed
+			select dead_letter->>'sourceExecutionId' as source, (select failed_at is not null from pgconductor._private_executions where id = ${id}::uuid)::text as source_failed
 			from pgconductor._private_executions where queue = 'dlq'
 		`;
 		expect(Array.from(finalRows)).toEqual([{ source: id, source_failed: "true" }]);
