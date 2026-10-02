@@ -83,7 +83,7 @@ describe("event pipeline", () => {
 			orchestratorId,
 			queueName: INTERNAL_QUEUE,
 			batchSize: 10,
-			filterTaskKeys: [],
+			taskKeys: [DISPATCH_TASK],
 		});
 		expect(claimed.some((execution) => execution.id === eventId)).toBe(true);
 		return orchestratorId;
@@ -989,7 +989,7 @@ describe("event pipeline", () => {
 			orchestratorId: waiterOwner,
 			queueName: "default",
 			batchSize: 1,
-			filterTaskKeys: [],
+			taskKeys: ["pipeline.waiter"],
 		});
 		await db.client.registerEventWait({
 			executionId: waiterId,
@@ -1053,7 +1053,7 @@ describe("event pipeline", () => {
 			orchestratorId: destinationOwner,
 			queueName: "default",
 			batchSize: 1,
-			filterTaskKeys: [],
+			taskKeys: ["pipeline.independent"],
 		});
 		if (!failedDestination) throw new Error("destination was not claimed");
 		await db.client.returnExecutions({
@@ -1092,7 +1092,7 @@ describe("event pipeline", () => {
 			orchestratorId: completionOwner,
 			queueName: "default",
 			batchSize: 1,
-			filterTaskKeys: [],
+			taskKeys: ["pipeline.independent"],
 		});
 		if (!completedDestination) throw new Error("second destination was not claimed");
 		await db.client.returnExecutions({
@@ -1180,7 +1180,7 @@ describe("event pipeline", () => {
 						orchestratorId: owners[index] || "",
 						queueName: INTERNAL_QUEUE,
 						batchSize: 1,
-						filterTaskKeys: [],
+						taskKeys: [DISPATCH_TASK],
 					}),
 				),
 			);

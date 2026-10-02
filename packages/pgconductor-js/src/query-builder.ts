@@ -37,7 +37,7 @@ export type GetExecutionsArgs = {
 	orchestratorId: string;
 	queueName: string;
 	batchSize: number;
-	filterTaskKeys: string[];
+	taskKeys: string[];
 };
 
 export type RemoveExecutionsArgs = {
@@ -253,7 +253,7 @@ export class QueryBuilder {
 		orchestratorId,
 		queueName,
 		batchSize,
-		filterTaskKeys,
+		taskKeys,
 	}: GetExecutionsArgs): PendingQuery<Execution[]> {
 		return this.sql<Execution[]>`
 			-- Read limit mode from the database so rolling workers cannot bypass new limits.
@@ -273,7 +273,7 @@ export class QueryBuilder {
 					and e.queue = ${queueName}::text
 					and e.run_at <= (select now_ts from claim_clock)
 					and e.is_available = true
-					${filterTaskKeys?.length ? this.sql`and not (e.task_key = any(${this.sql.array(filterTaskKeys)}::text[]))` : this.sql``}
+					and e.task_key = any(${this.sql.array(taskKeys, 1009)}::text[])
 				order by e.priority asc, e.run_at asc, e.created_at asc, e.id asc
 				limit ${batchSize}::integer
 				for update of e skip locked
@@ -308,7 +308,7 @@ export class QueryBuilder {
 					and t.queue = ${queueName}::text
 					and (t.concurrency_limit is null
 						or coalesce(at.active_count, 0) < t.concurrency_limit)
-					${filterTaskKeys?.length ? this.sql`and not (t.key = any(${this.sql.array(filterTaskKeys)}::text[]))` : this.sql``}
+					and t.key = any(${this.sql.array(taskKeys, 1009)}::text[])
 			), candidates as (
 				select c.*
 				from available_tasks t

@@ -94,7 +94,7 @@ describe("execution foundations", () => {
 				orchestratorId: crypto.randomUUID(),
 				queueName: "queue-a",
 				batchSize: 1,
-				filterTaskKeys: [],
+				taskKeys: ["same-task"],
 			})
 		)[0];
 		const second = (
@@ -102,7 +102,7 @@ describe("execution foundations", () => {
 				orchestratorId: crypto.randomUUID(),
 				queueName: "queue-b",
 				batchSize: 1,
-				filterTaskKeys: [],
+				taskKeys: ["same-task"],
 			})
 		)[0];
 		expect(first?.queue).toBe("queue-a");
@@ -312,7 +312,7 @@ describe("execution foundations", () => {
 				orchestratorId: crypto.randomUUID(),
 				queueName: "parent-retention",
 				batchSize: 1,
-				filterTaskKeys: [],
+				taskKeys: ["parent"],
 			})
 		)[0];
 		if (!parent) throw new Error("expected parent claim");
@@ -349,7 +349,7 @@ describe("execution foundations", () => {
 				orchestratorId: crypto.randomUUID(),
 				queueName: "parent-retention",
 				batchSize: 1,
-				filterTaskKeys: [],
+				taskKeys: ["child"],
 			})
 		)[0];
 		if (!child) throw new Error("expected child claim");
@@ -406,7 +406,7 @@ describe("execution foundations", () => {
 				orchestratorId: crypto.randomUUID(),
 				queueName: "parent-queue",
 				batchSize: 1,
-				filterTaskKeys: [],
+				taskKeys: ["parent"],
 			})
 		)[0];
 		if (!parent) throw new Error("expected parent claim");
@@ -436,7 +436,7 @@ describe("execution foundations", () => {
 				orchestratorId: crypto.randomUUID(),
 				queueName: "child-queue",
 				batchSize: 1,
-				filterTaskKeys: [],
+				taskKeys: ["child"],
 			})
 		)[0];
 		if (!child) throw new Error("expected child claim");
@@ -482,7 +482,7 @@ describe("execution foundations", () => {
 				orchestratorId,
 				queueName: "cancel-buffered",
 				batchSize: 1,
-				filterTaskKeys: [],
+				taskKeys: ["cancelled"],
 			})
 		)[0];
 		if (!claimed) throw new Error("expected claim");
@@ -537,7 +537,7 @@ describe("execution foundations", () => {
 				orchestratorId: crypto.randomUUID(),
 				queueName: "cascade-parent",
 				batchSize: 1,
-				filterTaskKeys: [],
+				taskKeys: ["parent"],
 			})
 		)[0];
 		if (!parent) throw new Error("expected parent claim");
@@ -609,7 +609,7 @@ describe("execution foundations", () => {
 			orchestratorId: crypto.randomUUID(),
 			queueName: "enqueue-order",
 			batchSize: 3,
-			filterTaskKeys: [],
+			taskKeys: ["ordered"],
 		});
 		expect(claimed.map((execution) => execution.id)).toEqual(
 			expected.map((execution) => execution.id),
@@ -661,7 +661,7 @@ describe("execution foundations", () => {
 				orchestratorId: oldOrchestrator,
 				queueName: "fenced",
 				batchSize: 1,
-				filterTaskKeys: [],
+				taskKeys: ["fenced-task"],
 			})
 		)[0];
 		if (!oldClaim) throw new Error("expected old claim");
@@ -679,7 +679,7 @@ describe("execution foundations", () => {
 				orchestratorId: newOrchestrator,
 				queueName: "fenced",
 				batchSize: 1,
-				filterTaskKeys: [],
+				taskKeys: ["fenced-task"],
 			})
 		)[0];
 		if (!currentClaim) throw new Error("expected recovered execution to be re-claimed");

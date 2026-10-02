@@ -124,7 +124,7 @@ Tables live in the `pgconductor` schema with a `_private_` prefix (`_private_exe
 
 **Worker** (`worker.ts`)
 - Implements async pipeline: fetch → execute → flush
-- Polls the database for ready executions of one queue
+- Polls the database for ready executions of one queue, claiming only the tasks it registers
 - Executes tasks with concurrency control (via `mapConcurrent`)
 - Batches and flushes results back to the database
 - Handles graceful shutdown via AbortController
