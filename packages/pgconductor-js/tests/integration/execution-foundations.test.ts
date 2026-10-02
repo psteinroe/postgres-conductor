@@ -635,6 +635,29 @@ describe("execution foundations", () => {
 		);
 	});
 
+	test("batch invoke replaces trace context on dedupe conflict", async () => {
+		const db = await database();
+		const spec = { task_key: "traced", queue: "default", dedupe_key: "same" };
+		const traceContext = {
+			traceparent: "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01",
+		};
+
+		await db.client.invokeBatch([
+			{
+				...spec,
+				trace_context: {
+					traceparent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+				},
+			},
+		]);
+		await db.client.invokeBatch([{ ...spec, trace_context: traceContext }]);
+
+		const executions = await db.sql<{ trace_context: unknown }[]>`
+			select trace_context from pgconductor._private_executions where task_key = 'traced'
+		`;
+		expect(executions.map((execution) => execution.trace_context)).toEqual([traceContext]);
+	});
+
 	test("fences stale completion, failure, and release results after recovery and re-claim", async () => {
 		const db = await database();
 		await db.client.registerWorker({

@@ -1,6 +1,4 @@
 
-create extension if not exists "uuid-ossp";
-
 create schema if not exists pgconductor;
 
 create table if not exists pgconductor.schema_migrations (

@@ -33,8 +33,6 @@ export class TestDatabase {
 		// Use max: 1 to ensure only one connection, making fake time work reliably
 		const sql = postgres(testDbUrl, { max: 1 });
 
-		await sql`CREATE EXTENSION IF NOT EXISTS "uuid-ossp"`;
-
 		return new TestDatabase(sql, name, masterUrl, testDbUrl);
 	}
 

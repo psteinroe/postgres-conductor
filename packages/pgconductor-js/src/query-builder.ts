@@ -883,7 +883,7 @@ export class QueryBuilder {
 					and dedupe_key like 'scheduled::%'
 					and split_part(dedupe_key, '::', 2) = ${scheduleName}::text
 					and cron_expression is not null
-					and run_at > pgconductor._private_current_time()
+					and is_available
 			)
 			select id from pgconductor.invoke(
 				p_task_key := ${spec.task_key}::text,
@@ -907,15 +907,15 @@ export class QueryBuilder {
 	}: UnscheduleCronExecutionArgs): PendingQuery<[]> {
 		return this.sql<[]>`
 			with
-			-- Delete future pending executions
-			deleted_future as (
+			-- Delete pending executions
+			deleted_pending as (
 				delete from pgconductor._private_executions
 				where task_key = ${taskKey}::text
 					and queue = ${queue}::text
 					and dedupe_key like 'scheduled::%'
 					and split_part(dedupe_key, '::', 2) = ${scheduleName}::text
 					and cron_expression is not null
-					and run_at > pgconductor._private_current_time()
+					and is_available
 				returning 1
 			),
 			-- Mark running executions as cancelled (no signal needed, they'll fail naturally)
