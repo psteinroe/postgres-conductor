@@ -215,12 +215,15 @@ as $function$
 declare
   v_partition_name text;
 begin
-  if tg_op = 'INSERT' then
-    v_partition_name := 'executions_' || replace(new.name, '-', '_');
+  -- readable prefix plus a hash of the exact queue name, e.g. executions_default_c21f969b.
+  -- sized so that the longest index name below stays within 63 bytes.
+  v_partition_name := 'executions_'
+    || left(regexp_replace(lower(coalesce(new.name, old.name)), '[^a-z0-9]+', '_', 'g'), 15)
+    || '_' || left(md5(coalesce(new.name, old.name)), 8);
 
-    -- Create partition for this queue: executions_default, executions_reports, etc.
+  if tg_op = 'INSERT' then
     execute format(
-      'create table if not exists pgconductor.%I partition of pgconductor._private_executions for values in (%L) with (fillfactor=70)',
+      'create table pgconductor.%I partition of pgconductor._private_executions for values in (%L) with (fillfactor=70)',
       v_partition_name,
       new.name
     );
@@ -229,63 +232,63 @@ begin
 
     -- main index for fetching available executions
     execute format(
-      'create index if not exists %I on pgconductor.%I (priority, run_at, created_at, id) include (task_key) where is_available = true',
+      'create index %I on pgconductor.%I (priority, run_at, created_at, id) include (task_key) where is_available = true',
       'idx_' || v_partition_name || '_get_executions',
       v_partition_name
     );
 
     -- index for waiting executions lookup
     execute format(
-      'create index if not exists %I on pgconductor.%I (waiting_on_execution_id) where waiting_on_execution_id is not null',
+      'create index %I on pgconductor.%I (waiting_on_execution_id) where waiting_on_execution_id is not null',
       'idx_' || v_partition_name || '_waiting_on_execution_id',
       v_partition_name
     );
 
     -- index for parent execution lookup (child -> parent)
     execute format(
-      'create index if not exists %I on pgconductor.%I (parent_execution_id) where parent_execution_id is not null',
+      'create index %I on pgconductor.%I (parent_execution_id) where parent_execution_id is not null',
       'idx_' || v_partition_name || '_parent_execution_id',
       v_partition_name
     );
 
     -- index for unlocking locked executions
     execute format(
-      'create index if not exists %I on pgconductor.%I (locked_by) where locked_by is not null',
+      'create index %I on pgconductor.%I (locked_by) where locked_by is not null',
       'idx_' || v_partition_name || '_locked_by',
       v_partition_name
     );
 
     -- index for cleanup of completed
     execute format(
-      'create index if not exists %I on pgconductor.%I (completed_at) where completed_at is not null',
+      'create index %I on pgconductor.%I (completed_at) where completed_at is not null',
       'idx_' || v_partition_name || '_completed_cleanup',
       v_partition_name
     );
 
     -- index for cleanup of failed
     execute format(
-      'create index if not exists %I on pgconductor.%I (failed_at) where failed_at is not null',
+      'create index %I on pgconductor.%I (failed_at) where failed_at is not null',
       'idx_' || v_partition_name || '_failed_cleanup',
       v_partition_name
     );
 
     -- index for schedule lookups
     execute format(
-      'create index if not exists %I on pgconductor.%I ((split_part(dedupe_key, ''::'', 2))) where cron_expression is not null',
+      'create index %I on pgconductor.%I ((split_part(dedupe_key, ''::'', 2))) where cron_expression is not null',
       'idx_' || v_partition_name || '_schedule',
       v_partition_name
     );
 
     -- index for task_key joins (used in return_executions)
     execute format(
-      'create index if not exists %I on pgconductor.%I (task_key)',
+      'create index %I on pgconductor.%I (task_key)',
       'idx_' || v_partition_name || '_task_key',
       v_partition_name
     );
 
     -- covering index used to count active executions for soft task and group limits
     execute format(
-      'create index if not exists %I on pgconductor.%I (task_key, "group") where locked_at is not null and failed_at is null and completed_at is null',
+      'create index %I on pgconductor.%I (task_key, "group") where locked_at is not null and failed_at is null and completed_at is null',
       'idx_' || v_partition_name || '_active_concurrency',
       v_partition_name
     );
@@ -319,11 +322,17 @@ begin
       raise exception 'Deleting the default queue is not allowed';
     end if;
 
-    v_partition_name := 'executions_' || replace(old.name, '-', '_');
+    -- foreign keys into the partition block dropping it, so clear its rows (cascading to
+    -- steps and subscriptions) and detach it first
+    delete from pgconductor._private_executions where queue = old.name;
 
-    -- drop the partition for this queue
     execute format(
-      'drop table if exists pgconductor.%I',
+      'alter table pgconductor._private_executions detach partition pgconductor.%I',
+      v_partition_name
+    );
+
+    execute format(
+      'drop table pgconductor.%I',
       v_partition_name
     );
 
@@ -338,7 +347,7 @@ create trigger manage_queue_partition_trigger
   for each row
   execute function pgconductor._private_manage_queue_partition();
 
--- create default queue (trigger will create executions_default partition)
+-- create default queue (trigger will create its partition)
 insert into pgconductor._private_queues (name) values ('default');
 
 -- drop a queue (will trigger partition deletion via trigger)

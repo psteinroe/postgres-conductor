@@ -524,8 +524,8 @@ describe("dead-letter queues (Postgres integration)", () => {
 			create function public.fail_dlq_insert() returns trigger language plpgsql as $$
 			begin raise exception 'forced destination failure'; end;
 			$$;
-			create trigger fail_dlq_insert before insert on pgconductor.executions_dlq
-			for each row execute function public.fail_dlq_insert();
+			create trigger fail_dlq_insert before insert on pgconductor._private_executions
+			for each row when (new.queue = 'dlq') execute function public.fail_dlq_insert();
 		`);
 		const settlement = {
 			execution_id: execution.id,
@@ -550,7 +550,7 @@ describe("dead-letter queues (Postgres integration)", () => {
 		expect(afterRollback[0]?.locked_by).toBe(lockedBy);
 		expect(afterRollback[0]?.attempts).toBe(1);
 		await db.sql.unsafe(
-			`drop trigger fail_dlq_insert on pgconductor.executions_dlq; drop function public.fail_dlq_insert();`,
+			`drop trigger fail_dlq_insert on pgconductor._private_executions; drop function public.fail_dlq_insert();`,
 		);
 		await db.client.returnExecutions({
 			orchestratorId: lockedBy,
