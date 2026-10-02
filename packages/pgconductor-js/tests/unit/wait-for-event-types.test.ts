@@ -5,7 +5,7 @@ import { Conductor } from "../../src/conductor";
 import { defineEvent } from "../../src/event-definition";
 import { defineTask } from "../../src/task-definition";
 import { EventSchemas, TaskSchemas } from "../../src/schemas";
-import { WaitForEventTimeoutError } from "../../src/index";
+import { WaitForEventTimeoutError, type EventSubscription } from "../../src/index";
 
 describe("waitForEvent API", () => {
 	test("returns the declared event and payload and constrains filters", () => {
@@ -29,6 +29,25 @@ describe("waitForEvent API", () => {
 			}>();
 			// @ts-expect-error id is not declared filterable
 			ctx.waitForEvent("bad", { event, filter: { id: ["x"] } });
+
+			const subscription = await ctx.subscribe("approve", {
+				event,
+				filter: { status: ["paid"] },
+			});
+			expectTypeOf(subscription).toEqualTypeOf<
+				EventSubscription<{
+					name: "api.order";
+					payload: { status: "paid" | "pending"; id: string };
+				}>
+			>();
+			expectTypeOf(await subscription.wait({ timeout: "24h" })).toEqualTypeOf<{
+				name: "api.order";
+				payload: { status: "paid" | "pending"; id: string };
+			}>();
+			// @ts-expect-error subscriptions do not take a timeout
+			ctx.subscribe("timeout", { event, timeout: "1h" });
+			// @ts-expect-error id is not declared filterable
+			ctx.subscribe("bad", { event, filter: { id: ["x"] } });
 		});
 		expect(WaitForEventTimeoutError).toBeDefined();
 	});

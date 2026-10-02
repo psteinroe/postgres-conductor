@@ -1001,6 +1001,7 @@ describe("event pipeline", () => {
 			terms: [],
 			timeoutMs: null,
 			orchestratorId: waiterOwner,
+			suspend: true,
 		});
 		const eventId = await db.client.emitEvent({
 			eventKey: "pipeline.locked-waiter",

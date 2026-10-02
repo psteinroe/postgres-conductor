@@ -3,6 +3,7 @@ import type {
 	Execution,
 	Payload,
 	DeadLetterMetadata,
+	EventWaitResult,
 	JsonValue,
 } from "./database-client";
 import { nextCronOccurrence } from "./lib/cron";
@@ -75,6 +76,15 @@ export class WaitForEventTimeoutError extends Error {
 		this.name = "WaitForEventTimeoutError";
 	}
 }
+
+/** A durable event subscription created by `ctx.subscribe()`. */
+export type EventSubscription<TEvent> = {
+	/**
+	 * Resolve with the matching event kept since the subscription, suspending
+	 * until one arrives. The timeout starts when `wait()` is first called.
+	 */
+	wait(options?: { timeout?: DurationInput }): Promise<TEvent>;
+};
 
 export type TaskContextOptions = {
 	abortController: TypedAbortController<TaskAbortReasons>;
@@ -258,45 +268,39 @@ export class TaskContext<
 			timeout?: DurationInput;
 		},
 	): Promise<{ name: TDef["name"]; payload: InferEventPayload<TDef> }> {
-		const cached = await this.opts.db.loadStep(
+		const cached = (await this.opts.db.loadStep(
 			{
 				executionId: this.opts.execution.id,
 				queue: this.opts.execution.queue,
 				key: stepKey,
 			},
 			{ signal: this.signal },
-		);
-		if (cached !== undefined) {
-			const result = cached as {
-				status: "resolved" | "timed_out";
-				event: { name: TDef["name"]; payload: InferEventPayload<TDef> };
-			};
-			if (result.status === "timed_out") throw new WaitForEventTimeoutError(stepKey);
-			return result.event;
-		}
+		)) as EventWaitResult | undefined;
+		const result = cached || (await this.registerEventWait(stepKey, options, true));
+		if (!result) return this.abortAndHangup({ reason: "suspended" });
+		if (result.status === "timed_out") throw new WaitForEventTimeoutError(stepKey);
+		return result.event as { name: TDef["name"]; payload: InferEventPayload<TDef> };
+	}
 
-		const compiled = compileEventFilter(
-			options.event.name,
-			options.filter,
-			this.opts.eventDefinitions,
-		);
-		const timeoutMs = options.timeout === undefined ? null : parseDuration(options.timeout);
-		const timedOut = await this.opts.db.registerEventWait(
-			{
-				executionId: this.opts.execution.id,
-				queue: this.opts.execution.queue,
-				taskKey: this.opts.execution.task_key,
-				eventKey: options.event.name,
-				stepKey,
-				requiredFieldCount: compiled.required_field_count,
-				terms: compiled.terms,
-				timeoutMs,
-				orchestratorId: this.opts.execution.locked_by,
-			},
-			{ signal: this.signal },
-		);
-		if (timedOut) throw new WaitForEventTimeoutError(stepKey);
-		return this.abortAndHangup({ reason: "suspended" });
+	/**
+	 * Subscribe to a custom event without suspending. A matching event emitted
+	 * after this resolves is kept for `wait()`, including events caused by steps
+	 * that run in between. The subscription is memoized by the step key.
+	 */
+	async subscribe<
+		TName extends EventName<Events>,
+		TDef extends FindEventByIdentifier<Events, TName> = FindEventByIdentifier<Events, TName>,
+	>(
+		stepKey: string,
+		options: {
+			event: TDef;
+			filter?: FilterForEvent<TDef>;
+		},
+	): Promise<EventSubscription<{ name: TDef["name"]; payload: InferEventPayload<TDef> }>> {
+		await this.registerEventWait(stepKey, options, false);
+		return {
+			wait: ({ timeout } = {}) => this.waitForEvent<TName, TDef>(stepKey, { ...options, timeout }),
+		};
 	}
 
 	async invoke<
@@ -455,6 +459,37 @@ export class TaskContext<
 				eventKey: event,
 				payload: payload as any,
 				traceContext: this.opts.telemetry.traceContext(),
+			},
+			{ signal: this.signal },
+		);
+	}
+
+	private registerEventWait(
+		stepKey: string,
+		options: {
+			event: EventDefinition<string, any, any>;
+			filter?: unknown;
+			timeout?: DurationInput;
+		},
+		suspend: boolean,
+	): Promise<EventWaitResult | null> {
+		const compiled = compileEventFilter(
+			options.event.name,
+			options.filter,
+			this.opts.eventDefinitions,
+		);
+		return this.opts.db.registerEventWait(
+			{
+				executionId: this.opts.execution.id,
+				queue: this.opts.execution.queue,
+				taskKey: this.opts.execution.task_key,
+				eventKey: options.event.name,
+				stepKey,
+				requiredFieldCount: compiled.required_field_count,
+				terms: compiled.terms,
+				timeoutMs: options.timeout === undefined ? null : parseDuration(options.timeout),
+				orchestratorId: this.opts.execution.locked_by,
+				suspend,
 			},
 			{ signal: this.signal },
 		);

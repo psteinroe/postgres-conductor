@@ -8,6 +8,7 @@ import type {
 	ExecutionSpec,
 	EventFilterTerm,
 	EventSubscriptionSpec,
+	EventWaitResult,
 	Payload,
 	TaskSpec,
 } from "./database-client";
@@ -116,6 +117,7 @@ export type RegisterEventWaitArgs = {
 	terms: EventFilterTerm[];
 	timeoutMs: number | null;
 	orchestratorId: string;
+	suspend: boolean;
 };
 
 export class QueryBuilder {
@@ -376,6 +378,9 @@ export class QueryBuilder {
 				update pgconductor._private_executions e
 				set
 					attempts = e.attempts + 1,
+					-- A running execution is no longer suspended at an event wait
+					waiting_step_key = case when e.waiting_on_execution_id is null then null
+						else e.waiting_step_key end,
 					locked_by = ${orchestratorId}::uuid,
 					locked_at = (select now_ts from claim_clock)
 				from claimable c
@@ -1082,8 +1087,9 @@ export class QueryBuilder {
 		terms,
 		timeoutMs,
 		orchestratorId,
-	}: RegisterEventWaitArgs): PendingQuery<{ timed_out: boolean }[]> {
-		return this.sql<{ timed_out: boolean }[]>`
+		suspend,
+	}: RegisterEventWaitArgs): PendingQuery<{ result: EventWaitResult | null }[]> {
+		return this.sql<{ result: EventWaitResult | null }[]>`
 			select pgconductor._private_register_event_wait(
 				${executionId}::uuid,
 				${queue}::text,
@@ -1093,8 +1099,9 @@ export class QueryBuilder {
 				${stepKey}::text,
 				${requiredFieldCount}::smallint,
 				${this.sql.json(terms)}::jsonb,
-				${timeoutMs}::bigint
-			) as timed_out
+				${timeoutMs}::bigint,
+				${suspend}::boolean
+			) as result
 		`;
 	}
 
@@ -1388,14 +1395,18 @@ export class QueryBuilder {
 					)
 				order by subscription.id, source.created_at, source.event_id
 			), locked_wait_executions as materialized (
-				select execution.id, execution.queue
+				-- A claimed or retrying subscriber keeps the result for its next wait.
+				-- Only an execution suspended at this wait is woken. The flag is read
+				-- from the locked row because the statement snapshot may be older.
+				select execution.id, execution.queue,
+					execution.locked_by is null
+						and execution.waiting_step_key = wait.step_key as suspended
 				from pgconductor._private_executions execution
 				join selected_waits wait
 					on wait.execution_id = execution.id and wait.queue = execution.queue
 				where execution.completed_at is null
 					and execution.failed_at is null
 					and not execution.cancelled
-					and execution.locked_by is null
 				order by execution.id
 				for update of execution
 			), inserted_wait_steps as (
@@ -1427,7 +1438,10 @@ export class QueryBuilder {
 					waiting_on_execution_id = null,
 					waiting_step_key = null
 				from deleted_waits wait
+				join locked_wait_executions locked
+					on locked.id = wait.execution_id and locked.queue = wait.queue
 				where execution.id = wait.execution_id and execution.queue = wait.queue
+					and locked.suspended
 				returning execution.id
 			)
 			select source.event_id

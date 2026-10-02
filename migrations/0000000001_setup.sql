@@ -1109,6 +1109,10 @@ as $function$
     );
 $function$;
 
+-- Registers the subscription for a wait step and, when p_suspend is set,
+-- releases the execution until an event or the timeout wakes it. Without
+-- p_suspend the execution keeps running and dispatch stores a matching event
+-- as the step result. Returns the step result once the wait has settled.
 create or replace function pgconductor._private_register_event_wait(
     p_execution_id uuid,
     p_queue text,
@@ -1118,9 +1122,10 @@ create or replace function pgconductor._private_register_event_wait(
     p_step_key text,
     p_required_field_count smallint,
     p_terms jsonb,
-    p_timeout_ms bigint
+    p_timeout_ms bigint,
+    p_suspend boolean
 )
-returns boolean
+returns jsonb
 language plpgsql
 volatile
 set search_path to ''
@@ -1128,6 +1133,7 @@ as $function$
 declare
     v_subscription_id uuid;
     v_expires_at timestamptz;
+    v_result jsonb;
     v_now timestamptz := pgconductor._private_current_time();
 begin
     perform 1
@@ -1143,6 +1149,18 @@ begin
 
     if not found then
         raise exception 'execution % is not claimed by orchestrator %', p_execution_id, p_orchestrator_id;
+    end if;
+
+    -- Dispatch locks the execution before storing a result, so a result stored
+    -- while the execution was claimed is visible here.
+    select step.result
+    into v_result
+    from pgconductor._private_steps step
+    where step.execution_id = p_execution_id
+      and step.key = p_step_key;
+
+    if found then
+        return v_result;
     end if;
 
     select subscription.id, subscription.expires_at
@@ -1211,18 +1229,27 @@ begin
         )
         on conflict (execution_id, key) do nothing;
 
-        return true;
+        return jsonb_build_object('status', 'timed_out');
+    elsif v_expires_at is null and p_suspend then
+        -- A subscription registered without suspending starts its timeout here.
+        v_expires_at := v_now + p_timeout_ms * interval '1 millisecond';
+
+        update pgconductor._private_custom_event_subscriptions
+        set expires_at = v_expires_at
+        where id = v_subscription_id;
     end if;
 
-    -- Release in the same transaction so event dispatch never sees a claimed waiter.
-    update pgconductor._private_executions
-    set attempts = greatest(attempts - 1, 0),
-        run_at = coalesce(v_expires_at, 'infinity'),
-        locked_by = null,
-        locked_at = null
-    where id = p_execution_id and queue = p_queue;
+    if p_suspend then
+        update pgconductor._private_executions
+        set attempts = greatest(attempts - 1, 0),
+            run_at = coalesce(v_expires_at, 'infinity'),
+            waiting_step_key = p_step_key,
+            locked_by = null,
+            locked_at = null
+        where id = p_execution_id and queue = p_queue;
+    end if;
 
-    return false;
+    return null;
 end;
 $function$;
 

@@ -87,8 +87,47 @@ const event = await ctx.waitForEvent("payment", {
 ```
 
 A matching event is delivered once and cached by the step key. The subscription becomes active
-when registration commits; an event racing registration or timeout is not guaranteed to win.
-Earlier events do not satisfy the wait. If the timeout wins, `WaitForEventTimeoutError` is thrown.
+when registration commits; earlier events do not satisfy the wait. If the timeout wins,
+`WaitForEventTimeoutError` is thrown. An event and the timeout never both win: the first one
+recorded for the step key is final.
+
+To wait for an event caused by your own side effect, use `ctx.subscribe()` so the
+subscription is active before the side effect runs.
+
+## ctx.subscribe()
+
+Subscribe to a custom event without suspending, then wait for it later:
+
+```typescript
+const subscription = await ctx.subscribe(
+  stepKey: string,
+  options: { event: EventDefinition, filter?: Filter }
+): Promise<EventSubscription>
+
+await subscription.wait(options?: { timeout?: DurationInput })
+```
+
+**Example:**
+
+```typescript
+const subscription = await ctx.subscribe("approval", {
+  event: approvalDecided,
+  filter: { approvalId: [approvalId] },
+});
+await ctx.step("post-card", () => postApprovalCard(approvalId));
+const decision = await subscription.wait({ timeout: "24h" });
+```
+
+**Behavior:**
+- The subscription is active once `subscribe()` resolves. The execution keeps running.
+- One matching event emitted after that is stored under the step key, even while the
+  execution is still running or retrying. Events emitted before `subscribe()` do not match.
+- `wait()` returns the stored event immediately, or suspends like `ctx.waitForEvent()` until a
+  matching event arrives. It throws `WaitForEventTimeoutError` if the timeout wins.
+- The timeout starts when `wait()` is first called, not at `subscribe()`.
+- The subscription is memoized by the step key: retries and resumes reuse it rather than
+  creating a new one. `ctx.waitForEvent(stepKey, ...)` with the same key is equivalent to
+  `wait()`.
 
 ## ctx.invoke()
 
