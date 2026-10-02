@@ -31,7 +31,12 @@ async function until(check: () => Promise<boolean>, timeout = 20_000) {
 	throw new Error("condition was not met");
 }
 
-async function setup(db: TestDatabase, fn: Handler, orchestrators: Orchestrator[] = []) {
+async function setup(
+	db: TestDatabase,
+	fn: Handler,
+	orchestrators: Orchestrator[] = [],
+	flushIntervalMs = 10,
+) {
 	const conductor = Conductor.create({
 		sql: db.sql,
 		tasks: TaskSchemas.fromSchema([taskDefinition]),
@@ -46,7 +51,7 @@ async function setup(db: TestDatabase, fn: Handler, orchestrators: Orchestrator[
 	const orchestrator = Orchestrator.create({
 		conductor,
 		tasks: [task],
-		defaultWorker: { pollIntervalMs: 10, flushIntervalMs: 10 },
+		defaultWorker: { pollIntervalMs: 10, flushIntervalMs },
 	});
 	orchestrators.push(orchestrator);
 	await orchestrator.start();
@@ -84,15 +89,12 @@ describe.serial("waitForEvent", () => {
 
 	async function waiting(database: TestDatabase, count = 1) {
 		await until(async () => {
-			const [row] = await database.sql<{ n: number; settled: boolean }[]>`
-				select count(*)::int as n,
-					coalesce(bool_and(execution.locked_by is null), true) as settled
-				from pgconductor._private_custom_event_subscriptions subscription
-				join pgconductor._private_executions execution
-					on execution.id = subscription.execution_id
-				where subscription.kind = 'execution_wait'
+			const [row] = await database.sql<{ n: number }[]>`
+				select count(*)::int as n
+				from pgconductor._private_custom_event_subscriptions
+				where kind = 'execution_wait'
 			`;
-			return Number(row?.n ?? 0) === count && row?.settled === true;
+			return row?.n === count;
 		});
 	}
 
@@ -101,12 +103,8 @@ describe.serial("waitForEvent", () => {
 			const [row] = await database.sql<{ present: boolean }[]>`
 				select exists (
 					select 1
-					from pgconductor._private_custom_event_subscriptions subscription
-					join pgconductor._private_executions execution
-						on execution.id = subscription.execution_id
-					where subscription.kind = 'execution_wait'
-						and subscription.step_key = ${stepKey}
-						and execution.locked_by is null
+					from pgconductor._private_custom_event_subscriptions
+					where kind = 'execution_wait' and step_key = ${stepKey}
 				) as present
 			`;
 			return row?.present === true;
@@ -311,6 +309,33 @@ describe.serial("waitForEvent", () => {
 		expect(result).toEqual(["race"]);
 	});
 
+	test.serial(
+		"events emitted before the worker flushes resolve the wait",
+		async () => {
+			const database = await db();
+			const { conductor } = await setup(
+				database,
+				async (id, ctx) => {
+					await ctx.waitForEvent(`unflushed:${id}`, { event });
+				},
+				orchestrators,
+				1_000,
+			);
+
+			const executionId = await conductor.invoke({ name: "wait.task" }, { id: "race" });
+			await waiting(database);
+			await conductor.emit("wait.order", { id: "race", kind: "match" });
+			await until(async () => {
+				const [row] = await database.sql<{ completed: boolean }[]>`
+				select completed_at is not null as completed
+				from pgconductor._private_executions where id = ${executionId}::uuid
+			`;
+				return row?.completed === true;
+			}, 5_000);
+		},
+		10_000,
+	);
+
 	test.serial("does not deliver events emitted before the subscription boundary", async () => {
 		const database = await db();
 		const result: string[] = [];
@@ -386,7 +411,7 @@ describe.serial("waitForEvent", () => {
 		await orchestrator.stop();
 		const executionId = await conductor.invoke({ name: "wait.task" }, { id: "stale" });
 		if (!executionId) throw new Error("invoke did not return an execution id");
-		const result = await database.client.registerEventWait({
+		const result = database.client.registerEventWait({
 			executionId,
 			queue: "default",
 			taskKey: "wait.task",
@@ -397,7 +422,7 @@ describe.serial("waitForEvent", () => {
 			timeoutMs: null,
 			orchestratorId: crypto.randomUUID(),
 		});
-		expect(result).toEqual({ timedOut: false, timeoutMs: null });
+		await expect(result).rejects.toThrow("is not claimed");
 		const rows = await database.sql<{ n: number; waiting_step_key: string | null }[]>`
 			select count(s.*)::int as n, max(e.waiting_step_key) as waiting_step_key
 			from pgconductor._private_custom_event_subscriptions s
@@ -433,15 +458,28 @@ describe.serial("waitForEvent", () => {
 			timeoutMs: 5_000,
 			orchestratorId,
 		};
-		const first = await database.client.registerEventWait(args);
-		await Bun.sleep(50);
-		const second = await database.client.registerEventWait(args);
+		const execution = async () => {
+			const [row] = await database.sql<{ run_at: Date; locked_by: string | null }[]>`
+				select run_at, locked_by from pgconductor._private_executions
+				where id = ${executionId}::uuid
+			`;
+			return row;
+		};
 
-		expect(first.timedOut).toBe(false);
-		expect(second.timedOut).toBe(false);
-		expect(first.timeoutMs).not.toBeNull();
-		expect(second.timeoutMs).not.toBeNull();
-		expect(second.timeoutMs ?? 0).toBeLessThan(first.timeoutMs ?? 0);
+		expect(await database.client.registerEventWait(args)).toBe(false);
+		const first = await execution();
+		expect(first?.locked_by).toBeNull();
+
+		await Bun.sleep(50);
+		await database.sql`
+			update pgconductor._private_executions
+			set locked_by = ${orchestratorId}::uuid, run_at = pgconductor._private_current_time()
+			where id = ${executionId}::uuid
+		`;
+		expect(await database.client.registerEventWait(args)).toBe(false);
+		const second = await execution();
+		expect(second?.locked_by).toBeNull();
+		expect(second?.run_at).toEqual(first?.run_at);
 	});
 
 	test.serial("cleans abandoned waits when executions settle", async () => {
@@ -473,7 +511,12 @@ describe.serial("waitForEvent", () => {
 					timeoutMs: null,
 					orchestratorId,
 				}),
-			).toEqual({ timedOut: false, timeoutMs: null });
+			).toBe(false);
+			await database.sql`
+				update pgconductor._private_executions
+				set locked_by = ${orchestratorId}::uuid
+				where id = ${executionId}::uuid
+			`;
 
 			const result = {
 				execution_id: executionId,

@@ -1051,12 +1051,9 @@ export class QueryBuilder {
 		terms,
 		timeoutMs,
 		orchestratorId,
-	}: RegisterEventWaitArgs): PendingQuery<
-		RowList<{ timed_out: boolean; timeout_ms: string | null }[]>
-	> {
-		return this.sql<RowList<{ timed_out: boolean; timeout_ms: string | null }[]>>`
-			select timed_out, timeout_ms::text
-			from pgconductor._private_register_event_wait(
+	}: RegisterEventWaitArgs): PendingQuery<{ timed_out: boolean }[]> {
+		return this.sql<{ timed_out: boolean }[]>`
+			select pgconductor._private_register_event_wait(
 				${executionId}::uuid,
 				${queue}::text,
 				${taskKey}::text,
@@ -1066,7 +1063,7 @@ export class QueryBuilder {
 				${requiredFieldCount}::smallint,
 				${this.sql.json(terms)}::jsonb,
 				${timeoutMs}::bigint
-			)
+			) as timed_out
 		`;
 	}
 

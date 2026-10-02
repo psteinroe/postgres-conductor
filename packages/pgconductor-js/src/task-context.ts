@@ -33,6 +33,8 @@ import { compileEventFilter } from "./event-trigger-validation";
 export type TaskAbortReasons =
 	// if cancelled by a user
 	| { reason: "cancelled"; __pgconductorTaskAborted: true }
+	// the database already released the task
+	| { reason: "suspended"; __pgconductorTaskAborted: true }
 	// the task is released
 	| {
 			reason: "released";
@@ -92,45 +94,6 @@ export class WaitForEventTimeoutError extends Error {
 		super(`Timed out waiting for event at step "${stepKey}"`);
 		this.name = "WaitForEventTimeoutError";
 	}
-}
-
-type ResolvedEventWaitStepResult<TDef extends EventDefinition<string, any, any>> = {
-	status: "resolved";
-	event: { name: TDef["name"]; payload: InferEventPayload<TDef> };
-};
-
-type TimedOutEventWaitStepResult = { status: "timed_out" };
-
-function isJsonValue(value: unknown): value is JsonValue {
-	if (value === null || ["string", "number", "boolean"].includes(typeof value)) return true;
-	if (Array.isArray(value)) return value.every(isJsonValue);
-	return isPayload(value);
-}
-
-function isPayload(value: unknown): value is Payload {
-	return (
-		typeof value === "object" &&
-		value !== null &&
-		!Array.isArray(value) &&
-		Object.values(value).every(isJsonValue)
-	);
-}
-
-function isTimedOutEventWaitStepResult(value: unknown): value is TimedOutEventWaitStepResult {
-	return isPayload(value) && value.status === "timed_out";
-}
-
-function isResolvedEventWaitStepResult<TDef extends EventDefinition<string, any, any>>(
-	value: unknown,
-	event: TDef,
-): value is ResolvedEventWaitStepResult<TDef> {
-	return (
-		isPayload(value) &&
-		value.status === "resolved" &&
-		isPayload(value.event) &&
-		value.event.name === event.name &&
-		isPayload(value.event.payload)
-	);
 }
 
 export type TaskContextOptions = {
@@ -314,7 +277,6 @@ export class TaskContext<
 			timeout?: DurationInput;
 		},
 	): Promise<{ name: TDef["name"]; payload: InferEventPayload<TDef> }> {
-		if (!stepKey) throw new Error("waitForEvent stepKey is required");
 		const cached = await this.opts.db.loadStep(
 			{
 				executionId: this.opts.execution.id,
@@ -324,9 +286,12 @@ export class TaskContext<
 			{ signal: this.signal },
 		);
 		if (cached !== undefined) {
-			if (isTimedOutEventWaitStepResult(cached)) throw new WaitForEventTimeoutError(stepKey);
-			if (isResolvedEventWaitStepResult(cached, options.event)) return cached.event;
-			throw new Error(`Invalid waitForEvent step result at "${stepKey}"`);
+			const result = cached as {
+				status: "resolved" | "timed_out";
+				event: { name: TDef["name"]; payload: InferEventPayload<TDef> };
+			};
+			if (result.status === "timed_out") throw new WaitForEventTimeoutError(stepKey);
+			return result.event;
 		}
 
 		const compiled = compileEventFilter(
@@ -335,7 +300,7 @@ export class TaskContext<
 			this.opts.eventDefinitions,
 		);
 		const timeoutMs = options.timeout === undefined ? null : parseDuration(options.timeout);
-		const registration = await this.opts.db.registerEventWait(
+		const timedOut = await this.opts.db.registerEventWait(
 			{
 				executionId: this.opts.execution.id,
 				queue: this.opts.execution.queue,
@@ -349,13 +314,8 @@ export class TaskContext<
 			},
 			{ signal: this.signal },
 		);
-		// A timeout wakes and reruns the execution. Registration then replaces the expired
-		// subscription with a timed-out step before reporting that outcome here.
-		if (registration.timedOut) throw new WaitForEventTimeoutError(stepKey);
-		return this.abortAndHangup({
-			reason: "released",
-			reschedule_in_ms: registration.timeoutMs ?? "infinity",
-		});
+		if (timedOut) throw new WaitForEventTimeoutError(stepKey);
+		return this.abortAndHangup({ reason: "suspended" });
 	}
 
 	async invoke<

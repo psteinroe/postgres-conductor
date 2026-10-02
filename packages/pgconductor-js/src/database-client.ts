@@ -587,16 +587,12 @@ export class DatabaseClient {
 	async registerEventWait(
 		args: RegisterEventWaitArgs,
 		opts?: QueryMethodOptions,
-	): Promise<{ timedOut: boolean; timeoutMs: number | null }> {
+	): Promise<boolean> {
 		const rows = await this.query(() => this.builder.buildRegisterEventWait(args), {
 			label: "registerEventWait",
 			...opts,
 		});
-		const row = rows[0];
-		return {
-			timedOut: row?.timed_out ?? false,
-			timeoutMs: row?.timeout_ms == null ? null : Number(row.timeout_ms),
-		};
+		return rows[0]?.timed_out === true;
 	}
 
 	async dispatchCustomEvents(

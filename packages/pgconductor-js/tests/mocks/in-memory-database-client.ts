@@ -1101,7 +1101,7 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 	async registerEventWait(
 		args: RegisterEventWaitArgs,
 		_opts?: { signal?: AbortSignal },
-	): Promise<{ timedOut: boolean; timeoutMs: number | null }> {
+	): Promise<boolean> {
 		const execution = this.executions.get(args.executionId);
 		if (
 			!execution ||
@@ -1111,7 +1111,9 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 			execution.cancelled ||
 			execution.state !== "running"
 		) {
-			return { timedOut: false, timeoutMs: null };
+			throw new Error(
+				`execution ${args.executionId} is not claimed by orchestrator ${args.orchestratorId}`,
+			);
 		}
 
 		const existing = Array.from(this.eventSubscriptions.values()).find(
@@ -1134,7 +1136,7 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 				result: { status: "timed_out" },
 				created_at: now,
 			});
-			return { timedOut: true, timeoutMs: 0 };
+			return true;
 		}
 
 		let expiresAt = existing?.expires_at ?? null;
@@ -1157,10 +1159,11 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 			});
 		}
 
-		return {
-			timedOut: false,
-			timeoutMs: expiresAt ? Math.max(0, expiresAt.getTime() - now.getTime()) : null,
-		};
+		execution.state = "pending";
+		execution.orchestrator_id = null;
+		execution.attempts = Math.max(execution.attempts - 1, 0);
+		execution.run_at = expiresAt || new Date(8640000000000000);
+		return false;
 	}
 
 	// ============================================================================
