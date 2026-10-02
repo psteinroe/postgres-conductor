@@ -1338,13 +1338,14 @@ begin
         p_trace_context,
         p_event_key || ':' || p_dedupe_key
     )
-    -- a retry after a lost response or a repeated dedupe key finds the event already stored
     on conflict do nothing;
 
     if p_dedupe_key is null then
         return p_id;
     end if;
 
+    -- returning yields no row for a duplicate, do update would write a row version per redelivery,
+    -- and a cte shares the insert's snapshot and misses a concurrent winner; a new statement sees it
     return (
         select id
         from pgconductor._private_executions
