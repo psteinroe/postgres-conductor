@@ -96,6 +96,7 @@ create table pgconductor._private_executions (
     payload jsonb,
     result jsonb,
     trace_context jsonb,
+    metadata jsonb,
     run_at timestamptz default pgconductor._private_current_time() not null,
     locked_at timestamptz,
     locked_by uuid,
@@ -341,6 +342,20 @@ create trigger manage_queue_partition_trigger
 -- create default queue (trigger will create its partition)
 insert into pgconductor._private_queues (name) values ('default');
 
+-- metadata is copied to derived executions, so it is only checked where it enters
+create or replace function pgconductor._private_check_metadata(p_metadata jsonb)
+ returns void
+ language plpgsql
+ immutable
+ set search_path to ''
+as $function$
+begin
+  if octet_length(p_metadata::text) > 8192 then
+    raise exception 'Execution metadata must not exceed 8192 bytes, got % bytes', octet_length(p_metadata::text);
+  end if;
+end;
+$function$;
+
 create type pgconductor.execution_spec as (
     task_key text,
     queue text,
@@ -352,7 +367,8 @@ create type pgconductor.execution_spec as (
     cron_expression text,
     priority integer,
     "group" text,
-    trace_context jsonb
+    trace_context jsonb,
+    metadata jsonb
 );
 
 create type pgconductor.task_spec as (
@@ -521,7 +537,8 @@ begin
             p_cron_expression := spec.cron_expression,
             p_priority := spec.priority,
             p_group := spec."group",
-            p_trace_context := spec.trace_context
+            p_trace_context := spec.trace_context,
+            p_metadata := spec.metadata
         );
     end loop;
 end;
@@ -539,7 +556,8 @@ create or replace function pgconductor.invoke(
     p_cron_expression text default null,
     p_priority integer default null,
     p_group text default null,
-    p_trace_context jsonb default null
+    p_trace_context jsonb default null,
+    p_metadata jsonb default null
 )
  returns table(id uuid)
  language plpgsql
@@ -552,6 +570,7 @@ declare
     v_next_singleton_on timestamptz;
     v_run_at timestamptz;
 begin
+  perform pgconductor._private_check_metadata(p_metadata);
   v_now := pgconductor._private_current_time();
   v_run_at := coalesce(p_run_at, v_now);
 
@@ -601,6 +620,7 @@ begin
               queue,
               payload,
               trace_context,
+              metadata,
               run_at,
               dedupe_key,
               singleton_on,
@@ -613,6 +633,7 @@ begin
               p_queue,
               p_payload,
               p_trace_context,
+              p_metadata,
               v_run_at,
               p_dedupe_key,
               v_singleton_on,
@@ -636,6 +657,7 @@ begin
               queue,
               payload,
               trace_context,
+              metadata,
               run_at,
               dedupe_key,
               singleton_on,
@@ -648,6 +670,7 @@ begin
               p_queue,
               p_payload,
               p_trace_context,
+              p_metadata,
               v_next_singleton_on,
               p_dedupe_key,
               v_next_singleton_on,
@@ -660,6 +683,7 @@ begin
           do update set
               payload = excluded.payload,
               trace_context = excluded.trace_context,
+              metadata = excluded.metadata,
               run_at = excluded.run_at,
               priority = excluded.priority,
               cron_expression = excluded.cron_expression,
@@ -676,6 +700,7 @@ begin
     queue,
     payload,
     trace_context,
+    metadata,
     run_at,
     dedupe_key,
     cron_expression,
@@ -687,6 +712,7 @@ begin
     p_queue,
     p_payload,
     p_trace_context,
+    p_metadata,
     v_run_at,
     p_dedupe_key,
     p_cron_expression,
@@ -696,6 +722,7 @@ begin
   on conflict (task_key, dedupe_key, queue) do update set
     payload = excluded.payload,
     trace_context = excluded.trace_context,
+    metadata = excluded.metadata,
     run_at = excluded.run_at,
     priority = excluded.priority,
     cron_expression = excluded.cron_expression,
@@ -716,7 +743,8 @@ begin
       p_cron_expression,
       p_priority,
       p_group,
-      p_trace_context
+      p_trace_context,
+      p_metadata
     );
   end if;
 end;
@@ -1320,6 +1348,7 @@ create or replace function pgconductor.emit_event(
     p_event_key text,
     p_payload jsonb default '{}'::jsonb,
     p_trace_context jsonb default null,
+    p_metadata jsonb default null,
     p_id uuid default pgconductor._private_portable_uuidv7()
 )
 returns uuid
@@ -1341,14 +1370,17 @@ begin
         raise exception 'Event payload must be a JSON object';
     end if;
 
+    perform pgconductor._private_check_metadata(p_metadata);
+
     insert into pgconductor._private_executions (
-        id, task_key, queue, payload, trace_context
+        id, task_key, queue, payload, trace_context, metadata
     ) values (
         p_id,
         'pgconductor.event-dispatch',
         'pgconductor.internal',
         jsonb_build_object('eventKey', p_event_key, 'payload', v_payload),
-        p_trace_context
+        p_trace_context,
+        p_metadata
     )
     -- a retry after a lost response finds the event it already stored
     on conflict (id, queue) do nothing;

@@ -185,6 +185,11 @@ Tables live in the `pgconductor` schema with a `_private_` prefix (`_private_exe
 - Used when `invoke()` is called without timeout
 - Parent waits forever until child completes
 
+**Execution Metadata**
+- `metadata jsonb` on `_private_executions` follows the same paths as `trace_context`: event → triggered executions, parent → child, terminal failure → dead-letter delivery, cron occurrence → next occurrence
+- `TaskContext` passes its metadata explicitly to `ctx.invoke` children, `ctx.emit` and `ctx.schedule`
+- `pgconductor._private_check_metadata()` enforces the 8 KB limit where metadata enters (`invoke()`, `emit_event()`, and `ctx.invoke` overrides before hang-up, so settlement never fails on size)
+
 **Custom Events**
 - An emitted event is an execution of the internal `pgconductor.event-dispatch` task on the `pgconductor.internal` queue; its id is the event id and there is no separate event table
 - `DatabaseClient.emitEvent` generates the event id once per call, so a retry after a lost response finds the stored event instead of emitting it twice

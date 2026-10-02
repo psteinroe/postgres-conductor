@@ -1,3 +1,4 @@
+import type { StandardSchemaV1 } from "@standard-schema/spec";
 import type {
 	DatabaseClient,
 	Execution,
@@ -31,6 +32,7 @@ import {
 	type FilterForEvent,
 } from "./event-definition";
 import { compileEventFilter } from "./event-trigger-validation";
+import { validateSchema } from "./lib/validate-schema";
 
 export type TaskAbortReasons =
 	// if cancelled by a user
@@ -55,6 +57,7 @@ export type TaskAbortReasons =
 			payload: Payload | null;
 			group?: string | null;
 			trace_context: TraceContextCarrier | null;
+			metadata: Payload | null;
 			__pgconductorTaskAborted: true;
 	  };
 
@@ -94,6 +97,7 @@ export type TaskContextOptions = {
 	execution: Execution;
 	logger: Logger;
 	eventDefinitions: readonly EventDefinition<string, any, any>[];
+	metadataSchema?: StandardSchemaV1<unknown, object>;
 	window?: [string, string];
 	telemetry: Telemetry;
 };
@@ -117,6 +121,7 @@ export class TaskContext<
 		any,
 		any
 	>[],
+	Metadata extends object = Payload,
 > {
 	private readonly windowChecker?: WindowChecker;
 
@@ -141,6 +146,11 @@ export class TaskContext<
 
 	get signal(): AbortSignal {
 		return this.opts.signal;
+	}
+
+	/** Metadata of this execution, inherited from the event, parent or schedule that created it. */
+	get metadata(): Readonly<Metadata> | undefined {
+		return (this.opts.execution.metadata || undefined) as Readonly<Metadata> | undefined;
 	}
 
 	/** Metadata describing the source execution when this is a DLQ delivery. */
@@ -315,7 +325,16 @@ export class TaskContext<
 		key: string,
 		task: TaskIdentifier<TName, TQueue>,
 		payload: InferPayload<TDef> = {} as InferPayload<TDef>,
-		{ timeout, group }: { timeout?: number; group?: string } = {},
+		{
+			timeout,
+			group,
+			metadata,
+		}: {
+			timeout?: number;
+			group?: string;
+			/** Metadata for this child only. Defaults to the metadata of this execution. */
+			metadata?: Metadata | ((metadata: Readonly<Metadata> | undefined) => Metadata);
+		} = {},
 	): Promise<InferReturns<TDef>> {
 		const cached = await this.opts.db.loadStep(
 			{
@@ -349,6 +368,16 @@ export class TaskContext<
 			);
 		}
 
+		let childMetadata = this.opts.execution.metadata || null;
+		if (metadata) {
+			childMetadata = (await validateSchema(
+				this.opts.metadataSchema,
+				typeof metadata === "function" ? metadata(this.metadata) : metadata,
+				"metadata",
+			)) as Payload;
+			await this.opts.db.checkMetadata(childMetadata, { signal: this.signal });
+		}
+
 		return this.abortAndHangup({
 			reason: "child-invocation",
 			timeout_ms: timeout || "infinity",
@@ -357,6 +386,7 @@ export class TaskContext<
 			payload,
 			group,
 			trace_context: this.opts.telemetry.traceContext(),
+			metadata: childMetadata,
 		});
 	}
 
@@ -399,6 +429,7 @@ export class TaskContext<
 					cron_expression: options.cron,
 					priority: options.priority || null,
 					group: options.group || null,
+					metadata: this.opts.execution.metadata,
 				},
 				scheduleName,
 			},
@@ -459,6 +490,7 @@ export class TaskContext<
 				eventKey: event,
 				payload: payload as any,
 				traceContext: this.opts.telemetry.traceContext(),
+				metadata: this.opts.execution.metadata,
 			},
 			{ signal: this.signal },
 		);

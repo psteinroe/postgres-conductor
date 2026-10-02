@@ -29,6 +29,7 @@ export class MockDatabaseClient implements IDatabaseClient {
 	loadStep = mock(async () => null);
 	countSteps = mock(async () => 0);
 	saveStep = mock(async (_args) => {});
+	checkMetadata = mock(async () => {});
 	clearWaitingState = mock(async () => {});
 	registerEventWait = mock(async () => null);
 	cancelExecution = mock(async () => true);
