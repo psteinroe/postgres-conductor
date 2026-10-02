@@ -89,14 +89,6 @@ class BufferState {
 		}
 	}
 
-	clear(): void {
-		this.completed = [];
-		this.failed = [];
-		this.released = [];
-		this.invokeChild = [];
-		this.count = 0;
-	}
-
 	restore(other: BufferState): void {
 		this.completed.push(...other.completed);
 		this.failed.push(...other.failed);
@@ -400,12 +392,7 @@ export class Worker<
 	) {
 		assert.ok(this.orchestratorId, "orchestratorId must be set when starting the pipeline");
 
-		// Pre-compute task metadata once
 		const allTasks = Array.from(this.tasks.values());
-		const taskMaxAttempts: Record<string, number> = {};
-		for (const task of allTasks) {
-			taskMaxAttempts[task.name] = task.maxAttempts || 3;
-		}
 		// Check if any tasks have windows - only then do we need time-based filtering
 		const tasksWithWindows = allTasks.filter((task) => task.window);
 
@@ -491,20 +478,23 @@ export class Worker<
 				}
 
 				// Don't execute already-cancelled tasks
-				const activeExecs = executions.filter((e) => !e.cancelled);
-				if (activeExecs.length === 0) {
-					return executions.map((exec) => ({
+				const cancelled: ExecutionResult[] = executions
+					.filter((e) => e.cancelled)
+					.map((exec) => ({
 						execution_id: exec.id,
 						queue: exec.queue,
 						task_key: taskKey,
 						status: "permanently_failed",
 						error: exec.last_error || "Execution was cancelled",
-					})) as ExecutionResult[];
+					}));
+				const activeExecs = executions.filter((e) => !e.cancelled);
+				if (activeExecs.length === 0) {
+					return cancelled;
 				}
 
 				// If task has batch config, always use batch execution (even for single items)
 				if (task.batch) {
-					return this.executeBatchTask(task, taskKey, activeExecs);
+					return [...cancelled, ...(await this.executeBatchTask(task, taskKey, activeExecs))];
 				}
 
 				// Execute single (non-batched tasks)
