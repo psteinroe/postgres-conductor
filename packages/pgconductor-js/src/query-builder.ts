@@ -74,6 +74,11 @@ export type LoadStepArgs = {
 	key: string;
 };
 
+export type CountStepsArgs = {
+	executionIds: string[];
+	key: string;
+};
+
 export type SaveStepArgs = {
 	executionId: string;
 	queue: string;
@@ -994,6 +999,13 @@ export class QueryBuilder {
 		return this.sql<[{ result: Payload | null }]>`
 			select result from pgconductor._private_steps
 			where execution_id = ${executionId}::uuid and queue = ${queue}::text and key = ${key}::text
+		`;
+	}
+
+	buildCountSteps({ executionIds, key }: CountStepsArgs): PendingQuery<[{ count: number }]> {
+		return this.sql<[{ count: number }]>`
+			select count(*)::int as count from pgconductor._private_steps
+			where execution_id = any(${this.sql.array(executionIds, 2951)}::uuid[]) and key = ${key}::text
 		`;
 	}
 

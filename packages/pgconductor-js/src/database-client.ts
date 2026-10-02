@@ -15,6 +15,7 @@ import {
 	type ScheduleCronExecutionArgs,
 	type UnscheduleCronExecutionArgs,
 	type LoadStepArgs,
+	type CountStepsArgs,
 	type SaveStepArgs,
 	type ClearWaitingStateArgs,
 	type EmitEventArgs,
@@ -569,6 +570,14 @@ export class DatabaseClient {
 			return undefined;
 		}
 		return rows[0].result;
+	}
+
+	async countSteps(args: CountStepsArgs, opts?: QueryMethodOptions): Promise<number> {
+		const rows = await this.query(() => this.builder.buildCountSteps(args), {
+			label: "countSteps",
+			...opts,
+		});
+		return rows[0].count;
 	}
 
 	async saveStep(args: SaveStepArgs, opts?: QueryMethodOptions): Promise<void> {

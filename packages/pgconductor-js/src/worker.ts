@@ -678,6 +678,8 @@ export class Worker<
 				queue: this.queueName,
 				batch_size: executions.length,
 			}),
+			this.db,
+			executions,
 		);
 
 		const abortPromise = new Promise<TaskAbortReasons>((resolve) => {

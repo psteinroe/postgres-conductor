@@ -135,7 +135,7 @@ const batchTask = conductor.createTask(
 
 - `logger` - Logging methods
 - `signal` - AbortSignal for cancellation
-- `sleep(id, ms)` - Reschedule all executions in the batch
+- `sleep(id, ms)` - Reschedule all executions in the batch. On replay it returns once every execution in the batch has slept at `id`. Since a replayed batch can contain new peers, executions that already slept wait again until the whole batch has.
 
 **BatchTaskContext does NOT have:**
 

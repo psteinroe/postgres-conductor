@@ -517,6 +517,8 @@ export class BatchTaskContext {
 	constructor(
 		private readonly abortController: TypedAbortController<TaskAbortReasons>,
 		public readonly logger: Logger,
+		private readonly db: Pick<DatabaseClient, "countSteps">,
+		private readonly executions: Execution[],
 	) {}
 
 	get signal(): AbortSignal {
@@ -525,9 +527,22 @@ export class BatchTaskContext {
 
 	/**
 	 * Sleep reschedules ALL executions in the batch.
-	 * After sleep, executions may batch with different peers.
+	 * After sleep, executions may batch with different peers, so it only
+	 * returns once every execution in the current batch has slept at `id`.
 	 */
 	async sleep(id: string, ms: number): Promise<void> {
+		const slept = await this.db.countSteps(
+			{
+				executionIds: this.executions.map((exec) => exec.id),
+				key: id,
+			},
+			{ signal: this.signal },
+		);
+
+		if (slept === this.executions.length) {
+			return;
+		}
+
 		this.abortController.abort({
 			__pgconductorTaskAborted: true,
 			reason: "released",
