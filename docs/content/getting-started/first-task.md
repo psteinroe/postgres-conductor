@@ -67,6 +67,7 @@ const orchestrator = Orchestrator.create({
 await orchestrator.start();
 console.log(" Worker running. Press Ctrl+C to stop.");
 await orchestrator.stopped;
+await conductor.close();
 ```
 
 ## Invoke the Task
@@ -126,6 +127,7 @@ const orchestrator = Orchestrator.create({
 
 await orchestrator.start();
 await orchestrator.stopped; // Wait for shutdown signal
+await conductor.close();
 ```
 
 **invoke.ts** - Triggers tasks:
@@ -141,6 +143,7 @@ const conductor = Conductor.create({
 });
 
 await conductor.invoke({ name: "greet" }, { name: "World" });
+await conductor.close();
 ```
 
 ## What's Next?

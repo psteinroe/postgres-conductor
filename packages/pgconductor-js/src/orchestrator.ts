@@ -472,7 +472,6 @@ export class Orchestrator {
 	 * Clean up resources:
 	 * - Stop heartbeat
 	 * - Remove orchestrator from database and release locked executions
-	 * - Close database connection
 	 */
 	private async cleanup(): Promise<void> {
 		// Stop heartbeat and wait for one in flight
@@ -489,8 +488,6 @@ export class Orchestrator {
 			{ signal: cleanupSignal },
 		);
 
-		// Close database client (no-op if user supplied their own instance)
-		await this.db.close();
 		this._stopDeferred = null;
 		this._startDeferred = null;
 		this._abortController = null;

@@ -138,7 +138,7 @@ Tables live in the `pgconductor` schema with a `_private_` prefix (`_private_exe
 **Conductor** (`conductor.ts`)
 - Task registry and factory
 - Entry point for invoking tasks and emitting events
-- Manages database client lifecycle
+- Owns the database client: `close()` ends a pool created from `connectionString`; stopping an orchestrator never closes it
 
 **Orchestrator** (`orchestrator.ts`)
 - Manages multiple workers, plus the internal event-dispatch worker when events are configured

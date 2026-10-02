@@ -48,6 +48,8 @@ const conductor = Conductor.create({
 });
 ```
 
+With `connectionString`, the Conductor owns the connection pool. Call [`conductor.close()`](#conductorclose) when you are done with it. A `sql` instance you pass in stays yours to close.
+
 ## conductor.createTask()
 
 Register a task handler:
@@ -201,6 +203,17 @@ const cancelled = await conductor.cancel(
 ```
 
 Returns `true` if cancelled, `false` if already completed.
+
+## conductor.close()
+
+Close the connection pool created from `connectionString`:
+
+```typescript
+await orchestrator.stop();
+await conductor.close();
+```
+
+Stopping an orchestrator leaves the connection open, so the conductor can keep invoking tasks and the orchestrator can be started again. Close the conductor last. If you passed in a `sql` instance, `close()` does nothing; call `sql.end()` yourself.
 
 ## What's Next?
 

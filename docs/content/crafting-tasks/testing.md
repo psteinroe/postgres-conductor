@@ -45,6 +45,7 @@ test("processes tasks end-to-end", async () => {
   });
 
   await orchestrator.drain(); // Runs until queue is empty
+  await conductor.close();
 
   expect(results).toEqual([1, 2, 3]);
 });
@@ -102,6 +103,7 @@ test("sends email via mocked service", async () => {
   });
 
   await orchestrator.drain();
+  await conductor.close();
 
   expect(mockEmail.send).toHaveBeenCalledWith({ to: "user@example.com" });
 });
