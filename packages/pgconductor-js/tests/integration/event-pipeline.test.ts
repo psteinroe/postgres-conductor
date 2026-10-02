@@ -95,12 +95,10 @@ describe("event pipeline", () => {
 		orchestratorId: string,
 	): Promise<void> {
 		await db.client.returnExecutions({
-			count: 1,
 			orchestratorId,
 			completed: [
 				{
 					execution_id: eventId,
-					orchestrator_id: orchestratorId,
 					queue: INTERNAL_QUEUE,
 					task_key: DISPATCH_TASK,
 					status: "completed",
@@ -109,7 +107,6 @@ describe("event pipeline", () => {
 			failed: [],
 			released: [],
 			invokeChild: [],
-			taskKeys: new Set([DISPATCH_TASK]),
 		});
 	}
 
@@ -837,13 +834,11 @@ describe("event pipeline", () => {
 		});
 		if (!failedDestination) throw new Error("destination was not claimed");
 		await db.client.returnExecutions({
-			count: 1,
 			orchestratorId: destinationOwner,
 			completed: [],
 			failed: [
 				{
 					execution_id: failedDestination.id,
-					orchestrator_id: destinationOwner,
 					queue: failedDestination.queue,
 					task_key: failedDestination.task_key,
 					status: "failed",
@@ -852,7 +847,6 @@ describe("event pipeline", () => {
 			],
 			released: [],
 			invokeChild: [],
-			taskKeys: new Set([failedDestination.task_key]),
 		});
 		const [source] = await db.sql<{ failed_at: Date | null; locked_by: string | null }[]>`
 			select failed_at, locked_by
@@ -879,12 +873,10 @@ describe("event pipeline", () => {
 		});
 		if (!completedDestination) throw new Error("second destination was not claimed");
 		await db.client.returnExecutions({
-			count: 1,
 			orchestratorId: completionOwner,
 			completed: [
 				{
 					execution_id: completedDestination.id,
-					orchestrator_id: completionOwner,
 					queue: completedDestination.queue,
 					task_key: completedDestination.task_key,
 					status: "completed",
@@ -893,7 +885,6 @@ describe("event pipeline", () => {
 			failed: [],
 			released: [],
 			invokeChild: [],
-			taskKeys: new Set([completedDestination.task_key]),
 		});
 		const [destinationState] = await db.sql<
 			{ completed_at: Date | null; failed_at: Date | null; subscription_id: string | null }[]

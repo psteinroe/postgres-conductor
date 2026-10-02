@@ -477,18 +477,15 @@ describe.serial("waitForEvent", () => {
 
 			const result = {
 				execution_id: executionId,
-				orchestrator_id: orchestratorId,
 				queue: "default",
 				task_key: "wait.task",
 			};
 			await database.client.returnExecutions({
-				count: 1,
 				orchestratorId,
 				completed: status === "completed" ? [{ ...result, status }] : [],
 				failed: status === "permanently_failed" ? [{ ...result, status, error: "failed" }] : [],
 				released: [],
 				invokeChild: [],
-				taskKeys: new Set(["wait.task"]),
 			});
 
 			const [row] = await database.sql<{ n: number }[]>`

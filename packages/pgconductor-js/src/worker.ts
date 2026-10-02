@@ -33,6 +33,7 @@ import type { EventDefinition } from "./event-definition";
 import { coerceError } from "./lib/coerce-error";
 import type { TypedAbortController } from "./lib/typed-abort-controller";
 import { Telemetry } from "./telemetry";
+import { noop } from "./lib/noop";
 
 /**
  * The configuration options for the Worker.
@@ -57,20 +58,18 @@ export const DEFAULT_WORKER_CONFIG: WorkerConfig = {
 };
 
 /**
- * Encapsulates buffered execution results with internal counting and task key tracking.
+ * Encapsulates buffered execution results with internal counting.
  */
 class BufferState {
-	orchestratorId = "";
 	completed: ExecutionCompleted[] = [];
 	failed: (ExecutionFailed | ExecutionPermamentlyFailed)[] = [];
 	released: ExecutionReleased[] = [];
 	invokeChild: ExecutionInvokeChild[] = [];
-	taskKeys = new Set<string>();
 	count = 0;
 
+	constructor(readonly orchestratorId: string) {}
+
 	add(result: ExecutionResult): void {
-		this.orchestratorId = result.orchestrator_id || this.orchestratorId;
-		this.taskKeys.add(result.task_key);
 		this.count++;
 
 		switch (result.status) {
@@ -95,7 +94,6 @@ class BufferState {
 		this.failed = [];
 		this.released = [];
 		this.invokeChild = [];
-		this.taskKeys.clear();
 		this.count = 0;
 	}
 
@@ -104,11 +102,7 @@ class BufferState {
 		this.failed.push(...other.failed);
 		this.released.push(...other.released);
 		this.invokeChild.push(...other.invokeChild);
-		this.orchestratorId = this.orchestratorId || other.orchestratorId;
 		this.count += other.count;
-		for (const key of other.taskKeys) {
-			this.taskKeys.add(key);
-		}
 	}
 }
 
@@ -172,7 +166,6 @@ export class Worker<
 		private readonly logger: Logger,
 		config: Partial<WorkerConfig> = {},
 		private readonly extraContext: object = {},
-		private readonly eventDefinitions: readonly EventDefinition<string, any, any>[] = [],
 		private readonly telemetry = new Telemetry(),
 	) {
 		const maintenanceTask = createMaintenanceTask(this.queueName);
@@ -255,24 +248,13 @@ export class Worker<
 		this._stopDeferred = new Deferred<void>();
 		this._abortController = new AbortController();
 
-		// Startup failures reject both lifecycle promises; callers must never
-		// observe a worker that started partially.
 		try {
-			// Sample before calculating or registering cron schedules.
-			await this.clock.start(this.abortController.signal);
+			// Sample before calculating cron schedules
+			await this.clock.start(this.signal);
 			await this.register();
 		} catch (error) {
-			// Registration is part of startup, not a running pipeline. Resolve the
-			// stop promise so callers that only await `start()` do not get an
-			// unhandled rejection, then discard every piece of this failed attempt.
-			const stopDeferred = this._stopDeferred;
-			this._abortController.abort();
-			// Reject `started` so an Orchestrator observes registration failure, but
-			// attach a noop handler because callers that only use start() do not
-			// necessarily observe this internal lifecycle promise.
-			this._startDeferred.promise.catch(() => {});
+			this._startDeferred.promise.catch(noop);
 			this._startDeferred.reject(error);
-			if (!stopDeferred.isSettled) stopDeferred.resolve();
 			this.resetLifecycle();
 			throw error;
 		}
@@ -298,7 +280,7 @@ export class Worker<
 				this.logger.error("Worker pipeline error:", error);
 			} finally {
 				queue.close();
-				if (this._stopDeferred && !this._stopDeferred.isSettled) this._stopDeferred.resolve();
+				this._stopDeferred?.resolve();
 				this.resetLifecycle();
 			}
 		})();
@@ -433,8 +415,7 @@ export class Worker<
 				let disallowedTaskKeys: string[] = [];
 
 				if (tasksWithWindows.length > 0) {
-					// db.getCurrentTime() handles test vs production: returns fake time in tests, system time in production
-					const now = await this.db.getCurrentTime({ signal: this.signal });
+					const now = this.clock.now();
 
 					const isWithinWindow = (task: AnyTask, now: Date): boolean => {
 						if (!task.window) return true;
@@ -503,40 +484,22 @@ export class Worker<
 					return executions.map((exec) => ({
 						queue: exec.queue,
 						execution_id: exec.id,
-						orchestrator_id: exec.locked_by,
 						task_key: taskKey,
 						status: "failed",
 						error: `Task not found: ${taskKey}`,
 					})) as ExecutionResult[];
 				}
 
-				// Safety check: don't execute already-cancelled tasks
-				const cancelledExecs = executions.filter((e) => e.cancelled);
-				if (cancelledExecs.length === executions.length) {
-					// All cancelled - return failures for all
+				// Don't execute already-cancelled tasks
+				const activeExecs = executions.filter((e) => !e.cancelled);
+				if (activeExecs.length === 0) {
 					return executions.map((exec) => ({
 						execution_id: exec.id,
-						orchestrator_id: exec.locked_by,
 						queue: exec.queue,
 						task_key: taskKey,
 						status: "permanently_failed",
 						error: exec.last_error || "Execution was cancelled",
 					})) as ExecutionResult[];
-				}
-
-				// Note: We intentionally do NOT check this.signal.aborted here.
-				// When shutdown occurs, fetchExecutions closes the queue which flushes
-				// pending batches. We want to process those flushed items during shutdown.
-				// The abort signal tells fetchExecutions to stop fetching NEW items,
-				// but executeTasks should process what's already queued.
-
-				// Filter out cancelled executions
-				const activeExecs = executions.filter((e) => !e.cancelled);
-
-				// If all cancelled, we already returned cancelled results above
-				if (activeExecs.length === 0) {
-					// This shouldn't happen due to check above, but be safe
-					return [];
 				}
 
 				// If task has batch config, always use batch execution (even for single items)
@@ -582,102 +545,97 @@ export class Worker<
 				? { ...this.extraContext, db: this.db, tasks: this.tasks }
 				: this.extraContext;
 
-		return this.scheduleNextExecution(exec)
-			.then(async () => {
-				const output = await this.telemetry.process({
-					taskKey: exec.task_key,
-					queue: exec.queue,
-					messageId: exec.id,
-					traceContexts: [exec.trace_context],
-					run: () =>
-						Promise.race([
-							task.execute(
-								taskEvent,
-								TaskContext.create<Tasks, Events, typeof extraContext>(
-									{
-										db: this.db,
-										clock: this.clock,
-										abortController: taskAbortController,
-										execution: exec,
-										logger: makeChildLogger(this.logger, {
-											execution_id: exec.id,
-											orchestrator_id: exec.locked_by,
-											task_key: exec.task_key,
-											queue: exec.queue,
-										}),
-										eventDefinitions: task.eventDefinitions,
-										window: task.window,
-										telemetry: this.telemetry,
-									},
-									extraContext,
-								),
+		try {
+			await this.scheduleNextExecution(exec);
+
+			const output = await this.telemetry.process({
+				taskKey: exec.task_key,
+				queue: exec.queue,
+				messageId: exec.id,
+				traceContexts: [exec.trace_context],
+				run: () =>
+					Promise.race([
+						task.execute(
+							taskEvent,
+							TaskContext.create<Tasks, Events, typeof extraContext>(
+								{
+									db: this.db,
+									clock: this.clock,
+									abortController: taskAbortController,
+									execution: exec,
+									logger: makeChildLogger(this.logger, {
+										execution_id: exec.id,
+										orchestrator_id: exec.locked_by,
+										task_key: exec.task_key,
+										queue: exec.queue,
+									}),
+									eventDefinitions: task.eventDefinitions,
+									window: task.window,
+									telemetry: this.telemetry,
+								},
+								extraContext,
 							),
-							abortPromise,
-						]),
-				});
+						),
+						abortPromise,
+					]),
+			});
 
-				if (isTaskAbortReason(output)) {
-					switch (output.reason) {
-						case "child-invocation":
-							return {
-								execution_id: exec.id,
-								orchestrator_id: exec.locked_by,
-								queue: exec.queue,
-								task_key: exec.task_key,
-								status: "invoke_child",
-								timeout_ms: output.timeout_ms,
-								step_key: output.step_key,
-								child_task_name: output.task.name,
-								child_task_queue: output.task.queue || "default",
-								child_payload: output.payload,
-								group: output.group,
-							} as const;
-						case "cancelled":
-							return {
-								execution_id: exec.id,
-								orchestrator_id: exec.locked_by,
-								queue: exec.queue,
-								task_key: exec.task_key,
-								status: "permanently_failed",
-								error: exec.last_error || "Task was cancelled",
-							} as const;
-						case "released":
-						case "parent-aborted":
-							return {
-								execution_id: exec.id,
-								orchestrator_id: exec.locked_by,
-								queue: exec.queue,
-								reschedule_in_ms:
-									output.reason === "released" ? output.reschedule_in_ms : undefined,
-								step_key: output.reason === "released" ? output.step_key : undefined,
-								task_key: exec.task_key,
-								status: "released",
-							} as const;
-						default:
-							assert.never(output);
-					}
+			if (isTaskAbortReason(output)) {
+				switch (output.reason) {
+					case "child-invocation":
+						return {
+							execution_id: exec.id,
+							queue: exec.queue,
+							task_key: exec.task_key,
+							status: "invoke_child",
+							timeout_ms: output.timeout_ms,
+							step_key: output.step_key,
+							child_task_name: output.task.name,
+							child_task_queue: output.task.queue || "default",
+							child_payload: output.payload,
+							group: output.group,
+						} as const;
+					case "cancelled":
+						return {
+							execution_id: exec.id,
+							queue: exec.queue,
+							task_key: exec.task_key,
+							status: "permanently_failed",
+							error: exec.last_error || "Task was cancelled",
+						} as const;
+					case "released":
+					case "parent-aborted":
+						return {
+							execution_id: exec.id,
+							queue: exec.queue,
+							reschedule_in_ms: output.reason === "released" ? output.reschedule_in_ms : undefined,
+							step_key: output.reason === "released" ? output.step_key : undefined,
+							task_key: exec.task_key,
+							status: "released",
+						} as const;
+					default:
+						assert.never(output);
 				}
+			}
 
-				return {
-					execution_id: exec.id,
-					orchestrator_id: exec.locked_by,
-					queue: exec.queue,
-					task_key: exec.task_key,
-					status: "completed",
-					result: output,
-				} as const;
-			})
-			.catch(
-				(err): ExecutionResult => ({
-					execution_id: exec.id,
-					orchestrator_id: exec.locked_by,
-					queue: exec.queue,
-					task_key: exec.task_key,
-					status: "failed",
-					error: coerceError(err).message,
-				}),
-			)
-			.finally(() => this._runningTasks.delete(exec.id));
+			return {
+				execution_id: exec.id,
+				queue: exec.queue,
+				task_key: exec.task_key,
+				status: "completed",
+				result: output,
+			} as const;
+		} catch (err) {
+			return {
+				execution_id: exec.id,
+				queue: exec.queue,
+				task_key: exec.task_key,
+				status: "failed",
+				error: coerceError(err).message,
+			} as const;
+		} finally {
+			this._runningTasks.delete(exec.id);
+		}
 	}
 
 	/**
@@ -722,91 +680,85 @@ export class Worker<
 			});
 		});
 
-		// Schedule recurring executions before passing the batch to the application handler.
-		return Promise.all(executions.map((exec) => this.scheduleNextExecution(exec)))
-			.then(() =>
-				this.telemetry.process({
-					taskKey,
-					queue: this.queueName,
-					batchMessageCount: executions.length,
-					traceContexts: executions.map((exec) => exec.trace_context),
-					run: async () => {
-						const result = await Promise.race([task.execute(events, batchContext), abortPromise]);
-						if (!isTaskAbortReason(result) && result !== undefined) {
-							if (!Array.isArray(result)) {
-								throw new Error("Batch handler must return array matching input length");
-							}
-							if (result.length !== executions.length) {
-								throw new Error(
-									`Batch handler returned ${result.length} results but received ${executions.length} executions`,
-								);
-							}
+		try {
+			// Schedule next executions for cron tasks
+			await Promise.all(executions.map((exec) => this.scheduleNextExecution(exec)));
+
+			const result = await this.telemetry.process({
+				taskKey,
+				queue: this.queueName,
+				batchMessageCount: executions.length,
+				traceContexts: executions.map((exec) => exec.trace_context),
+				run: async () => {
+					const result = await Promise.race([task.execute(events, batchContext), abortPromise]);
+					if (!isTaskAbortReason(result) && result !== undefined) {
+						if (!Array.isArray(result)) {
+							throw new Error("Batch handler must return array matching input length");
 						}
-						return result;
-					},
-				}),
-			)
-			.then((result) => {
-				// Handle abort reasons
-				if (isTaskAbortReason(result)) {
-					if (result.reason === "released") {
-						// Batch sleep - reschedule all
-						return executions.map((exec) => ({
-							execution_id: exec.id,
-							orchestrator_id: exec.locked_by,
-							queue: exec.queue,
-							task_key: taskKey,
-							status: "released" as const,
-							reschedule_in_ms: result.reschedule_in_ms,
-							step_key: result.step_key,
-						}));
+						if (result.length !== executions.length) {
+							throw new Error(
+								`Batch handler returned ${result.length} results but received ${executions.length} executions`,
+							);
+						}
 					}
+					return result;
+				},
+			});
 
-					// Other abort reasons
+			// Handle abort reasons
+			if (isTaskAbortReason(result)) {
+				if (result.reason === "released") {
+					// Batch sleep - reschedule all
 					return executions.map((exec) => ({
 						execution_id: exec.id,
-						orchestrator_id: exec.locked_by,
 						queue: exec.queue,
 						task_key: taskKey,
-						status: "failed" as const,
-						error: `Task aborted: ${result.reason}`,
+						status: "released" as const,
+						reschedule_in_ms: result.reschedule_in_ms,
+						step_key: result.step_key,
 					}));
 				}
 
-				// Void tasks: all succeed
-				if (result === undefined) {
-					return executions.map((exec) => ({
-						execution_id: exec.id,
-						orchestrator_id: exec.locked_by,
-						queue: exec.queue,
-						task_key: taskKey,
-						status: "completed" as const,
-						result: undefined,
-					}));
-				}
-
-				// Individual results
-				return executions.map((exec, i) => ({
-					execution_id: exec.id,
-					orchestrator_id: exec.locked_by,
-					queue: exec.queue,
-					task_key: taskKey,
-					status: "completed" as const,
-					result: result[i],
-				}));
-			})
-			.catch((err) => {
-				// Handler threw: all fail together
-				const error = coerceError(err).message;
+				// Other abort reasons
 				return executions.map((exec) => ({
 					execution_id: exec.id,
-					orchestrator_id: exec.locked_by,
 					queue: exec.queue,
 					task_key: taskKey,
 					status: "failed" as const,
-					error,
+					error: `Task aborted: ${result.reason}`,
 				}));
-			});
+			}
+
+			// Void tasks: all succeed
+			if (result === undefined) {
+				return executions.map((exec) => ({
+					execution_id: exec.id,
+					queue: exec.queue,
+					task_key: taskKey,
+					status: "completed" as const,
+					result: undefined,
+				}));
+			}
+
+			// Individual results
+			return executions.map((exec, i) => ({
+				execution_id: exec.id,
+				queue: exec.queue,
+				task_key: taskKey,
+				status: "completed" as const,
+				result: result[i],
+			}));
+		} catch (err) {
+			// Handler threw: all fail together
+			const error = coerceError(err).message;
+			return executions.map((exec) => ({
+				execution_id: exec.id,
+				queue: exec.queue,
+				task_key: taskKey,
+				status: "failed" as const,
+				error,
+			}));
+		}
 	}
 
 	private async scheduleNextExecution(execution: Execution): Promise<void> {
@@ -844,31 +796,35 @@ export class Worker<
 
 	// --- Stage 3: Flush results to database ---
 	private async flushResults(source: AsyncIterable<ExecutionResult>): Promise<void> {
-		let buffer = new BufferState();
+		const orchestratorId = this.orchestratorId;
+		assert.ok(orchestratorId, "orchestratorId must be set when starting the pipeline");
+
+		let buffer = new BufferState(orchestratorId);
 		let flushTimer: ReturnType<typeof setTimeout> | null = null;
 
 		const flushNow = async (isCleanup = false) => {
 			if (buffer.count === 0) return;
 
 			const batch = buffer;
-			buffer = new BufferState();
+			buffer = new BufferState(orchestratorId);
 
 			if (flushTimer) {
 				clearTimeout(flushTimer);
 				flushTimer = null;
 			}
 
-			batch.orchestratorId = this.orchestratorId || batch.orchestratorId;
-			await this.telemetry
-				.settle({
+			try {
+				await this.telemetry.settle({
 					queue: this.queueName,
 					batchMessageCount: batch.count,
 					run: () => this.db.returnExecutions(batch, { signal: this.signal }),
-				})
-				.catch((err) => {
-					this.logger.error("Error flushing results:", err);
-					if (!isCleanup) buffer.restore(batch);
 				});
+			} catch (err) {
+				this.logger.error("Error flushing results:", err);
+				if (!isCleanup) {
+					buffer.restore(batch);
+				}
+			}
 		};
 
 		const scheduleFlush = () => {

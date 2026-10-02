@@ -99,7 +99,6 @@ function makeWorker(db: InMemoryDatabaseClient, task: any, telemetry = true) {
 		logger,
 		{ pollIntervalMs: 1, flushIntervalMs: 1, fetchBatchSize: 10, flushBatchSize: 10 },
 		{},
-		[],
 		new Telemetry(telemetry),
 	);
 }
@@ -360,7 +359,6 @@ describe.serial("OpenTelemetry instrumentation", () => {
 			logger,
 			{ pollIntervalMs: 1, flushIntervalMs: 1 },
 			{},
-			[],
 			new Telemetry(),
 		);
 		await worker.drain("worker");

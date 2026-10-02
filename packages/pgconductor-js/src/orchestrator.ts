@@ -70,7 +70,6 @@ export class Orchestrator {
 				this.logger,
 				options.defaultWorker,
 				options.conductor.options.context,
-				options.conductor.options.events?.definitions ?? [],
 				options.conductor.telemetry,
 			);
 			this.workers.push(worker);
@@ -112,7 +111,6 @@ export class Orchestrator {
 						flushIntervalMs,
 					},
 					options.conductor.options.context,
-					options.conductor.options.events.definitions,
 					options.conductor.telemetry,
 				),
 			);
