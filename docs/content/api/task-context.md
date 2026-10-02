@@ -99,7 +99,7 @@ const result = await ctx.invoke<TResult>(
   stepName: string,
   taskRef: { name: string, queue?: string },
   payload: TPayload,
-  timeout?: number
+  options?: { timeout?: number, group?: string }
 ): Promise<TResult>
 ```
 
@@ -114,7 +114,7 @@ const parent = conductor.createTask(
       "call-child",
       { name: "child-task" },
       { input: event.payload.value },
-      30000 // 30 second timeout
+      { timeout: 30000 } // 30 second timeout
     );
 
     return { final: childResult.output + 10 };

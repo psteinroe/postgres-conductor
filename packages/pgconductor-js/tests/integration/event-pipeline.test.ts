@@ -353,6 +353,38 @@ describe("event pipeline", () => {
 		`;
 	}, 30_000);
 
+	test("validates emitted payloads against the event schema", async () => {
+		const db = await database();
+		const event = defineEvent({
+			name: "pipeline.validated",
+			payload: z.object({ value: z.string().trim() }),
+		});
+		const conductor = Conductor.create({
+			sql: db.sql,
+			events: EventSchemas.fromSchema([event]),
+			context: {},
+		});
+
+		// @ts-expect-error value must be a string
+		const invalid = conductor.emit("pipeline.validated", { value: 1 });
+		await expect(invalid).rejects.toThrow('Invalid payload for event "pipeline.validated"');
+
+		const eventId = await conductor.emit("pipeline.validated", { value: " ready " });
+		const [source] = await db.sql<{ payload: Record<string, unknown> }[]>`
+			select payload
+			from pgconductor._private_executions
+			where id = ${eventId}::uuid and queue = ${INTERNAL_QUEUE}
+		`;
+		expect(source?.payload).toEqual({
+			eventKey: "pipeline.validated",
+			payload: { value: "ready" },
+		});
+		const [executions] = await db.sql<{ count: number }[]>`
+			select count(*)::int as count from pgconductor._private_executions
+		`;
+		expect(executions?.count).toBe(1);
+	});
+
 	test("does not serialize same-key emitters for caller transaction lifetimes", async () => {
 		const db = await database();
 		const firstSql = postgres(db.url, { max: 1 });

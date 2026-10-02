@@ -370,8 +370,7 @@ export class TaskContext<
 		key: string,
 		task: TaskIdentifier<TName, TQueue>,
 		payload: InferPayload<TDef> = {} as InferPayload<TDef>,
-		timeout?: number,
-		group?: string,
+		{ timeout, group }: { timeout?: number; group?: string } = {},
 	): Promise<InferReturns<TDef>> {
 		const cached = await this.opts.db.loadStep(
 			{

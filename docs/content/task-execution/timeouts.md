@@ -16,7 +16,7 @@ const parent = conductor.createTask(
         "call-api",
         { name: "external-api" },
         { url: event.payload.url },
-        30000 // 30 second timeout
+        { timeout: 30000 } // 30 second timeout
       );
       return result;
     } catch (error) {
@@ -41,7 +41,7 @@ The child task completes independently, but its result isn't returned to the par
 
 ## Infinite Timeout
 
-Omit the timeout parameter to wait indefinitely:
+Omit the timeout option to wait indefinitely:
 
 ```typescript
 // Wait forever for child to complete

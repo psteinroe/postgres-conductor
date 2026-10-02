@@ -157,6 +157,7 @@ const parentTask = conductor.createTask(
   async (event, ctx) => {
     // ctx.invoke() waits for completion and returns the result
     const result = await ctx.invoke(
+      "process-data",
       { name: "process-data" },
       { items: ["a", "b", "c"] }
     );

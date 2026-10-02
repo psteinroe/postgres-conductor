@@ -43,7 +43,7 @@ This happens entirely in Postgres - no external coordination needed.
 - Set on worker/queue with `config: { concurrency }`
 - Independent per worker instance
 
-Child invocations use the group supplied to `ctx.invoke`. Dynamic cron schedules accept `group` alongside `cron`, and each subsequent cron execution preserves it.
+Child invocations use the `group` option supplied to `ctx.invoke`. Dynamic cron schedules accept `group` alongside `cron`, and each subsequent cron execution preserves it.
 
 ## What's Next?
 

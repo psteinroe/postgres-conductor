@@ -134,7 +134,7 @@ describe("Invoke Support", () => {
 			{ invocable: true },
 			async (_event, ctx) => {
 				try {
-					await ctx.invoke("invoke-slow", { name: "slow-child" }, {}, 1000);
+					await ctx.invoke("invoke-slow", { name: "slow-child" }, {}, { timeout: 1000 });
 					return { success: true };
 				} catch (err) {
 					parentError(err as Error);
@@ -538,7 +538,7 @@ describe("Invoke Support", () => {
 					"invoke-slow",
 					{ name: "slow-child-2", queue: "pending-child-queue" },
 					{},
-					1000,
+					{ timeout: 1000, group: "tenant-a" },
 				);
 				return { success: true };
 			},
@@ -599,9 +599,10 @@ describe("Invoke Support", () => {
 				cancelled: boolean;
 				failed_at: Date | null;
 				last_error: string | null;
+				group: string | null;
 			}[]
 		>`
-			select cancelled, failed_at, last_error
+			select cancelled, failed_at, last_error, "group"
 			from pgconductor._private_executions
 			where task_key = 'slow-child-2'
 				and queue = 'pending-child-queue'
@@ -611,6 +612,7 @@ describe("Invoke Support", () => {
 		expect(children[0]?.cancelled).toBe(false); // Not cancelled since it was pending
 		expect(children[0]?.failed_at).not.toBeNull();
 		expect(children[0]?.last_error).toContain("parent timed out");
+		expect(children[0]?.group).toBe("tenant-a");
 	}, 10000);
 
 	test("dedupe_key replaces unlocked execution with new values", async () => {
