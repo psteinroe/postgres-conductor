@@ -1,8 +1,9 @@
-import { afterAll, afterEach, beforeAll, test, expect } from "bun:test";
+import { afterAll, afterEach, beforeAll, test, expect, jest } from "bun:test";
 import { TestDatabasePool } from "../fixtures/test-database";
 import type { TestDatabase } from "../fixtures/test-database";
 import { Conductor } from "../../src/conductor";
 import { Orchestrator } from "../../src/orchestrator";
+import { Deferred } from "../../src/lib/deferred";
 
 let pool: TestDatabasePool;
 const databases: TestDatabase[] = [];
@@ -12,6 +13,7 @@ beforeAll(async () => {
 }, 60000);
 
 afterEach(async () => {
+	jest.useRealTimers();
 	await Promise.all(databases.map((db) => db.destroy()));
 	databases.length = 0;
 });
@@ -130,4 +132,59 @@ test("stop() waits for cleanup to complete", async () => {
 	expect(cleanupStarted).toBe(true);
 	expect(cleanupCompleted).toBe(true);
 	expect(orch.isStopped).toBe(true);
+});
+
+test("stop() waits for an in-flight heartbeat and nothing runs after cleanup", async () => {
+	const db = await pool.child();
+	databases.push(db);
+
+	const conductor = Conductor.create({
+		sql: db.sql,
+		context: {},
+	});
+
+	await conductor.ensureInstalled();
+
+	const unhandled: unknown[] = [];
+	const onUnhandled = (err: unknown) => unhandled.push(err);
+	process.on("unhandledRejection", onUnhandled);
+
+	const heartbeat = conductor.db.orchestratorHeartbeat.bind(conductor.db);
+	const heartbeatStarted = new Deferred<void>();
+	const releaseHeartbeat = new Deferred<void>();
+	let heartbeats = 0;
+	let heartbeatSettled = false;
+	conductor.db.orchestratorHeartbeat = async (args, opts) => {
+		if (++heartbeats === 2) {
+			heartbeatStarted.resolve();
+			await releaseHeartbeat.promise;
+			const signals = await heartbeat(args, opts);
+			heartbeatSettled = true;
+			return signals;
+		}
+		return heartbeat(args, opts);
+	};
+
+	jest.useFakeTimers();
+	const orch = Orchestrator.create({ conductor });
+	await orch.start();
+
+	jest.advanceTimersByTime(30_000);
+	await heartbeatStarted.promise;
+
+	const stopping = orch.stop();
+	releaseHeartbeat.resolve();
+	await stopping;
+
+	expect(heartbeatSettled).toBe(true);
+	const rows = await db.sql`
+		select id from pgconductor._private_orchestrators where id = ${orch.info.id}
+	`;
+	expect(rows.length).toBe(0);
+
+	jest.advanceTimersByTime(120_000);
+	await db.sql`select 1`;
+	expect(heartbeats).toBe(2);
+	process.off("unhandledRejection", onUnhandled);
+	expect(unhandled).toEqual([]);
 });

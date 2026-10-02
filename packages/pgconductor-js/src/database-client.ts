@@ -313,6 +313,7 @@ export class DatabaseClient {
 		opts?: QueryMethodOptions,
 	): Promise<
 		{
+			registered: boolean;
 			signal_type: string | null;
 			signal_execution_id: string | null;
 			signal_payload: Record<string, any> | null;
