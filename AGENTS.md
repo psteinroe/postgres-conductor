@@ -153,6 +153,7 @@ The migration file contains:
 - Manages multiple workers
 - Handles startup/shutdown coordination
 - Provides `stopped` promise for graceful shutdown
+- Runs the internal event dispatch worker only when the conductor has `events` configured
 
 **DatabaseClient** (`database-client.ts`)
 - Wraps all SQL function calls for easier unit testing and mocking

@@ -108,7 +108,7 @@ await conductor.emit("user.created", {
 });
 ```
 
-Each event is stored as a short-lived internal dispatch execution. Destination inserts are atomic within one database statement. If dispatch retries before the source execution completes, it re-evaluates current subscriptions: existing deliveries are deduplicated, but newly registered subscriptions may receive additional deliveries. Handlers should be prepared for at-least-once delivery.
+Each event is stored as a short-lived internal dispatch execution. Destination inserts are atomic within one database statement. If dispatch retries before the source execution completes, it re-evaluates current subscriptions: existing deliveries are deduplicated, but newly registered subscriptions may receive additional deliveries. Handlers should be prepared for at-least-once delivery. Only orchestrators whose conductor has `events` configured dispatch events.
 
 ### Emitting from Database Triggers
 

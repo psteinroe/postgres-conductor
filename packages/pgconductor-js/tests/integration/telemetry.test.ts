@@ -17,7 +17,10 @@ import {
 	SimpleSpanProcessor,
 } from "@opentelemetry/sdk-trace-base";
 import type { Sql } from "postgres";
+import { z } from "zod";
 import { Conductor } from "../../src/conductor";
+import { defineEvent } from "../../src/event-definition";
+import { EventSchemas } from "../../src/schemas";
 import { Orchestrator } from "../../src/orchestrator";
 import { Task } from "../../src/task";
 import { Worker } from "../../src/worker";
@@ -156,7 +159,14 @@ describe.serial("OpenTelemetry instrumentation", () => {
 	test("telemetry opt-out includes the internal event-dispatch worker", async () => {
 		const { exporter, provider } = installProvider();
 		const db = new InMemoryDatabaseClient();
-		const conductor = Conductor.create({ sql: fakeSql, context: {}, telemetry: false });
+		const conductor = Conductor.create({
+			sql: fakeSql,
+			events: EventSchemas.fromSchema([
+				defineEvent({ name: "disabled.event", payload: z.object({}) }),
+			]),
+			context: {},
+			telemetry: false,
+		});
 		(conductor as any).db = db;
 		const eventId = await db.emitEvent({ eventKey: "disabled.event", payload: {} });
 		expect(db.getExecution(eventId)?.state).toBe("pending");

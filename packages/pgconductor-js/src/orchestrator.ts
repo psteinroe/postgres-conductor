@@ -1,5 +1,5 @@
 import { createEventDispatchTask, EVENT_DISPATCH_QUEUE } from "./event-dispatch-task";
-import { Worker, type WorkerConfig } from "./worker";
+import { DEFAULT_WORKER_CONFIG, Worker, type WorkerConfig } from "./worker";
 import { DatabaseClient } from "./database-client";
 import { MigrationStore } from "./migration-store";
 import { SchemaManager } from "./schema-manager";
@@ -93,24 +93,30 @@ export class Orchestrator {
 			queues.add(worker.queueName);
 		}
 
-		this.workers.push(
-			new Worker(
-				EVENT_DISPATCH_QUEUE,
-				[createEventDispatchTask(this.db)],
-				this.db,
-				this.logger,
-				{
-					concurrency: 1,
-					fetchBatchSize: 10,
-					flushBatchSize: 10,
-					pollIntervalMs: options.defaultWorker?.pollIntervalMs || 1000,
-					flushIntervalMs: options.defaultWorker?.flushIntervalMs || 2000,
-				},
-				options.conductor.options.context,
-				options.conductor.options.events?.definitions ?? [],
-				options.conductor.telemetry,
-			),
-		);
+		if (options.conductor.options.events?.definitions.length) {
+			const { pollIntervalMs, flushIntervalMs } = {
+				...DEFAULT_WORKER_CONFIG,
+				...options.defaultWorker,
+			};
+			this.workers.push(
+				new Worker(
+					EVENT_DISPATCH_QUEUE,
+					[createEventDispatchTask(this.db)],
+					this.db,
+					this.logger,
+					{
+						concurrency: 1,
+						fetchBatchSize: 10,
+						flushBatchSize: 10,
+						pollIntervalMs,
+						flushIntervalMs,
+					},
+					options.conductor.options.context,
+					options.conductor.options.events.definitions,
+					options.conductor.telemetry,
+				),
+			);
+		}
 	}
 
 	static create<const TTasks extends readonly Task<any, "default", any, any, any, any>[]>(

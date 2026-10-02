@@ -29,6 +29,9 @@ most one worker for each queue (including the implicit `default` worker); put
 all tasks for a queue on that worker. Multiple workers for one queue are
 rejected rather than competing for registrations.
 
+If the conductor has `events` configured, the Orchestrator also runs an internal
+worker that dispatches emitted events to their subscribers.
+
 **Default worker config:**
 
 ```typescript
