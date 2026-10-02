@@ -32,6 +32,7 @@ import {
 import { EVENT_DISPATCH_QUEUE, EVENT_DISPATCH_TASK } from "./event-dispatch-task";
 import { Worker, type WorkerConfig } from "./worker";
 import { DefaultLogger, type Logger } from "./lib/logger";
+import type { AddedContext, Middleware } from "./middleware";
 import { waitFor } from "./lib/wait-for";
 import { SchemaManager } from "./schema-manager";
 import { Telemetry } from "./telemetry";
@@ -119,6 +120,9 @@ export type ConductorOptions<
 	/** Standard Schema for execution metadata, validated wherever metadata is set. */
 	metadata?: MetadataSchema;
 
+	/** Runs around every attempt of a non-batch task. Added context is typed in handlers. */
+	middleware?: readonly Middleware<any, object, any>[];
+
 	logger?: Logger;
 	/** Disable OpenTelemetry instrumentation. The default is enabled and uses the global API provider. */
 	telemetry?: false;
@@ -136,6 +140,7 @@ export class Conductor<
 	Events extends readonly EventDefinition<string, any, any>[] =
 		InferEventsFromSchema<TEventSchemas>,
 	Metadata extends object = Payload,
+	MiddlewareContext extends object = {},
 > {
 	/**
 	 * @internal
@@ -175,12 +180,25 @@ export class Conductor<
 		TEventSchemas extends EventSchemas<any> | undefined = undefined,
 		TExtraContext extends object = {},
 		TMetadataSchema extends MetadataSchema | undefined = undefined,
+		TAdded extends readonly object[] = readonly object[],
 	>(
 		options: ConnectionOptions & {
 			tasks?: TTaskSchemas;
 			events?: TEventSchemas;
 			context: TExtraContext;
 			metadata?: TMetadataSchema;
+			middleware?: {
+				[K in keyof TAdded]: Middleware<
+					TaskContext<
+						InferTasksFromSchema<TTaskSchemas>,
+						InferEventsFromSchema<TEventSchemas>,
+						InferMetadata<TMetadataSchema>
+					> &
+						TExtraContext,
+					TAdded[K],
+					InferMetadata<TMetadataSchema>
+				>;
+			};
 			logger?: Logger;
 			telemetry?: false;
 		},
@@ -190,7 +208,8 @@ export class Conductor<
 		TExtraContext,
 		InferTasksFromSchema<TTaskSchemas>,
 		InferEventsFromSchema<TEventSchemas>,
-		InferMetadata<TMetadataSchema>
+		InferMetadata<TMetadataSchema>,
+		AddedContext<TAdded>
 	> {
 		return new Conductor(options);
 	}
@@ -237,14 +256,14 @@ export class Conductor<
 					) => Promise<Array<ResolvedReturns<Tasks, TDef>>>
 			: (
 					event: ResolvedTaskEvent<Tasks, Events, TDef, TTriggers>,
-					ctx: TaskContext<Tasks, Events, Metadata> & ExtraContext,
+					ctx: TaskContext<Tasks, Events, Metadata> & ExtraContext & MiddlewareContext,
 				) => Promise<ResolvedReturns<Tasks, TDef>>,
 	): Task<
 		TDef["name"],
 		ResolvedQueue<TDef>,
 		ResolvedPayload<Tasks, TDef>,
 		ResolvedReturns<Tasks, TDef>,
-		TaskContext<Tasks, Events, Metadata> & ExtraContext,
+		TaskContext<Tasks, Events, Metadata> & ExtraContext & MiddlewareContext,
 		TaskEventFromTriggers<TTriggers, ResolvedPayload<Tasks, TDef>, Events>
 	> {
 		return Task.create<
@@ -252,7 +271,7 @@ export class Conductor<
 			ResolvedQueue<TDef>,
 			ResolvedPayload<Tasks, TDef>,
 			ResolvedReturns<Tasks, TDef>,
-			TaskContext<Tasks, Events, Metadata> & ExtraContext,
+			TaskContext<Tasks, Events, Metadata> & ExtraContext & MiddlewareContext,
 			TaskEventFromTriggers<TTriggers, ResolvedPayload<Tasks, TDef>, Events>
 		>(
 			definition as TaskConfiguration<
@@ -264,7 +283,7 @@ export class Conductor<
 			fn as ExecuteFunction<
 				TaskEventFromTriggers<TTriggers, ResolvedPayload<Tasks, TDef>, Events>,
 				ResolvedReturns<Tasks, TDef>,
-				TaskContext<Tasks, Events, Metadata> & ExtraContext
+				TaskContext<Tasks, Events, Metadata> & ExtraContext & MiddlewareContext
 			>,
 			this.options.events?.definitions ?? [],
 			this.options.metadata,
@@ -290,6 +309,7 @@ export class Conductor<
 			options.config,
 			this.options.context,
 			this.telemetry,
+			this.options.middleware,
 		);
 	}
 
