@@ -445,7 +445,7 @@ describe.serial("waitForEvent", () => {
 			orchestratorId,
 			queueName: "default",
 			batchSize: 1,
-			filterTaskKeys: [],
+			taskKeys: ["wait.task"],
 		});
 		const args = {
 			executionId,
@@ -496,7 +496,7 @@ describe.serial("waitForEvent", () => {
 				orchestratorId,
 				queueName: "default",
 				batchSize: 1,
-				filterTaskKeys: [],
+				taskKeys: ["wait.task"],
 			});
 			expect(execution?.id).toBe(executionId);
 			expect(

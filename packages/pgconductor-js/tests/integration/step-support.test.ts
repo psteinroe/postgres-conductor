@@ -323,7 +323,7 @@ describe("Step Support", () => {
 				orchestratorId: crypto.randomUUID(),
 				queueName: "default",
 				batchSize: 1,
-				filterTaskKeys: [],
+				taskKeys: ["reclaimed-task"],
 			})
 		)[0];
 		if (!execution) throw new Error("expected claimed execution");

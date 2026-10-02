@@ -179,7 +179,7 @@ describe("dead-letter queues (Postgres integration)", () => {
 			orchestratorId,
 			queueName: "default",
 			batchSize: 1,
-			filterTaskKeys: [],
+			taskKeys: ["settle-source"],
 		});
 		expect(claimed).toHaveLength(1);
 		const execution = claimed[0]!;
@@ -259,7 +259,7 @@ describe("dead-letter queues (Postgres integration)", () => {
 			orchestratorId,
 			queueName: "default",
 			batchSize: 1,
-			filterTaskKeys: [],
+			taskKeys: ["delivered-source"],
 		});
 		if (!execution) throw new Error("expected claimed execution");
 
@@ -369,7 +369,7 @@ describe("dead-letter queues (Postgres integration)", () => {
 			orchestratorId,
 			queueName: "default",
 			batchSize: 1,
-			filterTaskKeys: [],
+			taskKeys: ["cancelled-running-source"],
 		});
 		if (!execution || !executionId) throw new Error("expected claimed execution");
 
@@ -434,7 +434,7 @@ describe("dead-letter queues (Postgres integration)", () => {
 				orchestratorId: crypto.randomUUID(),
 				queueName: "default",
 				batchSize: 1,
-				filterTaskKeys: [],
+				taskKeys: ["cancelled-child-parent"],
 			})
 		)[0];
 		if (!parent || !parentId) throw new Error("expected claimed parent execution");
@@ -469,7 +469,7 @@ describe("dead-letter queues (Postgres integration)", () => {
 				orchestratorId: childOrchestratorId,
 				queueName: "default",
 				batchSize: 1,
-				filterTaskKeys: [],
+				taskKeys: ["cancelled-child"],
 			})
 		)[0];
 		if (!child) throw new Error("expected claimed child execution");
@@ -579,7 +579,7 @@ describe("dead-letter queues (Postgres integration)", () => {
 			orchestratorId: crypto.randomUUID(),
 			queueName: "default",
 			batchSize: 1,
-			filterTaskKeys: [],
+			taskKeys: ["rollback-source"],
 		});
 		const execution = claimed[0]!;
 		if (!execution.locked_by) throw new Error("execution was not claimed");

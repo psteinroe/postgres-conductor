@@ -308,7 +308,7 @@ test("a live orchestrator recovers executions locked by a crashed one", async ()
 		orchestratorId: crashedId,
 		queueName: "default",
 		batchSize: 1,
-		filterTaskKeys: [],
+		taskKeys: ["orphaned-task"],
 	});
 	expect(claimed.length).toBe(1);
 

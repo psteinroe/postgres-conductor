@@ -7,6 +7,7 @@ import { TestDatabasePool } from "../fixtures/test-database";
 import type { TestDatabase } from "../fixtures/test-database";
 import { waitFor } from "../../src/lib/wait-for";
 import { TaskSchemas } from "../../src/schemas";
+import { waitForCondition } from "../test-utils";
 
 describe("Worker API", () => {
 	let pool: TestDatabasePool;
@@ -126,4 +127,70 @@ describe("Worker API", () => {
 		await orchestrator.stop();
 		await db.destroy();
 	}, 60000);
+
+	test.each([
+		["without", undefined],
+		["with", 1],
+	])(
+		"claims only tasks the worker registers %s concurrency limits",
+		async (_, concurrency) => {
+			const db = await pool.child();
+			databases.push(db);
+
+			const taskA = defineTask({ name: "a" });
+			const taskB = defineTask({ name: "b" });
+
+			const newConductor = Conductor.create({
+				sql: db.sql,
+				tasks: TaskSchemas.fromSchema([taskA, taskB]),
+				context: {},
+			});
+			const newOrchestrator = Orchestrator.create({
+				conductor: newConductor,
+				tasks: [
+					newConductor.createTask({ name: "a" }, { invocable: true }, async () => {}),
+					newConductor.createTask({ name: "b", concurrency }, { invocable: true }, async () => {}),
+				],
+			});
+			await newOrchestrator.start();
+			await newOrchestrator.stop();
+
+			await newConductor.invoke({ name: "b" }, {});
+			await db.sql`insert into pgconductor._private_executions (task_key, queue) values ('ghost', 'default')`;
+
+			const oldConductor = Conductor.create({
+				sql: db.sql,
+				tasks: TaskSchemas.fromSchema([taskA]),
+				context: {},
+			});
+			let ranA = false;
+			const oldOrchestrator = Orchestrator.create({
+				conductor: oldConductor,
+				tasks: [
+					oldConductor.createTask({ name: "a" }, { invocable: true }, async () => {
+						ranA = true;
+					}),
+				],
+				defaultWorker: { pollIntervalMs: 50, flushIntervalMs: 50 },
+			});
+			await oldOrchestrator.start();
+			await oldConductor.invoke({ name: "a" }, {});
+			await waitForCondition(() => ranA, 5000);
+			await waitFor(300);
+
+			const rows = await db.sql<{ task_key: string; attempts: number; locked: boolean }[]>`
+			select task_key, attempts, locked_by is not null as locked
+			from pgconductor._private_executions
+			where task_key in ('b', 'ghost')
+			order by task_key
+		`;
+			await oldOrchestrator.stop();
+
+			expect([...rows]).toEqual([
+				{ task_key: "b", attempts: 0, locked: false },
+				{ task_key: "ghost", attempts: 0, locked: false },
+			]);
+		},
+		30000,
+	);
 });

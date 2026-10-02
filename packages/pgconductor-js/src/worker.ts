@@ -391,8 +391,6 @@ export class Worker<
 		assert.ok(this.orchestratorId, "orchestratorId must be set when starting the pipeline");
 
 		const allTasks = Array.from(this.tasks.values());
-		// Check if any tasks have windows - only then do we need time-based filtering
-		const tasksWithWindows = allTasks.filter((task) => task.window);
 		// A slot runs one execution, or one batch of a batched task
 		const executionsPerSlot = Math.max(...allTasks.map((task) => task.batch?.size || 1));
 
@@ -405,40 +403,21 @@ export class Worker<
 					continue;
 				}
 
-				// Filter tasks based on time windows (if any)
-				let disallowedTaskKeys: string[] = [];
-
-				if (tasksWithWindows.length > 0) {
-					const now = this.clock.now();
-
-					const isWithinWindow = (task: AnyTask, now: Date): boolean => {
-						if (!task.window) return true;
-						const [start, end] = task.window;
-						const currentTime = now.toISOString().slice(11, 19);
-						return currentTime >= start && currentTime < end;
-					};
-
-					disallowedTaskKeys = tasksWithWindows
-						.filter((task) => !isWithinWindow(task, now))
-						.map((t) => t.name);
-
-					if (disallowedTaskKeys.length === tasksWithWindows.length) {
-						// All windowed tasks are outside their windows, skip fetch for those
-						// But non-windowed tasks can still run
-						if (tasksWithWindows.length === this.tasks.size) {
-							// All tasks have windows and all are outside - skip entirely
-							await waitFor(this.pollIntervalMs, { signal: this.signal });
-							continue;
-						}
-					}
-				}
+				// Claim only registered tasks that are within their time window
+				const currentTime = this.clock.now().toISOString().slice(11, 19);
+				const taskKeys = allTasks
+					.filter(
+						(task) =>
+							!task.window || (currentTime >= task.window[0] && currentTime < task.window[1]),
+					)
+					.map((task) => task.name);
 
 				const executions = await this.db.getExecutions(
 					{
 						orchestratorId: this.orchestratorId,
 						queueName: this.queueName,
 						batchSize: Math.min(this.fetchBatchSize, freeSlots * executionsPerSlot),
-						filterTaskKeys: disallowedTaskKeys,
+						taskKeys,
 					},
 					{ signal: this.signal },
 				);
@@ -474,15 +453,7 @@ export class Worker<
 			async ({ taskKey, items: executions }): Promise<ExecutionResult | ExecutionResult[]> => {
 				// Dispatch to correct task based on task_key
 				const task = this.tasks.get(taskKey);
-				if (!task) {
-					return executions.map((exec) => ({
-						queue: exec.queue,
-						execution_id: exec.id,
-						task_key: taskKey,
-						status: "failed",
-						error: `Task not found: ${taskKey}`,
-					})) as ExecutionResult[];
-				}
+				assert.ok(task, `claimed an execution of unregistered task ${taskKey}`);
 
 				// Don't execute already-cancelled tasks
 				const cancelled: ExecutionResult[] = executions
