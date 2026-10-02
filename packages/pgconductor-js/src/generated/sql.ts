@@ -960,8 +960,7 @@ create index idx_custom_event_subscriptions_event
        (event_key, required_field_count, id);
 
 create unique index idx_custom_event_subscription_execution_wait
-    on pgconductor._private_custom_event_subscriptions (execution_id, step_key)
-    where kind = 'execution_wait';
+    on pgconductor._private_custom_event_subscriptions (execution_id, step_key);
 
 create index idx_custom_event_subscription_wait_match
     on pgconductor._private_custom_event_subscriptions
