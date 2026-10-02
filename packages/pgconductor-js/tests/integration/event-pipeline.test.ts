@@ -349,7 +349,9 @@ describe("event pipeline", () => {
 
 		// @ts-expect-error value must be a string
 		const invalid = conductor.emit("pipeline.validated", { value: 1 });
-		await expect(invalid).rejects.toThrow('Invalid payload for event "pipeline.validated"');
+		await expect(invalid).rejects.toThrow(
+			'Invalid payload for event "pipeline.validated": value: Invalid input: expected string, received number',
+		);
 
 		const eventId = await conductor.emit("pipeline.validated", { value: " ready " });
 		const [source] = await db.sql<{ payload: Record<string, unknown> }[]>`
@@ -365,6 +367,46 @@ describe("event pipeline", () => {
 			select count(*)::int as count from pgconductor._private_executions
 		`;
 		expect(executions?.count).toBe(1);
+	});
+
+	test("validates payloads emitted from a task context", async () => {
+		const db = await database();
+		const event = defineEvent({
+			name: "pipeline.context-validated",
+			payload: z.object({ value: z.string() }),
+		});
+		const conductor = Conductor.create({
+			sql: db.sql,
+			tasks: TaskSchemas.fromSchema([defineTask({ name: "pipeline.context-emitter" })]),
+			events: EventSchemas.fromSchema([event]),
+			context: {},
+		});
+		let error: unknown;
+		const task = conductor.createTask(
+			{ name: "pipeline.context-emitter" },
+			{ invocable: true },
+			async (_event, ctx) => {
+				// @ts-expect-error value must be a string
+				error = await ctx.emit("pipeline.context-validated", { value: 1 }).catch((err) => err);
+			},
+		);
+
+		await conductor.invoke({ name: "pipeline.context-emitter" }, {});
+		await Orchestrator.create({
+			conductor,
+			tasks: [task],
+			defaultWorker: { pollIntervalMs: 10, flushIntervalMs: 10 },
+		}).drain();
+
+		expect(error).toBeInstanceOf(Error);
+		expect((error as Error).message).toBe(
+			'Invalid payload for event "pipeline.context-validated": value: Invalid input: expected string, received number',
+		);
+		const [events] = await db.sql<{ count: number }[]>`
+			select count(*)::int as count from pgconductor._private_executions
+			where queue = ${INTERNAL_QUEUE} and task_key = ${DISPATCH_TASK}
+		`;
+		expect(events?.count).toBe(0);
 	});
 
 	test("does not serialize same-key emitters for caller transaction lifetimes", async () => {

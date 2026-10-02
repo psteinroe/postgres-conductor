@@ -21,12 +21,13 @@ import { TypedAbortController } from "./lib/typed-abort-controller";
 import { parseDuration, type DurationInput } from "./lib/duration";
 import { SpanKind } from "@opentelemetry/api";
 import type { Telemetry, TraceContextCarrier } from "./telemetry";
-import type {
-	EventDefinition,
-	EventName,
-	FindEventByIdentifier,
-	InferEventPayload,
-	FilterForEvent,
+import {
+	validateEventPayload,
+	type EventDefinition,
+	type EventName,
+	type FindEventByIdentifier,
+	type InferEventPayload,
+	type FilterForEvent,
 } from "./event-definition";
 import { compileEventFilter } from "./event-trigger-validation";
 
@@ -469,6 +470,7 @@ export class TaskContext<
 		TName extends EventName<Events>,
 		TDef extends FindEventByIdentifier<Events, TName> = FindEventByIdentifier<Events, TName>,
 	>(event: TName, payload: InferEventPayload<TDef>): Promise<string> {
+		payload = await validateEventPayload(this.opts.eventDefinitions, event, payload);
 		return this.opts.db.emitEvent(
 			{
 				eventKey: event,

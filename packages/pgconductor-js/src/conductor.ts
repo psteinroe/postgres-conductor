@@ -1,5 +1,4 @@
 import type { Sql } from "postgres";
-import type { StandardSchemaV1 } from "@standard-schema/spec";
 import { DatabaseClient, type ExecutionSpec } from "./database-client";
 import {
 	Task,
@@ -28,11 +27,12 @@ import { Worker, type WorkerConfig } from "./worker";
 import { DefaultLogger, type Logger } from "./lib/logger";
 import { SchemaManager } from "./schema-manager";
 import { Telemetry } from "./telemetry";
-import type {
-	EventDefinition,
-	EventName,
-	FindEventByIdentifier,
-	InferEventPayload,
+import {
+	validateEventPayload,
+	type EventDefinition,
+	type EventName,
+	type FindEventByIdentifier,
+	type InferEventPayload,
 } from "./event-definition";
 import {
 	TaskSchemas,
@@ -331,15 +331,7 @@ export class Conductor<
 		TName extends EventName<Events>,
 		TDef extends FindEventByIdentifier<Events, TName> = FindEventByIdentifier<Events, TName>,
 	>(event: TName, payload: InferEventPayload<TDef>): Promise<string> {
-		const schema: StandardSchemaV1<unknown, InferEventPayload<TDef>> | undefined =
-			this.options.events?.definitions.find(
-				(definition: EventDefinition<string, any, any>) => definition.name === event,
-			)?.payload;
-		if (schema) {
-			const result = await schema["~standard"].validate(payload);
-			if (result.issues) throw new Error(`Invalid payload for event "${event}"`);
-			payload = result.value;
-		}
+		payload = await validateEventPayload(this.options.events?.definitions || [], event, payload);
 
 		return this.telemetry.send({
 			taskKey: EVENT_DISPATCH_TASK,

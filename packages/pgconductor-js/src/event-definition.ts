@@ -109,3 +109,25 @@ export type InferEventPayload<T> =
 export type CustomEventConfig<TName extends string> = {
 	event: TName;
 };
+
+export async function validateEventPayload<T>(
+	definitions: readonly EventDefinition<string, any, any>[],
+	event: string,
+	payload: T,
+): Promise<T> {
+	const schema: StandardSchemaV1<unknown, T> | undefined = definitions.find(
+		(definition) => definition.name === event,
+	)?.payload;
+	if (!schema) return payload;
+	const result = await schema["~standard"].validate(payload);
+	if (result.issues) {
+		const issues = result.issues.map((issue) => {
+			const path = issue.path
+				?.map((segment) => String(typeof segment === "object" ? segment.key : segment))
+				.join(".");
+			return path ? `${path}: ${issue.message}` : issue.message;
+		});
+		throw new Error(`Invalid payload for event "${event}": ${issues.join("; ")}`);
+	}
+	return result.value;
+}
