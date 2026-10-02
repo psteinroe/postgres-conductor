@@ -146,6 +146,15 @@ await conductor.invoke({ name: "greet" }, { name: "World" });
 await conductor.close();
 ```
 
+`invoke` returns the execution ID. To wait for the task to finish, pass it to `waitForResult`, which resolves with the task's return value or rejects if the task fails:
+
+```typescript
+const executionId = await conductor.invoke({ name: "greet" }, { name: "World" });
+await conductor.waitForResult({ name: "greet" }, executionId, { timeout: 30_000 });
+```
+
+See the [Conductor API](../api/conductor.md#conductorgetexecution) to read an execution's status without waiting.
+
 ## What's Next?
 
 - Learn about [task triggers](../crafting-tasks/triggers.md) (cron vs invocable)

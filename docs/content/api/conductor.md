@@ -205,6 +205,54 @@ const cancelled = await conductor.cancel(
 
 Returns `true` if cancelled, `false` if already completed.
 
+## conductor.getExecution()
+
+Read an execution by ID:
+
+```typescript
+const execution = await conductor.getExecution(executionId);
+
+// pass the task to type the result
+const execution = await conductor.getExecution({ name: "send-email" }, executionId);
+```
+
+Returns `null` if the ID is unknown or the execution was removed by its [retention policy](../crafting-tasks/retention.md). Otherwise:
+
+```typescript
+{
+  id: string;
+  taskKey: string;
+  queue: string;
+  status: "pending" | "running" | "completed" | "failed" | "cancelled";
+  result: TResult | null;     // return value, set when completed
+  error: string | null;       // last attempt's error, or the cancellation reason
+  attempts: number;
+  createdAt: Date;
+  completedAt: Date | null;
+  failedAt: Date | null;
+}
+```
+
+`pending` covers executions that wait for their first attempt, a retry, a sleep, a child or an event. `cancelled` is reported once the cancellation has settled; until then a running execution stays `running`.
+
+## conductor.waitForResult()
+
+Poll an execution until it settles and return its result:
+
+```typescript
+const result = await conductor.waitForResult(
+  { name: "send-email" },     // optional, types the result
+  executionId,
+  {
+    timeout?: number,         // milliseconds, rejects with a TimeoutError
+    pollIntervalMs?: number,  // default: 1000
+    signal?: AbortSignal,     // rejects with the abort reason
+  },
+);
+```
+
+Resolves with the return value of a completed execution. Rejects with the error message if the execution failed or was cancelled, and rejects if the execution does not exist. The result is only available while the execution exists: with `removeOnComplete: true` the execution is removed when it completes, so `waitForResult` rejects with a not found error.
+
 ## conductor.close()
 
 Close the connection pool created from `connectionString`:

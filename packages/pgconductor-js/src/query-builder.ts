@@ -4,6 +4,7 @@ import * as assert from "./lib/assert";
 import type { TraceContextCarrier } from "./telemetry";
 import type {
 	Execution,
+	ExecutionInfo,
 	ExecutionSpec,
 	EventFilterTerm,
 	EventSubscriptionSpec,
@@ -66,6 +67,11 @@ export type UnscheduleCronExecutionArgs = {
 	taskKey: string;
 	queue: string;
 	scheduleName: string;
+};
+
+export type GetExecutionArgs = {
+	executionId: string;
+	task?: { key: string; queue: string };
 };
 
 export type LoadStepArgs = {
@@ -508,7 +514,7 @@ export class QueryBuilder {
 		)`);
 		ctes.push(this.sql`updated_completed as (
 			update pgconductor._private_executions e
-			set completed_at = nt.ts, locked_by = null, locked_at = null
+			set completed_at = nt.ts, result = r.result, locked_by = null, locked_at = null
 			from now_ts nt, completed_results r, task_configs tc
 			where e.id = r.execution_id and e.queue = r.queue
 				and e.locked_by = ${orchestratorId}::uuid
@@ -979,6 +985,24 @@ export class QueryBuilder {
 					select jsonb_populate_recordset(null::pgconductor.execution_spec, ${this.sql.json(JSON.parse(JSON.stringify(specsArray)))}::jsonb)
 				)
 			)
+		`;
+	}
+
+	buildGetExecution({ executionId, task }: GetExecutionArgs): PendingQuery<ExecutionInfo[]> {
+		return this.sql<ExecutionInfo[]>`
+			select id, task_key as "taskKey", queue,
+				case
+					when completed_at is not null then 'completed'
+					when failed_at is not null and cancelled then 'cancelled'
+					when failed_at is not null then 'failed'
+					when locked_by is not null then 'running'
+					else 'pending'
+				end as status,
+				result, last_error as error, attempts, created_at as "createdAt",
+				completed_at as "completedAt", failed_at as "failedAt"
+			from pgconductor._private_executions
+			where id = ${executionId}::uuid
+				${task ? this.sql`and task_key = ${task.key}::text and queue = ${task.queue}::text` : this.sql``}
 		`;
 	}
 

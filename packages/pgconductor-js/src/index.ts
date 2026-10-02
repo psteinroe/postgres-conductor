@@ -1,4 +1,6 @@
 export { Conductor } from "./conductor";
+export type { WaitForResultOptions } from "./conductor";
+export type { ExecutionInfo, ExecutionStatus } from "./database-client";
 export { Orchestrator } from "./orchestrator";
 export { Worker } from "./worker";
 export { Task } from "./task";

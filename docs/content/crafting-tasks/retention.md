@@ -101,6 +101,8 @@ Postgres Conductor runs daily maintenance automatically on each queue:
 
 No manual intervention required.
 
+An execution's result is stored on the execution, so [`conductor.getExecution()` and `conductor.waitForResult()`](../api/conductor.md#conductorgetexecution) can only read it until the execution is removed.
+
 ## What's Next?
 
 - [Logging](logging.md) - Configure task logging

@@ -108,6 +108,7 @@ create table pgconductor._private_executions (
     failed_at timestamptz,
     completed_at timestamptz,
     payload jsonb,
+    result jsonb,
     trace_context jsonb,
     run_at timestamptz default pgconductor._private_current_time() not null,
     locked_at timestamptz,
