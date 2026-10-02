@@ -3,8 +3,10 @@
 Postgres Conductor is available on npm:
 
 ```bash
-pnpm install pgconductor-js
+pnpm install pgconductor-js @opentelemetry/api
 ```
+
+`@opentelemetry/api` is a required peer dependency. Without a registered OpenTelemetry SDK, tracing is a no-op.
 
 ## Database Setup
 

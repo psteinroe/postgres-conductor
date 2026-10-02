@@ -16,6 +16,7 @@ const conductor = Conductor.create({
   context,              // Custom context object
   logger?,              // Optional custom logger
   events?,              // Optional EventSchemas
+  telemetry?,           // Set to false to disable OpenTelemetry tracing
 });
 ```
 
@@ -27,6 +28,7 @@ const conductor = Conductor.create({
 - `context`: Object passed to task handlers as `ctx.{property}` (see [Custom Context](../crafting-tasks/custom-context.md))
 - `logger`: (optional) Custom logger implementation
 - `events`: (optional) `EventSchemas.fromSchema([...])` for typed custom events
+- `telemetry`: (optional) `false` disables OpenTelemetry spans and trace context propagation. Enabled by default, using the globally registered provider
 
 **Connection options:**
 
