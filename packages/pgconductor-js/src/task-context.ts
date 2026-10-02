@@ -20,7 +20,7 @@ import { WindowChecker } from "./lib/window-checker";
 import { TypedAbortController } from "./lib/typed-abort-controller";
 import { parseDuration, type DurationInput } from "./lib/duration";
 import { SpanKind } from "@opentelemetry/api";
-import type { Telemetry } from "./telemetry";
+import type { Telemetry, TraceContextCarrier } from "./telemetry";
 import type {
 	EventDefinition,
 	EventName,
@@ -52,6 +52,7 @@ export type TaskAbortReasons =
 			task: TaskIdentifier<string, string>;
 			payload: Payload | null;
 			group?: string | null;
+			trace_context: TraceContextCarrier | null;
 			__pgconductorTaskAborted: true;
 	  };
 
@@ -371,6 +372,7 @@ export class TaskContext<
 			step_key: key,
 			payload,
 			group,
+			trace_context: this.opts.telemetry.traceContext(),
 		});
 	}
 
@@ -471,6 +473,7 @@ export class TaskContext<
 			{
 				eventKey: event,
 				payload: payload as any,
+				traceContext: this.opts.telemetry.traceContext(),
 			},
 			{ signal: this.signal },
 		);

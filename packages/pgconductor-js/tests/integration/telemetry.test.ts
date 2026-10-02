@@ -20,7 +20,7 @@ import type { Sql } from "postgres";
 import { z } from "zod";
 import { Conductor } from "../../src/conductor";
 import { defineEvent } from "../../src/event-definition";
-import { EventSchemas } from "../../src/schemas";
+import { EventSchemas, TaskSchemas } from "../../src/schemas";
 import { Orchestrator } from "../../src/orchestrator";
 import { Task } from "../../src/task";
 import { Worker } from "../../src/worker";
@@ -28,6 +28,8 @@ import { DefaultLogger } from "../../src/lib/logger";
 import type { DatabaseClient } from "../../src/database-client";
 import { TestDatabasePool } from "../fixtures/test-database";
 import { Telemetry, type TraceContextCarrier } from "../../src/telemetry";
+import { defineTask } from "../../src/task-definition";
+import { waitForCondition } from "../test-utils";
 
 const logger = new DefaultLogger();
 const orchestratorId = crypto.randomUUID();
@@ -426,4 +428,133 @@ describe.serial("OpenTelemetry instrumentation", () => {
 		}
 		await cleanup(provider);
 	});
+});
+
+describe.serial("trace propagation across internal executions", () => {
+	const processSpans = (exporter: InMemorySpanExporter, taskKey: string) =>
+		exporter
+			.getFinishedSpans()
+			.filter(
+				(span) =>
+					span.name.startsWith("process ") && span.attributes["pgconductor.task.name"] === taskKey,
+			);
+
+	test("ctx.invoke children continue the parent's trace", async () => {
+		const { exporter, provider } = installProvider();
+		const db = await pool.child();
+		const conductor = Conductor.create({
+			sql: db.sql,
+			tasks: TaskSchemas.fromSchema([
+				defineTask({ name: "trace-parent" }),
+				defineTask({ name: "trace-child" }),
+			]),
+			context: {},
+		});
+		const child = conductor.createTask(
+			{ name: "trace-child" },
+			{ invocable: true },
+			async () => {},
+		);
+		const parent = conductor.createTask(
+			{ name: "trace-parent" },
+			{ invocable: true },
+			async (_event, ctx) => {
+				await ctx.invoke("child", { name: "trace-child" });
+			},
+		);
+		const orchestrator = Orchestrator.create({
+			conductor,
+			tasks: [parent, child],
+			defaultWorker: { pollIntervalMs: 10, flushIntervalMs: 10 },
+		});
+		await orchestrator.start();
+		await conductor.invoke({ name: "trace-parent" }, {});
+		await waitForCondition(() => processSpans(exporter, "trace-parent").length === 2);
+		await orchestrator.stop();
+
+		const [parentSpan] = processSpans(exporter, "trace-parent");
+		const [childSpan] = processSpans(exporter, "trace-child");
+		expect(childSpan?.parentSpanId).toBe(parentSpan?.spanContext().spanId);
+		expect(childSpan?.spanContext().traceId).toBe(parentSpan?.spanContext().traceId);
+		await db.destroy();
+		await cleanup(provider);
+	}, 30000);
+
+	test("emitted events continue the emitter's trace in triggered executions", async () => {
+		const { exporter, provider } = installProvider();
+		const db = await pool.child();
+		const conductor = Conductor.create({
+			sql: db.sql,
+			tasks: TaskSchemas.fromSchema([defineTask({ name: "trace-on-event" })]),
+			events: EventSchemas.fromSchema([
+				defineEvent({ name: "trace.event", payload: z.object({}) }),
+			]),
+			context: {},
+		});
+		const destination = conductor.createTask(
+			{ name: "trace-on-event" },
+			{ event: "trace.event" },
+			async () => {},
+		);
+		const orchestrator = Orchestrator.create({
+			conductor,
+			tasks: [destination],
+			defaultWorker: { pollIntervalMs: 10, flushIntervalMs: 10 },
+		});
+		await orchestrator.start();
+		await conductor.emit("trace.event", {});
+		await waitForCondition(() => processSpans(exporter, "trace-on-event").length === 1);
+		await orchestrator.stop();
+
+		const [send] = spans(exporter, "send pgconductor.internal");
+		const [dispatch] = spans(exporter, "process pgconductor.internal");
+		const [destinationSpan] = processSpans(exporter, "trace-on-event");
+		expect(dispatch?.links).toHaveLength(1);
+		expect(dispatch?.links[0]?.context.spanId).toBe(send?.spanContext().spanId);
+		expect(destinationSpan?.parentSpanId).toBe(send?.spanContext().spanId);
+		expect(destinationSpan?.spanContext().traceId).toBe(send?.spanContext().traceId);
+		await db.destroy();
+		await cleanup(provider);
+	}, 30000);
+
+	test("dead-letter deliveries continue the failed execution's trace", async () => {
+		const { exporter, provider } = installProvider();
+		const db = await pool.child();
+		const conductor = Conductor.create({
+			sql: db.sql,
+			tasks: TaskSchemas.fromSchema([
+				defineTask({ name: "trace-failing" }),
+				defineTask({ name: "trace-dead-letter" }),
+			]),
+			context: {},
+		});
+		const deadLetter = conductor.createTask(
+			{ name: "trace-dead-letter" },
+			{ invocable: true },
+			async () => {},
+		);
+		const failing = conductor.createTask(
+			{ name: "trace-failing", maxAttempts: 1, deadLetter: { queue: "default", task: deadLetter } },
+			{ invocable: true },
+			async () => {
+				throw new Error("boom");
+			},
+		);
+		const orchestrator = Orchestrator.create({
+			conductor,
+			tasks: [failing, deadLetter],
+			defaultWorker: { pollIntervalMs: 10, flushIntervalMs: 10 },
+		});
+		await orchestrator.start();
+		await conductor.invoke({ name: "trace-failing" }, {});
+		await waitForCondition(() => processSpans(exporter, "trace-dead-letter").length === 1);
+		await orchestrator.stop();
+
+		const [send] = spans(exporter, "send default");
+		const [deadLetterSpan] = processSpans(exporter, "trace-dead-letter");
+		expect(deadLetterSpan?.parentSpanId).toBe(send?.spanContext().spanId);
+		expect(deadLetterSpan?.spanContext().traceId).toBe(send?.spanContext().traceId);
+		await db.destroy();
+		await cleanup(provider);
+	}, 30000);
 });

@@ -1301,7 +1301,8 @@ on conflict (queue, key) do update set
 
 create or replace function pgconductor.emit_event(
     p_event_key text,
-    p_payload jsonb default '{}'::jsonb
+    p_payload jsonb default '{}'::jsonb,
+    p_trace_context jsonb default null
 )
 returns uuid
 language plpgsql
@@ -1324,12 +1325,13 @@ begin
     end if;
 
     insert into pgconductor._private_executions (
-        id, task_key, queue, payload
+        id, task_key, queue, payload, trace_context
     ) values (
         pgconductor._private_portable_uuidv7(),
         'pgconductor.event-dispatch',
         'pgconductor.internal',
-        jsonb_build_object('eventKey', p_event_key, 'payload', v_payload)
+        jsonb_build_object('eventKey', p_event_key, 'payload', v_payload),
+        p_trace_context
     )
     returning id into v_event_id;
 
