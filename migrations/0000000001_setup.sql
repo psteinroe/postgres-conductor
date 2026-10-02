@@ -946,8 +946,7 @@ create index idx_custom_event_subscriptions_event
        (event_key, required_field_count, id);
 
 create unique index idx_custom_event_subscription_execution_wait
-    on pgconductor._private_custom_event_subscriptions (execution_id, step_key)
-    where kind = 'execution_wait';
+    on pgconductor._private_custom_event_subscriptions (execution_id, step_key);
 
 create index idx_custom_event_subscription_wait_match
     on pgconductor._private_custom_event_subscriptions
@@ -1241,6 +1240,8 @@ $function$;
 
 -- Worker registration replaces only durable task-trigger subscriptions. Active
 -- execution waits belong to running workflows and survive worker restarts.
+-- Ids derive from the definition so unchanged subscriptions keep their delivery
+-- identity and retried dispatches do not deliver to them twice.
 create or replace function pgconductor._private_replace_custom_event_subscriptions(
     p_queue_name text,
     p_subscriptions pgconductor.event_subscription_spec[]
@@ -1250,24 +1251,16 @@ language sql
 volatile
 set search_path to ''
 as $function$
-    with removed as materialized (
+    with prepared as materialized (
+        select distinct
+            md5(jsonb_build_array(p_queue_name, subscription)::text)::uuid as id,
+            subscription.*
+        from unnest(p_subscriptions) subscription
+    ), removed as (
         delete from pgconductor._private_custom_event_subscriptions
-        where queue = p_queue_name and kind = 'task_trigger'
-        returning 1
-    ), prepared as materialized (
-        select pgconductor._private_portable_uuidv7() as id,
-            subscription.task_key,
-            subscription.event_key,
-            subscription.payload_fields,
-            coalesce(subscription.required_field_count, 0) as required_field_count,
-            coalesce(subscription.terms, '[]'::jsonb) as terms,
-            subscription.input_ordinal
-        from unnest(p_subscriptions) with ordinality
-          as subscription(
-              task_key, event_key, payload_fields,
-              required_field_count, terms, input_ordinal
-          )
-        cross join (select count(*) from removed) removal_barrier
+        where queue = p_queue_name
+          and kind = 'task_trigger'
+          and id not in (select id from prepared)
     ), inserted_subscriptions as (
         insert into pgconductor._private_custom_event_subscriptions (
             id, event_key, task_key, queue, payload_fields,
@@ -1276,7 +1269,7 @@ as $function$
         select id, event_key, task_key, p_queue_name,
             payload_fields, required_field_count, 'task_trigger'
         from prepared
-        order by input_ordinal
+        on conflict (id) do nothing
         returning id
     )
     insert into pgconductor._private_event_filter_terms (
