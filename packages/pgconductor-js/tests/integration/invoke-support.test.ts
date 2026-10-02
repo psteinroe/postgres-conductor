@@ -1,4 +1,5 @@
 import { z } from "zod";
+import postgres from "postgres";
 import { test, expect, describe, beforeAll, afterAll, afterEach, mock } from "bun:test";
 import { Conductor } from "../../src/conductor";
 import { Orchestrator } from "../../src/orchestrator";
@@ -7,6 +8,8 @@ import { TestDatabasePool } from "../fixtures/test-database";
 import type { TestDatabase } from "../fixtures/test-database";
 import { TaskSchemas } from "../../src/schemas";
 import { Deferred } from "../../src/lib/deferred";
+import { DatabaseClient } from "../../src/database-client";
+import { DefaultLogger } from "../../src/lib/logger";
 import { waitForCondition } from "../test-utils";
 
 describe("Invoke Support", () => {
@@ -863,4 +866,69 @@ describe("Invoke Support", () => {
 		expect(executionCount).toBe(1);
 		expect(lastValue).toBe(3);
 	}, 10000);
+
+	test.each(["invoke", "invokeBatch"] as const)(
+		"%s supersedes an execution claimed while it waits",
+		async (method) => {
+			const db = await pool.child();
+			databases.push(db);
+
+			const conductor = Conductor.create({
+				sql: db.sql,
+				tasks: TaskSchemas.fromSchema([]),
+				context: {},
+			});
+			await conductor.ensureInstalled();
+
+			const spec = { task_key: "race-task", queue: "default", dedupe_key: "race-key" };
+			const first = await db.client.invoke({ ...spec, payload: { value: 1 } });
+			const [orchestrator] = await db.sql<[{ id: string }]>`
+				insert into pgconductor._private_orchestrators default values returning id
+			`;
+
+			const worker = postgres(db.url, { max: 1 });
+			const invoker = postgres(db.url, { max: 1 });
+			const client = new DatabaseClient({ sql: invoker, logger: new DefaultLogger() });
+			let second: string | null | undefined;
+			try {
+				await worker`begin`;
+				await worker`
+					update pgconductor._private_executions
+					set locked_by = ${orchestrator.id}::uuid, locked_at = now()
+					where id = ${first}::uuid
+				`;
+				const reinvoke =
+					method === "invoke"
+						? client.invoke({ ...spec, payload: { value: 2 } })
+						: client.invokeBatch([{ ...spec, payload: { value: 2 } }]).then(([id]) => id);
+				await waitForCondition(async () => {
+					const [blocked] = await db.sql<[{ count: number }]>`
+						select count(*)::int as count from pg_stat_activity
+						where datname = current_database() and wait_event_type = 'Lock'
+					`;
+					return blocked.count === 1;
+				});
+				await worker`commit`;
+				second = await reinvoke;
+			} finally {
+				await Promise.all([worker.end(), invoker.end()]);
+			}
+
+			expect(second).not.toBe(first);
+			const rows = await db.sql`
+				select id, payload, dedupe_key, last_error from pgconductor._private_executions
+				order by created_at, id
+			`;
+			expect([...rows]).toEqual([
+				{
+					id: first,
+					payload: { value: 1 },
+					dedupe_key: null,
+					last_error: "superseded by reinvoke",
+				},
+				{ id: second, payload: { value: 2 }, dedupe_key: "race-key", last_error: null },
+			]);
+		},
+		15000,
+	);
 });

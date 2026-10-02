@@ -512,85 +512,23 @@ create or replace function pgconductor.invoke_batch(
  set search_path to ''
 as $function$
 declare
-    v_now timestamptz;
+    spec pgconductor.execution_spec;
 begin
-    v_now := pgconductor._private_current_time();
-
-    -- clear locked dedupe keys before batch insert
-    with superseded as (
-        select e.id, e.queue, t.remove_on_fail_days = 0 as should_remove
-        from pgconductor._private_executions as e
-        cross join unnest(specs) as spec
-        left join pgconductor._private_tasks t on t.key = e.task_key and t.queue = e.queue
-        where e.dedupe_key = spec.dedupe_key
-            and e.task_key = spec.task_key
-            and e.queue = coalesce(spec.queue, 'default')
-            and e.locked_at is not null
-            and spec.dedupe_key is not null
-        for update of e
-    ),
-    removed as (
-        delete from pgconductor._private_executions e
-        using superseded s
-        where e.id = s.id and e.queue = s.queue and s.should_remove
-    )
-    update pgconductor._private_executions e
-    set
-        dedupe_key = null,
-        locked_by = null,
-        locked_at = null,
-        failed_at = v_now,
-        last_error = 'superseded by reinvoke'
-    from superseded s
-    where e.id = s.id and e.queue = s.queue and s.should_remove is not true;
-
-    -- batch insert all executions
-    -- note: duplicate dedupe_keys within same batch will cause error
-    -- users should deduplicate client-side if needed
-    return query
-    insert into pgconductor._private_executions (
-        id,
-        task_key,
-        queue,
-        payload,
-        trace_context,
-        run_at,
-        dedupe_key,
-        singleton_on,
-        cron_expression,
-        priority,
-        "group"
-    )
-    select
-        pgconductor._private_portable_uuidv7(),
-        spec.task_key,
-        coalesce(spec.queue, 'default'),
-        spec.payload,
-        spec.trace_context,
-        coalesce(spec.run_at, v_now),
-        spec.dedupe_key,
-        case
-            when spec.dedupe_seconds is not null then
-                'epoch'::timestamptz + '1 second'::interval * (
-                    spec.dedupe_seconds * floor(
-                        extract(epoch from v_now) / spec.dedupe_seconds
-                    )
-                )
-            else null
-        end,
-        spec.cron_expression,
-        coalesce(spec.priority, 0),
-        spec."group"
-    from unnest(specs) as spec
-    on conflict (task_key, dedupe_key, queue) do update set
-        payload = excluded.payload,
-        trace_context = excluded.trace_context,
-        run_at = excluded.run_at,
-        priority = excluded.priority,
-        cron_expression = excluded.cron_expression,
-        singleton_on = excluded.singleton_on,
-        "group" = excluded."group"
-    returning pgconductor._private_executions.id;
+    foreach spec in array specs loop
+        return query select * from pgconductor.invoke(
+            p_task_key := spec.task_key,
+            p_queue := coalesce(spec.queue, 'default'),
+            p_payload := spec.payload,
+            p_run_at := spec.run_at,
+            p_dedupe_key := spec.dedupe_key,
+            p_dedupe_seconds := spec.dedupe_seconds,
+            p_dedupe_next_slot := coalesce(spec.dedupe_next_slot, false),
+            p_cron_expression := spec.cron_expression,
+            p_priority := spec.priority,
+            p_group := spec."group",
+            p_trace_context := spec.trace_context
+        );
+    end loop;
 end;
 $function$
 ;
@@ -767,7 +705,25 @@ begin
     priority = excluded.priority,
     cron_expression = excluded.cron_expression,
     "group" = excluded."group"
+  where e.locked_at is null
   returning e.id;
+
+  -- a claim landed after the supersede check; the upsert locked that execution, so a retry supersedes it
+  if not found then
+    return query select * from pgconductor.invoke(
+      p_task_key,
+      p_queue,
+      p_payload,
+      p_run_at,
+      p_dedupe_key,
+      p_dedupe_seconds,
+      p_dedupe_next_slot,
+      p_cron_expression,
+      p_priority,
+      p_group,
+      p_trace_context
+    );
+  end if;
 end;
 $function$
 ;

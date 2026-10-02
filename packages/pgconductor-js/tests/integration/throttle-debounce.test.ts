@@ -404,4 +404,38 @@ describe("Throttle and Debounce Integration", () => {
 
 		expect(executions.length).toBe(2);
 	});
+
+	test("batch throttle without dedupe_key skips throttled specs", async () => {
+		const db = await pool.child();
+		databases.push(db);
+		const taskDefinition = defineTask({
+			name: "test-task",
+			payload: z.any(),
+		});
+
+		const conductor = Conductor.create({
+			sql: db.sql,
+			tasks: TaskSchemas.fromSchema([taskDefinition]),
+			context: {},
+		});
+
+		await conductor.ensureInstalled();
+
+		const first = await conductor.invoke({ name: "test-task" }, [
+			{ payload: { value: 1 }, throttle: { seconds: 60 } },
+			{ payload: { value: 2 }, throttle: { seconds: 60 } },
+		]);
+		const second = await conductor.invoke({ name: "test-task" }, [
+			{ payload: { value: 3 }, throttle: { seconds: 60 } },
+		]);
+
+		expect(first).toHaveLength(1);
+		expect(second).toHaveLength(0);
+
+		const executions = await db.sql`
+			select payload from pgconductor._private_executions
+			where task_key = 'test-task'
+		`;
+		expect(executions.map((e) => e.payload)).toEqual([{ value: 1 }]);
+	});
 });
