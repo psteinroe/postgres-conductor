@@ -118,7 +118,7 @@ describe("event subscription lifecycle", () => {
 			{ name: "on-qualified-user" },
 			{
 				event: "user.qualified",
-				filter: { score: [7], region: ["us", "eu", "us"], active: [true] },
+				filter: { score: [7], region: ["us", "eu"], active: [true] },
 			},
 			mock(async () => {}),
 		);
@@ -147,17 +147,10 @@ describe("event subscription lifecycle", () => {
 		expect([...rows]).toEqual([
 			{
 				required_field_count: 3,
-				field_name: "active",
+				field_name: "score",
 				operator: "exact",
-				scalar_type: "boolean",
-				value: "true",
-			},
-			{
-				required_field_count: 3,
-				field_name: "region",
-				operator: "exact",
-				scalar_type: "string",
-				value: "eu",
+				scalar_type: "number",
+				value: "7",
 			},
 			{
 				required_field_count: 3,
@@ -168,10 +161,17 @@ describe("event subscription lifecycle", () => {
 			},
 			{
 				required_field_count: 3,
-				field_name: "score",
+				field_name: "region",
 				operator: "exact",
-				scalar_type: "number",
-				value: "7",
+				scalar_type: "string",
+				value: "eu",
+			},
+			{
+				required_field_count: 3,
+				field_name: "active",
+				operator: "exact",
+				scalar_type: "boolean",
+				value: "true",
 			},
 		]);
 
