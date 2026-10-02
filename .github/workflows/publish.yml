@@ -45,6 +45,9 @@ jobs:
             echo "version=${{ steps.latest_release.outputs.tag }}" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Check package
+        run: bash ./scripts/check-package.sh
+
       - name: Build
         working-directory: packages/pgconductor-js
         run: bun run build
