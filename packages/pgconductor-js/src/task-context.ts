@@ -191,24 +191,8 @@ export class TaskContext<
 
 	/** Metadata describing the source execution when this is a DLQ delivery. */
 	get deadLetter(): DeadLetterMetadata | null {
-		const execution = this.opts.execution;
-		if (
-			!execution.dead_letter_source_execution_id ||
-			!execution.dead_letter_source_queue ||
-			!execution.dead_letter_source_task_key ||
-			execution.dead_letter_attempts == null ||
-			!execution.dead_letter_failed_at
-		) {
-			return null;
-		}
-		return {
-			sourceExecutionId: execution.dead_letter_source_execution_id,
-			sourceQueue: execution.dead_letter_source_queue,
-			sourceTaskKey: execution.dead_letter_source_task_key,
-			error: execution.dead_letter_error ?? null,
-			attempts: execution.dead_letter_attempts,
-			failedAt: execution.dead_letter_failed_at,
-		};
+		const deadLetter = this.opts.execution.dead_letter;
+		return deadLetter ? { ...deadLetter, failedAt: new Date(deadLetter.failedAt) } : null;
 	}
 
 	async step<T extends JsonValue | void>(name: string, fn: () => Promise<T> | T): Promise<T> {

@@ -110,13 +110,8 @@ create table pgconductor._private_executions (
     subscription_id uuid,
     singleton_on timestamptz,
 
-    -- Dead-letter metadata is denormalized so retained source rows are optional.
-    dead_letter_source_execution_id uuid,
-    dead_letter_source_queue text,
-    dead_letter_source_task_key text,
-    dead_letter_error text,
-    dead_letter_attempts integer,
-    dead_letter_failed_at timestamptz,
+    -- source execution metadata of a dead-letter delivery, copied so the source row may be removed
+    dead_letter jsonb,
     primary key (id, queue),
     unique (task_key, dedupe_key, queue),
     constraint chk_executions_event_delivery_parent
@@ -192,8 +187,8 @@ create table pgconductor._private_steps (
 create index idx_steps_execution_id on pgconductor._private_steps (execution_id);
 
 create unique index idx_executions_dead_letter_delivery
-    on pgconductor._private_executions (dead_letter_source_execution_id, queue, task_key)
-    where dead_letter_source_execution_id is not null;
+    on pgconductor._private_executions ((dead_letter->>'sourceExecutionId'), queue, task_key)
+    where dead_letter is not null;
 
 -- Trigger function to manage executions partitions per queue
 -- Automatically creates partition when queue is inserted
