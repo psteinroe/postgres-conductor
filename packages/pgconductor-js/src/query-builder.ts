@@ -70,7 +70,6 @@ export type UnscheduleCronExecutionArgs = {
 export type LoadStepArgs = {
 	executionId: string;
 	queue: string;
-	orchestratorId: string;
 	key: string;
 };
 
@@ -988,19 +987,11 @@ export class QueryBuilder {
 	buildLoadStep({
 		executionId,
 		queue,
-		orchestratorId,
 		key,
 	}: LoadStepArgs): PendingQuery<[{ result: Payload | null }]> {
 		return this.sql<[{ result: Payload | null }]>`
 			select result from pgconductor._private_steps
-			where execution_id = ${executionId}::uuid
-				and queue = ${queue}::text
-				and exists (
-					select 1 from pgconductor._private_executions e
-					where e.id = ${executionId}::uuid and e.queue = ${queue}::text
-						and e.locked_by = ${orchestratorId}::uuid
-				)
-				and key = ${key}::text
+			where execution_id = ${executionId}::uuid and queue = ${queue}::text and key = ${key}::text
 		`;
 	}
 

@@ -305,4 +305,47 @@ describe("Step Support", () => {
 		expect(transformedValue).toEqual(["APPLE", "BANANA", "CHERRY"]);
 		expect(countValue).toBe(3);
 	}, 30000);
+
+	test("loadStep() returns saved steps after the claim moved to another orchestrator", async () => {
+		const db = await pool.child();
+		databases.push(db);
+		const conductor = Conductor.create({ sql: db.sql, context: {} });
+		await conductor.ensureInstalled();
+		await db.client.registerWorker({
+			queueName: "default",
+			taskSpecs: [{ key: "reclaimed-task", queue: "default" }],
+			cronSchedules: [],
+			eventSubscriptions: [],
+		});
+		await db.client.invoke({ task_key: "reclaimed-task", queue: "default" });
+		const execution = (
+			await db.client.getExecutions({
+				orchestratorId: crypto.randomUUID(),
+				queueName: "default",
+				batchSize: 1,
+				filterTaskKeys: [],
+			})
+		)[0];
+		if (!execution) throw new Error("expected claimed execution");
+
+		await db.client.saveStep({
+			executionId: execution.id,
+			queue: execution.queue,
+			orchestratorId: execution.locked_by,
+			key: "side-effect",
+			result: { result: 42 },
+		});
+		await db.sql`
+			update pgconductor._private_executions
+			set locked_by = ${crypto.randomUUID()}::uuid
+			where id = ${execution.id}::uuid
+		`;
+
+		const cached = await db.client.loadStep({
+			executionId: execution.id,
+			queue: execution.queue,
+			key: "side-effect",
+		});
+		expect(cached).toEqual({ result: 42 });
+	});
 });
