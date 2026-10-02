@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 
 import postgres from "postgres";
-import prettier from "prettier";
 import * as assert from "./lib/assert";
 
 interface Column {
@@ -86,7 +85,13 @@ async function generateTypes(dbUrl: string, schemas: string[]): Promise<string> 
 		}
 
 		// Generate output
-		let output = `export type Json = string | number | boolean | null | { [key: string]: Json | undefined } | Json[]
+		let output = `export type Json =
+  | string
+  | number
+  | boolean
+  | null
+  | { [key: string]: Json | undefined }
+  | Json[];
 
 export type Database = {
 `;
@@ -113,13 +118,7 @@ export type Database = {
 			output += `  };\n`;
 		}
 
-		output += `}\n`;
-
-		// Format with prettier
-		output = await prettier.format(output, {
-			parser: "typescript",
-			semi: true,
-		});
+		output += `};\n`;
 
 		return output;
 	} finally {
@@ -163,6 +162,11 @@ function parseArgs(args: string[]): { dbUrl: string; schemas: string[] } {
 
 async function main() {
 	const args = process.argv.slice(2);
+
+	if (args[0] === "--help" || args[0] === "-h") {
+		printUsage();
+		return;
+	}
 
 	if (args.length < 3) {
 		printUsage();

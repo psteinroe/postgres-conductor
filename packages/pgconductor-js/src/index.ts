@@ -1,16 +1,52 @@
 export { Conductor } from "./conductor";
-export type { WaitForResultOptions } from "./conductor";
-export type { ExecutionInfo, ExecutionStatus } from "./database-client";
+export type { ConductorOptions, WaitForResultOptions } from "./conductor";
 export { Orchestrator } from "./orchestrator";
+export type { OrchestratorOptions } from "./orchestrator";
 export { Worker } from "./worker";
+export type { WorkerConfig } from "./worker";
 export { Task } from "./task";
+export type {
+	AnyTask,
+	BatchConfig,
+	DeadLetterConfiguration,
+	ExecuteFunction,
+	RetentionSettings,
+	TaskConfiguration,
+	TaskEvent,
+	TaskIdentifier,
+} from "./task";
+export { TaskSchemas, EventSchemas } from "./schemas";
 export { SchemaManager } from "./schema-manager";
 export { MigrationStore } from "./migration-store";
-export { WaitForEventTimeoutError } from "./task-context";
-export type { EventSubscription, SignalMessage, WaitForAnyResult } from "./task-context";
+export { TaskContext, BatchTaskContext, WaitForEventTimeoutError } from "./task-context";
+export type {
+	BatchTaskEvent,
+	EventSubscription,
+	SignalMessage,
+	WaitForAnyResult,
+} from "./task-context";
 export type { SignalHandler, SignalInfo } from "./signal-inbox";
 export type { Middleware, MiddlewareExecution, MiddlewareResult } from "./middleware";
-export type { EventDefinition, DefineEvent, FilterForEvent } from "./event-definition";
+export { defineTask } from "./task-definition";
+export type {
+	TaskDefinition,
+	DefineTask,
+	InferPayload,
+	InferReturns,
+	Trigger,
+	InvocableTrigger,
+	CronTrigger,
+	CustomEventTrigger,
+} from "./task-definition";
+export type {
+	EventDefinition,
+	DefineEvent,
+	EventFilter,
+	FilterForEvent,
+	InferEventPayload,
+} from "./event-definition";
 export { defineEvent } from "./event-definition";
+export type { ExecutionInfo, ExecutionStatus, JsonValue, Payload } from "./database-client";
+export type { Logger, LogArg } from "./lib/logger";
 export { parseDuration } from "./lib/duration";
 export type { DurationInput, DurationUnit } from "./lib/duration";
