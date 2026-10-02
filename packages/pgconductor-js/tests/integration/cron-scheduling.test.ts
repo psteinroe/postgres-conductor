@@ -645,4 +645,80 @@ describe("Cron Scheduling", () => {
 
 		await db.destroy();
 	}, 30000);
+
+	test("registration stores cron priority and removes overdue occurrences of dropped schedules", async () => {
+		const db = await pool.child();
+		await Conductor.create({ sql: db.sql, context: {} }).ensureInstalled();
+
+		const overdue = new Date(Date.now() - 60_000);
+		await db.client.registerWorker({
+			queueName: "default",
+			taskSpecs: [{ key: "overdue-cron", queue: "default" }],
+			cronSchedules: [
+				{
+					task_key: "overdue-cron",
+					queue: "default",
+					run_at: overdue,
+					dedupe_key: `scheduled::dropped::${Math.floor(overdue.getTime() / 1000)}`,
+					cron_expression: "0 * * * * *",
+					priority: 5,
+				},
+			],
+			eventSubscriptions: [],
+		});
+
+		const scheduled = await db.sql<{ priority: number }[]>`
+			select priority from pgconductor._private_executions where task_key = 'overdue-cron'
+		`;
+		expect(scheduled.map((execution) => execution.priority)).toEqual([5]);
+
+		await db.client.registerWorker({
+			queueName: "default",
+			taskSpecs: [{ key: "overdue-cron", queue: "default" }],
+			cronSchedules: [],
+			eventSubscriptions: [],
+		});
+
+		const remaining = await db.sql`
+			select id from pgconductor._private_executions where task_key = 'overdue-cron'
+		`;
+		expect(remaining).toHaveLength(0);
+
+		await db.destroy();
+	});
+
+	test("schedule and unschedule remove overdue occurrences", async () => {
+		const db = await pool.child();
+		await Conductor.create({ sql: db.sql, context: {} }).ensureInstalled();
+
+		const spec = { task_key: "overdue-dynamic", queue: "default", cron_expression: "0 * * * * *" };
+		const overdue = new Date(Date.now() - 60_000);
+		const occurrences = () => db.sql<{ run_at: Date }[]>`
+			select run_at from pgconductor._private_executions where task_key = 'overdue-dynamic'
+		`;
+
+		await db.client.scheduleCronExecution({
+			spec: { ...spec, run_at: overdue },
+			scheduleName: "reporting",
+		});
+		await db.client.unscheduleCronExecution({
+			taskKey: spec.task_key,
+			queue: spec.queue,
+			scheduleName: "reporting",
+		});
+		expect(await occurrences()).toHaveLength(0);
+
+		const next = new Date(Math.ceil(Date.now() / 1000) * 1000 + 60_000);
+		await db.client.scheduleCronExecution({
+			spec: { ...spec, run_at: overdue },
+			scheduleName: "reporting",
+		});
+		await db.client.scheduleCronExecution({
+			spec: { ...spec, run_at: next },
+			scheduleName: "reporting",
+		});
+		expect((await occurrences()).map((execution) => execution.run_at)).toEqual([next]);
+
+		await db.destroy();
+	});
 });

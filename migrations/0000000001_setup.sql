@@ -255,10 +255,10 @@ begin
       v_partition_name
     );
 
-    -- index for dynamic schedule lookups
+    -- index for schedule lookups
     execute format(
-      'create index if not exists %I on pgconductor.%I ((split_part(dedupe_key, ''::'', 2))) where dedupe_key like ''dynamic::%%'' and cron_expression is not null',
-      'idx_' || v_partition_name || '_dynamic_schedule',
+      'create index if not exists %I on pgconductor.%I ((split_part(dedupe_key, ''::'', 2))) where dedupe_key like ''scheduled::%%'' and cron_expression is not null',
+      'idx_' || v_partition_name || '_schedule',
       v_partition_name
     );
 
@@ -430,7 +430,6 @@ begin
   from unnest(p_task_specs) as spec
   on conflict (queue, key)
   do update set
-    queue = coalesce(excluded.queue, pgconductor._private_tasks.queue),
     max_attempts = coalesce(excluded.max_attempts, pgconductor._private_tasks.max_attempts),
     remove_on_complete_days = excluded.remove_on_complete_days,
     remove_on_fail_days = excluded.remove_on_fail_days,
@@ -442,7 +441,7 @@ begin
     dead_letter_task_key = excluded.dead_letter_task_key;
 
   -- Insert scheduled cron executions.
-  insert into pgconductor._private_executions (task_key, queue, payload, run_at, dedupe_key, cron_expression, "group")
+  insert into pgconductor._private_executions (task_key, queue, payload, run_at, dedupe_key, cron_expression, priority, "group")
   select
     spec.task_key,
     coalesce(spec.queue, 'default'),
@@ -450,6 +449,7 @@ begin
     coalesce(spec.run_at, pgconductor._private_current_time()),
     spec.dedupe_key,
     spec.cron_expression,
+    coalesce(spec.priority, 0),
     spec."group"
   from unnest(p_cron_schedules) as spec
   where spec.dedupe_key is not null
@@ -457,13 +457,14 @@ begin
     payload = excluded.payload,
     run_at = excluded.run_at,
     cron_expression = excluded.cron_expression,
+    priority = excluded.priority,
     "group" = excluded."group";
 
   -- Clean up stale schedules for this queue.
   delete from pgconductor._private_executions
   where queue = p_queue_name
     and cron_expression is not null
-    and run_at > pgconductor._private_current_time()
+    and is_available
     and dedupe_key like 'scheduled::%'
     and split_part(dedupe_key, '::', 2) not in (
       select split_part(spec.dedupe_key, '::', 2)
@@ -568,6 +569,7 @@ begin
     from unnest(specs) as spec
     on conflict (task_key, dedupe_key, queue) do update set
         payload = excluded.payload,
+        trace_context = excluded.trace_context,
         run_at = excluded.run_at,
         priority = excluded.priority,
         cron_expression = excluded.cron_expression,
@@ -601,7 +603,6 @@ declare
     v_singleton_on timestamptz;
     v_next_singleton_on timestamptz;
     v_run_at timestamptz;
-    v_new_id uuid;
 begin
   v_now := pgconductor._private_current_time();
   v_run_at := coalesce(p_run_at, v_now);
