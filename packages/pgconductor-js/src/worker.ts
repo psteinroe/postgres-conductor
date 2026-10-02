@@ -597,6 +597,7 @@ export class Worker<
 							child_task_queue: output.task.queue || "default",
 							child_payload: output.payload,
 							group: output.group,
+							trace_context: output.trace_context,
 						} as const;
 					case "cancelled":
 						return {

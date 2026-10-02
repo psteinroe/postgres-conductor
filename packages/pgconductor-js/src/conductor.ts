@@ -23,7 +23,7 @@ import {
 	type ValidateTriggers,
 	type ValidateEventTriggers,
 } from "./task-definition";
-import { EVENT_DISPATCH_QUEUE } from "./event-dispatch-task";
+import { EVENT_DISPATCH_QUEUE, EVENT_DISPATCH_TASK } from "./event-dispatch-task";
 import { Worker, type WorkerConfig } from "./worker";
 import { DefaultLogger, type Logger } from "./lib/logger";
 import { SchemaManager } from "./schema-manager";
@@ -341,9 +341,18 @@ export class Conductor<
 			payload = result.value;
 		}
 
-		return this.db.emitEvent({
-			eventKey: event,
-			payload: payload as any,
+		return this.telemetry.send({
+			taskKey: EVENT_DISPATCH_TASK,
+			queue: EVENT_DISPATCH_QUEUE,
+			run: async (span) => {
+				const id = await this.db.emitEvent({
+					eventKey: event,
+					payload: payload as any,
+					traceContext: this.telemetry.traceContext(),
+				});
+				span?.setAttribute("messaging.message.id", id);
+				return id;
+			},
 		});
 	}
 

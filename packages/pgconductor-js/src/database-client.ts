@@ -144,6 +144,7 @@ export type ExecutionInvokeChild = {
 	child_task_name: string;
 	child_task_queue: string;
 	child_payload: Payload | null;
+	trace_context?: TraceContextCarrier | null;
 };
 
 export type EventFilterTerm = Record<string, JsonValue | undefined> & {
