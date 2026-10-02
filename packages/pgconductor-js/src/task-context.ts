@@ -368,16 +368,7 @@ export class TaskContext<
 			);
 		}
 
-		let childMetadata = this.opts.execution.metadata || null;
-		if (metadata) {
-			childMetadata = (await validateSchema(
-				this.opts.metadataSchema,
-				typeof metadata === "function" ? metadata(this.metadata) : metadata,
-				"metadata",
-			)) as Payload;
-			await this.opts.db.checkMetadata(childMetadata, { signal: this.signal });
-		}
-
+		const childMetadata = await this.childMetadata(metadata);
 		return this.abortAndHangup({
 			reason: "child-invocation",
 			timeout_ms: timeout || "infinity",
@@ -388,6 +379,78 @@ export class TaskContext<
 			trace_context: this.opts.telemetry.traceContext(),
 			metadata: childMetadata,
 		});
+	}
+
+	/**
+	 * Start an independent execution and return its id without waiting for it.
+	 * Memoized by the step key: retries and resumes return the same execution.
+	 * The execution is not cancelled with this one, and its outcome does not affect it.
+	 */
+	async start<
+		TName extends TaskName<Tasks>,
+		TQueue extends string = "default",
+		TDef extends FindTaskByIdentifier<Tasks, TName, TQueue> = FindTaskByIdentifier<
+			Tasks,
+			TName,
+			TQueue
+		>,
+	>(
+		key: string,
+		task: TaskIdentifier<TName, TQueue>,
+		payload: InferPayload<TDef> = {} as InferPayload<TDef>,
+		{
+			dedupe_key,
+			metadata,
+			run_at,
+			priority,
+			group,
+		}: {
+			/**
+			 * Returns the execution that holds this key instead of starting a new one.
+			 * Defaults to a key derived from this execution and the step key.
+			 */
+			dedupe_key?: string;
+			/** Metadata for the started execution. Defaults to the metadata of this execution. */
+			metadata?: Metadata | ((metadata: Readonly<Metadata> | undefined) => Metadata);
+			run_at?: Date;
+			priority?: number;
+			group?: string;
+		} = {},
+	): Promise<string> {
+		const cached = await this.opts.db.loadStep(
+			{
+				executionId: this.opts.execution.id,
+				queue: this.opts.execution.queue,
+				key,
+			},
+			{ signal: this.signal },
+		);
+
+		if (cached !== undefined) {
+			return (cached as { id: string }).id;
+		}
+
+		const id = await this.opts.db.startExecution(
+			{
+				executionId: this.opts.execution.id,
+				queue: this.opts.execution.queue,
+				orchestratorId: this.opts.execution.locked_by,
+				key,
+				spec: {
+					task_key: task.name,
+					queue: task.queue || "default",
+					payload,
+					run_at,
+					dedupe_key: dedupe_key || `${this.opts.execution.id}:${key}`,
+					priority,
+					group,
+					trace_context: this.opts.telemetry.traceContext(),
+					metadata: await this.childMetadata(metadata),
+				},
+			},
+			{ signal: this.signal },
+		);
+		return id || this.abortAndHangup({ reason: "suspended" });
 	}
 
 	async schedule<
@@ -494,6 +557,19 @@ export class TaskContext<
 			},
 			{ signal: this.signal },
 		);
+	}
+
+	private async childMetadata(
+		metadata: Metadata | ((metadata: Readonly<Metadata> | undefined) => Metadata) | undefined,
+	): Promise<Payload | null> {
+		if (!metadata) return this.opts.execution.metadata || null;
+		const childMetadata = (await validateSchema(
+			this.opts.metadataSchema,
+			typeof metadata === "function" ? metadata(this.metadata) : metadata,
+			"metadata",
+		)) as Payload;
+		await this.opts.db.checkMetadata(childMetadata, { signal: this.signal });
+		return childMetadata;
 	}
 
 	private registerEventWait(
