@@ -79,12 +79,35 @@ export class WaitForEventTimeoutError extends Error {
 
 /** A durable event subscription created by `ctx.subscribe()`. */
 export type EventSubscription<TEvent> = {
+	/** The step key the subscription is memoized under. */
+	readonly key: string;
 	/**
 	 * Resolve with the matching event kept since the subscription, suspending
 	 * until one arrives. The timeout starts when `wait()` is first called.
 	 */
 	wait(options?: { timeout?: DurationInput }): Promise<TEvent>;
 };
+
+/**
+ * A `ctx.waitForAny()` branch: a subscription, or an event subscribed to at the
+ * call. The type parameter is the subscription or the event definition.
+ */
+type WaitForAnyBranch<T> =
+	T extends EventDefinition<string, any, any> ? { event: T; filter?: FilterForEvent<T> } : T;
+
+type WaitForAnyEvent<T> =
+	T extends EventSubscription<infer TEvent>
+		? TEvent
+		: T extends EventDefinition<string, any, any>
+			? { name: T["name"]; payload: InferEventPayload<T> }
+			: never;
+
+/** The branch of a `ctx.waitForAny()` that won, with its event, or the timeout. */
+export type WaitForAnyResult<TBranches> =
+	| {
+			[K in keyof TBranches & string]: { key: K; event: WaitForAnyEvent<TBranches[K]> };
+	  }[keyof TBranches & string]
+	| { key: "timeout" };
 
 export type TaskContextOptions = {
 	abortController: TypedAbortController<TaskAbortReasons>;
@@ -279,6 +302,9 @@ export class TaskContext<
 		const result = cached || (await this.registerEventWait(stepKey, options, true));
 		if (!result) return this.abortAndHangup({ reason: "suspended" });
 		if (result.status === "timed_out") throw new WaitForEventTimeoutError(stepKey);
+		if (result.status === "closed") {
+			throw new Error(`Event subscription "${stepKey}" was closed by ctx.waitForAny()`);
+		}
 		return result.event as { name: TDef["name"]; payload: InferEventPayload<TDef> };
 	}
 
@@ -299,8 +325,51 @@ export class TaskContext<
 	): Promise<EventSubscription<{ name: TDef["name"]; payload: InferEventPayload<TDef> }>> {
 		await this.registerEventWait(stepKey, options, false);
 		return {
+			key: stepKey,
 			wait: ({ timeout } = {}) => this.waitForEvent<TName, TDef>(stepKey, { ...options, timeout }),
 		};
+	}
+
+	/**
+	 * Wait for the first event among several branches, or the timeout. A branch
+	 * is a `ctx.subscribe()` handle or an event subscribed to at this call. An
+	 * event a handle kept before this call wins at once; when several did, the
+	 * one dispatched first wins. All branch subscriptions are removed when the
+	 * wait settles, and the winner is memoized by the step key.
+	 */
+	async waitForAny<TBranches extends Record<string, Events[number] | EventSubscription<unknown>>>(
+		stepKey: string,
+		branches: { [K in keyof TBranches]: WaitForAnyBranch<TBranches[K]> } & { timeout?: never },
+		options: { timeout?: DurationInput } = {},
+	): Promise<WaitForAnyResult<TBranches>> {
+		const result = await this.opts.db.registerEventRace(
+			{
+				executionId: this.opts.execution.id,
+				queue: this.opts.execution.queue,
+				taskKey: this.opts.execution.task_key,
+				stepKey,
+				branches: Object.entries(branches).map(([key, branch]) => {
+					if ("wait" in branch) return { key, stepKey: branch.key };
+					const compiled = compileEventFilter(
+						branch.event.name,
+						branch.filter,
+						this.opts.eventDefinitions,
+					);
+					return {
+						key,
+						stepKey: `${stepKey}::${key}`,
+						eventKey: branch.event.name,
+						requiredFieldCount: compiled.required_field_count,
+						terms: compiled.terms,
+					};
+				}),
+				timeoutMs: options.timeout === undefined ? null : parseDuration(options.timeout),
+				orchestratorId: this.opts.execution.locked_by,
+			},
+			{ signal: this.signal },
+		);
+		if (!result) return this.abortAndHangup({ reason: "suspended" });
+		return result as WaitForAnyResult<TBranches>;
 	}
 
 	async invoke<

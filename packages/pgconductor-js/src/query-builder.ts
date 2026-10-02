@@ -9,6 +9,8 @@ import type {
 	EventFilterTerm,
 	EventSubscriptionSpec,
 	EventWaitResult,
+	EventRaceBranch,
+	EventRaceResult,
 	Payload,
 	TaskSpec,
 } from "./database-client";
@@ -118,6 +120,16 @@ export type RegisterEventWaitArgs = {
 	timeoutMs: number | null;
 	orchestratorId: string;
 	suspend: boolean;
+};
+
+export type RegisterEventRaceArgs = {
+	executionId: string;
+	queue: string;
+	taskKey: string;
+	stepKey: string;
+	branches: EventRaceBranch[];
+	timeoutMs: number | null;
+	orchestratorId: string;
 };
 
 export class QueryBuilder {
@@ -1105,6 +1117,28 @@ export class QueryBuilder {
 		`;
 	}
 
+	buildRegisterEventRace({
+		executionId,
+		queue,
+		taskKey,
+		stepKey,
+		branches,
+		timeoutMs,
+		orchestratorId,
+	}: RegisterEventRaceArgs): PendingQuery<{ result: EventRaceResult | null }[]> {
+		return this.sql<{ result: EventRaceResult | null }[]>`
+			select pgconductor._private_register_event_race(
+				${executionId}::uuid,
+				${queue}::text,
+				${taskKey}::text,
+				${orchestratorId}::uuid,
+				${stepKey}::text,
+				${this.sql.json(branches)}::jsonb,
+				${timeoutMs}::bigint
+			) as result
+		`;
+	}
+
 	buildClearWaitingState({
 		executionId,
 		queue,
@@ -1396,11 +1430,9 @@ export class QueryBuilder {
 				order by subscription.id, source.created_at, source.event_id
 			), locked_wait_executions as materialized (
 				-- A claimed or retrying subscriber keeps the result for its next wait.
-				-- Only an execution suspended at this wait is woken. The flag is read
+				-- Only an execution suspended at this wait is woken. Its state is read
 				-- from the locked row because the statement snapshot may be older.
-				select execution.id, execution.queue,
-					execution.locked_by is null
-						and execution.waiting_step_key = wait.step_key as suspended
+				select execution.id, execution.queue, execution.locked_by, execution.waiting_step_key
 				from pgconductor._private_executions execution
 				join selected_waits wait
 					on wait.execution_id = execution.id and wait.queue = execution.queue
@@ -1409,6 +1441,16 @@ export class QueryBuilder {
 					and not execution.cancelled
 				order by execution.id
 				for update of execution
+			), deleted_waits as (
+				-- Returns the current row, so a waitForAny that tagged the subscription
+				-- after the statement snapshot is still woken.
+				delete from pgconductor._private_custom_event_subscriptions subscription
+				using selected_waits wait
+				join locked_wait_executions execution
+					on execution.id = wait.execution_id and execution.queue = wait.queue
+				where subscription.id = wait.subscription_id
+				returning subscription.id, subscription.execution_id, subscription.queue,
+					coalesce(subscription.race_step_key, subscription.step_key) as waiting_step_key
 			), inserted_wait_steps as (
 				insert into pgconductor._private_steps (execution_id, queue, key, result)
 				select wait.execution_id, wait.queue, wait.step_key,
@@ -1420,18 +1462,8 @@ export class QueryBuilder {
 						)
 					)
 				from selected_waits wait
-				join locked_wait_executions execution
-					on execution.id = wait.execution_id and execution.queue = wait.queue
+				join deleted_waits deleted on deleted.id = wait.subscription_id
 				on conflict (execution_id, key) do nothing
-				returning execution_id, queue, key
-			), deleted_waits as (
-				delete from pgconductor._private_custom_event_subscriptions subscription
-				using inserted_wait_steps step
-				where subscription.kind = 'execution_wait'
-					and subscription.execution_id = step.execution_id
-					and subscription.queue = step.queue
-					and subscription.step_key = step.key
-				returning subscription.execution_id, subscription.queue
 			), woken_waits as (
 				update pgconductor._private_executions execution
 				set run_at = pgconductor._private_current_time(),
@@ -1441,7 +1473,8 @@ export class QueryBuilder {
 				join locked_wait_executions locked
 					on locked.id = wait.execution_id and locked.queue = wait.queue
 				where execution.id = wait.execution_id and execution.queue = wait.queue
-					and locked.suspended
+					and locked.locked_by is null
+					and locked.waiting_step_key = wait.waiting_step_key
 				returning execution.id
 			)
 			select source.event_id
