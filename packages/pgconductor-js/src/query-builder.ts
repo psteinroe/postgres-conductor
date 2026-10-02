@@ -400,24 +400,31 @@ export class QueryBuilder {
 		`;
 	}
 
-	buildReturnExecutions(grouped: GroupedExecutionResults): PendingQuery<any> | null {
-		const allResults = [
-			...grouped.completed,
-			...grouped.failed,
-			...grouped.released,
-			...grouped.invokeChild,
+	buildReturnExecutions({
+		orchestratorId,
+		completed,
+		failed,
+		released,
+		invokeChild,
+	}: GroupedExecutionResults): PendingQuery<any> | null {
+		const toMs = (ms: number | "infinity" | undefined) => (ms === "infinity" ? -1 : ms);
+		const results = [
+			...completed,
+			...failed,
+			...released.map((r) => ({ ...r, reschedule_in_ms: toMs(r.reschedule_in_ms) })),
+			...invokeChild.map((r) => ({ ...r, timeout_ms: toMs(r.timeout_ms) })),
 		];
 
-		if (allResults.length === 0) return null;
+		if (results.length === 0) return null;
 
 		const ctes: PendingQuery<any>[] = [];
 		ctes.push(this.sql`now_ts as (select pgconductor._private_current_time() as ts)`);
 		ctes.push(this.sql`result_data as (
-			select * from jsonb_to_recordset(${this.sql.json(JSON.parse(JSON.stringify(allResults)))}::jsonb)
+			select * from jsonb_to_recordset(${this.sql.json(results)}::jsonb)
 			as r(
 				execution_id uuid, queue text, task_key text, status text,
-				orchestrator_id uuid, result jsonb, error text,
-				reschedule_in_ms text, step_key text, timeout_ms text,
+				result jsonb, error text,
+				reschedule_in_ms bigint, step_key text, timeout_ms bigint,
 				child_task_name text, child_task_queue text, child_payload jsonb,
 				"group" text
 			)
@@ -433,7 +440,7 @@ export class QueryBuilder {
 				on e.id = r.execution_id
 				and e.queue = r.queue
 				and e.task_key = r.task_key
-				and e.locked_by = r.orchestrator_id
+				and e.locked_by = ${orchestratorId}::uuid
 			for update of e
 		)`);
 		ctes.push(this.sql`task_configs as materialized (
@@ -487,7 +494,7 @@ export class QueryBuilder {
 				locked_by = null, locked_at = null
 			from now_ts nt, completed_results r
 			where e.id = r.execution_id and e.queue = r.queue
-				and e.locked_by = r.orchestrator_id
+				and e.locked_by = ${orchestratorId}::uuid
 				and e.parent_execution_id is not null
 				and e.subscription_id is null
 				and not exists (
@@ -508,7 +515,7 @@ export class QueryBuilder {
 			delete from pgconductor._private_executions e
 			using completed_results r, task_configs tc
 			where e.id = r.execution_id and e.queue = r.queue
-				and e.locked_by = r.orchestrator_id
+				and e.locked_by = ${orchestratorId}::uuid
 				and tc.key = r.task_key and tc.queue = r.queue and tc.remove_on_complete_days = 0
 				and not exists (select 1 from orphaned_children oc where oc.id = e.id)
 			returning e.id
@@ -518,7 +525,7 @@ export class QueryBuilder {
 			set completed_at = nt.ts, locked_by = null, locked_at = null
 			from now_ts nt, completed_results r, task_configs tc
 			where e.id = r.execution_id and e.queue = r.queue
-				and e.locked_by = r.orchestrator_id
+				and e.locked_by = ${orchestratorId}::uuid
 				and tc.key = r.task_key and tc.queue = r.queue
 				and (tc.remove_on_complete_days is null or tc.remove_on_complete_days != 0)
 				and not exists (select 1 from orphaned_children oc where oc.id = e.id)
@@ -526,7 +533,7 @@ export class QueryBuilder {
 		)`);
 
 		ctes.push(this.sql`permanently_failed_children as materialized (
-			select r.execution_id, r.queue, r.task_key, r.orchestrator_id,
+			select r.execution_id, r.queue, r.task_key,
 				r.execution_cancelled,
 				coalesce(r.error, r.execution_last_error, 'unknown error') as child_error,
 				e."group" as execution_group,
@@ -603,7 +610,7 @@ export class QueryBuilder {
 			where p.parent_should_remove is not true
 		)`);
 		ctes.push(this.sql`failed_delete_targets as materialized (
-			select p.execution_id as target_id, p.queue, p.orchestrator_id as expected_locked_by
+			select p.execution_id as target_id, p.queue, ${orchestratorId}::uuid as expected_locked_by
 			from permanently_failed_children p
 			where p.should_remove is true
 				and (
@@ -659,7 +666,7 @@ export class QueryBuilder {
 				locked_by = null, locked_at = null
 			from now_ts nt, failed_results r, task_configs tc
 			where e.id = r.execution_id and e.queue = r.queue
-				and e.locked_by = r.orchestrator_id
+				and e.locked_by = ${orchestratorId}::uuid
 				and tc.key = r.task_key and tc.queue = r.queue
 				and r.status <> 'permanently_failed'
 				and not r.execution_cancelled
@@ -677,14 +684,12 @@ export class QueryBuilder {
 		ctes.push(this.sql`updated_released as (
 			update pgconductor._private_executions e
 			set attempts = greatest(e.attempts - 1, 0),
-				run_at = case when lower(nullif(trim(r.reschedule_in_ms), '')) = 'infinity' then 'infinity'::timestamptz
-					when nullif(trim(r.reschedule_in_ms), '') is not null then
-						nt.ts + (nullif(trim(r.reschedule_in_ms), '')::bigint || ' milliseconds')::interval
-					else nt.ts end,
+				run_at = case when r.reschedule_in_ms = -1 then 'infinity'::timestamptz
+					else nt.ts + coalesce(r.reschedule_in_ms, 0) * interval '1 millisecond' end,
 				locked_by = null, locked_at = null
 			from now_ts nt, released_results r
 			where e.id = r.execution_id and e.queue = r.queue
-				and e.locked_by = r.orchestrator_id
+				and e.locked_by = ${orchestratorId}::uuid
 			returning e.id
 		)`);
 
@@ -695,22 +700,20 @@ export class QueryBuilder {
 			where exists (
 				select 1 from pgconductor._private_executions parent
 				where parent.id = r.execution_id and parent.queue = r.queue
-					and parent.locked_by = r.orchestrator_id
+					and parent.locked_by = ${orchestratorId}::uuid
 			)
 			returning id, parent_execution_id
 		)`);
 		ctes.push(this.sql`updated_invoke_parents as (
 			update pgconductor._private_executions e
 			set waiting_on_execution_id = ic.id, waiting_step_key = r.step_key,
-				run_at = case when lower(nullif(trim(r.timeout_ms), '')) = 'infinity' then 'infinity'::timestamptz
-					when nullif(trim(r.timeout_ms), '') is not null then
-						nt.ts + (nullif(trim(r.timeout_ms), '')::bigint || ' milliseconds')::interval
-					else nt.ts end,
+				run_at = case when r.timeout_ms = -1 then 'infinity'::timestamptz
+					else nt.ts + r.timeout_ms * interval '1 millisecond' end,
 				locked_by = null, locked_at = null
 			from now_ts nt, inserted_children ic
 			join invoke_child_data r on r.execution_id = ic.parent_execution_id
 			where e.id = r.execution_id and e.queue = r.queue
-				and e.locked_by = r.orchestrator_id
+				and e.locked_by = ${orchestratorId}::uuid
 			returning e.id
 		)`);
 

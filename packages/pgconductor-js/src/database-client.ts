@@ -93,57 +93,50 @@ export type ExecutionResult =
 	| ExecutionInvokeChild;
 
 export type GroupedExecutionResults = {
-	count: number;
 	orchestratorId: string;
 	completed: ExecutionCompleted[];
 	failed: (ExecutionFailed | ExecutionPermamentlyFailed)[];
 	released: ExecutionReleased[];
 	invokeChild: ExecutionInvokeChild[];
-	taskKeys: Set<string>;
 };
 
-export interface ExecutionCompleted {
+export type ExecutionCompleted = {
 	execution_id: string;
 	queue: string;
-	orchestrator_id: string;
 	task_key: string;
 	status: "completed";
 	result?: Payload;
-}
+};
 
-export interface ExecutionFailed {
+export type ExecutionFailed = {
 	execution_id: string;
 	queue: string;
-	orchestrator_id: string;
 	task_key: string;
 	status: "failed";
 	error: string;
-}
+};
 
-export interface ExecutionReleased {
+export type ExecutionReleased = {
 	execution_id: string;
 	queue: string;
-	orchestrator_id: string;
 	task_key: string;
 	status: "released";
 	reschedule_in_ms?: number | "infinity";
 	step_key?: string;
-}
+};
 
-export interface ExecutionPermamentlyFailed {
+export type ExecutionPermamentlyFailed = {
 	execution_id: string;
 	queue: string;
-	orchestrator_id: string;
 	task_key: string;
 	status: "permanently_failed";
 	error: string;
-}
+};
 
-export interface ExecutionInvokeChild {
+export type ExecutionInvokeChild = {
 	group?: string | null;
 	execution_id: string;
 	queue: string;
-	orchestrator_id: string;
 	task_key: string;
 	status: "invoke_child";
 	timeout_ms: number | "infinity";
@@ -151,7 +144,7 @@ export interface ExecutionInvokeChild {
 	child_task_name: string;
 	child_task_queue: string;
 	child_payload: Payload | null;
-}
+};
 
 export type EventFilterTerm = Record<string, JsonValue | undefined> & {
 	field_name: string;

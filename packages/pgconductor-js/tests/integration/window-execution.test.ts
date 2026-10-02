@@ -302,8 +302,16 @@ describe("Window Execution", () => {
 		// Task should not execute yet (outside window)
 		expect(stepFn).not.toHaveBeenCalled();
 
-		// Move back inside window (next day at 10:00)
+		// Move back inside window (next day at 10:00). Workers sample the database
+		// clock on start, so restart to observe the new fake time.
+		await orchestrator.stop();
 		await db.client.setFakeTime({ date: new Date("2024-01-02T10:00:00Z") });
+		const restarted = Orchestrator.create({
+			conductor,
+			tasks: [resumeTask],
+			defaultWorker: { pollIntervalMs: 50, flushIntervalMs: 50 },
+		});
+		await restarted.start();
 
 		// Wait for task to resume and complete
 		await new Promise((r) => setTimeout(r, 500));
@@ -322,6 +330,6 @@ describe("Window Execution", () => {
 		if (!execution3) throw new Error("execution not found");
 		expect(execution3.completed_at).not.toBeNull();
 
-		await orchestrator.stop();
+		await restarted.stop();
 	}, 30000);
 });

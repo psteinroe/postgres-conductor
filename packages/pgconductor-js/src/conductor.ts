@@ -241,7 +241,6 @@ export class Conductor<
 			this.logger,
 			options.config,
 			this.options.context,
-			this.options.events?.definitions ?? [],
 			this.telemetry,
 		);
 	}

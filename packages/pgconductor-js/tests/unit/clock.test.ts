@@ -41,7 +41,7 @@ describe("Clock", () => {
 	});
 
 	test("uses the request midpoint to account for latency", async () => {
-		const localTimes = [date(1_000), date(1_300)];
+		const localTimes = [date(1_000), date(1_300), date(2_000)];
 		const clock = new Clock({
 			sampleDatabaseTime: async () => date(1_100),
 			logger,
@@ -53,7 +53,7 @@ describe("Clock", () => {
 		});
 
 		await clock.refresh();
-		expect(clock.offset).toBe(-50);
+		expect(clock.now()).toEqual(date(1_950));
 	});
 
 	test("gives skewed workers the same cron slot", async () => {
@@ -111,7 +111,7 @@ describe("Clock", () => {
 		fail = true;
 		await clock.refresh();
 
-		expect(clock.offset).toBe(1_000);
+		expect(clock.now()).toEqual(date(2_000));
 		expect(logger.warn).toHaveBeenCalledWith(
 			"Database clock offset refresh failed; retaining previous offset",
 			expect.any(Error),

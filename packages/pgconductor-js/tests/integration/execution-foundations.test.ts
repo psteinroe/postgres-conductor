@@ -29,16 +29,15 @@ describe("execution foundations", () => {
 	}
 
 	function grouped(
+		orchestratorId: string,
 		result: Parameters<TestDatabase["client"]["returnExecutions"]>[0]["completed"][number],
 	) {
 		return {
-			count: 1,
-			orchestratorId: result.orchestrator_id,
+			orchestratorId,
 			completed: [result],
 			failed: [],
 			released: [],
 			invokeChild: [],
-			taskKeys: new Set([result.task_key]),
 		};
 	}
 
@@ -111,20 +110,18 @@ describe("execution foundations", () => {
 		if (!first || !second) throw new Error("expected both executions to be claimed");
 
 		await db.client.returnExecutions(
-			grouped({
+			grouped(first.locked_by, {
 				execution_id: first.id,
 				queue: first.queue,
 				task_key: first.task_key,
-				orchestrator_id: first.locked_by,
 				status: "completed",
 			}),
 		);
 		await db.client.returnExecutions(
-			grouped({
+			grouped(second.locked_by, {
 				execution_id: second.id,
 				queue: second.queue,
 				task_key: second.task_key,
-				orchestrator_id: second.locked_by,
 				status: "completed",
 			}),
 		);
@@ -321,7 +318,6 @@ describe("execution foundations", () => {
 		if (!parent) throw new Error("expected parent claim");
 
 		await db.client.returnExecutions({
-			count: 1,
 			orchestratorId: parent.locked_by,
 			completed: [],
 			failed: [],
@@ -330,7 +326,6 @@ describe("execution foundations", () => {
 				{
 					execution_id: parent.id,
 					queue: parent.queue,
-					orchestrator_id: parent.locked_by,
 					task_key: parent.task_key,
 					status: "invoke_child",
 					timeout_ms: 5000,
@@ -340,7 +335,6 @@ describe("execution foundations", () => {
 					child_payload: null,
 				},
 			],
-			taskKeys: new Set([parent.task_key]),
 		});
 
 		const childId = (
@@ -361,14 +355,12 @@ describe("execution foundations", () => {
 		if (!child) throw new Error("expected child claim");
 
 		await db.client.returnExecutions({
-			count: 1,
 			orchestratorId: child.locked_by,
 			completed: [],
 			failed: [
 				{
 					execution_id: child.id,
 					queue: child.queue,
-					orchestrator_id: child.locked_by,
 					task_key: child.task_key,
 					status: "permanently_failed",
 					error: "child failed",
@@ -376,7 +368,6 @@ describe("execution foundations", () => {
 			],
 			released: [],
 			invokeChild: [],
-			taskKeys: new Set([child.task_key]),
 		});
 
 		const retained = await db.sql<
@@ -421,7 +412,6 @@ describe("execution foundations", () => {
 		if (!parent) throw new Error("expected parent claim");
 
 		await db.client.returnExecutions({
-			count: 1,
 			orchestratorId: parent.locked_by,
 			completed: [],
 			failed: [],
@@ -430,7 +420,6 @@ describe("execution foundations", () => {
 				{
 					execution_id: parent.id,
 					queue: parent.queue,
-					orchestrator_id: parent.locked_by,
 					task_key: parent.task_key,
 					status: "invoke_child",
 					timeout_ms: "infinity",
@@ -440,7 +429,6 @@ describe("execution foundations", () => {
 					child_payload: null,
 				},
 			],
-			taskKeys: new Set([parent.task_key]),
 		});
 
 		const child = (
@@ -453,14 +441,12 @@ describe("execution foundations", () => {
 		)[0];
 		if (!child) throw new Error("expected child claim");
 		await db.client.returnExecutions({
-			count: 1,
 			orchestratorId: child.locked_by,
 			completed: [],
 			failed: [
 				{
 					execution_id: child.id,
 					queue: child.queue,
-					orchestrator_id: child.locked_by,
 					task_key: child.task_key,
 					status: "permanently_failed",
 					error: "child failed",
@@ -468,7 +454,6 @@ describe("execution foundations", () => {
 			],
 			released: [],
 			invokeChild: [],
-			taskKeys: new Set([child.task_key]),
 		});
 
 		const outcome = await db.sql<{ failed_at: Date | null; last_error: string | null }[]>`
@@ -503,11 +488,10 @@ describe("execution foundations", () => {
 		if (!claimed) throw new Error("expected claim");
 		await db.client.cancelExecution(executionId, { reason: "cancelled before flush" });
 		await db.client.returnExecutions(
-			grouped({
+			grouped(claimed.locked_by, {
 				execution_id: claimed.id,
 				queue: claimed.queue,
 				task_key: claimed.task_key,
-				orchestrator_id: claimed.locked_by,
 				status: "completed",
 			}),
 		);
@@ -558,7 +542,6 @@ describe("execution foundations", () => {
 		)[0];
 		if (!parent) throw new Error("expected parent claim");
 		await db.client.returnExecutions({
-			count: 1,
 			orchestratorId: parent.locked_by,
 			completed: [],
 			failed: [],
@@ -567,7 +550,6 @@ describe("execution foundations", () => {
 				{
 					execution_id: parent.id,
 					queue: parent.queue,
-					orchestrator_id: parent.locked_by,
 					task_key: parent.task_key,
 					status: "invoke_child",
 					timeout_ms: "infinity",
@@ -577,7 +559,6 @@ describe("execution foundations", () => {
 					child_payload: null,
 				},
 			],
-			taskKeys: new Set([parent.task_key]),
 		});
 		const childId = (
 			await db.sql<{ id: string }[]>`
@@ -707,16 +688,13 @@ describe("execution foundations", () => {
 			execution_id: executionId,
 			queue: "fenced",
 			task_key: "fenced-task",
-			orchestrator_id: oldClaim.locked_by,
 		};
 		await db.client.returnExecutions({
-			count: 3,
 			orchestratorId: oldOrchestrator,
 			completed: [{ ...staleBase, status: "completed" }],
 			failed: [{ ...staleBase, status: "failed", error: "stale" }],
 			released: [{ ...staleBase, status: "released", reschedule_in_ms: 0 }],
 			invokeChild: [],
-			taskKeys: new Set(["fenced-task"]),
 		});
 
 		const untouched = await db.sql<
@@ -735,11 +713,10 @@ describe("execution foundations", () => {
 		expect(untouched[0]?.locked_by).toBe(newOrchestrator);
 
 		await db.client.returnExecutions(
-			grouped({
+			grouped(currentClaim.locked_by, {
 				execution_id: currentClaim.id,
 				queue: currentClaim.queue,
 				task_key: currentClaim.task_key,
-				orchestrator_id: currentClaim.locked_by,
 				status: "completed",
 			}),
 		);

@@ -503,12 +503,12 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 
 	async returnExecutions(
 		resultsOrGrouped:
-			| ExecutionResult[]
+			| (ExecutionResult & { orchestrator_id: string })[]
 			| import("../../src/database-client").GroupedExecutionResults,
 		_opts?: { signal?: AbortSignal },
 	): Promise<void> {
 		// Handle both old array format (for testing) and new grouped format
-		const results: ExecutionResult[] = Array.isArray(resultsOrGrouped)
+		const results = Array.isArray(resultsOrGrouped)
 			? resultsOrGrouped
 			: [
 					...resultsOrGrouped.completed,
@@ -517,7 +517,7 @@ export class InMemoryDatabaseClient implements IDatabaseClient {
 					...resultsOrGrouped.invokeChild,
 					// ...resultsOrGrouped.waitForCustomEvent,
 					// ...resultsOrGrouped.waitForDbEvent,
-				];
+				].map((result) => ({ ...result, orchestrator_id: resultsOrGrouped.orchestratorId }));
 		const now = this.getInternalTime();
 
 		for (const result of results) {

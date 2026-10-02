@@ -14,6 +14,10 @@ export type ClockOptions = {
  * The offset is database time minus the midpoint of the local request times.
  */
 export class Clock {
+	private readonly sampleDatabaseTime: (signal?: AbortSignal) => Promise<Date>;
+	private readonly logger: Logger;
+	private readonly localClock: () => Date;
+	private readonly refreshIntervalMs: number;
 	private offsetMs = 0;
 	private refreshTimer: ReturnType<typeof setTimeout> | null = null;
 	private running = false;
@@ -30,17 +34,8 @@ export class Clock {
 		this.refreshIntervalMs = refreshIntervalMs;
 	}
 
-	private readonly sampleDatabaseTime: (signal?: AbortSignal) => Promise<Date>;
-	private readonly logger: Logger;
-	private readonly localClock: () => Date;
-	private readonly refreshIntervalMs: number;
-
 	now(): Date {
 		return new Date(this.localClock().getTime() + this.offsetMs);
-	}
-
-	get offset(): number {
-		return this.offsetMs;
 	}
 
 	async start(signal?: AbortSignal): Promise<void> {
