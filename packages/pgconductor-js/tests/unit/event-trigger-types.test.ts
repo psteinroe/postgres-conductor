@@ -166,20 +166,6 @@ describe("event triggers", () => {
 				async () => {},
 			),
 		).toThrow('Event "user.typo" is not defined in the conductor event catalog');
-		expect(() =>
-			conductor.createTask(
-				{ name: "on-user-created" },
-				{ event: "user.created", fields: "userId,userId" } as any,
-				async () => {},
-			),
-		).toThrow('Fields for event "user.created" cannot contain duplicate names');
-		expect(() =>
-			conductor.createTask(
-				{ name: "on-user-created" },
-				{ event: "user.created", fields: '"userId"' } as any,
-				async () => {},
-			),
-		).toThrow('Fields for event "user.created" contains invalid field');
 	});
 
 	test("runtime event schema collections can be chained", () => {

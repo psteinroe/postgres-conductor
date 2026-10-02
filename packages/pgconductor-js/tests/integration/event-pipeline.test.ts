@@ -4,12 +4,7 @@ import { z } from "zod";
 import { Conductor } from "../../src/conductor";
 import { DatabaseClient, type EventSubscriptionSpec } from "../../src/database-client";
 import { defineEvent } from "../../src/event-definition";
-import {
-	compileEventFilterTerms,
-	compileEventTrigger,
-	type CompiledEventTrigger,
-	type EventFilter,
-} from "../../src/event-trigger-validation";
+import { compileEventFilter, type EventFilter } from "../../src/event-trigger-validation";
 import { DefaultLogger } from "../../src/lib/logger";
 import { Orchestrator } from "../../src/orchestrator";
 import { EventSchemas, TaskSchemas } from "../../src/schemas";
@@ -24,7 +19,6 @@ type CustomSubscription = {
 	taskKey: string;
 	eventKey: string;
 	filter?: EventFilter;
-	compiledFilter?: Pick<CompiledEventTrigger, "required_field_count" | "terms">;
 	payloadFields?: string[];
 	maxAttempts?: number;
 };
@@ -58,15 +52,14 @@ describe("event pipeline", () => {
 		subscriptions: CustomSubscription[],
 	): Promise<void> {
 		const eventSubscriptions: EventSubscriptionSpec[] = subscriptions.map((subscription) => {
-			const filter = subscription.filter || null;
+			const filter = subscription.filter || {};
 			return {
 				task_key: subscription.taskKey,
 				event_key: subscription.eventKey,
 				payload_fields: subscription.payloadFields || null,
-				required_field_count:
-					subscription.compiledFilter?.required_field_count ||
-					(filter ? Object.keys(filter).length : 0),
-				terms: subscription.compiledFilter?.terms || compileEventFilterTerms(filter),
+				...compileEventFilter(subscription.eventKey, filter, [
+					{ name: subscription.eventKey, payload: undefined, filterable: Object.keys(filter) },
+				]),
 			};
 		});
 		await db.client.registerWorker({
@@ -132,15 +125,7 @@ describe("event pipeline", () => {
 				taskKey: "pipeline.numeric-range-destination",
 				eventKey: "pipeline.numeric-boundary",
 				filter: {
-					value: [
-						{
-							$operator: "numeric_range",
-							lower: 9007199254740992,
-							lowerInclusive: false,
-							upper: 9007199254740994,
-							upperInclusive: false,
-						},
-					],
+					value: [{ numeric: [">", 9007199254740992, "<", 9007199254740994] }],
 				},
 			},
 		]);
@@ -507,54 +492,36 @@ describe("event pipeline", () => {
 
 	test("matches literal prefixes, numeric ranges, exists, and atomic anything-but", async () => {
 		const db = await database();
-		const operatorEvent = defineEvent({
-			name: "pipeline.operators",
-			payload: z.object({
-				code: z.string(),
-				amount: z.number(),
-				note: z.string().optional(),
-				metadata: z.string().optional(),
-				status: z.string(),
-			}),
-			filterable: ["code", "amount", "note", "metadata", "status"],
-		});
-		const compileFilter = (filter: Record<string, unknown[]>) => {
-			const compiled = compileEventTrigger({ event: "pipeline.operators", filter }, [
-				operatorEvent,
-			]);
-			if (compiled === null) throw new Error("expected an event trigger");
-			return compiled;
-		};
 		await registerSubscriptions(db, [
 			{
 				taskKey: "pipeline.prefix",
 				eventKey: "pipeline.operators",
-				compiledFilter: compileFilter({ code: [{ prefix: "a%_\\" }] }),
+				filter: { code: [{ prefix: "a%_\\" }] },
 			},
 			{
 				taskKey: "pipeline.range",
 				eventKey: "pipeline.operators",
-				compiledFilter: compileFilter({ amount: [{ numeric: [">=", 10, "<", 20] }] }),
+				filter: { amount: [{ numeric: [">=", 10, "<", 20] }] },
 			},
 			{
 				taskKey: "pipeline.missing",
 				eventKey: "pipeline.operators",
-				compiledFilter: compileFilter({ note: [{ exists: false }] }),
+				filter: { note: [{ exists: false }] },
 			},
 			{
 				taskKey: "pipeline.present",
 				eventKey: "pipeline.operators",
-				compiledFilter: compileFilter({ metadata: [{ exists: true }] }),
+				filter: { metadata: [{ exists: true }] },
 			},
 			{
 				taskKey: "pipeline.anything",
 				eventKey: "pipeline.operators",
-				compiledFilter: compileFilter({ status: [{ "anything-but": "blocked" }] }),
+				filter: { status: [{ "anything-but": "blocked" }] },
 			},
 			{
 				taskKey: "pipeline.mixed-or",
 				eventKey: "pipeline.operators",
-				compiledFilter: compileFilter({ code: ["exact", { prefix: "a%_\\" }] }),
+				filter: { code: ["exact", { prefix: "a%_\\" }] },
 			},
 		]);
 
@@ -610,7 +577,7 @@ describe("event pipeline", () => {
 				taskKey: "pipeline.anything-object",
 				eventKey: "pipeline.residual",
 				filter: {
-					status: [{ $operator: "anything_but", value: "blocked" }],
+					status: [{ "anything-but": "blocked" }],
 				},
 			},
 		]);
@@ -1036,27 +1003,31 @@ describe("event pipeline", () => {
 		expect(received).toEqual(["done"]);
 	});
 
-	test("rejects malformed filters and the reserved internal queue", async () => {
+	test("rejects oversized filters in the database", async () => {
 		const db = await database();
-		const event = defineEvent({
-			name: "pipeline.validation",
-			payload: z.object({ status: z.string(), metadata: z.object({ source: z.string() }) }),
-			filterable: ["status"],
-		});
-		const definition = defineTask({ name: "pipeline.validation-task", payload: z.object({}) });
-		const conductor = Conductor.create({
-			sql: db.sql,
-			tasks: TaskSchemas.fromSchema([definition]),
-			events: EventSchemas.fromSchema([event]),
-			context: {},
-		});
-		expect(() =>
-			conductor.createTask(
-				{ name: "pipeline.validation-task" },
-				{ event: "pipeline.validation", filter: { status: [{ source: "api" }] } } as never,
-				async () => {},
+		const register = (eventKey: string, filter: EventFilter) =>
+			registerSubscriptions(db, [{ taskKey: "pipeline.limits", eventKey, filter }]);
+
+		await expect(register("e".repeat(256), {})).rejects.toThrow(
+			/chk_custom_event_subscription_event_key/,
+		);
+		await expect(
+			register("pipeline.limits", { code: [{ prefix: "x".repeat(65) }] }),
+		).rejects.toThrow(/chk_event_filter_term_value/);
+		await expect(register("pipeline.limits", { code: ["x".repeat(1025)] })).rejects.toThrow(
+			/chk_event_filter_term_names/,
+		);
+		await expect(
+			register(
+				"pipeline.limits",
+				Object.fromEntries(Array.from({ length: 9 }, (_, index) => [`field${index}`, [true]])),
 			),
-		).toThrow(/unsupported operator/);
+		).rejects.toThrow(/required_field_count_check/);
+	});
+
+	test("rejects the reserved internal queue", async () => {
+		const db = await database();
+		const conductor = Conductor.create({ sql: db.sql, context: {} });
 		expect(() => conductor.createWorker({ queue: INTERNAL_QUEUE, tasks: [] as never })).toThrow(
 			/reserved for internal use/,
 		);

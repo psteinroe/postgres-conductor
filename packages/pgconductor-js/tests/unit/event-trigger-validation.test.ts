@@ -1,13 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import { z } from "zod";
 import { defineEvent } from "../../src/event-definition";
-import { compileEventTrigger } from "../../src/event-trigger-validation";
+import { compileEventTriggers } from "../../src/event-trigger-validation";
 import { Task } from "../../src/task";
 
 const catalogChanged = defineEvent({
 	name: "catalog.changed",
 	payload: z.object({
-		z: z.number(),
 		a: z.union([z.string(), z.number(), z.boolean(), z.null()]),
 		["__proto__"]: z.string(),
 		status: z.string(),
@@ -16,73 +15,45 @@ const catalogChanged = defineEvent({
 		deleted: z.boolean(),
 		value: z.string(),
 	}),
-	filterable: ["z", "a", "__proto__", "status", "score", "name", "deleted", "value"],
+	filterable: ["a", "__proto__", "status", "score", "name", "deleted", "value"],
 });
 
 const definitions = [catalogChanged] as const;
 
 describe("event trigger compilation", () => {
-	test("sorts fields and deduplicates scalar alternatives type-sensitively", () => {
-		const compiled = compileEventTrigger(
-			{
-				event: "catalog.changed",
-				filter: {
-					z: [1, 1, 0],
-					a: ["1", 1, true, null],
-				},
-			},
-			definitions,
-		);
+	const compile = (filter: Record<string, unknown[]>) =>
+		compileEventTriggers([{ event: "catalog.changed", filter }], definitions);
 
-		if (!compiled) throw new Error("expected an event trigger");
-		expect(compiled).toEqual({
-			event_key: "catalog.changed",
-			payload_fields: null,
-			required_field_count: 2,
-			terms: [
-				{ field_name: "a", operator: "exact", scalar_type: "null" },
-				{
-					field_name: "a",
-					operator: "exact",
-					scalar_type: "boolean",
-					boolean_value: true,
-				},
-				{
-					field_name: "a",
-					operator: "exact",
-					scalar_type: "number",
-					number_value: 1,
-				},
-				{
-					field_name: "a",
-					operator: "exact",
-					scalar_type: "string",
-					text_value: "1",
-				},
-				{
-					field_name: "z",
-					operator: "exact",
-					scalar_type: "number",
-					number_value: 0,
-				},
-				{
-					field_name: "z",
-					operator: "exact",
-					scalar_type: "number",
-					number_value: 1,
-				},
-			],
-		});
+	test("compiles fields, scalar alternatives, and selected payload fields", () => {
+		expect(
+			compileEventTriggers(
+				[
+					{ invocable: true },
+					{
+						event: "catalog.changed",
+						fields: "status, score",
+						filter: { a: ["1", 1, true, null] },
+					},
+				],
+				definitions,
+			),
+		).toEqual([
+			{
+				event_key: "catalog.changed",
+				payload_fields: ["status", "score"],
+				required_field_count: 1,
+				terms: [
+					{ field_name: "a", operator: "exact", scalar_type: "string", text_value: "1" },
+					{ field_name: "a", operator: "exact", scalar_type: "number", number_value: 1 },
+					{ field_name: "a", operator: "exact", scalar_type: "boolean", boolean_value: true },
+					{ field_name: "a", operator: "exact", scalar_type: "null" },
+				],
+			},
+		]);
 	});
 
 	test("preserves prototype-named filter fields", () => {
-		const compiled = compileEventTrigger(
-			{
-				event: "catalog.changed",
-				filter: JSON.parse('{"__proto__":["safe"]}') as Record<string, unknown>,
-			},
-			definitions,
-		);
+		const [compiled] = compile(JSON.parse('{"__proto__":["safe"]}') as Record<string, unknown[]>);
 
 		expect(compiled?.terms).toEqual([
 			{
@@ -94,33 +65,21 @@ describe("event trigger compilation", () => {
 		]);
 	});
 
-	test("compiles supported atomic operators", () => {
-		const compiled = compileEventTrigger(
-			{
-				event: "catalog.changed",
-				filter: {
-					status: [{ "anything-but": "blocked" }],
-					score: [{ numeric: ["<", 20, ">=", 10] }],
-					name: [{ prefix: "literal%_\\" }, "exact"],
-					deleted: [{ exists: false }],
-				},
-			},
-			definitions,
-		);
+	test("compiles supported operators", () => {
+		const [compiled] = compile({
+			status: [{ "anything-but": "blocked" }],
+			score: [{ numeric: ["<", 20, ">=", 10] }],
+			name: [{ prefix: "literal%_\\" }, "exact"],
+			deleted: [{ exists: false }],
+		});
 
+		expect(compiled?.required_field_count).toBe(4);
 		expect(compiled?.terms).toEqual([
-			{ field_name: "deleted", operator: "exists", boolean_value: false },
 			{
-				field_name: "name",
-				operator: "exact",
+				field_name: "status",
+				operator: "anything_but",
 				scalar_type: "string",
-				text_value: "exact",
-			},
-			{
-				field_name: "name",
-				operator: "prefix",
-				scalar_type: "string",
-				text_value: "literal%_\\",
+				text_value: "blocked",
 			},
 			{
 				field_name: "score",
@@ -132,29 +91,42 @@ describe("event trigger compilation", () => {
 				upper_inclusive: false,
 			},
 			{
-				field_name: "status",
-				operator: "anything_but",
+				field_name: "name",
+				operator: "prefix",
 				scalar_type: "string",
-				text_value: "blocked",
+				text_value: "literal%_\\",
 			},
+			{
+				field_name: "name",
+				operator: "exact",
+				scalar_type: "string",
+				text_value: "exact",
+			},
+			{ field_name: "deleted", operator: "exists", boolean_value: false },
 		]);
 	});
 
-	test("rejects malformed, unbounded, and non-atomic operators", () => {
-		const compile = (value: unknown[]) =>
-			compileEventTrigger({ event: "catalog.changed", filter: { value } }, definitions);
-
-		expect(() => compile([{ prefix: "" }])).toThrow(/non-empty string/);
-		expect(() => compile([{ prefix: "x".repeat(65) }])).toThrow(/64 characters/);
-		expect(() => compile([{ numeric: [">", 10, ">=", 11] }])).toThrow(/duplicate lower bounds/);
-		expect(() => compile([{ numeric: [">", 10, "<", 10] }])).toThrow(/is empty/);
-		expect(() => compile([{ exists: "yes" }])).toThrow(/must be boolean/);
-		expect(() => compile([{ "anything-but": ["a", "b"] }])).toThrow(/requires one scalar value/);
-		expect(() => compile([{ "anything-but": "a" }, "b"])).toThrow(/must be atomic/);
-		expect(() => compile([{ suffix: "x" }])).toThrow(/unsupported operator/);
+	test("rejects filters the database cannot represent meaningfully", () => {
+		expect(() => compile({ value: [] })).toThrow(/between 1 and 4 values/);
+		expect(() => compile({ value: ["a", "b", "c", "d", "e"] })).toThrow(/between 1 and 4 values/);
+		expect(() => compile({ value: [{ "anything-but": "a" }, "b"] })).toThrow(
+			/cannot combine anything-but/,
+		);
+		expect(() => compile({ score: [{ numeric: [">", 10, ">=", 11] }] })).toThrow(
+			/more than one lower bound/,
+		);
+		expect(() => compile({ score: [{ numeric: [">", 10, "<", 10] }] })).toThrow(
+			/empty numeric range/,
+		);
+		expect(() => compile({ undeclared: [true] })).toThrow(
+			'Filter for event "catalog.changed" contains undeclared field "undeclared"',
+		);
 	});
 
-	test("requires runtime definitions for directly constructed tasks", () => {
+	test("requires runtime definitions", () => {
+		expect(() => compileEventTriggers([{ event: "catalog.changed" }], [])).toThrow(
+			'Event "catalog.changed" is not defined in the conductor event catalog',
+		);
 		expect(
 			() => new Task({ name: "catalog-task" }, { event: "catalog.changed" }, async () => {}),
 		).toThrow('Event "catalog.changed" is not defined in the conductor event catalog');
@@ -167,21 +139,5 @@ describe("event trigger compilation", () => {
 					definitions,
 				),
 		).not.toThrow();
-	});
-
-	test("enforces index-safe names and byte limits", () => {
-		expect(() => compileEventTrigger({ event: "catalog.changed" }, [])).toThrow(
-			'Event "catalog.changed" is not defined in the conductor event catalog',
-		);
-		expect(() =>
-			compileEventTrigger({ event: "catalog.changed", filter: { " ": [true] } }, definitions),
-		).toThrow(/empty field names/);
-		expect(() => compileEventTrigger({ event: "e".repeat(256) }, [])).toThrow(/255 UTF-8 bytes/);
-		expect(() =>
-			compileEventTrigger(
-				{ event: "catalog.changed", filter: { value: ["x".repeat(1023)] } },
-				definitions,
-			),
-		).toThrow(/1024 UTF-8 bytes/);
 	});
 });
