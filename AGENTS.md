@@ -130,7 +130,7 @@ Tables live in the `pgconductor` schema with a `_private_` prefix (`_private_exe
 - Handles graceful shutdown via AbortController
 
 **TaskContext** (`task-context.ts`)
-- Provides API to task functions: `step()`, `sleep()`, `invoke()`, `waitForEvent()`
+- Provides API to task functions: `step()`, `sleep()`, `invoke()`, `waitForEvent()`, `subscribe()`
 - All operations are idempotent (use steps as memoization)
 - Hangup pattern: abort execution and return never-resolving promise
 - Resume happens automatically when database wakes execution
@@ -191,6 +191,7 @@ Tables live in the `pgconductor` schema with a `_private_` prefix (`_private_exe
 - The dispatcher matches subscriptions and inserts one delivery execution per matching subscription in a single statement; deliveries carry `subscription_id` and `parent_execution_id` (the event)
 - Worker registration syncs a queue's trigger subscriptions; ids derive from the definition, so unchanged subscriptions keep their identity. Each trigger filter is compiled once into typed rows in `_private_event_filter_terms` (fields are ANDed, alternatives within a field are ORed)
 - Fan-out is at-least-once: a retried dispatch re-evaluates current subscriptions, and a unique index deduplicates existing deliveries
+- Event waits are `execution_wait` subscriptions keyed by `(execution_id, step_key)`. Dispatch stores the first matching event as the step result and wakes the execution only if it is suspended at that step (`waiting_step_key`); `ctx.subscribe()` registers without suspending, so events matched while the execution runs are kept for the later wait
 
 ### Task Configuration Options
 

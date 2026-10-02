@@ -180,6 +180,10 @@ export type EventFilterTerm = Record<string, JsonValue | undefined> & {
 	upper_inclusive?: boolean;
 };
 
+export type EventWaitResult =
+	| { status: "resolved"; event: { name: string; payload: Payload } }
+	| { status: "timed_out" };
+
 export interface EventSubscriptionSpec {
 	task_key: string;
 	event_key: string;
@@ -624,12 +628,12 @@ export class DatabaseClient {
 	async registerEventWait(
 		args: RegisterEventWaitArgs,
 		opts?: QueryMethodOptions,
-	): Promise<boolean> {
+	): Promise<EventWaitResult | null> {
 		const rows = await this.query(() => this.builder.buildRegisterEventWait(args), {
 			label: "registerEventWait",
 			...opts,
 		});
-		return rows[0]?.timed_out === true;
+		return rows[0]?.result || null;
 	}
 
 	async dispatchCustomEvents(

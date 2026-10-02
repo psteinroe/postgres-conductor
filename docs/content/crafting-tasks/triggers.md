@@ -190,6 +190,35 @@ conductor.createTask(
 );
 ```
 
+## Waiting for Events in a Task
+
+A running task can also wait for a custom event. `ctx.waitForEvent()` subscribes and suspends
+in one call, so it only sees events emitted after it has been registered:
+
+```typescript
+const payment = await ctx.waitForEvent("payment", {
+  event: paymentReceived,
+  filter: { orderId: [orderId] },
+  timeout: "1h",
+});
+```
+
+When the event is a response to something the task does itself, such as posting an approval
+request, subscribe before the side effect and wait after it. Otherwise a fast response could
+be emitted before the wait is registered and be missed:
+
+```typescript
+const subscription = await ctx.subscribe("approval", {
+  event: approvalDecided,
+  filter: { approvalId: [approvalId] },
+});
+await ctx.step("post-card", () => postApprovalCard(approvalId));
+const decision = await subscription.wait({ timeout: "24h" });
+```
+
+A matching event emitted after `subscribe()` resolves is kept for `wait()`, even if the task
+is still running. The timeout starts at `wait()`. See [ctx.subscribe()](../api/task-context.md#ctxsubscribe).
+
 ## Multiple Triggers
 
 Tasks can respond to multiple trigger types:
