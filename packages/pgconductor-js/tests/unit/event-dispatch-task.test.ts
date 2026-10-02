@@ -8,7 +8,12 @@ import { DefaultLogger } from "../../src/lib/logger";
 import { BatchTaskContext, createTaskSignal } from "../../src/task-context";
 
 function context() {
-	return new BatchTaskContext(createTaskSignal(new AbortController().signal), new DefaultLogger());
+	return new BatchTaskContext(
+		createTaskSignal(new AbortController().signal),
+		new DefaultLogger(),
+		{ countSteps: mock(async () => 0) },
+		[],
+	);
 }
 
 test("defines the internal event dispatch task", () => {

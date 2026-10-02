@@ -139,7 +139,7 @@ describe("Batch Processing", () => {
 		expect(processedBatches[0]).toEqual([{ doubled: 10 }, { doubled: 20 }]);
 	}, 30000);
 
-	test("batch task sleep reschedules all executions", async () => {
+	test("batch task sleep reschedules all executions and replays past it", async () => {
 		const db = await pool.child();
 		databases.push(db);
 
@@ -154,7 +154,8 @@ describe("Batch Processing", () => {
 			context: {},
 		});
 
-		let executionAttempts = 0;
+		let attempts = 0;
+		const completed: number[] = [];
 
 		const batchTask = conductor.createTask(
 			{
@@ -163,12 +164,9 @@ describe("Batch Processing", () => {
 			},
 			{ invocable: true },
 			async (events, ctx) => {
-				executionAttempts++;
-				if (executionAttempts === 1) {
-					// First attempt: sleep
-					await ctx.sleep("wait", 1000);
-				}
-				// Second attempt: complete
+				attempts++;
+				await ctx.sleep("wait", 200);
+				completed.push(...events.map((e) => e.payload.value));
 			},
 		);
 
@@ -185,12 +183,79 @@ describe("Batch Processing", () => {
 			conductor.invoke({ name: "batch-sleep" }, { value: 2 }),
 		]);
 
-		await new Promise((r) => setTimeout(r, 4000));
+		await new Promise((r) => setTimeout(r, 3000));
 
 		await orchestrator.stop();
 
-		// Should have executed twice (once for sleep, once for completion)
-		expect(executionAttempts).toBe(2);
+		expect(attempts).toBe(2);
+		expect(completed.sort()).toEqual([1, 2]);
+		const pending = await db.sql`
+			select id from pgconductor._private_executions
+			where task_key = 'batch-sleep' and completed_at is null
+		`;
+		expect(pending.length).toBe(0);
+	}, 30000);
+
+	test("batch task sleep re-sleeps the batch until every execution has slept", async () => {
+		const db = await pool.child();
+		databases.push(db);
+
+		const taskDefinitions = defineTask({
+			name: "batch-sleep-mixed",
+			payload: z.object({ value: z.number() }),
+		});
+
+		const conductor = Conductor.create({
+			sql: db.sql,
+			tasks: TaskSchemas.fromSchema([taskDefinitions]),
+			context: {},
+		});
+
+		const batches: number[][] = [];
+		const completed: number[] = [];
+
+		const batchTask = conductor.createTask(
+			{
+				name: "batch-sleep-mixed",
+				batch: { size: 2, timeoutMs: 10 },
+			},
+			{ invocable: true },
+			async (events, ctx) => {
+				batches.push(events.map((e) => e.payload.value).sort());
+				await ctx.sleep("wait", 1000);
+				completed.push(...events.map((e) => e.payload.value));
+			},
+		);
+
+		const drain = () =>
+			Orchestrator.create({
+				conductor,
+				tasks: [batchTask],
+				defaultWorker: { pollIntervalMs: 50, flushIntervalMs: 50 },
+			}).drain();
+
+		await conductor.ensureInstalled();
+		await db.client.setFakeTime({ date: new Date("2024-01-01T12:00:00Z") });
+
+		await conductor.invoke({ name: "batch-sleep-mixed" }, { value: 1 });
+		await drain();
+
+		await conductor.invoke({ name: "batch-sleep-mixed" }, { value: 2 });
+		await db.client.setFakeTime({ date: new Date("2024-01-01T12:00:01Z") });
+		await drain();
+
+		await db.client.setFakeTime({ date: new Date("2024-01-01T12:00:02Z") });
+		await drain();
+
+		await db.client.clearFakeTime();
+
+		expect(batches).toEqual([[1], [1, 2], [1, 2]]);
+		expect(completed.sort()).toEqual([1, 2]);
+		const pending = await db.sql`
+			select id from pgconductor._private_executions
+			where task_key = 'batch-sleep-mixed' and completed_at is null
+		`;
+		expect(pending.length).toBe(0);
 	}, 30000);
 
 	test("batch task throws - all fail together", async () => {
