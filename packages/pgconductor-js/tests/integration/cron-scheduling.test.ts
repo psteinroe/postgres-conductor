@@ -817,4 +817,30 @@ describe("Cron Scheduling", () => {
 
 		await db.destroy();
 	});
+
+	test("changing a cron expression replaces the pending schedule", async () => {
+		const db = await pool.child();
+		const taskDefinition = defineTask({ name: "report" });
+
+		for (const cron of ["0 0 9 * * *", "0 0 10 * * *"]) {
+			const conductor = Conductor.create({
+				sql: db.sql,
+				tasks: TaskSchemas.fromSchema([taskDefinition]),
+				context: {},
+			});
+			const orchestrator = Orchestrator.create({
+				conductor,
+				tasks: [conductor.createTask({ name: "report" }, { cron, name: "daily" }, async () => {})],
+			});
+			await orchestrator.start();
+			await orchestrator.stop();
+		}
+
+		const schedules = await db.sql<{ cron_expression: string }[]>`
+			select cron_expression from pgconductor._private_executions where task_key = 'report'
+		`;
+		expect(schedules.map((execution) => execution.cron_expression)).toEqual(["0 0 10 * * *"]);
+
+		await db.destroy();
+	}, 30000);
 });
