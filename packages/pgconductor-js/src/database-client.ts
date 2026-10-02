@@ -22,6 +22,7 @@ import {
 	type RegisterEventWaitArgs,
 } from "./query-builder";
 import { makeChildLogger, type Logger } from "./lib/logger";
+import { uuidv7 } from "./lib/uuidv7";
 import type { TraceContextCarrier } from "./telemetry";
 
 export type JsonValue = string | number | boolean | null | Payload | JsonValue[];
@@ -604,15 +605,12 @@ export class DatabaseClient {
 	}
 
 	async emitEvent(args: EmitEventArgs, opts?: QueryMethodOptions): Promise<string> {
-		const result = await this.query(() => this.builder.buildEmitEvent(args), {
+		const id = uuidv7();
+		await this.query(() => this.builder.buildEmitEvent({ ...args, id }), {
 			label: "emitEvent",
 			...opts,
 		});
-		const row = result[0];
-		if (!row) {
-			throw new Error("emitEvent did not return a result");
-		}
-		return row.id;
+		return id;
 	}
 
 	/**

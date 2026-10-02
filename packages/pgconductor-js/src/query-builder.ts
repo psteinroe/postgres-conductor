@@ -1413,15 +1413,17 @@ export class QueryBuilder {
 	}
 
 	buildEmitEvent({
+		id,
 		eventKey,
 		payload,
 		traceContext,
-	}: EmitEventArgs): PendingQuery<{ id: string }[]> {
+	}: EmitEventArgs & { id: string }): PendingQuery<{ id: string }[]> {
 		return this.sql<{ id: string }[]>`
 			select pgconductor.emit_event(
 				${eventKey}::text,
 				${this.sql.json(payload || {})}::jsonb,
-				${traceContext ? this.sql.json(traceContext) : null}::jsonb
+				${traceContext ? this.sql.json(traceContext) : null}::jsonb,
+				${id}::uuid
 			) as id
 		`;
 	}

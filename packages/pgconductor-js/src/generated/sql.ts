@@ -1305,7 +1305,8 @@ on conflict (queue, key) do update set
 create or replace function pgconductor.emit_event(
     p_event_key text,
     p_payload jsonb default '{}'::jsonb,
-    p_trace_context jsonb default null
+    p_trace_context jsonb default null,
+    p_id uuid default pgconductor._private_portable_uuidv7()
 )
 returns uuid
 language plpgsql
@@ -1314,7 +1315,6 @@ set search_path to ''
 as $function$
 declare
     v_payload jsonb := p_payload;
-    v_event_id uuid;
 begin
     if p_event_key is null
         or btrim(p_event_key) = ''
@@ -1330,15 +1330,16 @@ begin
     insert into pgconductor._private_executions (
         id, task_key, queue, payload, trace_context
     ) values (
-        pgconductor._private_portable_uuidv7(),
+        p_id,
         'pgconductor.event-dispatch',
         'pgconductor.internal',
         jsonb_build_object('eventKey', p_event_key, 'payload', v_payload),
         p_trace_context
     )
-    returning id into v_event_id;
+    -- a retry after a lost response finds the event it already stored
+    on conflict (id, queue) do nothing;
 
-    return v_event_id;
+    return p_id;
 end;
 $function$;
 `,
