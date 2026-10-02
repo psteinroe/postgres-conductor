@@ -1,3 +1,4 @@
+import postgres from "postgres";
 import { z } from "zod";
 import { test, expect, describe, beforeAll, afterAll, afterEach, mock } from "bun:test";
 import { Conductor } from "../../src/conductor";
@@ -5,6 +6,7 @@ import { Orchestrator } from "../../src/orchestrator";
 import { defineTask } from "../../src/task-definition";
 import { TestDatabasePool, type TestDatabase } from "../fixtures/test-database";
 import { TaskSchemas } from "../../src/schemas";
+import { waitForCondition } from "../test-utils";
 
 describe("Cancellation Support", () => {
 	let pool: TestDatabasePool;
@@ -893,5 +895,207 @@ describe("Cancellation Support", () => {
 		expect(failedExec[0]!.last_error).toBe("Cancelled from task context");
 
 		await orchestrator.stop();
+	}, 15000);
+
+	async function installSchema(db: TestDatabase) {
+		const conductor = Conductor.create({
+			sql: db.sql,
+			tasks: TaskSchemas.fromSchema([defineTask({ name: "workflow-task", payload: z.object({}) })]),
+			context: {},
+		});
+		await conductor.ensureInstalled();
+	}
+
+	async function insertExecution(
+		db: TestDatabase,
+		{ waitingOn, lockedBy }: { waitingOn?: string; lockedBy?: string } = {},
+	) {
+		const [execution] = await db.sql<[{ id: string }]>`
+			insert into pgconductor._private_executions
+				(task_key, payload, run_at, waiting_on_execution_id, waiting_step_key, locked_by, locked_at)
+			values (
+				'workflow-task', '{}'::jsonb,
+				${waitingOn ? "infinity" : "now"}::text::timestamptz,
+				${waitingOn || null}::uuid, ${waitingOn ? "child" : null},
+				${lockedBy || null}::uuid, ${lockedBy ? "now" : null}::text::timestamptz
+			)
+			returning id
+		`;
+		if (waitingOn) {
+			await db.sql`
+				update pgconductor._private_executions
+				set parent_execution_id = ${execution.id}::uuid
+				where id = ${waitingOn}::uuid
+			`;
+		}
+		return execution.id;
+	}
+
+	async function executionState(db: TestDatabase, id: string) {
+		const [execution] = await db.sql<
+			[
+				{
+					failed: boolean;
+					cancelled: boolean;
+					last_error: string | null;
+					waiting_on_execution_id: string | null;
+				},
+			]
+		>`
+			select failed_at is not null as failed, cancelled, last_error, waiting_on_execution_id
+			from pgconductor._private_executions
+			where id = ${id}::uuid
+		`;
+		return execution;
+	}
+
+	test("cancelling a pending child fails the workflow waiting on it", async () => {
+		const db = await pool.child();
+		databases.push(db);
+		await installSchema(db);
+
+		const child = await insertExecution(db);
+		const parent = await insertExecution(db, { waitingOn: child });
+		const root = await insertExecution(db, { waitingOn: parent });
+
+		expect(await db.client.cancelExecution(child)).toBe(true);
+
+		expect(await executionState(db, child)).toEqual({
+			failed: true,
+			cancelled: false,
+			last_error: "Cancelled by user",
+			waiting_on_execution_id: null,
+		});
+		for (const id of [parent, root]) {
+			expect(await executionState(db, id)).toEqual({
+				failed: true,
+				cancelled: false,
+				last_error: "Child execution failed: Cancelled by user",
+				waiting_on_execution_id: null,
+			});
+		}
+	}, 15000);
+
+	test("cancelling a waiting workflow cancels every execution it waits on", async () => {
+		const db = await pool.child();
+		databases.push(db);
+		await installSchema(db);
+
+		const [orchestrator] = await db.sql<[{ id: string }]>`
+			insert into pgconductor._private_orchestrators default values returning id
+		`;
+		const child = await insertExecution(db, { lockedBy: orchestrator.id });
+		const parent = await insertExecution(db, { waitingOn: child });
+		const root = await insertExecution(db, { waitingOn: parent });
+
+		expect(await db.client.cancelExecution(root)).toBe(true);
+
+		expect(await executionState(db, child)).toEqual({
+			failed: false,
+			cancelled: true,
+			last_error: "Cancelled by user",
+			waiting_on_execution_id: null,
+		});
+		for (const id of [root, parent]) {
+			expect(await executionState(db, id)).toEqual({
+				failed: true,
+				cancelled: false,
+				last_error: "Cancelled by user",
+				waiting_on_execution_id: null,
+			});
+		}
+		const signals = await db.sql<{ orchestrator_id: string; execution_id: string }[]>`
+			select orchestrator_id, execution_id
+			from pgconductor._private_orchestrator_signals
+			where type = 'cancel_execution'
+		`;
+		expect(signals.map((s) => [s.orchestrator_id, s.execution_id])).toEqual([
+			[orchestrator.id, child],
+		]);
+	}, 15000);
+
+	test("cancellation locks a child before its waiting parent", async () => {
+		const db = await pool.child();
+		databases.push(db);
+		await installSchema(db);
+
+		const [orchestrator] = await db.sql<[{ id: string }]>`
+			insert into pgconductor._private_orchestrators default values returning id
+		`;
+		const child = await insertExecution(db, { lockedBy: orchestrator.id });
+		const parent = await insertExecution(db, { waitingOn: child });
+
+		const worker = postgres(db.url, { max: 1 });
+		const canceller = postgres(db.url, { max: 1 });
+		try {
+			// Returning a child result locks the child, then the parent it wakes.
+			await worker`begin`;
+			await worker`select 1 from pgconductor._private_executions where id = ${child}::uuid for update`;
+			const cancellation = canceller<[{ cancelled: boolean }]>`
+				select pgconductor.cancel_execution(${parent}::uuid) as cancelled
+			`.execute();
+			await waitForCondition(async () => {
+				const [blocked] = await db.sql<[{ count: number }]>`
+					select count(*)::int as count from pg_stat_activity
+					where datname = current_database() and wait_event_type = 'Lock'
+				`;
+				return blocked.count === 1;
+			});
+			await worker`select 1 from pgconductor._private_executions where id = ${parent}::uuid for update`;
+			await worker`commit`;
+			const [{ cancelled }] = await cancellation;
+			expect(cancelled).toBe(true);
+		} finally {
+			await Promise.all([worker.end(), canceller.end()]);
+		}
+
+		expect((await executionState(db, child)).cancelled).toBe(true);
+		expect((await executionState(db, parent)).failed).toBe(true);
+	}, 15000);
+
+	test("cancelling a pending execution honors remove_on_fail_days = 0", async () => {
+		const db = await pool.child();
+		databases.push(db);
+		await installSchema(db);
+		await db.sql`
+			insert into pgconductor._private_tasks (key, queue, remove_on_fail_days)
+			values ('workflow-task', 'default', 0)
+		`;
+
+		const child = await insertExecution(db);
+		await insertExecution(db, { waitingOn: child });
+
+		expect(await db.client.cancelExecution(child)).toBe(true);
+
+		const [{ count }] = await db.sql<[{ count: number }]>`
+			select count(*)::int as count from pgconductor._private_executions
+		`;
+		expect(count).toBe(0);
+	}, 15000);
+
+	test("superseding a running execution honors remove_on_fail_days = 0", async () => {
+		const db = await pool.child();
+		databases.push(db);
+		await installSchema(db);
+		await db.sql`
+			insert into pgconductor._private_tasks (key, queue, remove_on_fail_days)
+			values ('workflow-task', 'default', 0)
+		`;
+		const [orchestrator] = await db.sql<[{ id: string }]>`
+			insert into pgconductor._private_orchestrators default values returning id
+		`;
+		const spec = { task_key: "workflow-task", queue: "default", payload: {}, dedupe_key: "key" };
+
+		const first = await db.client.invoke(spec);
+		await db.sql`update pgconductor._private_executions set locked_by = ${orchestrator.id}::uuid, locked_at = now()`;
+		const [second] = await db.client.invokeBatch([spec]);
+		await db.sql`update pgconductor._private_executions set locked_by = ${orchestrator.id}::uuid, locked_at = now()`;
+		const third = await db.client.invoke(spec);
+
+		expect(new Set([first, second, third]).size).toBe(3);
+		const remaining = await db.sql<{ is_third: boolean }[]>`
+			select id = ${third}::uuid as is_third from pgconductor._private_executions
+		`;
+		expect(remaining.map((r) => r.is_third)).toEqual([true]);
 	}, 15000);
 });

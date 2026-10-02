@@ -509,15 +509,21 @@ begin
 
     -- clear locked dedupe keys before batch insert
     with superseded as (
-        select e.id, e.queue, e.task_key
+        select e.id, e.queue, t.remove_on_fail_days = 0 as should_remove
         from pgconductor._private_executions as e
         cross join unnest(specs) as spec
+        left join pgconductor._private_tasks t on t.key = e.task_key and t.queue = e.queue
         where e.dedupe_key = spec.dedupe_key
             and e.task_key = spec.task_key
             and e.queue = coalesce(spec.queue, 'default')
             and e.locked_at is not null
             and spec.dedupe_key is not null
         for update of e
+    ),
+    removed as (
+        delete from pgconductor._private_executions e
+        using superseded s
+        where e.id = s.id and e.queue = s.queue and s.should_remove
     )
     update pgconductor._private_executions e
     set
@@ -527,7 +533,7 @@ begin
         failed_at = v_now,
         last_error = 'superseded by reinvoke'
     from superseded s
-    where e.id = s.id;
+    where e.id = s.id and e.queue = s.queue and s.should_remove is not true;
 
     -- batch insert all executions
     -- note: duplicate dedupe_keys within same batch will cause error
@@ -610,13 +616,19 @@ begin
   -- clear locked dedupe key before insert (supersede pattern)
   if p_dedupe_key is not null then
       with superseded as (
-          select e.id, e.queue, e.task_key
+          select e.id, e.queue, t.remove_on_fail_days = 0 as should_remove
           from pgconductor._private_executions e
+          left join pgconductor._private_tasks t on t.key = e.task_key and t.queue = e.queue
           where e.dedupe_key = p_dedupe_key
               and e.task_key = p_task_key
               and e.queue = p_queue
               and e.locked_at is not null
           for update of e
+      ),
+      removed as (
+          delete from pgconductor._private_executions e
+          using superseded s
+          where e.id = s.id and e.queue = s.queue and s.should_remove
       )
       update pgconductor._private_executions e
       set
@@ -626,7 +638,7 @@ begin
           failed_at = v_now,
           last_error = 'superseded by reinvoke'
         from superseded s
-      where e.id = s.id;
+      where e.id = s.id and e.queue = s.queue and s.should_remove is not true;
   end if;
 
   -- singleton throttle/debounce logic
@@ -764,104 +776,55 @@ as $function$
 declare
   v_orchestrator_id uuid;
   v_queue text;
-  v_child_id uuid;
-  v_child_orchestrator_id uuid;
-  v_child_queue text;
-  v_completed boolean;
-  v_failed boolean;
+  v_descendant_ids uuid[];
+  v_ancestor_ids uuid[];
   v_rows_affected integer;
 begin
-  select
-    locked_by,
-    queue,
-    waiting_on_execution_id,
-    completed_at is not null,
-    failed_at is not null
-  into v_orchestrator_id, v_queue, v_child_id, v_completed, v_failed
+  -- a waiting execution is cancelled with the executions it waits on, and
+  -- fails the executions waiting on it
+  with recursive descendants as (
+    select e.waiting_on_execution_id as id, 1 as depth
+    from pgconductor._private_executions e
+    where e.id = p_execution_id and e.waiting_on_execution_id is not null
+    union all
+    select e.waiting_on_execution_id, d.depth + 1
+    from descendants d
+    join pgconductor._private_executions e on e.id = d.id
+    where e.waiting_on_execution_id is not null
+  )
+  select array_agg(id order by depth desc) into v_descendant_ids from descendants;
+
+  with recursive ancestors as (
+    select e.id, 1 as depth
+    from pgconductor._private_executions e
+    where e.waiting_on_execution_id = p_execution_id and e.locked_by is null
+    union all
+    select e.id, a.depth + 1
+    from ancestors a
+    join pgconductor._private_executions e on e.waiting_on_execution_id = a.id
+    where e.locked_by is null
+  )
+  select array_agg(id order by depth) into v_ancestor_ids from ancestors;
+
+  -- lock children before parents, like returning execution results does
+  perform 1
+  from unnest(v_descendant_ids || p_execution_id || v_ancestor_ids) with ordinality as chain(id, position)
+  join pgconductor._private_executions e on e.id = chain.id
+  order by chain.position
+  for update of e;
+
+  select locked_by, queue
+  into v_orchestrator_id, v_queue
   from pgconductor._private_executions
   where id = p_execution_id
-  for update;
+    and completed_at is null
+    and failed_at is null;
 
-  if not found or v_completed or v_failed then
+  if not found then
     return false;
   end if;
 
-  if v_orchestrator_id is null then
-    -- pending: fail immediately. If this is a waiting parent, resolve its
-    -- child relationship in the same transaction so the child cannot become
-    -- orphaned or leave the workflow stranded.
-    if v_child_id is not null then
-      select locked_by, queue
-      into v_child_orchestrator_id, v_child_queue
-      from pgconductor._private_executions
-      where id = v_child_id
-      for update;
-
-      if found and v_child_orchestrator_id is null then
-        update pgconductor._private_executions
-        set
-          failed_at = pgconductor._private_current_time(),
-          last_error = 'Cancelled: parent execution was cancelled',
-          locked_by = null,
-          locked_at = null,
-          waiting_on_execution_id = null,
-          waiting_step_key = null
-        where id = v_child_id
-          and completed_at is null
-          and failed_at is null;
-      elsif found then
-        update pgconductor._private_executions
-        set cancelled = true, last_error = p_reason
-        where id = v_child_id
-          and completed_at is null
-          and failed_at is null
-          and cancelled = false;
-
-        get diagnostics v_rows_affected = row_count;
-        if v_rows_affected > 0 then
-          insert into pgconductor._private_orchestrator_signals
-            (orchestrator_id, type, execution_id, payload)
-          values (
-            v_child_orchestrator_id,
-            'cancel_execution',
-            v_child_id,
-            jsonb_build_object('queue', v_child_queue, 'reason', p_reason)
-          )
-          on conflict (orchestrator_id, execution_id)
-            where type = 'cancel_execution' and execution_id is not null
-          do nothing;
-        end if;
-      end if;
-
-      delete from pgconductor._private_custom_event_subscriptions
-      where kind = 'execution_wait'
-        and execution_id = v_child_id;
-    end if;
-
-    update pgconductor._private_executions
-    set
-      failed_at = pgconductor._private_current_time(),
-      last_error = p_reason,
-      locked_by = null,
-      locked_at = null,
-      waiting_on_execution_id = null,
-      waiting_step_key = null
-    where id = p_execution_id
-      and completed_at is null
-      and failed_at is null
-      and locked_by is null
-      and locked_at is null;
-
-    get diagnostics v_rows_affected = row_count;
-
-    if v_rows_affected > 0 then
-      delete from pgconductor._private_custom_event_subscriptions
-      where kind = 'execution_wait'
-        and execution_id = p_execution_id;
-    end if;
-
-    return v_rows_affected > 0;
-  else
+  if v_orchestrator_id is not null then
     -- running: signal orchestrator + set cancelled flag
     update pgconductor._private_executions
     set
@@ -869,8 +832,6 @@ begin
       last_error = p_reason
     where id = p_execution_id
       and queue = v_queue
-      and locked_by = v_orchestrator_id
-      and completed_at is null
       and cancelled = false;
 
     get diagnostics v_rows_affected = row_count;
@@ -891,12 +852,63 @@ begin
       on conflict (orchestrator_id, execution_id)
         where type = 'cancel_execution' and execution_id is not null
       do nothing;
-
-      return true;
-    else
-      return false;
     end if;
+
+    return v_rows_affected > 0;
   end if;
+
+  with running as (
+    update pgconductor._private_executions e
+    set cancelled = true, last_error = p_reason
+    where e.id = any(v_descendant_ids)
+      and e.locked_by is not null
+      and e.completed_at is null
+      and e.failed_at is null
+      and e.cancelled = false
+    returning e.id, e.queue, e.locked_by
+  )
+  insert into pgconductor._private_orchestrator_signals
+    (orchestrator_id, type, execution_id, payload)
+  select r.locked_by, 'cancel_execution', r.id, jsonb_build_object('queue', r.queue, 'reason', p_reason)
+  from running r
+  on conflict (orchestrator_id, execution_id)
+    where type = 'cancel_execution' and execution_id is not null
+  do nothing;
+
+  -- pending: fail immediately
+  with pending as (
+    select e.id, e.queue,
+      case when e.id = any(v_ancestor_ids) then 'Child execution failed: ' || p_reason
+        else p_reason end as error,
+      t.remove_on_fail_days = 0 as should_remove
+    from pgconductor._private_executions e
+    left join pgconductor._private_tasks t on t.key = e.task_key and t.queue = e.queue
+    where e.id = any(v_descendant_ids || p_execution_id || v_ancestor_ids)
+      and e.locked_by is null
+      and e.completed_at is null
+      and e.failed_at is null
+  ),
+  removed as (
+    delete from pgconductor._private_executions e
+    using pending p
+    where e.id = p.id and e.queue = p.queue and p.should_remove
+  ),
+  failed as (
+    update pgconductor._private_executions e
+    set
+      failed_at = pgconductor._private_current_time(),
+      last_error = p.error,
+      waiting_on_execution_id = null,
+      waiting_step_key = null
+    from pending p
+    where e.id = p.id and e.queue = p.queue and p.should_remove is not true
+  )
+  delete from pgconductor._private_custom_event_subscriptions s
+  using pending p
+  where s.kind = 'execution_wait'
+    and s.execution_id = p.id;
+
+  return true;
 end;
 $function$;
 
