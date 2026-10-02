@@ -121,6 +121,7 @@ export class QueryBuilder {
 		migrationNumber,
 	}: OrchestratorHeartbeatArgs): PendingQuery<
 		{
+			registered: boolean;
 			signal_type: string | null;
 			signal_execution_id: string | null;
 			signal_payload: Record<string, any> | null;
@@ -128,6 +129,7 @@ export class QueryBuilder {
 	> {
 		return this.sql<
 			{
+				registered: boolean;
 				signal_type: string | null;
 				signal_execution_id: string | null;
 				signal_payload: Record<string, any> | null;
@@ -156,7 +158,8 @@ export class QueryBuilder {
 					last_heartbeat_at = pgconductor._private_current_time(),
 					version = excluded.version,
 					migration_number = excluded.migration_number
-				returning id
+				-- xmax = 0 when the row was inserted rather than updated
+				returning (xmax = 0) as registered
 			),
 			-- Signal shutdown if newer migration exists
 			shutdown_signal_inserted as (
@@ -176,11 +179,13 @@ export class QueryBuilder {
 				returning type, execution_id, payload, created_at
 			)
 			select
-				type as signal_type,
-				execution_id as signal_execution_id,
-				payload as signal_payload
-			from deleted_signals
-			order by created_at asc
+				o.registered,
+				s.type as signal_type,
+				s.execution_id as signal_execution_id,
+				s.payload as signal_payload
+			from upserted_orchestrator o
+			left join deleted_signals s on true
+			order by s.created_at asc
 		`;
 	}
 

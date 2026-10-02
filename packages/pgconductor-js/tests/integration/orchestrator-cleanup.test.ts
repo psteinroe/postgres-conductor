@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, test, expect } from "bun:test";
+import { afterAll, afterEach, beforeAll, test, expect, jest } from "bun:test";
 import { TestDatabasePool } from "../fixtures/test-database";
 import type { TestDatabase } from "../fixtures/test-database";
 import { Conductor } from "../../src/conductor";
@@ -17,6 +17,7 @@ beforeAll(async () => {
 }, 60000);
 
 afterEach(async () => {
+	jest.useRealTimers();
 	await Promise.all(databases.map((db) => db.destroy()));
 	databases.length = 0;
 });
@@ -272,4 +273,112 @@ test("multiple orchestrators cleanup independently", async () => {
 	// Cleanup connections
 	await sql1.end();
 	await sql2.end();
+});
+
+test("a live orchestrator recovers executions locked by a crashed one", async () => {
+	const db = await pool.child();
+	databases.push(db);
+
+	const taskDefinition = defineTask({ name: "orphaned-task" });
+	const conductor = Conductor.create({
+		sql: db.sql,
+		tasks: TaskSchemas.fromSchema([taskDefinition]),
+		context: {},
+	});
+	await conductor.ensureInstalled();
+
+	let runs = 0;
+	const task = conductor.createTask(taskDefinition, { invocable: true }, async () => {
+		runs++;
+	});
+
+	await db.client.setFakeTime({ date: new Date("2024-01-01T12:00:00Z") });
+	await db.client.registerWorker({
+		queueName: "default",
+		taskSpecs: [{ key: "orphaned-task", queue: "default", maxAttempts: 3 }],
+		cronSchedules: [],
+		eventSubscriptions: [],
+	});
+	const crashedId = crypto.randomUUID();
+	await db.client.orchestratorHeartbeat({
+		orchestratorId: crashedId,
+		version: "test",
+		migrationNumber: 1,
+	});
+	await conductor.invoke(taskDefinition, {});
+	const claimed = await db.client.getExecutions({
+		orchestratorId: crashedId,
+		queueName: "default",
+		batchSize: 1,
+		filterTaskKeys: [],
+	});
+	expect(claimed.length).toBe(1);
+
+	await db.client.setFakeTime({ date: new Date("2024-01-01T12:10:00Z") });
+
+	jest.useFakeTimers();
+	const orch = Orchestrator.create({ conductor, tasks: [task] });
+	await orch.start();
+
+	// recovery runs every 8th heartbeat, one heartbeat per 30s
+	for (let seconds = 0; runs === 0 && seconds < 600; seconds++) {
+		jest.advanceTimersByTime(1000);
+		await db.sql`select 1`;
+	}
+	expect(runs).toBe(1);
+
+	const crashed = await db.sql`
+		select id from pgconductor._private_orchestrators where id = ${crashedId}::uuid
+	`;
+	expect(crashed.length).toBe(0);
+
+	await orch.stop();
+	await db.client.clearFakeTime();
+});
+
+test("an orchestrator recovered as stale aborts its running handlers and stops", async () => {
+	const db = await pool.child();
+	databases.push(db);
+
+	const taskDefinition = defineTask({ name: "long-task" });
+	const conductor = Conductor.create({
+		sql: db.sql,
+		tasks: TaskSchemas.fromSchema([taskDefinition]),
+		context: {},
+	});
+	await conductor.ensureInstalled();
+
+	const handlerStarted = new Deferred<void>();
+	const handlerAborted = new Deferred<void>();
+	const task = conductor.createTask(taskDefinition, { invocable: true }, async (_event, ctx) => {
+		handlerStarted.resolve();
+		if (!ctx.signal.aborted) {
+			await new Promise((resolve) => ctx.signal.addEventListener("abort", resolve));
+		}
+		handlerAborted.resolve();
+	});
+
+	jest.useFakeTimers();
+	const orch = Orchestrator.create({ conductor, tasks: [task] });
+	await orch.start();
+	await conductor.invoke(taskDefinition, {});
+
+	while (!handlerStarted.isSettled) {
+		jest.advanceTimersByTime(1000);
+		await db.sql`select 1`;
+	}
+
+	await db.sql`
+		update pgconductor._private_orchestrators
+		set last_heartbeat_at = now() - interval '1 hour'
+		where id = ${orch.info.id}::uuid
+	`;
+	await db.client.recoverStaleOrchestrators({ maxAge: "5 minutes" });
+
+	for (let seconds = 0; !orch.isStopped && seconds < 60; seconds++) {
+		jest.advanceTimersByTime(1000);
+		await db.sql`select 1`;
+	}
+	expect(handlerAborted.isSettled).toBe(true);
+	expect(orch.isStopped).toBe(true);
 });

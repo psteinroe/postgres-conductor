@@ -12,6 +12,7 @@ import * as assert from "./lib/assert";
 import { SIGNALS, type Signal } from "./lib/signals";
 import { noop } from "./lib/noop";
 import { coerceError } from "./lib/coerce-error";
+import { waitFor } from "./lib/wait-for";
 
 export type OrchestratorOptions<TTasks extends readonly AnyTask[] = readonly AnyTask[]> = {
 	conductor: Conductor<any, any, any, any, any>;
@@ -45,7 +46,7 @@ export class Orchestrator {
 	private readonly schemaManager: SchemaManager;
 	private readonly logger: Logger;
 
-	private heartbeatTimer: ReturnType<typeof setTimeout> | null = null;
+	private heartbeats: Promise<void> | null = null;
 	private _stopDeferred: Deferred<void> | null = null;
 	private _startDeferred: Deferred<void> | null = null;
 	private _abortController: AbortController | null = null;
@@ -224,8 +225,7 @@ export class Orchestrator {
 					throw new Error("Received shutdown signal during startup");
 				}
 
-				// Start heartbeat loop
-				this.startHeartbeatLoop();
+				this.heartbeats = this.runHeartbeats(this.abortController);
 
 				const workerLifecycles: Promise<void>[] = [];
 				for (const worker of this.workers) {
@@ -312,30 +312,24 @@ export class Orchestrator {
 	}
 
 	/**
-	 * Start the heartbeat loop that:
-	 * - Updates last_heartbeat_at every heartbeatIntervalMs
+	 * Run the heartbeat loop until the orchestrator aborts:
+	 * - Updates last_heartbeat_at every heartbeat
 	 * - Checks for version mismatch shutdowns from database
+	 * - Stops when another orchestrator recovered us as stale
 	 * - Recovers stale orchestrators periodically (every 8th heartbeat)
 	 */
-	private startHeartbeatLoop(): void {
-		let heartbeatCount = 0;
+	private async runHeartbeats(abortController: AbortController): Promise<void> {
+		for (let heartbeatCount = 1; ; heartbeatCount++) {
+			await waitFor(HEARTBEAT_INTERVAL_MS, { signal: abortController.signal });
+			if (abortController.signal.aborted) return;
 
-		const beat = async () => {
 			try {
-				if (this.abortController.signal.aborted) {
-					// if we are aborting, do not run heartbeat
-					return;
-				}
-
-				heartbeatCount = (heartbeatCount % 4) + 1;
-
-				// Every 8th heartbeat, recover stale orchestrators
-				if (heartbeatCount === 8) {
+				if (heartbeatCount % 8 === 0) {
 					await this.db.recoverStaleOrchestrators(
 						{
 							maxAge: `${STALE_ORCHESTRATOR_MAX_AGE_MS} milliseconds`,
 						},
-						{ signal: this.abortController.signal },
+						{ signal: abortController.signal },
 					);
 				}
 
@@ -346,8 +340,15 @@ export class Orchestrator {
 						version: PACKAGE_VERSION,
 						migrationNumber: this.migrationStore.getLatestMigrationNumber(),
 					},
-					{ signal: this.abortController.signal },
+					{ signal: abortController.signal },
 				);
+
+				// Our row was gone, so another orchestrator recovered our executions
+				if (signals.some((s) => s.registered)) {
+					this.logger.warn("Orchestrator was recovered as stale, shutting down");
+					abortController.abort();
+					return;
+				}
 
 				// Process signals in order
 				for (const signal of signals) {
@@ -355,11 +356,11 @@ export class Orchestrator {
 
 					switch (signal.signal_type) {
 						case "shutdown":
-							if (!this.signal.aborted) {
+							if (!abortController.signal.aborted) {
 								this.logger.info(
 									`Received shutdown signal: ${signal.signal_payload?.reason || "unknown"}`,
 								);
-								this.abortController.abort();
+								abortController.abort();
 							}
 							break;
 
@@ -381,16 +382,8 @@ export class Orchestrator {
 				}
 			} catch (err) {
 				this.logger.error("Heartbeat error:", err);
-			} finally {
-				// Schedule next heartbeat if not shutting down
-				if (!this.abortController.signal.aborted) {
-					this.heartbeatTimer = setTimeout(beat, HEARTBEAT_INTERVAL_MS);
-				}
 			}
-		};
-
-		// Start first heartbeat
-		this.heartbeatTimer = setTimeout(beat, HEARTBEAT_INTERVAL_MS);
+		}
 	}
 
 	/**
@@ -482,11 +475,10 @@ export class Orchestrator {
 	 * - Close database connection
 	 */
 	private async cleanup(): Promise<void> {
-		// Stop heartbeat
-		if (this.heartbeatTimer) {
-			clearTimeout(this.heartbeatTimer);
-			this.heartbeatTimer = null;
-		}
+		// Stop heartbeat and wait for one in flight
+		this.abortController.abort();
+		await this.heartbeats;
+		this.heartbeats = null;
 
 		// Remove ourselves from orchestrators table and release locked executions
 		const cleanupSignal = new AbortController().signal;
