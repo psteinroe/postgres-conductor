@@ -138,7 +138,11 @@ const result = await ctx.invoke<TResult>(
   stepName: string,
   taskRef: { name: string, queue?: string },
   payload: TPayload,
-  options?: { timeout?: number, group?: string }
+  options?: {
+    timeout?: number,
+    group?: string,
+    metadata?: Metadata | ((metadata: Metadata | undefined) => Metadata),
+  }
 ): Promise<TResult>
 ```
 
@@ -166,6 +170,7 @@ const parent = conductor.createTask(
 - Parent hangs up and waits
 - Returns child's result
 - Throws if child fails or times out
+- The child inherits `ctx.metadata` unless `metadata` overrides it for that child
 
 ## ctx.checkpoint()
 
@@ -286,6 +291,17 @@ const task = conductor.createTask(
   }
 );
 ```
+
+## ctx.metadata
+
+Readonly metadata of the current execution, typed by the Conductor's `metadata` schema:
+
+```typescript
+ctx.metadata: Readonly<Metadata> | undefined
+```
+
+Children, emitted events and dynamic schedules created from this execution inherit it. See
+[Execution Metadata](../crafting-tasks/execution-metadata.md).
 
 ## ctx.executionId
 

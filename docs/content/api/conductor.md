@@ -16,6 +16,7 @@ const conductor = Conductor.create({
   context,              // Custom context object
   logger?,              // Optional custom logger
   events?,              // Optional EventSchemas
+  metadata?,            // Optional Standard Schema for execution metadata
   telemetry?,           // Set to false to disable OpenTelemetry tracing
 });
 ```
@@ -28,6 +29,7 @@ const conductor = Conductor.create({
 - `context`: Object passed to task handlers as `ctx.{property}` (see [Custom Context](../crafting-tasks/custom-context.md))
 - `logger`: (optional) Custom logger implementation
 - `events`: (optional) `EventSchemas.fromSchema([...])` for typed custom events
+- `metadata`: (optional) Standard Schema that types and validates execution metadata (see [Execution Metadata](../crafting-tasks/execution-metadata.md))
 - `telemetry`: (optional) `false` disables OpenTelemetry spans and trace context propagation. Enabled by default, using the globally registered provider
 
 **Connection options:**
@@ -133,6 +135,7 @@ await conductor.invoke(
     run_at?: Date,
     throttle?: { seconds: number },
     debounce?: { seconds: number },
+    metadata?: Metadata,  // Execution metadata, at most 8 KB
   }
 );
 ```
@@ -184,11 +187,13 @@ Emit a typed custom event:
 ```typescript
 await conductor.emit(
   "event-name",
-  { /* event payload */ }
+  { /* event payload */ },
+  options?: { metadata?: Metadata }
 );
 ```
 
-Returns the event ID. Events trigger tasks with matching event triggers.
+Returns the event ID. Events trigger tasks with matching event triggers. Triggered executions
+inherit the event's `metadata`.
 
 See [Task Triggers](../crafting-tasks/triggers.md) for details on event-triggered tasks.
 

@@ -1,3 +1,4 @@
+import type { StandardSchemaV1 } from "@standard-schema/spec";
 import type {
 	NonEmptyArray,
 	Trigger,
@@ -168,6 +169,7 @@ export class Task<
 		triggers: NonEmptyArray<Trigger> | Trigger,
 		public readonly execute: ExecuteFunction<EventType, Returns, Context>,
 		public readonly eventDefinitions: readonly EventDefinition<string, any, any>[] = [],
+		public readonly metadataSchema?: StandardSchemaV1<unknown, object>,
 	) {
 		const { name, queue, ...config } = definition;
 		this.name = name;
@@ -205,12 +207,14 @@ export class Task<
 		triggers: NonEmptyArray<Trigger> | Trigger,
 		execute: ExecuteFunction<EventType, Returns, Context>,
 		eventDefinitions: readonly EventDefinition<string, any, any>[] = [],
+		metadataSchema?: StandardSchemaV1<unknown, object>,
 	): Task<Key, Queue, Payload, Returns, Context, EventType> {
 		return new Task<Key, Queue, Payload, Returns, Context, EventType>(
 			definition,
 			triggers,
 			execute,
 			eventDefinitions,
+			metadataSchema,
 		);
 	}
 }

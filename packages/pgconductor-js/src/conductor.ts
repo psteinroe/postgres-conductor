@@ -1,5 +1,11 @@
 import type { Sql } from "postgres";
-import { DatabaseClient, type ExecutionInfo, type ExecutionSpec } from "./database-client";
+import type { StandardSchemaV1 } from "@standard-schema/spec";
+import {
+	DatabaseClient,
+	type ExecutionInfo,
+	type ExecutionSpec,
+	type Payload,
+} from "./database-client";
 import {
 	Task,
 	type TaskConfiguration,
@@ -29,6 +35,7 @@ import { DefaultLogger, type Logger } from "./lib/logger";
 import { waitFor } from "./lib/wait-for";
 import { SchemaManager } from "./schema-manager";
 import { Telemetry } from "./telemetry";
+import { validateSchema } from "./lib/validate-schema";
 import {
 	validateEventPayload,
 	type EventDefinition,
@@ -50,6 +57,15 @@ export type WaitForResultOptions = {
 	pollIntervalMs?: number;
 	signal?: AbortSignal;
 };
+
+type MetadataSchema = StandardSchemaV1<unknown, object>;
+
+type InferMetadata<T> = T extends StandardSchemaV1<any, infer O extends object> ? O : Payload;
+
+type InvokeOptions<Metadata extends object> = Omit<
+	ExecutionSpec,
+	"task_key" | "payload" | "queue" | "metadata"
+> & { metadata?: Metadata };
 
 type ConnectionOptions =
 	| { connectionString: string; sql?: never }
@@ -100,6 +116,9 @@ export type ConductorOptions<
 
 	context: ExtraContext;
 
+	/** Standard Schema for execution metadata, validated wherever metadata is set. */
+	metadata?: MetadataSchema;
+
 	logger?: Logger;
 	/** Disable OpenTelemetry instrumentation. The default is enabled and uses the global API provider. */
 	telemetry?: false;
@@ -116,6 +135,7 @@ export class Conductor<
 		InferTasksFromSchema<TTaskSchemas>,
 	Events extends readonly EventDefinition<string, any, any>[] =
 		InferEventsFromSchema<TEventSchemas>,
+	Metadata extends object = Payload,
 > {
 	/**
 	 * @internal
@@ -154,16 +174,25 @@ export class Conductor<
 		TTaskSchemas extends TaskSchemas<any> | undefined = undefined,
 		TEventSchemas extends EventSchemas<any> | undefined = undefined,
 		TExtraContext extends object = {},
+		TMetadataSchema extends MetadataSchema | undefined = undefined,
 	>(
 		options: ConnectionOptions & {
 			tasks?: TTaskSchemas;
 			events?: TEventSchemas;
 			context: TExtraContext;
+			metadata?: TMetadataSchema;
 			logger?: Logger;
 			telemetry?: false;
 		},
-	): Conductor<TTaskSchemas, TEventSchemas, TExtraContext> {
-		return new Conductor<TTaskSchemas, TEventSchemas, TExtraContext>(options);
+	): Conductor<
+		TTaskSchemas,
+		TEventSchemas,
+		TExtraContext,
+		InferTasksFromSchema<TTaskSchemas>,
+		InferEventsFromSchema<TEventSchemas>,
+		InferMetadata<TMetadataSchema>
+	> {
+		return new Conductor(options);
 	}
 
 	/**
@@ -208,14 +237,14 @@ export class Conductor<
 					) => Promise<Array<ResolvedReturns<Tasks, TDef>>>
 			: (
 					event: ResolvedTaskEvent<Tasks, Events, TDef, TTriggers>,
-					ctx: TaskContext<Tasks, Events> & ExtraContext,
+					ctx: TaskContext<Tasks, Events, Metadata> & ExtraContext,
 				) => Promise<ResolvedReturns<Tasks, TDef>>,
 	): Task<
 		TDef["name"],
 		ResolvedQueue<TDef>,
 		ResolvedPayload<Tasks, TDef>,
 		ResolvedReturns<Tasks, TDef>,
-		TaskContext<Tasks, Events> & ExtraContext,
+		TaskContext<Tasks, Events, Metadata> & ExtraContext,
 		TaskEventFromTriggers<TTriggers, ResolvedPayload<Tasks, TDef>, Events>
 	> {
 		return Task.create<
@@ -223,7 +252,7 @@ export class Conductor<
 			ResolvedQueue<TDef>,
 			ResolvedPayload<Tasks, TDef>,
 			ResolvedReturns<Tasks, TDef>,
-			TaskContext<Tasks, Events> & ExtraContext,
+			TaskContext<Tasks, Events, Metadata> & ExtraContext,
 			TaskEventFromTriggers<TTriggers, ResolvedPayload<Tasks, TDef>, Events>
 		>(
 			definition as TaskConfiguration<
@@ -235,9 +264,10 @@ export class Conductor<
 			fn as ExecuteFunction<
 				TaskEventFromTriggers<TTriggers, ResolvedPayload<Tasks, TDef>, Events>,
 				ResolvedReturns<Tasks, TDef>,
-				TaskContext<Tasks, Events> & ExtraContext
+				TaskContext<Tasks, Events, Metadata> & ExtraContext
 			>,
 			this.options.events?.definitions ?? [],
+			this.options.metadata,
 		);
 	}
 
@@ -272,7 +302,7 @@ export class Conductor<
 				TTask["queue"] extends string ? TTask["queue"] : "default"
 			>
 		>,
-		opts?: Omit<ExecutionSpec, "task_key" | "payload" | "queue">,
+		opts?: InvokeOptions<Metadata>,
 	): Promise<string>;
 	async invoke<const TTask extends { readonly name: string; readonly queue?: string }>(
 		task: TTask,
@@ -285,18 +315,21 @@ export class Conductor<
 						TTask["queue"] extends string ? TTask["queue"] : "default"
 					>
 				>;
-			} & Omit<ExecutionSpec, "task_key" | "payload" | "queue">
+			} & InvokeOptions<Metadata>
 		>,
 	): Promise<string[]>;
 	async invoke<const TTask extends { readonly name: string; readonly queue?: string }>(
 		task: TTask,
 		payloadOrItems: any,
-		opts?: Omit<ExecutionSpec, "task_key" | "payload" | "queue">,
+		opts?: InvokeOptions<Metadata>,
 	): Promise<string | null | string[]> {
 		const taskName = task.name;
 		const queue = task.queue || "default";
 
 		if (Array.isArray(payloadOrItems)) {
+			const metadata = await Promise.all(
+				payloadOrItems.map((item) => this.validateMetadata(item.metadata)),
+			);
 			return this.telemetry.send({
 				taskKey: taskName,
 				queue,
@@ -304,7 +337,7 @@ export class Conductor<
 				run: async () => {
 					const traceContext = this.telemetry.traceContext();
 					return this.db.invokeBatch(
-						payloadOrItems.map((item) => ({
+						payloadOrItems.map((item, i) => ({
 							task_key: taskName,
 							queue,
 							payload: item.payload,
@@ -316,12 +349,14 @@ export class Conductor<
 							priority: item.priority,
 							group: item.group,
 							trace_context: traceContext,
+							metadata: metadata[i],
 						})),
 					);
 				},
 			});
 		}
 
+		const metadata = await this.validateMetadata(opts?.metadata);
 		return this.telemetry.send({
 			taskKey: taskName,
 			queue,
@@ -332,6 +367,7 @@ export class Conductor<
 					payload: payloadOrItems,
 					...opts,
 					trace_context: this.telemetry.traceContext(),
+					metadata,
 				});
 				if (id) span?.setAttribute("messaging.message.id", id);
 				return id;
@@ -343,13 +379,19 @@ export class Conductor<
 	 * Emit a typed custom event.
 	 * @param event - Event name to emit
 	 * @param payload - Typed event payload
+	 * @param opts.metadata - Metadata inherited by the executions this event triggers
 	 * @returns Event ID
 	 */
 	async emit<
 		TName extends EventName<Events>,
 		TDef extends FindEventByIdentifier<Events, TName> = FindEventByIdentifier<Events, TName>,
-	>(event: TName, payload: InferEventPayload<TDef>): Promise<string> {
+	>(
+		event: TName,
+		payload: InferEventPayload<TDef>,
+		opts?: { metadata?: Metadata },
+	): Promise<string> {
 		payload = await validateEventPayload(this.options.events?.definitions || [], event, payload);
+		const metadata = await this.validateMetadata(opts?.metadata);
 
 		return this.telemetry.send({
 			taskKey: EVENT_DISPATCH_TASK,
@@ -359,6 +401,7 @@ export class Conductor<
 					eventKey: event,
 					payload: payload as any,
 					traceContext: this.telemetry.traceContext(),
+					metadata,
 				});
 				span?.setAttribute("messaging.message.id", id);
 				return id;
@@ -437,5 +480,10 @@ export class Conductor<
 			}
 			await waitFor(pollIntervalMs, { signal: stop });
 		}
+	}
+
+	private async validateMetadata(metadata: Metadata | undefined): Promise<Payload | null> {
+		if (metadata === undefined) return null;
+		return validateSchema(this.options.metadata, metadata, "metadata") as Promise<Payload>;
 	}
 }

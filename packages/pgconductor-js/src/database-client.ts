@@ -44,6 +44,7 @@ export interface ExecutionSpec {
 	parent_step_key?: string | null;
 	parent_timeout_ms?: number | null;
 	trace_context?: TraceContextCarrier | null;
+	metadata?: Payload | null;
 }
 
 export interface TaskSpec {
@@ -101,6 +102,7 @@ export interface Execution {
 	subscription_id?: string | null;
 	dead_letter?: (Omit<DeadLetterMetadata, "failedAt"> & { failedAt: string }) | null;
 	trace_context?: TraceContextCarrier | null;
+	metadata?: Payload | null;
 }
 
 // todo: move all of this to query-builder too or create new types.ts file
@@ -165,6 +167,7 @@ export type ExecutionInvokeChild = {
 	child_task_queue: string;
 	child_payload: Payload | null;
 	trace_context?: TraceContextCarrier | null;
+	metadata?: Payload | null;
 };
 
 export type EventFilterTerm = Record<string, JsonValue | undefined> & {
@@ -614,6 +617,13 @@ export class DatabaseClient {
 	async saveStep(args: SaveStepArgs, opts?: QueryMethodOptions): Promise<void> {
 		await this.query(() => this.builder.buildSaveStep(args), {
 			label: "saveStep",
+			...opts,
+		});
+	}
+
+	async checkMetadata(metadata: Payload, opts?: QueryMethodOptions): Promise<void> {
+		await this.query(() => this.builder.buildCheckMetadata(metadata), {
+			label: "checkMetadata",
 			...opts,
 		});
 	}

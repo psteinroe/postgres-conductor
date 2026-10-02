@@ -15,14 +15,14 @@ import { coerceError } from "./lib/coerce-error";
 import { waitFor } from "./lib/wait-for";
 
 export type OrchestratorOptions<TTasks extends readonly AnyTask[] = readonly AnyTask[]> = {
-	conductor: Conductor<any, any, any, any, any>;
+	conductor: Conductor<any, any, any, any, any, any>;
 	tasks?: ValidateTasksQueue<"default", TTasks>;
 	defaultWorker?: Partial<WorkerConfig>;
 	workers?: Worker[];
 };
 
 type InternalOrchestratorOptions = {
-	conductor: Conductor<any, any, any, any, any>;
+	conductor: Conductor<any, any, any, any, any, any>;
 	tasks?: readonly AnyTask[];
 	defaultWorker?: Partial<WorkerConfig>;
 	workers?: Worker[];

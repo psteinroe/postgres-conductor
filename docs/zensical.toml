@@ -60,6 +60,7 @@ nav = [
     { "Child Invocation" = "crafting-tasks/child-invocation.md" },
     { "Long-Running Tasks" = "crafting-tasks/long-running.md" },
     { "Custom Context" = "crafting-tasks/custom-context.md" },
+    { "Execution Metadata" = "crafting-tasks/execution-metadata.md" },
     { "Logging" = "crafting-tasks/logging.md" },
     { "Retention Policies" = "crafting-tasks/retention.md" },
     { "Testing" = "crafting-tasks/testing.md" },

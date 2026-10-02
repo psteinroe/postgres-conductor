@@ -563,6 +563,7 @@ export class Worker<
 										queue: exec.queue,
 									}),
 									eventDefinitions: task.eventDefinitions,
+									metadataSchema: task.metadataSchema,
 									window: task.window,
 									telemetry: this.telemetry,
 								},
@@ -588,6 +589,7 @@ export class Worker<
 							child_payload: output.payload,
 							group: output.group,
 							trace_context: output.trace_context,
+							metadata: output.metadata,
 						} as const;
 					case "cancelled":
 						return {
@@ -819,6 +821,7 @@ export class Worker<
 				dedupe_key: nextDedupeKey,
 				cron_expression: execution.cron_expression,
 				group: execution.group || null,
+				metadata: execution.metadata,
 			},
 			{ signal: this.signal },
 		);
