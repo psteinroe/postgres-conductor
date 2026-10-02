@@ -211,6 +211,7 @@ export class TaskContext<
 						executionId: this.opts.execution.id,
 						queue: this.opts.execution.queue,
 						orchestratorId: this.opts.execution.locked_by,
+						claimToken: this.opts.execution.claim_token,
 						key: name,
 						result: { result: result as JsonValue },
 						runAtMs: undefined,
@@ -359,6 +360,7 @@ export class TaskContext<
 					executionId: this.opts.execution.id,
 					queue: this.opts.execution.queue,
 					orchestratorId: this.opts.execution.locked_by,
+					claimToken: this.opts.execution.claim_token,
 				},
 				{ signal: this.signal },
 			);
@@ -521,6 +523,7 @@ export class TaskContext<
 				terms: compiled.terms,
 				timeoutMs: options.timeout === undefined ? null : parseDuration(options.timeout),
 				orchestratorId: this.opts.execution.locked_by,
+				claimToken: this.opts.execution.claim_token,
 				suspend,
 			},
 			{ signal: this.signal },

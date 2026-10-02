@@ -94,6 +94,7 @@ export interface Execution {
 	waiting_on_execution_id: string | null;
 	waiting_step_key: string | null;
 	locked_by: string;
+	claim_token: string;
 	cancelled: boolean;
 	last_error: string | null;
 	dedupe_key?: string | null;
@@ -126,6 +127,7 @@ export type ExecutionCompleted = {
 	execution_id: string;
 	queue: string;
 	task_key: string;
+	claim_token: string;
 	status: "completed";
 	result?: Payload;
 };
@@ -134,6 +136,7 @@ export type ExecutionFailed = {
 	execution_id: string;
 	queue: string;
 	task_key: string;
+	claim_token: string;
 	status: "failed";
 	error: string;
 };
@@ -142,6 +145,7 @@ export type ExecutionReleased = {
 	execution_id: string;
 	queue: string;
 	task_key: string;
+	claim_token: string;
 	status: "released";
 	reschedule_in_ms?: number | "infinity";
 	step_key?: string;
@@ -151,6 +155,7 @@ export type ExecutionPermamentlyFailed = {
 	execution_id: string;
 	queue: string;
 	task_key: string;
+	claim_token: string;
 	status: "permanently_failed";
 	error: string;
 };
@@ -160,6 +165,7 @@ export type ExecutionInvokeChild = {
 	execution_id: string;
 	queue: string;
 	task_key: string;
+	claim_token: string;
 	status: "invoke_child";
 	timeout_ms: number | "infinity";
 	step_key: string;
@@ -195,10 +201,16 @@ export interface EventSubscriptionSpec {
 	terms: EventFilterTerm[];
 }
 
-const RETRYABLE_SQLSTATE_CODES = new Set([
+// Postgres rolled the statement back, so it is safe to retry any statement
+const ROLLBACK_SQLSTATE_CODES = new Set([
 	"40001", // serialization_failure
 	"40P01", // deadlock_detected
 	"55P03", // lock_not_available
+]);
+
+// Connection failures are ambiguous: the statement may have committed before the connection failed
+const RETRYABLE_SQLSTATE_CODES = new Set([
+	...ROLLBACK_SQLSTATE_CODES,
 	"57P01", // admin_shutdown
 	"57P02", // crash_shutdown
 	"57P03", // cannot_connect_now
@@ -244,6 +256,7 @@ type QueryOptions = {
 	label?: string;
 	expectError?: boolean;
 	signal?: AbortSignal;
+	onlyRetryRollbacks?: boolean;
 };
 
 type QueryMethodOptions = Pick<QueryOptions, "signal">;
@@ -294,7 +307,7 @@ export class DatabaseClient {
 				return await callback(this.sql);
 			} catch (error) {
 				const err = error as ErrorWithOptionalCode;
-				if (!this.isRetryableError(err)) {
+				if (!this.isRetryableError(err, options?.onlyRetryRollbacks)) {
 					if (!options?.expectError) {
 						logger.error(`Non-retryable database error${label}: ${err.message}`);
 					}
@@ -327,10 +340,13 @@ export class DatabaseClient {
 		}
 	}
 
-	private isRetryableError(err: ErrorWithOptionalCode): boolean {
+	private isRetryableError(err: ErrorWithOptionalCode, onlyRollbacks = false): boolean {
 		const code = err.code;
 		if (!code) {
 			return false;
+		}
+		if (onlyRollbacks) {
+			return ROLLBACK_SQLSTATE_CODES.has(code);
 		}
 		return RETRYABLE_SQLSTATE_CODES.has(code) || RETRYABLE_SYSTEM_ERROR_CODES.has(code);
 	}
@@ -346,8 +362,11 @@ export class DatabaseClient {
 			signal_payload: Record<string, any> | null;
 		}[]
 	> {
+		// A retry would release claims made after the held executions were collected, so a failed
+		// heartbeat waits for the next one.
 		return this.query(() => this.builder.buildOrchestratorHeartbeat(args), {
 			label: "orchestratorHeartbeat",
+			onlyRetryRollbacks: true,
 			...opts,
 		});
 	}
@@ -507,8 +526,11 @@ export class DatabaseClient {
 	}
 
 	async getExecutions(args: GetExecutionsArgs, opts?: QueryMethodOptions): Promise<Execution[]> {
+		// A claim whose response was lost may have committed, so it is not retried. The next poll
+		// claims again, and the heartbeat releases the orphaned claim.
 		return this.query(() => this.builder.buildGetExecutions(args), {
 			label: "getExecutions",
+			onlyRetryRollbacks: true,
 			...opts,
 		});
 	}
@@ -528,13 +550,11 @@ export class DatabaseClient {
 		grouped: GroupedExecutionResults,
 		opts?: QueryMethodOptions,
 	): Promise<void> {
-		const query = this.builder.buildReturnExecutions(grouped);
-
-		if (!query) {
-			return;
-		}
-
-		await this.query(() => query, { label: "returnExecutions", ...opts });
+		// A query runs once, so every attempt builds a new one.
+		await this.query(async () => this.builder.buildReturnExecutions(grouped), {
+			label: "returnExecutions",
+			...opts,
+		});
 	}
 
 	async removeExecutions(args: RemoveExecutionsArgs, opts?: QueryMethodOptions): Promise<boolean> {

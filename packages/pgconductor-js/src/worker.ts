@@ -148,6 +148,8 @@ export class Worker<
 	private _stopDeferred: Deferred<void> | null = null;
 	private _abortController: AbortController | null = null;
 	private _runningTasks = new Map<string, TypedAbortController<TaskAbortReasons>>();
+	// Claimed and not yet settled, including results buffered for flush
+	private readonly held = new Set<string>();
 
 	constructor(
 		public readonly queueName: string,
@@ -178,6 +180,10 @@ export class Worker<
 			sampleDatabaseTime: (signal) => this.db.getDatabaseTime({ signal }),
 			logger: this.logger,
 		});
+	}
+
+	get heldExecutionIds(): string[] {
+		return [...this.held];
 	}
 
 	/**
@@ -421,6 +427,7 @@ export class Worker<
 					},
 					{ signal: this.signal },
 				);
+				for (const exec of executions) this.held.add(exec.id);
 
 				if (executions.length === 0) {
 					if (runOnce) {
@@ -460,6 +467,7 @@ export class Worker<
 					.filter((e) => e.cancelled)
 					.map((exec) => ({
 						execution_id: exec.id,
+						claim_token: exec.claim_token,
 						queue: exec.queue,
 						task_key: taskKey,
 						status: "permanently_failed",
@@ -476,6 +484,7 @@ export class Worker<
 						...cancelled,
 						...activeExecs.map((exec) => ({
 							execution_id: exec.id,
+							claim_token: exec.claim_token,
 							queue: exec.queue,
 							task_key: taskKey,
 							status: "released" as const,
@@ -579,6 +588,7 @@ export class Worker<
 					case "child-invocation":
 						return {
 							execution_id: exec.id,
+							claim_token: exec.claim_token,
 							queue: exec.queue,
 							task_key: exec.task_key,
 							status: "invoke_child",
@@ -594,6 +604,7 @@ export class Worker<
 					case "cancelled":
 						return {
 							execution_id: exec.id,
+							claim_token: exec.claim_token,
 							queue: exec.queue,
 							task_key: exec.task_key,
 							status: "permanently_failed",
@@ -602,16 +613,19 @@ export class Worker<
 					case "timed-out":
 						return {
 							execution_id: exec.id,
+							claim_token: exec.claim_token,
 							queue: exec.queue,
 							task_key: exec.task_key,
 							status: "failed",
 							error: `Task timed out after ${task.timeoutMs}ms`,
 						} as const;
 					case "suspended":
+						this.held.delete(exec.id);
 						return [];
 					case "released":
 						return {
 							execution_id: exec.id,
+							claim_token: exec.claim_token,
 							queue: exec.queue,
 							reschedule_in_ms: output.reschedule_in_ms,
 							step_key: output.step_key,
@@ -625,6 +639,7 @@ export class Worker<
 
 			return {
 				execution_id: exec.id,
+				claim_token: exec.claim_token,
 				queue: exec.queue,
 				task_key: exec.task_key,
 				status: "completed",
@@ -635,6 +650,7 @@ export class Worker<
 			if (this.signal.aborted) {
 				return {
 					execution_id: exec.id,
+					claim_token: exec.claim_token,
 					queue: exec.queue,
 					task_key: exec.task_key,
 					status: "released",
@@ -642,6 +658,7 @@ export class Worker<
 			}
 			return {
 				execution_id: exec.id,
+				claim_token: exec.claim_token,
 				queue: exec.queue,
 				task_key: exec.task_key,
 				status: "failed",
@@ -734,6 +751,7 @@ export class Worker<
 					// Batch sleep - reschedule all
 					return executions.map((exec) => ({
 						execution_id: exec.id,
+						claim_token: exec.claim_token,
 						queue: exec.queue,
 						task_key: taskKey,
 						status: "released" as const,
@@ -745,6 +763,7 @@ export class Worker<
 				// Other abort reasons
 				return executions.map((exec) => ({
 					execution_id: exec.id,
+					claim_token: exec.claim_token,
 					queue: exec.queue,
 					task_key: taskKey,
 					status: "failed" as const,
@@ -759,6 +778,7 @@ export class Worker<
 			if (result === undefined) {
 				return executions.map((exec) => ({
 					execution_id: exec.id,
+					claim_token: exec.claim_token,
 					queue: exec.queue,
 					task_key: taskKey,
 					status: "completed" as const,
@@ -769,6 +789,7 @@ export class Worker<
 			// Individual results
 			return executions.map((exec, i) => ({
 				execution_id: exec.id,
+				claim_token: exec.claim_token,
 				queue: exec.queue,
 				task_key: taskKey,
 				status: "completed" as const,
@@ -778,6 +799,7 @@ export class Worker<
 			if (this.signal.aborted) {
 				return executions.map((exec) => ({
 					execution_id: exec.id,
+					claim_token: exec.claim_token,
 					queue: exec.queue,
 					task_key: taskKey,
 					status: "released" as const,
@@ -788,6 +810,7 @@ export class Worker<
 			const error = coerceError(err).message;
 			return executions.map((exec) => ({
 				execution_id: exec.id,
+				claim_token: exec.claim_token,
 				queue: exec.queue,
 				task_key: taskKey,
 				status: "failed" as const,
@@ -853,6 +876,14 @@ export class Worker<
 					batchMessageCount: batch.count,
 					run: () => this.db.returnExecutions(batch, { signal: this.signal }),
 				});
+				for (const result of [
+					...batch.completed,
+					...batch.failed,
+					...batch.released,
+					...batch.invokeChild,
+				]) {
+					this.held.delete(result.execution_id);
+				}
 			} catch (err) {
 				this.logger.error("Error flushing results:", err);
 				if (!isCleanup) {
