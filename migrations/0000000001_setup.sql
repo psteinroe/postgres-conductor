@@ -257,7 +257,7 @@ begin
 
     -- index for schedule lookups
     execute format(
-      'create index if not exists %I on pgconductor.%I ((split_part(dedupe_key, ''::'', 2))) where dedupe_key like ''scheduled::%%'' and cron_expression is not null',
+      'create index if not exists %I on pgconductor.%I ((split_part(dedupe_key, ''::'', 2))) where cron_expression is not null',
       'idx_' || v_partition_name || '_schedule',
       v_partition_name
     );
@@ -466,8 +466,8 @@ begin
     and cron_expression is not null
     and is_available
     and dedupe_key like 'scheduled::%'
-    and split_part(dedupe_key, '::', 2) not in (
-      select split_part(spec.dedupe_key, '::', 2)
+    and (task_key, split_part(dedupe_key, '::', 2)) not in (
+      select spec.task_key, split_part(spec.dedupe_key, '::', 2)
       from unnest(p_cron_schedules) as spec
       where spec.dedupe_key is not null and spec.dedupe_key like 'scheduled::%'
     );
@@ -481,8 +481,8 @@ begin
     and completed_at is null
     and failed_at is null
     and cancelled = false
-    and split_part(dedupe_key, '::', 2) not in (
-      select split_part(spec.dedupe_key, '::', 2)
+    and (task_key, split_part(dedupe_key, '::', 2)) not in (
+      select spec.task_key, split_part(spec.dedupe_key, '::', 2)
       from unnest(p_cron_schedules) as spec
       where spec.dedupe_key is not null and spec.dedupe_key like 'scheduled::%'
     );

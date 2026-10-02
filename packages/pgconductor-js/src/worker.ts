@@ -774,20 +774,15 @@ export class Worker<
 			return;
 		}
 
-		// Extract schedule name from dedupe_key (format: scheduled::{name}::{timestamp})
-		if (!execution.dedupe_key || !execution.dedupe_key.startsWith("scheduled::")) {
+		// dedupe_key format: {scheduled|dynamic}::{name}::{timestamp}
+		const [prefix, scheduleName] = execution.dedupe_key?.split("::") || [];
+		if (prefix !== "scheduled" && prefix !== "dynamic") {
 			return;
 		}
 
-		const parts = execution.dedupe_key.split("::");
-		if (parts.length < 2) {
-			return;
-		}
-
-		const scheduleName = parts[1];
 		const nextTimestamp = nextCronOccurrence(execution.cron_expression, this.clock.now());
 		const timestampSeconds = Math.floor(nextTimestamp.getTime() / 1000);
-		const nextDedupeKey = `scheduled::${scheduleName}::${timestampSeconds}`;
+		const nextDedupeKey = `${prefix}::${scheduleName}::${timestampSeconds}`;
 
 		await this.db.invoke(
 			{

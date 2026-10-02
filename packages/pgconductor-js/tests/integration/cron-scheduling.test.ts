@@ -372,7 +372,7 @@ describe("Cron Scheduling", () => {
 			return nextSchedule !== undefined;
 		}, 20_000);
 
-		expect(nextSchedule?.dedupe_key).toMatch(/^scheduled::reporting::\d+$/);
+		expect(nextSchedule?.dedupe_key).toMatch(/^dynamic::reporting::\d+$/);
 
 		await orchestrator.stop();
 		await db.destroy();
@@ -718,6 +718,73 @@ describe("Cron Scheduling", () => {
 			scheduleName: "reporting",
 		});
 		expect((await occurrences()).map((execution) => execution.run_at)).toEqual([next]);
+
+		await db.destroy();
+	});
+
+	test("worker registration keeps dynamic schedules", async () => {
+		const db = await pool.child();
+		await Conductor.create({ sql: db.sql, context: {} }).ensureInstalled();
+
+		await db.client.scheduleCronExecution({
+			spec: {
+				task_key: "user-report",
+				queue: "default",
+				run_at: new Date(Date.now() + 60_000),
+				cron_expression: "0 * * * * *",
+			},
+			scheduleName: "user-1",
+		});
+
+		await db.client.registerWorker({
+			queueName: "default",
+			taskSpecs: [{ key: "user-report", queue: "default" }],
+			cronSchedules: [],
+			eventSubscriptions: [],
+		});
+
+		const schedules = await db.sql<{ dedupe_key: string }[]>`
+			select dedupe_key from pgconductor._private_executions where task_key = 'user-report'
+		`;
+		expect(schedules).toHaveLength(1);
+
+		await db.destroy();
+	});
+
+	test("worker registration matches stale schedules by task and name", async () => {
+		const db = await pool.child();
+		await Conductor.create({ sql: db.sql, context: {} }).ensureInstalled();
+
+		const runAt = new Date(Date.now() + 60_000);
+		const schedule = (taskKey: string) => ({
+			task_key: taskKey,
+			queue: "default",
+			run_at: runAt,
+			dedupe_key: `scheduled::daily::${Math.floor(runAt.getTime() / 1000)}`,
+			cron_expression: "0 * * * * *",
+		});
+		const taskSpecs = [
+			{ key: "task-a", queue: "default" },
+			{ key: "task-b", queue: "default" },
+		];
+
+		await db.client.registerWorker({
+			queueName: "default",
+			taskSpecs,
+			cronSchedules: [schedule("task-a"), schedule("task-b")],
+			eventSubscriptions: [],
+		});
+		await db.client.registerWorker({
+			queueName: "default",
+			taskSpecs,
+			cronSchedules: [schedule("task-b")],
+			eventSubscriptions: [],
+		});
+
+		const schedules = await db.sql<{ task_key: string }[]>`
+			select task_key from pgconductor._private_executions where cron_expression is not null
+		`;
+		expect(schedules.map((execution) => execution.task_key)).toEqual(["task-b"]);
 
 		await db.destroy();
 	});
