@@ -89,6 +89,17 @@ describe("event pipeline", () => {
 		return orchestratorId;
 	}
 
+	async function blocked(db: TestDatabase): Promise<boolean> {
+		const [row] = await db.sql<{ blocked: boolean }[]>`
+			select exists(
+				select 1 from pg_stat_activity
+				where datname = current_database()
+					and cardinality(pg_blocking_pids(pid)) > 0
+			) as blocked
+		`;
+		return row?.blocked === true;
+	}
+
 	async function settleSource(
 		db: TestDatabase,
 		eventId: string,
@@ -911,6 +922,108 @@ describe("event pipeline", () => {
 		expect(state).toEqual({ locked_by: newOwner, completed_at: null, destinations: 0 });
 	});
 
+	test("does not fan out when recovery releases the source during dispatch", async () => {
+		const db = await database();
+		await registerSubscriptions(db, [{ taskKey: "pipeline.fenced", eventKey: "pipeline.fenced" }]);
+		const eventId = await db.client.emitEvent({ eventKey: "pipeline.fenced", payload: {} });
+		const owner = await claimEvent(db, eventId);
+		const recoverySql = postgres(db.url, { max: 1 });
+		const dispatchSql = postgres(db.url, { max: 1 });
+		const client = new DatabaseClient({ sql: dispatchSql, logger: new DefaultLogger() });
+		let dispatch: Promise<string[]> | undefined;
+		try {
+			await recoverySql.begin(async (transaction) => {
+				await transaction`
+					update pgconductor._private_executions
+					set locked_by = null, locked_at = null
+					where id = ${eventId}::uuid
+				`;
+				let settled = false;
+				dispatch = client
+					.dispatchCustomEvents({ eventIds: [eventId], orchestratorId: owner })
+					.finally(() => {
+						settled = true;
+					});
+				await waitForCondition(async () => settled || (await blocked(db)));
+			});
+			expect(await dispatch).toEqual([]);
+		} finally {
+			await Promise.all([recoverySql.end(), dispatchSql.end()]);
+		}
+
+		const [state] = await db.sql<{ destinations: number }[]>`
+			select count(*)::integer as destinations from pgconductor._private_executions
+			where parent_execution_id = ${eventId}::uuid and subscription_id is not null
+		`;
+		expect(state?.destinations).toBe(0);
+	}, 30_000);
+
+	test("waits for a locked waiter instead of dropping the event", async () => {
+		const db = await database();
+		await db.client.registerWorker({
+			queueName: "default",
+			taskSpecs: [{ key: "pipeline.waiter", queue: "default", maxAttempts: 3 }],
+			cronSchedules: [],
+			eventSubscriptions: [],
+		});
+		const waiterId = await db.client.invoke({ task_key: "pipeline.waiter", queue: "default" });
+		if (!waiterId) throw new Error("invoke did not return an execution id");
+		const waiterOwner = crypto.randomUUID();
+		await db.client.getExecutions({
+			orchestratorId: waiterOwner,
+			queueName: "default",
+			batchSize: 1,
+			filterTaskKeys: [],
+		});
+		await db.client.registerEventWait({
+			executionId: waiterId,
+			queue: "default",
+			taskKey: "pipeline.waiter",
+			eventKey: "pipeline.locked-waiter",
+			stepKey: "wait",
+			requiredFieldCount: 0,
+			terms: [],
+			timeoutMs: null,
+			orchestratorId: waiterOwner,
+		});
+		const eventId = await db.client.emitEvent({
+			eventKey: "pipeline.locked-waiter",
+			payload: { id: 1 },
+		});
+		const owner = await claimEvent(db, eventId);
+		const blockerSql = postgres(db.url, { max: 1 });
+		const dispatchSql = postgres(db.url, { max: 1 });
+		const client = new DatabaseClient({ sql: dispatchSql, logger: new DefaultLogger() });
+		let dispatch: Promise<string[]> | undefined;
+		try {
+			await blockerSql.begin(async (transaction) => {
+				await transaction`
+					select 1 from pgconductor._private_executions
+					where id = ${waiterId}::uuid for update
+				`;
+				let settled = false;
+				dispatch = client
+					.dispatchCustomEvents({ eventIds: [eventId], orchestratorId: owner })
+					.finally(() => {
+						settled = true;
+					});
+				await waitForCondition(async () => settled || (await blocked(db)));
+			});
+			expect(await dispatch).toEqual([eventId]);
+		} finally {
+			await Promise.all([blockerSql.end(), dispatchSql.end()]);
+		}
+
+		const [step] = await db.sql<{ result: unknown }[]>`
+			select result from pgconductor._private_steps
+			where execution_id = ${waiterId}::uuid and key = 'wait'
+		`;
+		expect(step?.result).toEqual({
+			status: "resolved",
+			event: { name: "pipeline.locked-waiter", payload: { id: 1 } },
+		});
+	}, 30_000);
+
 	test("settles event destinations independently from dispatch sources", async () => {
 		const db = await database();
 		await registerSubscriptions(db, [
@@ -1018,16 +1131,7 @@ describe("event pipeline", () => {
 						},
 					],
 				});
-				await waitForCondition(async () => {
-					const [waiting] = await db.sql<{ exists: boolean }[]>`
-						select exists(
-							select 1 from pg_stat_activity
-							where datname = current_database()
-								and cardinality(pg_blocking_pids(pid)) > 0
-						) as exists
-					`;
-					return waiting?.exists === true;
-				});
+				await waitForCondition(() => blocked(db));
 			});
 			if (!registration) throw new Error("registration did not start");
 			await registration;

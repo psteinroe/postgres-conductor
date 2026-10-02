@@ -1178,6 +1178,8 @@ export class QueryBuilder {
 					and source.completed_at is null
 					and source.failed_at is null
 					and not source.cancelled
+				order by source.id
+				for update of source
 			), event_values as materialized (
 				select source.event_id, source.event_key, field.key as field_name,
 					field.value, jsonb_typeof(field.value) as scalar_type
@@ -1376,7 +1378,7 @@ export class QueryBuilder {
 					and not execution.cancelled
 					and execution.locked_by is null
 				order by execution.id
-				for update of execution skip locked
+				for update of execution
 			), inserted_wait_steps as (
 				insert into pgconductor._private_steps (execution_id, queue, key, result)
 				select wait.execution_id, wait.queue, wait.step_key,
