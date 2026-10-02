@@ -606,7 +606,17 @@ describe.serial("waitForEvent", () => {
 		if (!executionId) throw new Error("invoke did not return an execution id");
 		await waiting(database);
 		await database.client.cancelExecution(executionId);
-		await waiting(database, 0);
+		const [settled] = await database.sql<
+			{ failed: boolean; cancelled: boolean; waiting: boolean }[]
+		>`
+			select failed_at is not null as failed, cancelled,
+				exists (
+					select 1 from pgconductor._private_custom_event_subscriptions
+					where execution_id = ${executionId}::uuid
+				) as waiting
+			from pgconductor._private_executions where id = ${executionId}::uuid
+		`;
+		expect(settled).toEqual({ failed: true, cancelled: true, waiting: false });
 		await conductor.emit("wait.order", { id: "cancel", kind: "match" });
 		await Bun.sleep(150);
 		expect(entered).toEqual(["cancel"]);

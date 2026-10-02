@@ -200,7 +200,7 @@ const cancelled = await conductor.cancel(
 );
 ```
 
-Returns `true` if cancelled, `false` if already completed.
+Returns `true` if cancelled, `false` if already completed. Cancelling also cancels the child the execution is waiting on. See [Cancellation](../task-execution/cancellation.md).
 
 ## What's Next?
 

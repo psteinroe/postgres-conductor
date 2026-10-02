@@ -327,7 +327,7 @@ describe("dead-letter queues (Postgres integration)", () => {
 			select failed_at, cancelled from pgconductor._private_executions where id = ${id}::uuid
 		`;
 		expect(rows[0]?.failed_at).not.toBeNull();
-		expect(rows[0]?.cancelled).toBe(false);
+		expect(rows[0]?.cancelled).toBe(true);
 		const destinationRows = await db.sql<{ count: string }[]>`
 			select count(*)::text as count from pgconductor._private_executions where queue = 'dlq'
 		`;
@@ -399,7 +399,7 @@ describe("dead-letter queues (Postgres integration)", () => {
 		expect(counts).toEqual({ source: "0", destination: "0" });
 	}, 15000);
 
-	test("removes a parent failed by a claimed child cancellation without delivering to the DLQ", async () => {
+	test("removes a parent cancelled by a claimed child cancellation without delivering to the DLQ", async () => {
 		const db = await pool.child();
 		databases.push(db);
 		const conductor = Conductor.create({ sql: db.sql, context: {} });
@@ -483,8 +483,32 @@ describe("dead-letter queues (Postgres integration)", () => {
 					execution_id: child.id,
 					queue: child.queue,
 					task_key: child.task_key,
-					status: "permanently_failed",
-					error: "Task was cancelled",
+					status: "cancelled",
+					error: "Cancelled by user",
+				},
+			],
+			released: [],
+			invokeChild: [],
+		});
+		const wokenParent = (
+			await db.client.getExecutions({
+				orchestratorId: childOrchestratorId,
+				queueName: "default",
+				batchSize: 1,
+				filterTaskKeys: [],
+			})
+		)[0];
+		expect(wokenParent?.id).toBe(parentId);
+		await db.client.returnExecutions({
+			orchestratorId: childOrchestratorId,
+			completed: [],
+			failed: [
+				{
+					execution_id: parentId,
+					queue: parent.queue,
+					task_key: parent.task_key,
+					status: "cancelled",
+					error: "Cancelled by user",
 				},
 			],
 			released: [],

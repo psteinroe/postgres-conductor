@@ -408,14 +408,15 @@ export class QueryBuilder {
 				result jsonb, error text,
 				reschedule_in_ms bigint, step_key text, timeout_ms bigint,
 				child_task_name text, child_task_queue text, child_payload jsonb,
-				"group" text, trace_context jsonb
+				cancel_with_parent boolean, "group" text, trace_context jsonb
 			)
 		)`);
 		// Lock the claimed rows for the whole statement. This prevents recovery or a
 		// new claim from racing the side effects below.
 		ctes.push(this.sql`valid_results as materialized (
 			select r.*,
-				e.cancelled as execution_cancelled, e.last_error as execution_last_error,
+				e.cancelled or r.status = 'cancelled' as execution_cancelled,
+				e.last_error as execution_last_error,
 				e.subscription_id
 			from result_data r
 			join pgconductor._private_executions e
@@ -447,11 +448,38 @@ export class QueryBuilder {
 			select * from valid_results where status = 'invoke_child' and not execution_cancelled
 		)`);
 
-		// A completed child may wake only a parent which is still waiting and is not
-		// currently claimed. The row lock makes this check race-safe.
-		ctes.push(this.sql`completed_parents as materialized (
+		ctes.push(this.sql`permanently_failed_children as materialized (
+			select r.execution_id, r.queue, r.task_key,
+				r.execution_cancelled,
+				coalesce(r.error, r.execution_last_error, 'unknown error') as child_error,
+				e."group" as execution_group,
+				e.payload as execution_payload,
+				e.attempts as execution_attempts,
+				e.subscription_id,
+				e.trace_context,
+				tc.remove_on_fail_days = 0 as should_remove,
+				tc.dead_letter_queue, tc.dead_letter_task_key
+			from failed_results r
+			join pgconductor._private_executions e on e.id = r.execution_id and e.queue = r.queue
+			join task_configs tc on tc.key = r.task_key and tc.queue = r.queue
+			where e.attempts >= tc.max_attempts
+				or r.status = 'permanently_failed'
+				or r.execution_cancelled
+		)`);
+		// A completed or cancelled child may wake only a parent which is still waiting
+		// and is not currently claimed. The row lock makes this check race-safe.
+		ctes.push(this.sql`woken_parents as materialized (
 			select parent.id as parent_id, parent.queue, parent.waiting_step_key, r.result
-			from completed_results r
+			from (
+				select execution_id, subscription_id,
+					jsonb_build_object('status', 'completed', 'result', result) as result
+				from completed_results
+				union all
+				select execution_id, subscription_id,
+					jsonb_build_object('status', 'cancelled', 'error', child_error)
+				from permanently_failed_children
+				where execution_cancelled
+			) r
 			join pgconductor._private_executions parent
 				on parent.waiting_on_execution_id = r.execution_id
 			where r.subscription_id is null
@@ -463,7 +491,7 @@ export class QueryBuilder {
 		ctes.push(this.sql`parent_steps_all as (
 			insert into pgconductor._private_steps (execution_id, queue, key, result)
 			select parent_id, queue, waiting_step_key, result
-			from completed_parents
+			from woken_parents
 			where waiting_step_key is not null
 			on conflict (execution_id, key) do nothing
 			returning execution_id
@@ -478,6 +506,7 @@ export class QueryBuilder {
 				and e.locked_by = ${orchestratorId}::uuid
 				and e.parent_execution_id is not null
 				and e.subscription_id is null
+				and e.cancel_with_parent
 				and not exists (
 					select 1 from pgconductor._private_executions parent
 					where parent.waiting_on_execution_id = r.execution_id
@@ -488,7 +517,7 @@ export class QueryBuilder {
 			update pgconductor._private_executions e
 			set run_at = nt.ts, waiting_on_execution_id = null, waiting_step_key = null,
 				locked_by = null, locked_at = null
-			from now_ts nt, completed_parents p
+			from now_ts nt, woken_parents p
 			where e.id = p.parent_id and e.queue = p.queue
 			returning e.id
 		)`);
@@ -513,24 +542,6 @@ export class QueryBuilder {
 			returning e.id, e.queue
 		)`);
 
-		ctes.push(this.sql`permanently_failed_children as materialized (
-			select r.execution_id, r.queue, r.task_key,
-				r.execution_cancelled,
-				coalesce(r.error, r.execution_last_error, 'unknown error') as child_error,
-				e."group" as execution_group,
-				e.payload as execution_payload,
-				e.attempts as execution_attempts,
-				e.subscription_id,
-				e.trace_context,
-				tc.remove_on_fail_days = 0 as should_remove,
-				tc.dead_letter_queue, tc.dead_letter_task_key
-			from failed_results r
-			join pgconductor._private_executions e on e.id = r.execution_id and e.queue = r.queue
-			join task_configs tc on tc.key = r.task_key and tc.queue = r.queue
-			where e.attempts >= tc.max_attempts
-				or r.status = 'permanently_failed'
-				or r.execution_cancelled
-		)`);
 		// A terminal failure fails every workflow still waiting on it. Ancestors are
 		// locked child first, then the chain is followed again on the locked rows.
 		ctes.push(this.sql`waiting_ancestors as (
@@ -539,6 +550,7 @@ export class QueryBuilder {
 			join pgconductor._private_executions parent
 				on parent.waiting_on_execution_id = p.execution_id
 			where p.subscription_id is null
+				and not p.execution_cancelled
 				and parent.completed_at is null and parent.failed_at is null and parent.locked_by is null
 			union all
 			select parent.id, a.depth + 1
@@ -607,11 +619,12 @@ export class QueryBuilder {
 				do nothing
 		)`);
 		ctes.push(this.sql`failed_updates as (
-			select p.execution_id as target_id, p.queue, p.child_error, true as is_child
+			select p.execution_id as target_id, p.queue, p.child_error, true as is_child,
+				p.execution_cancelled as cancelled
 			from permanently_failed_children p
 			where p.should_remove is not true
 			union all
-			select p.parent_id, p.parent_queue, p.child_error, false
+			select p.parent_id, p.parent_queue, p.child_error, false, false
 			from failed_parent_targets p
 			where p.parent_should_remove is not true
 		)`);
@@ -633,7 +646,7 @@ export class QueryBuilder {
 		)`);
 		ctes.push(this.sql`updated_failed as (
 			update pgconductor._private_executions e
-			set failed_at = nt.ts,
+			set failed_at = nt.ts, cancelled = f.cancelled,
 				last_error = case when f.is_child then coalesce(f.child_error, 'unknown error')
 					else 'Child execution failed: ' || coalesce(f.child_error, 'unknown error') end,
 				waiting_on_execution_id = null, waiting_step_key = null,
@@ -689,8 +702,8 @@ export class QueryBuilder {
 		)`);
 
 		ctes.push(this.sql`inserted_children as (
-			insert into pgconductor._private_executions (id, task_key, queue, payload, run_at, parent_execution_id, "group", trace_context)
-			select pgconductor._private_portable_uuidv7(), r.child_task_name, r.child_task_queue, r.child_payload, nt.ts, r.execution_id, r."group", r.trace_context
+			insert into pgconductor._private_executions (id, task_key, queue, payload, run_at, parent_execution_id, cancel_with_parent, "group", trace_context)
+			select pgconductor._private_portable_uuidv7(), r.child_task_name, r.child_task_queue, r.child_payload, nt.ts, r.execution_id, coalesce(r.cancel_with_parent, true), r."group", r.trace_context
 			from invoke_child_data r, now_ts nt
 			where exists (
 				select 1 from pgconductor._private_executions parent
@@ -1098,6 +1111,7 @@ export class QueryBuilder {
 				update pgconductor._private_executions e
 				set
 					failed_at = pgconductor._private_current_time(),
+					cancelled = true,
 					last_error = 'Cancelled: parent timed out',
 					locked_by = null,
 					locked_at = null

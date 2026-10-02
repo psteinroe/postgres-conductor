@@ -612,7 +612,7 @@ describe("Invoke Support", () => {
 		`;
 
 		expect(children.length).toBe(1);
-		expect(children[0]?.cancelled).toBe(false); // Not cancelled since it was pending
+		expect(children[0]?.cancelled).toBe(true);
 		expect(children[0]?.failed_at).not.toBeNull();
 		expect(children[0]?.last_error).toContain("parent timed out");
 		expect(children[0]?.group).toBe("tenant-a");
