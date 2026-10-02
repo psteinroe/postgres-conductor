@@ -236,7 +236,7 @@ begin
 
     -- index for claiming available executions of one task under concurrency limits
     execute format(
-      'create index if not exists %I on pgconductor.%I (task_key, priority, run_at, created_at, id) where is_available = true',
+      'create index %I on pgconductor.%I (task_key, priority, run_at, created_at, id) where is_available = true',
       'idx_' || v_partition_name || '_get_task_executions',
       v_partition_name
     );
