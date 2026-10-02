@@ -6,6 +6,7 @@ import { Orchestrator } from "../../src/orchestrator";
 import { defineTask } from "../../src/task-definition";
 import { TestDatabasePool, type TestDatabase } from "../fixtures/test-database";
 import { TaskSchemas } from "../../src/schemas";
+import { QueryBuilder } from "../../src/query-builder";
 import { waitForCondition } from "../test-utils";
 
 describe("Cancellation Support", () => {
@@ -679,6 +680,16 @@ describe("Cancellation Support", () => {
 
 		await db.client.orchestratorShutdown({ orchestratorId });
 
+		// The released execution is reclaimed and settled as cancelled
+		await waitForCondition(async () => {
+			const [execution] = await db.sql<[{ failed: boolean }]>`
+				select failed_at is not null as failed
+				from pgconductor._private_executions
+				where id = ${execId}::uuid
+			`;
+			return execution.failed;
+		});
+
 		const failedExec = await db.sql<
 			{
 				failed_at: Date | null;
@@ -908,13 +919,17 @@ describe("Cancellation Support", () => {
 
 	async function insertExecution(
 		db: TestDatabase,
-		{ waitingOn, lockedBy }: { waitingOn?: string; lockedBy?: string } = {},
+		{
+			waitingOn,
+			lockedBy,
+			taskKey = "workflow-task",
+		}: { waitingOn?: string; lockedBy?: string; taskKey?: string } = {},
 	) {
 		const [execution] = await db.sql<[{ id: string }]>`
 			insert into pgconductor._private_executions
 				(task_key, payload, run_at, waiting_on_execution_id, waiting_step_key, locked_by, locked_at)
 			values (
-				'workflow-task', '{}'::jsonb,
+				${taskKey}, '{}'::jsonb,
 				${waitingOn ? "infinity" : "now"}::text::timestamptz,
 				${waitingOn || null}::uuid, ${waitingOn ? "child" : null},
 				${lockedBy || null}::uuid, ${lockedBy ? "now" : null}::text::timestamptz
@@ -1097,5 +1112,396 @@ describe("Cancellation Support", () => {
 			select id = ${third}::uuid as is_third from pgconductor._private_executions
 		`;
 		expect(remaining.map((r) => r.is_third)).toEqual([true]);
+	}, 15000);
+
+	test("a cancelled execution cannot suspend or invoke a child", async () => {
+		const db = await pool.child();
+		databases.push(db);
+		await installSchema(db);
+		await db.sql`insert into pgconductor._private_tasks (key, queue) values ('workflow-task', 'default')`;
+		const [orchestrator] = await db.sql<[{ id: string }]>`
+			insert into pgconductor._private_orchestrators default values returning id
+		`;
+		const sleeping = await insertExecution(db, { lockedBy: orchestrator.id });
+		const invoking = await insertExecution(db, { lockedBy: orchestrator.id });
+		const parent = await insertExecution(db, { waitingOn: invoking });
+		const root = await insertExecution(db, { waitingOn: parent });
+
+		expect(await db.client.cancelExecution(sleeping)).toBe(true);
+		expect(await db.client.cancelExecution(invoking)).toBe(true);
+
+		const execution = { queue: "default", task_key: "workflow-task" };
+		await db.client.returnExecutions({
+			orchestratorId: orchestrator.id,
+			completed: [],
+			failed: [],
+			released: [
+				{ ...execution, execution_id: sleeping, status: "released", reschedule_in_ms: "infinity" },
+			],
+			invokeChild: [
+				{
+					...execution,
+					execution_id: invoking,
+					status: "invoke_child",
+					timeout_ms: "infinity",
+					step_key: "child",
+					child_task_name: "workflow-task",
+					child_task_queue: "default",
+					child_payload: {},
+				},
+			],
+		});
+
+		for (const id of [sleeping, invoking]) {
+			expect(await executionState(db, id)).toEqual({
+				failed: true,
+				cancelled: true,
+				last_error: "Cancelled by user",
+				waiting_on_execution_id: null,
+			});
+		}
+		for (const id of [parent, root]) {
+			expect(await executionState(db, id)).toEqual({
+				failed: true,
+				cancelled: false,
+				last_error: "Child execution failed: Cancelled by user",
+				waiting_on_execution_id: null,
+			});
+		}
+		const [{ count }] = await db.sql<[{ count: number }]>`
+			select count(*)::int as count from pgconductor._private_executions
+		`;
+		expect(count).toBe(4);
+	}, 15000);
+
+	test("a permanently failed child settles every waiting ancestor", async () => {
+		const db = await pool.child();
+		databases.push(db);
+		await installSchema(db);
+		await db.sql`insert into pgconductor._private_queues (name) values ('dlq')`;
+		await db.sql`
+			insert into pgconductor._private_tasks
+				(key, queue, remove_on_fail_days, dead_letter_queue, dead_letter_task_key)
+			values
+				('workflow-task', 'default', null, null, null),
+				('root-task', 'default', 0, 'dlq', 'root-dead-letter')
+		`;
+		const [orchestrator] = await db.sql<[{ id: string }]>`
+			insert into pgconductor._private_orchestrators default values returning id
+		`;
+		const child = await insertExecution(db, { lockedBy: orchestrator.id });
+		const parent = await insertExecution(db, { waitingOn: child });
+		const root = await insertExecution(db, { waitingOn: parent, taskKey: "root-task" });
+
+		await db.client.returnExecutions({
+			orchestratorId: orchestrator.id,
+			completed: [],
+			failed: [
+				{
+					execution_id: child,
+					queue: "default",
+					task_key: "workflow-task",
+					status: "permanently_failed",
+					error: "boom",
+				},
+			],
+			released: [],
+			invokeChild: [],
+		});
+
+		expect((await executionState(db, child)).last_error).toBe("boom");
+		expect(await executionState(db, parent)).toEqual({
+			failed: true,
+			cancelled: false,
+			last_error: "Child execution failed: boom",
+			waiting_on_execution_id: null,
+		});
+		const [{ count }] = await db.sql<[{ count: number }]>`
+			select count(*)::int as count from pgconductor._private_executions where id = ${root}::uuid
+		`;
+		expect(count).toBe(0);
+		const deadLetters = await db.sql<{ task_key: string; source: string; error: string }[]>`
+			select task_key, dead_letter->>'sourceExecutionId' as source, dead_letter->>'error' as error
+			from pgconductor._private_executions
+			where queue = 'dlq'
+		`;
+		expect([...deadLetters]).toEqual([
+			{ task_key: "root-dead-letter", source: root, error: "Child execution failed: boom" },
+		]);
+	}, 15000);
+
+	test("cancellation fails a child invoked while it waited for the parent lock", async () => {
+		const db = await pool.child();
+		databases.push(db);
+		await installSchema(db);
+
+		const [orchestrator] = await db.sql<[{ id: string }]>`
+			insert into pgconductor._private_orchestrators default values returning id
+		`;
+		const parent = await insertExecution(db, { lockedBy: orchestrator.id });
+
+		const worker = postgres(db.url, { max: 1 });
+		const canceller = postgres(db.url, { max: 1 });
+		let child: string;
+		try {
+			// Returning an invoke_child result inserts the child and suspends the parent.
+			await worker`begin`;
+			[{ id: child }] = await worker<[{ id: string }]>`
+				insert into pgconductor._private_executions (task_key, payload, parent_execution_id)
+				values ('workflow-task', '{}'::jsonb, ${parent}::uuid)
+				returning id
+			`;
+			await worker`
+				update pgconductor._private_executions
+				set waiting_on_execution_id = ${child}::uuid, waiting_step_key = 'child',
+					run_at = 'infinity', locked_by = null, locked_at = null
+				where id = ${parent}::uuid
+			`;
+			const cancellation = canceller<[{ cancelled: boolean }]>`
+				select pgconductor.cancel_execution(${parent}::uuid) as cancelled
+			`.execute();
+			await waitForCondition(async () => {
+				const [blocked] = await db.sql<[{ count: number }]>`
+					select count(*)::int as count from pg_stat_activity
+					where datname = current_database() and wait_event_type = 'Lock'
+				`;
+				return blocked.count === 1;
+			});
+			await worker`commit`;
+			const [{ cancelled }] = await cancellation;
+			expect(cancelled).toBe(true);
+		} finally {
+			await Promise.all([worker.end(), canceller.end()]);
+		}
+
+		expect(await executionState(db, child)).toEqual({
+			failed: true,
+			cancelled: false,
+			last_error: "Cancelled by user",
+			waiting_on_execution_id: null,
+		});
+		expect(await executionState(db, parent)).toEqual({
+			failed: true,
+			cancelled: false,
+			last_error: "Cancelled by user",
+			waiting_on_execution_id: null,
+		});
+	}, 15000);
+
+	test("cancellation releases a parent lock before locking a newly found child", async () => {
+		const db = await pool.child();
+		databases.push(db);
+		await installSchema(db);
+
+		const [orchestrator] = await db.sql<[{ id: string }]>`
+			insert into pgconductor._private_orchestrators default values returning id
+		`;
+		const parent = await insertExecution(db, { lockedBy: orchestrator.id });
+		const [{ id: child }] = await db.sql<[{ id: string }]>`
+			insert into pgconductor._private_executions (task_key, payload, parent_execution_id)
+			values ('workflow-task', '{}'::jsonb, ${parent}::uuid)
+			returning id
+		`;
+
+		const worker = postgres(db.url, { max: 1 });
+		const settler = postgres(db.url, { max: 1 });
+		const canceller = postgres(db.url, { max: 1 });
+		const [{ pid: workerPid }] = await worker<[{ pid: number }]>`select pg_backend_pid() as pid`;
+		const [{ pid: settlerPid }] = await settler<[{ pid: number }]>`select pg_backend_pid() as pid`;
+		const [{ pid: cancellerPid }] = await canceller<
+			[{ pid: number }]
+		>`select pg_backend_pid() as pid`;
+		const cancellationBlockedBy = (pid: number) =>
+			waitForCondition(async () => {
+				const [{ blocked }] = await db.sql<[{ blocked: boolean }]>`
+					select pg_blocking_pids(${cancellerPid}::int) = array[${pid}::int] as blocked
+				`;
+				return blocked;
+			});
+		try {
+			// Settling the child locks it, then the parent waiting on it.
+			await settler`begin`;
+			await settler`select 1 from pgconductor._private_executions where id = ${child}::uuid for update`;
+			await worker`begin`;
+			await worker`
+				update pgconductor._private_executions
+				set waiting_on_execution_id = ${child}::uuid, waiting_step_key = 'child',
+					run_at = 'infinity', locked_by = null, locked_at = null
+				where id = ${parent}::uuid
+			`;
+			const cancellation = canceller<[{ cancelled: boolean }]>`
+				select pgconductor.cancel_execution(${parent}::uuid) as cancelled
+			`.execute();
+			await cancellationBlockedBy(workerPid);
+			await worker`commit`;
+			await cancellationBlockedBy(settlerPid);
+			await settler`select 1 from pgconductor._private_executions where id = ${parent}::uuid for update nowait`;
+			await settler`commit`;
+			const [{ cancelled }] = await cancellation;
+			expect(cancelled).toBe(true);
+		} finally {
+			await Promise.all([worker.end(), settler.end(), canceller.end()]);
+		}
+
+		expect((await executionState(db, child)).failed).toBe(true);
+		expect((await executionState(db, parent)).failed).toBe(true);
+	}, 15000);
+
+	test("timing out an invoke locks the child before the parent", async () => {
+		const db = await pool.child();
+		databases.push(db);
+		await installSchema(db);
+
+		const [orchestrator] = await db.sql<[{ id: string }]>`
+			insert into pgconductor._private_orchestrators default values returning id
+		`;
+		const child = await insertExecution(db);
+		const parent = await insertExecution(db, { waitingOn: child });
+		await db.sql`
+			update pgconductor._private_executions
+			set locked_by = ${orchestrator.id}::uuid, locked_at = now()
+			where id = ${parent}::uuid
+		`;
+
+		const canceller = postgres(db.url, { max: 1 });
+		const worker = postgres(db.url, { max: 1 });
+		try {
+			// Cancelling the child locks it, then the parent waiting on it.
+			await canceller`begin`;
+			await canceller`select 1 from pgconductor._private_executions where id = ${child}::uuid for update`;
+			const clearing = new QueryBuilder(worker)
+				.buildClearWaitingState({
+					executionId: parent,
+					queue: "default",
+					orchestratorId: orchestrator.id,
+				})
+				.execute();
+			await waitForCondition(async () => {
+				const [blocked] = await db.sql<[{ count: number }]>`
+					select count(*)::int as count from pg_stat_activity
+					where datname = current_database() and wait_event_type = 'Lock'
+				`;
+				return blocked.count === 1;
+			});
+			await canceller`select 1 from pgconductor._private_executions where id = ${parent}::uuid for update nowait`;
+			await canceller`commit`;
+			await clearing;
+		} finally {
+			await Promise.all([canceller.end(), worker.end()]);
+		}
+
+		expect(await executionState(db, child)).toEqual({
+			failed: true,
+			cancelled: false,
+			last_error: "Cancelled: parent timed out",
+			waiting_on_execution_id: null,
+		});
+		expect((await executionState(db, parent)).waiting_on_execution_id).toBeNull();
+	}, 15000);
+
+	test("a cancelled execution of a stopped orchestrator settles its workflow", async () => {
+		const db = await pool.child();
+		databases.push(db);
+		await installSchema(db);
+		await db.sql`insert into pgconductor._private_tasks (key, queue) values ('workflow-task', 'default')`;
+
+		const [stopped] = await db.sql<[{ id: string }]>`
+			insert into pgconductor._private_orchestrators default values returning id
+		`;
+		const child = await insertExecution(db, { lockedBy: stopped.id, taskKey: "leaf-task" });
+		const root = await insertExecution(db, { waitingOn: child });
+
+		expect(await db.client.cancelExecution(child)).toBe(true);
+		await db.client.orchestratorShutdown({ orchestratorId: stopped.id });
+
+		const conductor = Conductor.create({
+			sql: db.sql,
+			tasks: TaskSchemas.fromSchema([defineTask({ name: "leaf-task", payload: z.object({}) })]),
+			context: {},
+		});
+		const leafTask = conductor.createTask(
+			{ name: "leaf-task", removeOnFail: true },
+			{ invocable: true },
+			async () => {},
+		);
+		const orchestrator = Orchestrator.create({
+			conductor,
+			tasks: [leafTask],
+			defaultWorker: { pollIntervalMs: 50, flushIntervalMs: 50 },
+		});
+		await orchestrator.start();
+		try {
+			await waitForCondition(async () => (await executionState(db, root)).failed);
+		} finally {
+			await orchestrator.stop();
+		}
+
+		expect(await executionState(db, root)).toEqual({
+			failed: true,
+			cancelled: false,
+			last_error: "Child execution failed: Cancelled by user",
+			waiting_on_execution_id: null,
+		});
+		const [{ count }] = await db.sql<[{ count: number }]>`
+			select count(*)::int as count from pgconductor._private_executions where id = ${child}::uuid
+		`;
+		expect(count).toBe(0);
+	}, 15000);
+
+	test("recovered cancelled executions are settled alongside a batch", async () => {
+		const db = await pool.child();
+		databases.push(db);
+		await installSchema(db);
+
+		const [stale] = await db.sql<[{ id: string }]>`
+			insert into pgconductor._private_orchestrators (last_heartbeat_at)
+			values (now() - interval '1 hour')
+			returning id
+		`;
+		const cancelled = await insertExecution(db, { lockedBy: stale.id, taskKey: "batch-task" });
+		const active = await insertExecution(db, { lockedBy: stale.id, taskKey: "batch-task" });
+
+		expect(await db.client.cancelExecution(cancelled)).toBe(true);
+		await db.client.recoverStaleOrchestrators({ maxAge: "1 minute" });
+
+		const conductor = Conductor.create({
+			sql: db.sql,
+			tasks: TaskSchemas.fromSchema([defineTask({ name: "batch-task", payload: z.object({}) })]),
+			context: {},
+		});
+		const batchSizes: number[] = [];
+		const batchTask = conductor.createTask(
+			{ name: "batch-task", batch: { size: 10, timeoutMs: 100 } },
+			{ invocable: true },
+			async (events) => {
+				batchSizes.push(events.length);
+			},
+		);
+		const orchestrator = Orchestrator.create({
+			conductor,
+			tasks: [batchTask],
+			defaultWorker: { pollIntervalMs: 50, flushIntervalMs: 50 },
+		});
+		await orchestrator.start();
+		try {
+			await waitForCondition(async () => {
+				const [{ count }] = await db.sql<[{ count: number }]>`
+					select count(*)::int as count from pgconductor._private_executions
+					where locked_by is null and (failed_at is not null or completed_at is not null)
+				`;
+				return count === 2;
+			});
+		} finally {
+			await orchestrator.stop();
+		}
+
+		expect(batchSizes).toEqual([1]);
+		expect(await executionState(db, cancelled)).toEqual({
+			failed: true,
+			cancelled: true,
+			last_error: "Cancelled by user",
+			waiting_on_execution_id: null,
+		});
+		expect((await executionState(db, active)).failed).toBe(false);
 	}, 15000);
 });
