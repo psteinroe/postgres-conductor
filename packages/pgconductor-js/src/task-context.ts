@@ -43,6 +43,8 @@ export type TaskAbortReasons =
 			step_key?: string;
 			__pgconductorTaskAborted: true;
 	  }
+	// the task ran longer than its timeoutMs
+	| { reason: "timed-out"; __pgconductorTaskAborted: true }
 	// the task invoked a child
 	| {
 			reason: "child-invocation";
