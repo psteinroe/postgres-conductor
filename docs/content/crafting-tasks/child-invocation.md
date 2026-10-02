@@ -65,7 +65,7 @@ If the child doesn't complete within the timeout, the parent task fails with a t
 
 ## Error Handling
 
-If a child task fails permanently (exhausts all retries), the parent task will be moved to `failed_executions` with an error like:
+If a child task fails permanently (exhausts all retries), the parent task fails with an error like:
 ```
 Child execution failed: <child error message>
 ```

@@ -25,15 +25,24 @@ The task retries until it succeeds or reaches max attempts.
 
 ## Backoff Schedule
 
-Postgres Conductor uses exponential backoff:
+After a failed attempt, the next attempt waits:
 
-- **Attempt 1:** Immediate
-- **Attempt 2:** 15 seconds later
-- **Attempt 3:** 30 seconds later
-- **Attempt 4:** 60 seconds later
-- **Attempt 5+:** 60 seconds later
+| Failed attempt | Delay      |
+|----------------|------------|
+| 1              | 15 seconds |
+| 2              | 30 seconds |
+| 3              | 1 minute   |
+| 4              | 2 minutes  |
+| 5              | 5 minutes  |
+| 6              | 10 minutes |
+| 7              | 20 minutes |
+| 8              | 40 minutes |
+| 9              | 1 hour     |
+| 10 and later   | 2 hours    |
 
-Each retry waits longer, preventing overwhelming failed services.
+With the default of 3 attempts, a task retries after 15 and 30 seconds, then fails.
+
+Resuming after `ctx.sleep()` or `ctx.waitForEvent()` does not count as an attempt. Resuming after `ctx.invoke()` does.
 
 ## Max Attempts
 
@@ -101,8 +110,6 @@ If the child exhausts retries, the parent gets an error like:
 ```
 Child execution failed: <child error message>
 ```
-
-The parent is moved to `failed_executions`.
 
 ## What's Next?
 

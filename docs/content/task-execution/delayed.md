@@ -35,7 +35,7 @@ await conductor.invoke(
 );
 ```
 
-If invoked multiple times, only one execution is created.
+Invoking again before it runs replaces the payload and `run_at` of the pending execution instead of creating a second one. See [Deduplication](deduplication.md).
 
 ## Cancellation
 
