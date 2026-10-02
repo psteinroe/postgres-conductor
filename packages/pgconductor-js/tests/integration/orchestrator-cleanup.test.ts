@@ -380,3 +380,85 @@ test("an orchestrator recovered as stale aborts its running handlers and stops",
 	expect(handlerAborted.isSettled).toBe(true);
 	expect(orch.isStopped).toBe(true);
 });
+
+test.each(["stop()", "a shutdown signal"])(
+	"an orchestrator stopped by %s keeps heartbeating until its handlers finish",
+	async (trigger) => {
+		const db = await pool.child();
+		databases.push(db);
+
+		const taskDefinition = defineTask({ name: "slow-task" });
+		const conductor = Conductor.create({
+			sql: db.sql,
+			tasks: TaskSchemas.fromSchema([taskDefinition]),
+			context: {},
+		});
+		await conductor.ensureInstalled();
+
+		const handlerStarted = new Deferred<void>();
+		const finishHandler = new Deferred<void>();
+		const task = conductor.createTask(taskDefinition, { invocable: true }, async () => {
+			handlerStarted.resolve();
+			await finishHandler.promise;
+		});
+
+		await db.client.setFakeTime({ date: new Date("2024-01-01T12:00:00Z") });
+
+		jest.useFakeTimers();
+		const orch = Orchestrator.create({ conductor, tasks: [task] });
+		await orch.start();
+		await conductor.invoke(taskDefinition, {});
+
+		while (!handlerStarted.isSettled) {
+			jest.advanceTimersByTime(1000);
+			await db.sql`select 1`;
+		}
+
+		if (trigger === "stop()") {
+			orch.stop();
+		} else {
+			await db.sql`
+				insert into pgconductor._private_orchestrator_signals (orchestrator_id, type, payload)
+				values (${orch.info.id}::uuid, 'shutdown', '{}'::jsonb)
+			`;
+		}
+		for (let seconds = 0; seconds < 30; seconds++) {
+			jest.advanceTimersByTime(1000);
+			await db.sql`select 1`;
+		}
+		expect(orch.isShuttingDown).toBe(true);
+
+		await db.client.setFakeTime({ date: new Date("2024-01-01T12:10:00Z") });
+		for (let seconds = 0; seconds < 60; seconds++) {
+			jest.advanceTimersByTime(1000);
+			await db.sql`select 1`;
+		}
+
+		const [row] = await db.sql<{ last_heartbeat_at: Date }[]>`
+			select last_heartbeat_at from pgconductor._private_orchestrators where id = ${orch.info.id}::uuid
+		`;
+		expect(row?.last_heartbeat_at).toEqual(new Date("2024-01-01T12:10:00Z"));
+
+		await db.client.recoverStaleOrchestrators({ maxAge: "5 minutes" });
+		const locked = await db.sql`
+			select id from pgconductor._private_executions
+			where task_key = 'slow-task' and locked_by = ${orch.info.id}::uuid
+		`;
+		expect(locked.length).toBe(1);
+
+		finishHandler.resolve();
+		await orch.stopped;
+
+		const rows = await db.sql`
+			select id from pgconductor._private_orchestrators where id = ${orch.info.id}::uuid
+		`;
+		expect(rows.length).toBe(0);
+		const [execution] = await db.sql<{ completed: boolean }[]>`
+			select completed_at is not null as completed from pgconductor._private_executions
+			where task_key = 'slow-task'
+		`;
+		expect(execution?.completed).toBe(true);
+
+		await db.client.clearFakeTime();
+	},
+);
