@@ -282,11 +282,6 @@ export class DatabaseClient {
 					throw err;
 				}
 
-				if (options?.signal?.aborted) {
-					logger.warn(`Aborting retries due to signal${label}`);
-					throw err;
-				}
-
 				logger.warn(`Retryable database error${label}: ${err.message}`);
 
 				attempt += 1;
@@ -296,7 +291,13 @@ export class DatabaseClient {
 				);
 				await waitFor(delay, {
 					jitter: delay / 2,
+					signal: options.signal,
 				});
+
+				if (options.signal.aborted) {
+					logger.warn(`Aborting retries due to signal${label}`);
+					throw err;
+				}
 			}
 		}
 	}
@@ -465,10 +466,19 @@ export class DatabaseClient {
 		args: OrchestratorShutdownArgs,
 		opts?: QueryMethodOptions,
 	): Promise<void> {
-		await this.query(() => this.builder.buildOrchestratorShutdown(args), {
-			label: "orchestratorShutdown",
-			...opts,
-		});
+		try {
+			await this.query(() => this.builder.buildOrchestratorShutdown(args), {
+				label: "orchestratorShutdown",
+				expectError: true,
+				...opts,
+			});
+		} catch (err) {
+			const pgErr = err as { code?: string };
+			if (pgErr?.code === "42P01") {
+				return;
+			}
+			throw err;
+		}
 	}
 
 	async getExecutions(args: GetExecutionsArgs, opts?: QueryMethodOptions): Promise<Execution[]> {

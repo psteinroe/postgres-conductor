@@ -104,4 +104,48 @@ describe("SchemaManager", () => {
 			spy.mockRestore();
 		}
 	}, 30000);
+
+	test("aborting stops waiting for older orchestrators to exit", async () => {
+		const db = await pool.child();
+		databases.push(db);
+		const client = new DatabaseClient({ sql: db.sql, logger: new DefaultLogger() });
+		await new SchemaManager(client).ensureLatest(new AbortController().signal);
+
+		await client.orchestratorHeartbeat({
+			orchestratorId: crypto.randomUUID(),
+			version: "old",
+			migrationNumber: 1,
+		});
+
+		const getMigration = MigrationStore.prototype.getMigration;
+		const spy = spyOn(MigrationStore.prototype, "getMigration").mockImplementation(function (
+			this: MigrationStore,
+			version: number,
+		) {
+			if (version === 2) {
+				return { version, name: "breaking", sql: "select 1", breaking: true };
+			}
+			return getMigration.call(this, version);
+		});
+
+		try {
+			const controller = new AbortController();
+			const migrating = new SchemaManager(client).ensureLatest(controller.signal);
+			migrating.catch(() => {});
+			await waitFor(300);
+			controller.abort();
+
+			const state = await Promise.race([
+				migrating.then(
+					() => "migrated",
+					() => "aborted",
+				),
+				waitFor(1000).then(() => "waiting"),
+			]);
+			expect(state).toBe("aborted");
+			expect(await client.getInstalledMigrationNumber()).toBe(1);
+		} finally {
+			spy.mockRestore();
+		}
+	}, 30000);
 });
