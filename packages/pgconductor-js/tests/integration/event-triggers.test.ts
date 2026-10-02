@@ -66,8 +66,7 @@ describe("Event Triggers - Custom Events", () => {
 		// Emit event
 		await conductor.emit("user.created", { userId: "user-123", email: "test@example.com" });
 
-		// Wait for task to execute
-		await new Promise((r) => setTimeout(r, 300));
+		await waitForCondition(() => taskFn.mock.calls.length > 0);
 
 		expect(taskFn).toHaveBeenCalledTimes(1);
 
@@ -131,8 +130,7 @@ describe("Event Triggers - Custom Events", () => {
 			plan: "pro",
 		});
 
-		// Wait for task to execute
-		await new Promise((r) => setTimeout(r, 300));
+		await waitForCondition(() => taskFn.mock.calls.length > 0);
 
 		expect(taskFn).toHaveBeenCalledTimes(1);
 
@@ -186,8 +184,7 @@ describe("Event Triggers - Custom Events", () => {
 		// Emit large order (should trigger)
 		await conductor.emit("order.placed", { orderId: "order-2", total: 1500 });
 
-		// Wait for tasks to execute
-		await new Promise((r) => setTimeout(r, 300));
+		await waitForCondition(() => taskFn.mock.calls.length > 0);
 
 		// Should only be called once (for large order)
 		expect(taskFn).toHaveBeenCalledTimes(1);
@@ -247,8 +244,7 @@ describe("Event Triggers - Custom Events", () => {
 		// Emit event once
 		await conductor.emit("user.created.multiple", { userId: "user-123" });
 
-		// Wait for both tasks to execute
-		await new Promise((r) => setTimeout(r, 300));
+		await waitForCondition(() => task1Fn.mock.calls.length > 0 && task2Fn.mock.calls.length > 0);
 
 		// Both tasks should be triggered
 		expect(task1Fn).toHaveBeenCalledTimes(1);
