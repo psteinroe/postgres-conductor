@@ -761,40 +761,52 @@ declare
   v_queue text;
   v_descendant_ids uuid[];
   v_ancestor_ids uuid[];
+  v_locked_ids uuid[];
   v_rows_affected integer;
 begin
   -- a waiting execution is cancelled with the executions it waits on, and
-  -- fails the executions waiting on it
-  with recursive descendants as (
-    select e.waiting_on_execution_id as id, 1 as depth
-    from pgconductor._private_executions e
-    where e.id = p_execution_id and e.waiting_on_execution_id is not null
-    union all
-    select e.waiting_on_execution_id, d.depth + 1
-    from descendants d
-    join pgconductor._private_executions e on e.id = d.id
-    where e.waiting_on_execution_id is not null
-  )
-  select array_agg(id order by depth desc) into v_descendant_ids from descendants;
+  -- fails the executions waiting on it. the graph may change while we wait for
+  -- locks, so it is read again after locking. a changed graph releases the
+  -- stale locks by rolling back, then locks the new graph children first.
+  loop
+    begin
+      perform 1
+      from unnest(v_locked_ids) with ordinality as chain(id, position)
+      join pgconductor._private_executions e on e.id = chain.id
+      order by chain.position
+      for update of e;
 
-  with recursive ancestors as (
-    select e.id, 1 as depth
-    from pgconductor._private_executions e
-    where e.waiting_on_execution_id = p_execution_id and e.locked_by is null
-    union all
-    select e.id, a.depth + 1
-    from ancestors a
-    join pgconductor._private_executions e on e.waiting_on_execution_id = a.id
-    where e.locked_by is null
-  )
-  select array_agg(id order by depth) into v_ancestor_ids from ancestors;
+      with recursive descendants as (
+        select e.waiting_on_execution_id as id, 1 as depth
+        from pgconductor._private_executions e
+        where e.id = p_execution_id and e.waiting_on_execution_id is not null
+        union all
+        select e.waiting_on_execution_id, d.depth + 1
+        from descendants d
+        join pgconductor._private_executions e on e.id = d.id
+        where e.waiting_on_execution_id is not null
+      )
+      select array_agg(id order by depth desc) into v_descendant_ids from descendants;
 
-  -- lock children before parents, like returning execution results does
-  perform 1
-  from unnest(v_descendant_ids || p_execution_id || v_ancestor_ids) with ordinality as chain(id, position)
-  join pgconductor._private_executions e on e.id = chain.id
-  order by chain.position
-  for update of e;
+      with recursive ancestors as (
+        select e.id, 1 as depth
+        from pgconductor._private_executions e
+        where e.waiting_on_execution_id = p_execution_id and e.locked_by is null
+        union all
+        select e.id, a.depth + 1
+        from ancestors a
+        join pgconductor._private_executions e on e.waiting_on_execution_id = a.id
+        where e.locked_by is null
+      )
+      select array_agg(id order by depth) into v_ancestor_ids from ancestors;
+
+      exit when v_locked_ids = v_descendant_ids || p_execution_id || v_ancestor_ids;
+      v_locked_ids := v_descendant_ids || p_execution_id || v_ancestor_ids;
+      raise exception using errcode = 'PGC01';
+    exception when sqlstate 'PGC01' then
+      null;
+    end;
+  end loop;
 
   select locked_by, queue
   into v_orchestrator_id, v_queue

@@ -192,29 +192,14 @@ export class QueryBuilder {
 				delete from pgconductor._private_orchestrators o
 				where o.last_heartbeat_at < (select pgconductor._private_current_time()) - ${maxAge}::interval
 				returning o.id
-			),
-			-- fail cancelled executions from expired orchestrators
-			failed_cancelled as (
-				update pgconductor._private_executions e
-				set
-					failed_at = pgconductor._private_current_time(),
-					locked_by = null,
-					locked_at = null
-				from expired
-				where e.locked_by = expired.id
-					and e.cancelled = true
-					and e.failed_at is null
-					and e.completed_at is null
-				returning e.id
 			)
-			-- unlock remaining (non-cancelled) executions
+			-- cancelled executions are reclaimed and settled like any other result
 			update pgconductor._private_executions e
 			set
 				locked_by = null,
 				locked_at = null
 			from expired
 			where e.locked_by = expired.id
-				and e.cancelled = false
 		`;
 	}
 
@@ -248,29 +233,14 @@ export class QueryBuilder {
 				delete from pgconductor._private_orchestrators
 				where id = ${orchestratorId}::uuid
 				returning id
-			),
-			-- fail cancelled executions from this orchestrator
-			failed_cancelled as (
-				update pgconductor._private_executions e
-				set
-					failed_at = pgconductor._private_current_time(),
-					locked_by = null,
-					locked_at = null
-				from deleted
-				where e.locked_by = deleted.id
-					and e.cancelled = true
-					and e.failed_at is null
-					and e.completed_at is null
-				returning e.id
 			)
-			-- unlock remaining (non-cancelled) executions
+			-- cancelled executions are reclaimed and settled like any other result
 			update pgconductor._private_executions e
 			set
 				locked_by = null,
 				locked_at = null
 			from deleted
 			where e.locked_by = deleted.id
-				and e.cancelled = false
 		`;
 	}
 
@@ -468,14 +438,13 @@ export class QueryBuilder {
 		)`);
 		ctes.push(this.sql`failed_results as (
 			select * from valid_results
-			where status in ('failed', 'permanently_failed')
-				or (status = 'completed' and execution_cancelled)
+			where status in ('failed', 'permanently_failed') or execution_cancelled
 		)`);
 		ctes.push(this.sql`released_results as (
-			select * from valid_results where status = 'released'
+			select * from valid_results where status = 'released' and not execution_cancelled
 		)`);
 		ctes.push(this.sql`invoke_child_data as (
-			select * from valid_results where status = 'invoke_child'
+			select * from valid_results where status = 'invoke_child' and not execution_cancelled
 		)`);
 
 		// A completed child may wake only a parent which is still waiting and is not
@@ -562,24 +531,48 @@ export class QueryBuilder {
 				or r.status = 'permanently_failed'
 				or r.execution_cancelled
 		)`);
-		ctes.push(this.sql`failed_parent_targets as materialized (
-			select p.execution_id as child_id, p.queue as child_queue, p.child_error,
-				p.execution_cancelled as child_cancelled,
-				parent.id as parent_id, parent.queue as parent_queue,
+		// A terminal failure fails every workflow still waiting on it. Ancestors are
+		// locked child first, then the chain is followed again on the locked rows.
+		ctes.push(this.sql`waiting_ancestors as (
+			select parent.id, 1 as depth
+			from permanently_failed_children p
+			join pgconductor._private_executions parent
+				on parent.waiting_on_execution_id = p.execution_id
+			where p.subscription_id is null
+				and parent.completed_at is null and parent.failed_at is null and parent.locked_by is null
+			union all
+			select parent.id, a.depth + 1
+			from waiting_ancestors a
+			join pgconductor._private_executions parent
+				on parent.waiting_on_execution_id = a.id
+			where parent.completed_at is null and parent.failed_at is null and parent.locked_by is null
+		)`);
+		ctes.push(this.sql`locked_ancestors as materialized (
+			select parent.id as parent_id, parent.queue as parent_queue,
+				parent.waiting_on_execution_id,
 				parent.task_key as parent_task_key, parent."group" as parent_group,
 				parent.payload as parent_payload, parent.attempts as parent_attempts,
 				parent.trace_context as parent_trace_context,
 				pt.remove_on_fail_days = 0 as parent_should_remove,
 				pt.dead_letter_queue as parent_dead_letter_queue,
 				pt.dead_letter_task_key as parent_dead_letter_task_key
-			from permanently_failed_children p
-			join pgconductor._private_executions parent
-				on parent.waiting_on_execution_id = p.execution_id
+			from waiting_ancestors a
+			join pgconductor._private_executions parent on parent.id = a.id
 			join pgconductor._private_tasks pt
 				on pt.key = parent.task_key and pt.queue = parent.queue
-			where p.subscription_id is null
-				and parent.completed_at is null and parent.failed_at is null and parent.locked_by is null
+			where parent.completed_at is null and parent.failed_at is null and parent.locked_by is null
+			order by a.depth
 			for update of parent
+		)`);
+		ctes.push(this.sql`failed_parent_targets as (
+			select p.child_error, p.execution_cancelled as child_cancelled, a.*
+			from permanently_failed_children p
+			join locked_ancestors a on a.waiting_on_execution_id = p.execution_id
+			where p.subscription_id is null
+			union all
+			select f.child_error, f.child_cancelled, a.*
+			from failed_parent_targets f
+			join locked_ancestors a on a.waiting_on_execution_id = f.parent_id
 		)`);
 		ctes.push(this.sql`terminal_failures as materialized (
 			select p.execution_id, p.queue, p.task_key, p.execution_group, p.execution_payload as payload,
@@ -720,7 +713,7 @@ export class QueryBuilder {
 		)`);
 
 		const combined = ctes.reduce((acc, cte, i) => (i === 0 ? cte : this.sql`${acc}, ${cte}`));
-		return this.sql<[{ result: number }]>`with ${combined} select 1 as result`;
+		return this.sql<[{ result: number }]>`with recursive ${combined} select 1 as result`;
 	}
 	buildRemoveExecutions({
 		queueName,
@@ -1082,19 +1075,23 @@ export class QueryBuilder {
 		orchestratorId,
 	}: ClearWaitingStateArgs): PendingQuery<RowList<Row[]>> {
 		return this.sql<RowList<Row[]>>`
-			with claimed_parent as materialized (
-				select e.id, e.queue, e.waiting_on_execution_id
+			-- Lock the child before the parent, like cancellation and settlement do
+			with child_info as materialized (
+				select c.id as child_id, c.locked_by as child_locked_by
+				from pgconductor._private_executions p
+				join pgconductor._private_executions c on c.id = p.waiting_on_execution_id
+				where p.id = ${executionId}::uuid
+					and p.queue = ${queue}::text
+					and p.locked_by = ${orchestratorId}::uuid
+				for update of c
+			), claimed_parent as materialized (
+				select e.id, e.queue, ci.child_id, ci.child_locked_by
 				from pgconductor._private_executions e
+				left join child_info ci on ci.child_id = e.waiting_on_execution_id
 				where e.id = ${executionId}::uuid
 					and e.queue = ${queue}::text
 					and e.locked_by = ${orchestratorId}::uuid
-				for update
-			), child_info as (
-				select
-					p.waiting_on_execution_id as child_id,
-					c.locked_by as child_locked_by
-				from claimed_parent p
-				left join pgconductor._private_executions c on c.id = p.waiting_on_execution_id
+				for update of e
 			),
 			-- Fail pending (not locked) children immediately
 			failed_pending_child as (
@@ -1104,9 +1101,9 @@ export class QueryBuilder {
 					last_error = 'Cancelled: parent timed out',
 					locked_by = null,
 					locked_at = null
-				from child_info ci
-				where e.id = ci.child_id
-					and ci.child_locked_by is null   -- not currently executing
+				from claimed_parent p
+				where e.id = p.child_id
+					and p.child_locked_by is null   -- not currently executing
 					and e.completed_at is null
 					and e.failed_at is null
 				returning e.id
@@ -1115,9 +1112,9 @@ export class QueryBuilder {
 			signaled_executing_child as (
 				update pgconductor._private_executions e
 				set cancelled = true
-				from child_info ci
-				where e.id = ci.child_id
-					and ci.child_locked_by is not null  -- currently executing
+				from claimed_parent p
+				where e.id = p.child_id
+					and p.child_locked_by is not null  -- currently executing
 					and e.completed_at is null
 					and e.failed_at is null
 				returning e.id

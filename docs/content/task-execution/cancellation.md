@@ -30,7 +30,12 @@ console.log(cancelled); // true if cancelled, false if already completed
 
 - `ctx.signal` is aborted
 - Task should check signal and exit gracefully
-- Execution is marked as cancelled
+- Execution is marked as cancelled and fails once the task stops, even if it was about to sleep or invoke a child
+
+**Workflows:**
+
+- Cancelling an execution also cancels the executions it is waiting on
+- Every workflow waiting on a cancelled execution fails with "Child execution failed: <reason>"
 
 ## Graceful Cancellation
 
