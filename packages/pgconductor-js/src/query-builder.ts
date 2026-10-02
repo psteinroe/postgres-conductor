@@ -190,7 +190,7 @@ export class QueryBuilder {
 		return this.sql`
 			with expired as (
 				delete from pgconductor._private_orchestrators o
-				where o.last_heartbeat_at < pgconductor._private_current_time() - ${maxAge}::interval
+				where o.last_heartbeat_at < (select pgconductor._private_current_time()) - ${maxAge}::interval
 				returning o.id
 			),
 			-- fail cancelled executions from expired orchestrators
@@ -289,12 +289,14 @@ export class QueryBuilder {
 					where t.queue = ${queueName}::text
 						and (t.concurrency_limit is not null or t.group_concurrency_limit is not null)
 				) as enabled
+			), claim_clock as materialized (
+				select pgconductor._private_current_time() as now_ts
 			), unconstrained_candidates as (
 				select e.id
 				from pgconductor._private_executions e
 				where not (select enabled from task_limits)
 					and e.queue = ${queueName}::text
-					and e.run_at <= pgconductor._private_current_time()
+					and e.run_at <= (select now_ts from claim_clock)
 					and e.is_available = true
 					${filterTaskKeys?.length ? this.sql`and not (e.task_key = any(${this.sql.array(filterTaskKeys)}::text[]))` : this.sql``}
 				order by e.priority asc, e.run_at asc, e.created_at asc, e.id asc
@@ -318,48 +320,51 @@ export class QueryBuilder {
 				where e."group" is not null
 				group by e.task_key, e."group"
 			),
-			-- A full task makes the candidate branch a no-op instead of scanning its backlog.
+			-- Full tasks are excluded here so their backlog is never scanned.
 			available_tasks as materialized (
 				select
 					t.key,
-					t.queue,
 					t.concurrency_limit,
 					t.group_concurrency_limit,
 					coalesce(at.active_count, 0) as active_task_count
 				from pgconductor._private_tasks t
 				left join active_tasks at on at.task_key = t.key
-				where t.queue = ${queueName}::text
+				where (select enabled from task_limits)
+					and t.queue = ${queueName}::text
 					and (t.concurrency_limit is null
 						or coalesce(at.active_count, 0) < t.concurrency_limit)
+					${filterTaskKeys?.length ? this.sql`and not (t.key = any(${this.sql.array(filterTaskKeys)}::text[]))` : this.sql``}
 			), candidates as (
-				select
-					e.id,
-					e.task_key,
-					e.queue,
-					e.priority,
-					e.run_at,
-					e.created_at,
-					e."group",
-					t.concurrency_limit,
-					t.group_concurrency_limit,
-					t.active_task_count,
-					coalesce(ag.active_count, 0) as active_group_count
-				from pgconductor._private_executions e
-				join available_tasks t on t.key = e.task_key and t.queue = e.queue
-				left join active_groups ag on ag.task_key = e.task_key and ag."group" = e."group"
-				where (select enabled from task_limits)
-					and (select exists (select 1 from available_tasks))
-					and e.queue = ${queueName}::text
-					and e.run_at <= pgconductor._private_current_time()
-					and e.is_available = true
-					and (t.group_concurrency_limit is null
-						or e."group" is null
-						or coalesce(ag.active_count, 0) < t.group_concurrency_limit)
-					${filterTaskKeys?.length ? this.sql`and not (e.task_key = any(${this.sql.array(filterTaskKeys)}::text[]))` : this.sql``}
+				select c.*
+				from available_tasks t
+				cross join lateral (
+					select
+						e.id,
+						e.task_key,
+						e.priority,
+						e.run_at,
+						e.created_at,
+						e."group",
+						t.concurrency_limit,
+						t.group_concurrency_limit,
+						t.active_task_count,
+						coalesce(ag.active_count, 0) as active_group_count
+					from pgconductor._private_executions e
+					left join active_groups ag on ag.task_key = e.task_key and ag."group" = e."group"
+					where e.queue = ${queueName}::text
+						and e.task_key = t.key
+						and e.run_at <= (select now_ts from claim_clock)
+						and e.is_available = true
+						and (t.group_concurrency_limit is null
+							or e."group" is null
+							or coalesce(ag.active_count, 0) < t.group_concurrency_limit)
+					order by e.priority asc, e.run_at asc, e.created_at asc, e.id asc
+					limit least(${batchSize}::integer, t.concurrency_limit - t.active_task_count)
+					for update of e skip locked
+				) c
 				-- Bound both window functions to one locked candidate batch.
-				order by e.priority asc, e.run_at asc, e.created_at asc, e.id asc
+				order by c.priority asc, c.run_at asc, c.created_at asc, c.id asc
 				limit ${batchSize}::integer
-				for update of e skip locked
 			), group_ranked as (
 				select c.*,
 					row_number() over (
@@ -391,7 +396,7 @@ export class QueryBuilder {
 				set
 					attempts = e.attempts + 1,
 					locked_by = ${orchestratorId}::uuid,
-					locked_at = pgconductor._private_current_time()
+					locked_at = (select now_ts from claim_clock)
 				from claimable c
 				where e.id = c.id and e.queue = ${queueName}::text and e.is_available = true
 				returning e.id, e.task_key, e.queue, e.payload, e.waiting_on_execution_id,
@@ -587,7 +592,7 @@ export class QueryBuilder {
 				p.parent_dead_letter_queue, p.parent_dead_letter_task_key, p.parent_trace_context
 			from failed_parent_targets p
 		)`);
-		ctes.push(this.sql`dead_lettered as materialized (
+		ctes.push(this.sql`dead_lettered as (
 			insert into pgconductor._private_executions (task_key, queue, payload, run_at, "group", trace_context, dead_letter)
 			select
 				coalesce(p.dead_letter_task_key, p.task_key),
@@ -606,8 +611,7 @@ export class QueryBuilder {
 			where p.dead_letter_queue is not null
 				and not p.execution_cancelled
 			on conflict ((dead_letter->>'sourceExecutionId'), queue, task_key) where dead_letter is not null
-				do update set dead_letter = _private_executions.dead_letter
-			returning (dead_letter->>'sourceExecutionId')::uuid as source_execution_id
+				do nothing
 		)`);
 		ctes.push(this.sql`failed_updates as (
 			select p.execution_id as target_id, p.queue, p.child_error, true as is_child
@@ -622,20 +626,10 @@ export class QueryBuilder {
 			select p.execution_id as target_id, p.queue, ${orchestratorId}::uuid as expected_locked_by
 			from permanently_failed_children p
 			where p.should_remove is true
-				and (
-					p.execution_cancelled
-					or p.dead_letter_queue is null
-					or exists (select 1 from dead_lettered d where d.source_execution_id = p.execution_id)
-				)
 			union all
 			select p.parent_id, p.parent_queue, null::uuid
 			from failed_parent_targets p
 			where p.parent_should_remove is true
-				and (
-					p.child_cancelled
-					or p.parent_dead_letter_queue is null
-					or exists (select 1 from dead_lettered d where d.source_execution_id = p.parent_id)
-				)
 		)`);
 		ctes.push(this.sql`deleted_failed as (
 			delete from pgconductor._private_executions e
@@ -688,7 +682,6 @@ export class QueryBuilder {
 			select execution_id, queue, step_key, null::jsonb from released_results
 			where step_key is not null
 			on conflict (execution_id, key) do nothing
-			returning id
 		)`);
 		ctes.push(this.sql`updated_released as (
 			update pgconductor._private_executions e
@@ -1031,7 +1024,7 @@ export class QueryBuilder {
 					select e.id, e.queue, ${key}::text, ${this.sql.json(result)}::jsonb
 					from claimed_execution e
 					on conflict (execution_id, key) do nothing
-					returning id
+					returning 1
 				)
 				update pgconductor._private_executions e
 				set run_at = pgconductor._private_current_time() + (${runAtMs}::integer || ' milliseconds')::interval
