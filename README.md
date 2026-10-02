@@ -99,6 +99,7 @@ const orchestrator = Orchestrator.create({
 await orchestrator.start();
 console.log("Worker running. Press Ctrl+C to stop.");
 await orchestrator.stopped;
+await conductor.close();
 ```
 
 ### Invoke the Task

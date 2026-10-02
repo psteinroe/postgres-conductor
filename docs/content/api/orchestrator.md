@@ -69,6 +69,7 @@ await orchestrator.stop();
 - Releases locked executions
 - Cleans up database records
 - Shuts down workers
+- Leaves the database connection open, so the conductor stays usable and the orchestrator can be started again (see [`conductor.close()`](conductor.md#conductorclose))
 
 ## orchestrator.drain()
 
@@ -102,7 +103,7 @@ await orchestrator.start();
 // Wait for shutdown signal
 await orchestrator.stopped;
 
-await sql.end();
+await conductor.close();
 ```
 
 ## orchestrator.info

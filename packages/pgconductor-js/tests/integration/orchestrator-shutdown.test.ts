@@ -402,3 +402,37 @@ test("stop() waits for a running batch handler and saves its results", async () 
 	`;
 	expect(executions.map((execution) => execution.completed)).toEqual([true, true]);
 });
+
+test("stop() leaves a conductor with an owned connection usable until close()", async () => {
+	const db = await pool.child();
+	databases.push(db);
+
+	const conductor = Conductor.create({
+		connectionString: db.url,
+		tasks: TaskSchemas.fromSchema([defineTask({ name: "noop" })]),
+		context: {},
+	});
+
+	const orch = Orchestrator.create({
+		conductor,
+		tasks: [conductor.createTask({ name: "noop" }, { invocable: true }, async () => {})],
+	});
+
+	await orch.start();
+	await orch.stop();
+
+	const id = await conductor.invoke({ name: "noop" }, {});
+
+	await orch.drain();
+
+	const [execution] = await db.sql<{ completed: boolean }[]>`
+		select completed_at is not null as completed
+		from pgconductor._private_executions
+		where id = ${id}
+	`;
+	expect(execution?.completed).toBe(true);
+
+	await conductor.close();
+
+	expect(conductor.invoke({ name: "noop" }, {})).rejects.toThrow();
+});

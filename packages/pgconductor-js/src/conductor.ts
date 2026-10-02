@@ -166,6 +166,14 @@ export class Conductor<
 		await schemaManager.ensureLatest(signal);
 	}
 
+	/**
+	 * Close the connection pool created from `connectionString`.
+	 * A user-supplied `sql` instance is left open.
+	 */
+	async close(): Promise<void> {
+		await this.db.close();
+	}
+
 	createTask<
 		const TDef extends {
 			readonly name: string;
