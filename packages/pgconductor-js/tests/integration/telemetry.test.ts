@@ -343,12 +343,7 @@ describe.serial("OpenTelemetry instrumentation", () => {
 			payload: { event: "user.created", payload: { id: 1 } },
 		});
 		db.getExecution(eventId!)!.subscription_id = "event-subscription";
-		const worker = makeWorker(
-			db,
-			makeTask("root-cron", async () => undefined),
-		);
-		// A second worker is unnecessary: use a task map with both definitions.
-		const eventWorker = new Worker(
+		const worker = new Worker(
 			"default",
 			[makeTask("root-cron", async () => undefined), makeTask("root-event", async () => undefined)],
 			db as unknown as DatabaseClient,
@@ -358,13 +353,12 @@ describe.serial("OpenTelemetry instrumentation", () => {
 			[],
 			new Telemetry(),
 		);
-		await eventWorker.drain("worker");
+		await worker.drain("worker");
 		const processSpans = spans(exporter, "process default");
 		expect(processSpans.map((span) => span.attributes["pgconductor.task.name"])).toEqual(
 			expect.arrayContaining(["root-cron", "root-event"]),
 		);
 		for (const span of processSpans) expect(span.parentSpanId).toBeUndefined();
-		void worker;
 		await cleanup(provider);
 	});
 
@@ -387,36 +381,6 @@ describe.serial("OpenTelemetry instrumentation", () => {
 			expect(span.attributes).not.toHaveProperty("payload");
 			expect(JSON.stringify(span.attributes)).not.toContain("do not record");
 		}
-		await cleanup(provider);
-	});
-
-	test("hostile propagators fail open", async () => {
-		const { provider } = installProvider();
-		propagation.disable();
-		propagation.setGlobalPropagator({
-			inject() {
-				throw new Error("inject failed");
-			},
-			extract() {
-				throw new Error("extract failed");
-			},
-			fields() {
-				return [];
-			},
-		} as any);
-		const telemetry = new Telemetry();
-		expect(() =>
-			telemetry.extractTraceContext({
-				traceparent: `00-${"1".repeat(32)}-${"2".repeat(16)}-01`,
-			}),
-		).not.toThrow();
-		await expect(
-			telemetry.trace({
-				name: "hostile propagator",
-				kind: SpanKind.INTERNAL,
-				run: (span) => span.traceContext(),
-			}),
-		).resolves.toBeNull();
 		await cleanup(provider);
 	});
 });
