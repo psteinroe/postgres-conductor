@@ -143,6 +143,7 @@ Tables live in the `pgconductor` schema with a `_private_` prefix (`_private_exe
 **Orchestrator** (`orchestrator.ts`)
 - Manages multiple workers, plus the internal event-dispatch worker when events are configured
 - Handles startup/shutdown coordination and heartbeats
+- Heartbeats keep running while workers drain after shutdown and stop in cleanup, so a slow handler is not recovered as stale
 - Every 8th heartbeat recovers stale orchestrators (unlocks their executions); an orchestrator whose row was recovered stops itself when its next heartbeat has to re-insert the row
 - Provides `stopped` promise for graceful shutdown
 - Runs the internal event dispatch worker only when the conductor has `events` configured

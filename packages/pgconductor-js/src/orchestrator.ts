@@ -47,6 +47,7 @@ export class Orchestrator {
 	private readonly logger: Logger;
 
 	private heartbeats: Promise<void> | null = null;
+	private heartbeatController: AbortController | null = null;
 	private _stopDeferred: Deferred<void> | null = null;
 	private _startDeferred: Deferred<void> | null = null;
 	private _abortController: AbortController | null = null;
@@ -225,7 +226,8 @@ export class Orchestrator {
 					throw new Error("Received shutdown signal during startup");
 				}
 
-				this.heartbeats = this.runHeartbeats(this.abortController);
+				this.heartbeatController = new AbortController();
+				this.heartbeats = this.runHeartbeats(this.heartbeatController.signal);
 
 				const workerLifecycles: Promise<void>[] = [];
 				for (const worker of this.workers) {
@@ -286,8 +288,8 @@ export class Orchestrator {
 
 	/**
 	 * Stop the orchestrator gracefully:
-	 * 1. Stop heartbeat
-	 * 2. Stop all workers
+	 * 1. Stop all workers
+	 * 2. Stop heartbeat
 	 * 3. Clean up resources
 	 *
 	 * Waits until the orchestrator is fully stopped
@@ -312,16 +314,16 @@ export class Orchestrator {
 	}
 
 	/**
-	 * Run the heartbeat loop until the orchestrator aborts:
+	 * Run the heartbeat loop until cleanup stops it, so the orchestrator stays live while workers drain:
 	 * - Updates last_heartbeat_at every heartbeat
 	 * - Checks for version mismatch shutdowns from database
 	 * - Stops when another orchestrator recovered us as stale
 	 * - Recovers stale orchestrators periodically (every 8th heartbeat)
 	 */
-	private async runHeartbeats(abortController: AbortController): Promise<void> {
+	private async runHeartbeats(signal: AbortSignal): Promise<void> {
 		for (let heartbeatCount = 1; ; heartbeatCount++) {
-			await waitFor(HEARTBEAT_INTERVAL_MS, { signal: abortController.signal });
-			if (abortController.signal.aborted) return;
+			await waitFor(HEARTBEAT_INTERVAL_MS, { signal });
+			if (signal.aborted) return;
 
 			try {
 				if (heartbeatCount % 8 === 0) {
@@ -329,7 +331,7 @@ export class Orchestrator {
 						{
 							maxAge: `${STALE_ORCHESTRATOR_MAX_AGE_MS} milliseconds`,
 						},
-						{ signal: abortController.signal },
+						{ signal },
 					);
 				}
 
@@ -340,13 +342,13 @@ export class Orchestrator {
 						version: PACKAGE_VERSION,
 						migrationNumber: this.migrationStore.getLatestMigrationNumber(),
 					},
-					{ signal: abortController.signal },
+					{ signal },
 				);
 
 				// Our row was gone, so another orchestrator recovered our executions
 				if (signals.some((s) => s.registered)) {
 					this.logger.warn("Orchestrator was recovered as stale, shutting down");
-					abortController.abort();
+					this.abortController.abort();
 					return;
 				}
 
@@ -356,11 +358,11 @@ export class Orchestrator {
 
 					switch (signal.signal_type) {
 						case "shutdown":
-							if (!abortController.signal.aborted) {
+							if (!this.isShuttingDown) {
 								this.logger.info(
 									`Received shutdown signal: ${signal.signal_payload?.reason || "unknown"}`,
 								);
-								abortController.abort();
+								this.abortController.abort();
 							}
 							break;
 
@@ -475,9 +477,10 @@ export class Orchestrator {
 	 */
 	private async cleanup(): Promise<void> {
 		// Stop heartbeat and wait for one in flight
-		this.abortController.abort();
+		this.heartbeatController?.abort();
 		await this.heartbeats;
 		this.heartbeats = null;
+		this.heartbeatController = null;
 
 		// Remove ourselves from orchestrators table and release locked executions
 		const cleanupSignal = new AbortController().signal;
