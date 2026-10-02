@@ -470,8 +470,8 @@ begin
     and cron_expression is not null
     and is_available
     and dedupe_key like 'scheduled::%'
-    and (task_key, split_part(dedupe_key, '::', 2)) not in (
-      select spec.task_key, split_part(spec.dedupe_key, '::', 2)
+    and (task_key, split_part(dedupe_key, '::', 2), cron_expression) not in (
+      select spec.task_key, split_part(spec.dedupe_key, '::', 2), spec.cron_expression
       from unnest(p_cron_schedules) as spec
       where spec.dedupe_key is not null and spec.dedupe_key like 'scheduled::%'
     );
@@ -485,8 +485,8 @@ begin
     and completed_at is null
     and failed_at is null
     and cancelled = false
-    and (task_key, split_part(dedupe_key, '::', 2)) not in (
-      select spec.task_key, split_part(spec.dedupe_key, '::', 2)
+    and (task_key, split_part(dedupe_key, '::', 2), cron_expression) not in (
+      select spec.task_key, split_part(spec.dedupe_key, '::', 2), spec.cron_expression
       from unnest(p_cron_schedules) as spec
       where spec.dedupe_key is not null and spec.dedupe_key like 'scheduled::%'
     );

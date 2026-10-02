@@ -147,6 +147,7 @@ Tables live in the `pgconductor` schema with a `_private_` prefix (`_private_exe
 - Every 8th heartbeat recovers stale orchestrators (unlocks their executions); an orchestrator whose row was recovered stops itself when its next heartbeat has to re-insert the row
 - Provides `stopped` promise for graceful shutdown
 - Runs the internal event dispatch worker only when the conductor has `events` configured
+- One queue = one codebase: every orchestrator polling a queue runs the same task set, so worker registration owns the whole queue and replaces its cron schedules and trigger subscriptions
 
 **DatabaseClient** (`database-client.ts`)
 - All database access goes through this interface

@@ -21,6 +21,8 @@ Cron expressions are evaluated in UTC, regardless of the timezone of the worker 
 
 The orchestrator automatically schedules the next execution after each run. If the task fails and retries, it still reschedules the next execution.
 
+When a worker starts, it replaces its queue's static schedules with the ones its tasks declare: a changed expression replaces the pending execution, and removed triggers and tasks are unscheduled. Every orchestrator polling a queue must therefore run the same task set (see [One Queue, One Codebase](../scaling/horizontal.md#one-queue-one-codebase)). During a rolling deploy, an old replica that restarts removes the new version's schedules until a new replica starts again.
+
 ## Multiple Schedules & Event Handling
 
 A task can have multiple cron schedules and be invocable. Use `event.name` to distinguish between triggers:

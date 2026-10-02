@@ -70,6 +70,14 @@ const orchestrator = Orchestrator.create({
 - Workers on different queues don't compete for locks
 - You can scale each queue independently based on its workload
 
+## One Queue, One Codebase
+
+Every orchestrator that polls a queue must run the same task set. Replicas of one service share its queues, and different versions only overlap briefly during a rolling deploy. Separate services must use separate queues, the same constraint as Temporal task queues.
+
+The rule exists because registration owns the whole queue. When a worker starts, it registers its tasks and replaces the queue's cron schedules and event subscriptions with the ones it declares. Schedules and subscriptions of tasks it does not run are removed, so a task deleted from the codebase is cleaned up by the next deploy. Two services sharing a queue would remove each other's schedules and subscriptions on every start.
+
+**Rolling deploys:** while old and new replicas overlap, an old replica that restarts registers the old task set again. That removes the cron schedules and event subscriptions that only the new version declares, until a replica of the new version starts again. If that happens after the rollout has finished, restart one replica of the new version.
+
 ## When to Scale Horizontally
 
 **Scale up (more processes) when:**
