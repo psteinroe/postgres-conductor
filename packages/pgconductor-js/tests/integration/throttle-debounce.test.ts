@@ -68,7 +68,7 @@ describe("Throttle and Debounce Integration", () => {
 
 		// Verify only one execution exists
 		const executions = await db.sql`
-			select * from pgconductor.executions_default
+			select * from pgconductor._private_executions
 			where task_key = 'test-task'
 		`;
 
@@ -131,7 +131,7 @@ describe("Throttle and Debounce Integration", () => {
 
 		// Verify two executions exist
 		const executions = await db.sql`
-			select * from pgconductor.executions_default
+			select * from pgconductor._private_executions
 			where task_key = 'test-task'
 			order by created_at
 		`;
@@ -186,7 +186,7 @@ describe("Throttle and Debounce Integration", () => {
 
 		// All executions for the same task+slot should result in only the last one
 		const executions = await db.sql`
-			select * from pgconductor.executions_default
+			select * from pgconductor._private_executions
 			where task_key = 'test-task'
 		`;
 
@@ -249,7 +249,7 @@ describe("Throttle and Debounce Integration", () => {
 
 		// Verify two executions exist (one per partition)
 		const executions = await db.sql`
-			select * from pgconductor.executions_default
+			select * from pgconductor._private_executions
 			where task_key = 'test-task'
 			order by dedupe_key
 		`;
@@ -324,7 +324,7 @@ describe("Throttle and Debounce Integration", () => {
 
 		// Verify only one execution exists
 		const executions = await db.sql`
-			select * from pgconductor.executions_default
+			select * from pgconductor._private_executions
 			where task_key = 'test-task'
 		`;
 
@@ -397,7 +397,7 @@ describe("Throttle and Debounce Integration", () => {
 
 		// Verify both executions exist
 		const executions = await db.sql`
-			select * from pgconductor.executions_default
+			select * from pgconductor._private_executions
 			where task_key = 'test-task'
 			order by created_at
 		`;
