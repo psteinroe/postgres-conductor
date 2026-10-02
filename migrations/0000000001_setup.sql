@@ -100,6 +100,8 @@ create table pgconductor._private_executions (
     run_at timestamptz default pgconductor._private_current_time() not null,
     locked_at timestamptz,
     locked_by uuid,
+    -- new on every claim, so a late or retried write from an earlier claim cannot touch a newer one
+    claim_token uuid,
     "group" text,
     is_available boolean generated always as (locked_at is null and failed_at is null and completed_at is null) stored not null,
     attempts integer default 0 not null,
@@ -1146,6 +1148,7 @@ create or replace function pgconductor._private_register_event_wait(
     p_queue text,
     p_task_key text,
     p_orchestrator_id uuid,
+    p_claim_token uuid,
     p_event_key text,
     p_step_key text,
     p_required_field_count smallint,
@@ -1170,6 +1173,7 @@ begin
       and execution.queue = p_queue
       and execution.task_key = p_task_key
       and execution.locked_by = p_orchestrator_id
+      and execution.claim_token = p_claim_token
       and execution.completed_at is null
       and execution.failed_at is null
       and not execution.cancelled
