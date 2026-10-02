@@ -518,6 +518,11 @@ export class Worker<
 		const taskAbortController = new TypedAbortController<TaskAbortReasons>();
 		const signal = AbortSignal.any([taskAbortController.signal, this.signal]);
 		this._runningTasks.set(exec.id, taskAbortController);
+		const timeout = task.timeoutMs
+			? setTimeout(() => {
+					taskAbortController.abort({ reason: "timed-out", __pgconductorTaskAborted: true });
+				}, task.timeoutMs)
+			: undefined;
 
 		const abortPromise = new Promise<TaskAbortReasons>((resolve) => {
 			taskAbortController.signal.addEventListener("abort", () => {
@@ -592,6 +597,14 @@ export class Worker<
 							status: "permanently_failed",
 							error: exec.last_error || "Task was cancelled",
 						} as const;
+					case "timed-out":
+						return {
+							execution_id: exec.id,
+							queue: exec.queue,
+							task_key: exec.task_key,
+							status: "failed",
+							error: `Task timed out after ${task.timeoutMs}ms`,
+						} as const;
 					case "suspended":
 						return [];
 					case "released":
@@ -633,6 +646,7 @@ export class Worker<
 				error: coerceError(err).message,
 			} as const;
 		} finally {
+			clearTimeout(timeout);
 			this._runningTasks.delete(exec.id);
 		}
 	}
@@ -662,6 +676,11 @@ export class Worker<
 		});
 
 		const taskAbortController = new TypedAbortController<TaskAbortReasons>();
+		const timeout = task.timeoutMs
+			? setTimeout(() => {
+					taskAbortController.abort({ reason: "timed-out", __pgconductorTaskAborted: true });
+				}, task.timeoutMs)
+			: undefined;
 
 		// Create batch context
 		const batchContext = new BatchTaskContext(
@@ -727,7 +746,10 @@ export class Worker<
 					queue: exec.queue,
 					task_key: taskKey,
 					status: "failed" as const,
-					error: `Task aborted: ${result.reason}`,
+					error:
+						result.reason === "timed-out"
+							? `Task timed out after ${task.timeoutMs}ms`
+							: `Task aborted: ${result.reason}`,
 				}));
 			}
 
@@ -769,6 +791,8 @@ export class Worker<
 				status: "failed" as const,
 				error,
 			}));
+		} finally {
+			clearTimeout(timeout);
 		}
 	}
 

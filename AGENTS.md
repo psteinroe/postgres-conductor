@@ -198,6 +198,7 @@ conductor.createTask(
     name: "my-task",
     queue: "default",            // Queue name (default: "default")
     maxAttempts: 3,              // Max retry attempts before permanent failure (default: 3)
+    timeoutMs: 60000,            // Abort ctx.signal and fail the attempt after this long
     window: ["09:00", "17:00"],  // Time window for execution [start, end]
     concurrency: 10,             // Max concurrent executions of this task
     batch: { size: 10, timeoutMs: 1000 }, // Process executions in batches

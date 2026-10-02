@@ -32,6 +32,7 @@ export type TaskConfiguration<
 	TPayload extends object = object,
 > = TaskIdentifier<TName, TQueue> & {
 	maxAttempts?: number;
+	timeoutMs?: number;
 	window?: [string, string];
 	removeOnComplete?: RetentionSettings;
 	removeOnFail?: RetentionSettings;
@@ -150,6 +151,7 @@ export class Task<
 	public readonly name: Key;
 	public readonly queue: Queue;
 	public readonly maxAttempts?: number;
+	public readonly timeoutMs?: number;
 	public readonly window?: [string, string];
 	public readonly removeOnComplete: RetentionSettings;
 	public readonly removeOnFail: RetentionSettings;
@@ -172,6 +174,7 @@ export class Task<
 		this.queue = (queue || "default") as Queue;
 
 		this.maxAttempts = config.maxAttempts;
+		this.timeoutMs = assert.positiveInteger(config.timeoutMs, "timeoutMs");
 		this.window = config.window;
 		this.removeOnComplete = config.removeOnComplete ?? false;
 		this.removeOnFail = config.removeOnFail ?? false;

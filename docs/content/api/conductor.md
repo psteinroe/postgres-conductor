@@ -56,7 +56,7 @@ Register a task handler:
 
 ```typescript
 const task = conductor.createTask(
-  taskRef,              // { name, queue?, maxAttempts?, window?, removeOnComplete?, removeOnFail? }
+  taskRef,              // { name, queue?, maxAttempts?, timeoutMs?, window?, removeOnComplete?, removeOnFail? }
   triggers,             // Trigger config or array of configs
   handler               // async (event, ctx) => result
 );
@@ -69,6 +69,7 @@ const task = conductor.createTask(
   name: string;                           // Task name (required)
   queue?: string;                         // Queue name (default: "default")
   maxAttempts?: number;                   // Max retry attempts (default: 3)
+  timeoutMs?: number;                     // Fail an attempt that runs longer (default: none)
   concurrency?: number;                   // Max concurrent executions (default: unlimited)
   window?: [string, string];              // Time window (e.g., ["09:00", "17:00"])
   removeOnComplete?: { days: number } | false;  // Retention policy
