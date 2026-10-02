@@ -677,6 +677,58 @@ describe("event pipeline", () => {
 		expect(settled).toEqual({ source_exists: false, destinations: 2 });
 	});
 
+	test("keeps unchanged subscriptions across re-registration", async () => {
+		const db = await database();
+		const unchanged = {
+			taskKey: "pipeline.unchanged",
+			eventKey: "pipeline.redeploy",
+			filter: { kind: ["first"] },
+			payloadFields: ["kind"],
+		};
+		await registerSubscriptions(db, [
+			unchanged,
+			{ taskKey: "pipeline.changed", eventKey: "pipeline.redeploy" },
+		]);
+		const subscriptionIds = () =>
+			db.sql<{ task_key: string; id: string }[]>`
+				select task_key, id from pgconductor._private_custom_event_subscriptions
+				where event_key = 'pipeline.redeploy'
+				order by task_key
+			`;
+		const [changedBefore, unchangedBefore] = await subscriptionIds();
+		const eventId = await db.client.emitEvent({
+			eventKey: "pipeline.redeploy",
+			payload: { kind: "first" },
+		});
+		const orchestratorId = await claimEvent(db, eventId);
+		await db.client.dispatchCustomEvents({ eventIds: [eventId], orchestratorId });
+
+		await registerSubscriptions(db, [
+			unchanged,
+			{ taskKey: "pipeline.changed", eventKey: "pipeline.redeploy", filter: { kind: ["first"] } },
+		]);
+		const [changedAfter, unchangedAfter] = await subscriptionIds();
+		expect(unchangedAfter?.id).toBe(unchangedBefore?.id);
+		expect(changedAfter?.id).not.toBe(changedBefore?.id);
+		const [terms] = await db.sql<{ count: number }[]>`
+			select count(*)::integer as count from pgconductor._private_event_filter_terms
+			where subscription_id = ${unchangedAfter?.id || null}::uuid
+		`;
+		expect(terms?.count).toBe(1);
+
+		await db.client.dispatchCustomEvents({ eventIds: [eventId], orchestratorId });
+		const destinations = await db.sql<{ task_key: string; count: number }[]>`
+			select task_key, count(*)::integer as count from pgconductor._private_executions
+			where parent_execution_id = ${eventId}::uuid and subscription_id is not null
+			group by task_key
+			order by task_key
+		`;
+		expect(destinations.map(({ task_key, count }) => [task_key, count])).toEqual([
+			["pipeline.changed", 2],
+			["pipeline.unchanged", 1],
+		]);
+	});
+
 	test("deduplicates concurrent dispatch against the same subscription", async () => {
 		const db = await database();
 		await registerSubscriptions(db, [
