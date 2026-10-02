@@ -197,6 +197,7 @@ Tables live in the `pgconductor` schema with a `_private_` prefix (`_private_exe
 - Worker registration syncs a queue's trigger subscriptions; ids derive from the definition, so unchanged subscriptions keep their identity. Each trigger filter is compiled once into typed rows in `_private_event_filter_terms` (fields are ANDed, alternatives within a field are ORed)
 - Fan-out is at-least-once: a retried dispatch re-evaluates current subscriptions, and a unique index deduplicates existing deliveries
 - Event waits are `execution_wait` subscriptions keyed by `(execution_id, step_key)`. Dispatch stores the first matching event as the step result and wakes the execution only if it is suspended at that step (`waiting_step_key`); `ctx.subscribe()` registers without suspending, so events matched while the execution runs are kept for the later wait
+- `ctx.waitForAny()` tags its branch subscriptions with `race_step_key`. Dispatch stores a branch event under the branch's own key as usual and wakes an execution suspended at the race key; `_private_register_event_race` picks the winner (earliest stored, then branch order), caches it under the race key and removes all branch subscriptions
 
 ### Task Configuration Options
 

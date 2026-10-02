@@ -92,7 +92,8 @@ when registration commits; earlier events do not satisfy the wait. If the timeou
 recorded for the step key is final.
 
 To wait for an event caused by your own side effect, use `ctx.subscribe()` so the
-subscription is active before the side effect runs.
+subscription is active before the side effect runs. To wait for the first of several
+events, use `ctx.waitForAny()`.
 
 ## ctx.subscribe()
 
@@ -128,6 +129,58 @@ const decision = await subscription.wait({ timeout: "24h" });
 - The subscription is memoized by the step key: retries and resumes reuse it rather than
   creating a new one. `ctx.waitForEvent(stepKey, ...)` with the same key is equivalent to
   `wait()`.
+
+## ctx.waitForAny()
+
+Wait for whichever of several events arrives first, or a timeout:
+
+```typescript
+const winner = await ctx.waitForAny(
+  stepKey: string,
+  branches: Record<string, EventSubscription | { event: EventDefinition, filter?: Filter }>,
+  options?: { timeout?: DurationInput }
+): Promise<{ key: string, event } | { key: "timeout" }>
+```
+
+**Example:**
+
+```typescript
+const decision = await ctx.subscribe("decision", {
+  event: approvalDecided,
+  filter: { approvalId: [approvalId] },
+});
+await ctx.step("post-card", () => postApprovalCard(approvalId));
+
+const winner = await ctx.waitForAny(
+  "approval-or-reply",
+  {
+    decision,
+    reply: { event: threadReplied, filter: { interactionId: [interactionId] } },
+  },
+  { timeout: "24h" },
+);
+
+if (winner.key === "decision") {
+  // winner.event is typed as the approvalDecided event
+} else if (winner.key === "reply") {
+  // winner.event is typed as the threadReplied event
+} else {
+  // winner.key === "timeout"
+}
+```
+
+**Behavior:**
+- A branch is a `ctx.subscribe()` handle or an inline `{ event, filter }` that is subscribed
+  when `waitForAny()` is called. Use a handle when the event is caused by a step that runs
+  before the wait.
+- Exactly one branch wins. A handle that already holds an event wins without suspending. If
+  several do, the one whose event was dispatched first wins, and ties go to the branch listed
+  first. Otherwise the execution suspends until the first matching event.
+- The timeout starts when `waitForAny()` is first called. When it wins, the result is
+  `{ key: "timeout" }` instead of an error. `timeout` cannot be used as a branch key.
+- When the wait settles, every branch subscription is removed. Calling `wait()` on a handle
+  that did not win throws, unless its event arrived before the wait settled.
+- The result is memoized by the step key, so retries and resumes return the same winner.
 
 ## ctx.invoke()
 
