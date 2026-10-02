@@ -6,6 +6,7 @@ import { defineTask } from "../../src/task-definition";
 import { TestDatabasePool } from "../fixtures/test-database";
 import type { TestDatabase } from "../fixtures/test-database";
 import { TaskSchemas } from "../../src/schemas";
+import { waitForCondition } from "../test-utils";
 
 describe("Basic Task Execution", () => {
 	let pool: TestDatabasePool;
@@ -82,5 +83,44 @@ describe("Basic Task Execution", () => {
 
 		expect(executionCount).toBe(1);
 		expect(contextFn).toHaveBeenCalledWith("World");
+	}, 30000);
+
+	test("flushes a single result after a full flush batch", async () => {
+		const db = await pool.child();
+		databases.push(db);
+
+		const conductor = Conductor.create({
+			sql: db.sql,
+			tasks: TaskSchemas.fromSchema([defineTask({ name: "flush-task", payload: z.object({}) })]),
+			context: {},
+		});
+		const task = conductor.createTask({ name: "flush-task" }, { invocable: true }, async () => {});
+		const orchestrator = Orchestrator.create({
+			conductor,
+			tasks: [task],
+			defaultWorker: { pollIntervalMs: 50, flushIntervalMs: 50, flushBatchSize: 2 },
+		});
+		await orchestrator.start();
+
+		const completedCount = async () => {
+			const [{ count }] = await db.sql<[{ count: number }]>`
+				select count(*)::int as count from pgconductor._private_executions
+				where task_key = 'flush-task' and completed_at is not null
+			`;
+			return count;
+		};
+		try {
+			await Promise.all([
+				conductor.invoke({ name: "flush-task" }, {}),
+				conductor.invoke({ name: "flush-task" }, {}),
+			]);
+			await waitForCondition(async () => (await completedCount()) === 2, 5000);
+			await new Promise((r) => setTimeout(r, 200));
+
+			await conductor.invoke({ name: "flush-task" }, {});
+			await waitForCondition(async () => (await completedCount()) === 3, 5000);
+		} finally {
+			await orchestrator.stop();
+		}
 	}, 30000);
 });

@@ -796,15 +796,15 @@ export class Worker<
 		let flushTimer: ReturnType<typeof setTimeout> | null = null;
 
 		const flushNow = async (isCleanup = false) => {
-			if (buffer.count === 0) return;
-
-			const batch = buffer;
-			buffer = new BufferState(orchestratorId);
-
 			if (flushTimer) {
 				clearTimeout(flushTimer);
 				flushTimer = null;
 			}
+
+			if (buffer.count === 0) return;
+
+			const batch = buffer;
+			buffer = new BufferState(orchestratorId);
 
 			try {
 				await this.telemetry.settle({
