@@ -325,12 +325,13 @@ export class Conductor<
 	 * Emit a typed custom event.
 	 * @param event - Event name to emit
 	 * @param payload - Typed event payload
+	 * @param opts.id - Deduplication id: repeating it for the same event name returns the original event ID
 	 * @returns Event ID
 	 */
 	async emit<
 		TName extends EventName<Events>,
 		TDef extends FindEventByIdentifier<Events, TName> = FindEventByIdentifier<Events, TName>,
-	>(event: TName, payload: InferEventPayload<TDef>): Promise<string> {
+	>(event: TName, payload: InferEventPayload<TDef>, opts?: { id?: string }): Promise<string> {
 		payload = await validateEventPayload(this.options.events?.definitions || [], event, payload);
 
 		return this.telemetry.send({
@@ -341,6 +342,7 @@ export class Conductor<
 					eventKey: event,
 					payload: payload as any,
 					traceContext: this.telemetry.traceContext(),
+					dedupeKey: opts?.id,
 				});
 				span?.setAttribute("messaging.message.id", id);
 				return id;

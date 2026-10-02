@@ -28,7 +28,7 @@ export function createEventDispatchTask(db: EventDispatchDatabase) {
 			name: EVENT_DISPATCH_TASK,
 			queue: EVENT_DISPATCH_QUEUE,
 			maxAttempts: 3,
-			removeOnComplete: true,
+			removeOnComplete: { days: 1 },
 			batch: { size: EVENT_DISPATCH_BATCH_SIZE, timeoutMs: 10 },
 		},
 		{ invocable: true },

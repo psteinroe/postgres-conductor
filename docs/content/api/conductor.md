@@ -181,11 +181,16 @@ Emit a typed custom event:
 ```typescript
 await conductor.emit(
   "event-name",
-  { /* event payload */ }
+  { /* event payload */ },
+  options?: { id?: string }
 );
 ```
 
 Returns the event ID. Events trigger tasks with matching event triggers.
+
+`id` deduplicates the emit: repeating it for the same event name returns the original event ID
+without emitting again. Ids are scoped per event name and remembered for 1–2 days after the event
+was dispatched. See [Deduplicating Emits](../crafting-tasks/triggers.md#deduplicating-emits).
 
 See [Task Triggers](../crafting-tasks/triggers.md) for details on event-triggered tasks.
 

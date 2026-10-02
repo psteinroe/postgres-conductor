@@ -283,6 +283,231 @@ describe("event pipeline", () => {
 		expect(sources.map((source) => source.id)).toEqual([eventId]);
 	});
 
+	test("an emit id deduplicates the event per event name", async () => {
+		const db = await database();
+		const first = await db.client.emitEvent({
+			eventKey: "pipeline.deduped",
+			payload: { value: "first" },
+			dedupeKey: "delivery-1",
+		});
+		const repeated = await db.client.emitEvent({
+			eventKey: "pipeline.deduped",
+			payload: { value: "second" },
+			dedupeKey: "delivery-1",
+		});
+		const otherEvent = await db.client.emitEvent({
+			eventKey: "pipeline.deduped-other",
+			payload: {},
+			dedupeKey: "delivery-1",
+		});
+		const [plain] = await db.sql<{ id: string }[]>`
+			select pgconductor.emit_event('pipeline.deduped', '{}'::jsonb, p_dedupe_key := 'delivery-1') as id
+		`;
+
+		expect(repeated).toBe(first);
+		expect(plain?.id).toBe(first);
+		expect(otherEvent).not.toBe(first);
+		const sources = await db.sql<{ id: string; payload: Record<string, unknown> }[]>`
+			select id, payload from pgconductor._private_executions
+			where task_key = ${DISPATCH_TASK}
+			order by id
+		`;
+		expect([...sources]).toEqual([
+			{ id: first, payload: { eventKey: "pipeline.deduped", payload: { value: "first" } } },
+			{ id: otherEvent, payload: { eventKey: "pipeline.deduped-other", payload: {} } },
+		]);
+	});
+
+	test("concurrent emits with the same id store one event", async () => {
+		const db = await database();
+		const firstSql = postgres(db.url, { max: 1 });
+		const secondSql = postgres(db.url, { max: 1 });
+		let releaseFirst = () => {};
+		let markFirstInserted = () => {};
+		const release = new Promise<void>((resolve) => {
+			releaseFirst = resolve;
+		});
+		const firstInserted = new Promise<void>((resolve) => {
+			markFirstInserted = resolve;
+		});
+		const emit = (sql: postgres.Sql) => sql<{ id: string }[]>`
+			select pgconductor.emit_event(
+				'pipeline.raced', '{}'::jsonb, p_dedupe_key := 'delivery-1'
+			) as id
+		`;
+
+		try {
+			const firstTransaction = firstSql.begin(async (transaction) => {
+				const [row] = await emit(transaction);
+				markFirstInserted();
+				await release;
+				return row?.id;
+			});
+			await firstInserted;
+			const second = emit(secondSql).execute();
+			await waitForCondition(() => blocked(db));
+			releaseFirst();
+
+			const [firstId, [secondRow]] = await Promise.all([firstTransaction, second]);
+			expect(secondRow?.id).toBe(firstId);
+			const sources = await db.sql<{ id: string }[]>`
+				select id from pgconductor._private_executions where task_key = ${DISPATCH_TASK}
+			`;
+			expect(sources.map((source) => source.id)).toEqual([secondRow?.id || ""]);
+		} finally {
+			releaseFirst();
+			await Promise.all([firstSql.end(), secondSql.end()]);
+		}
+	});
+
+	test("a repeated emit id triggers tasks and resumes waits once", async () => {
+		const db = await database();
+		const event = defineEvent({
+			name: "pipeline.redelivered",
+			payload: z.object({ value: z.string() }),
+		});
+		const conductor = Conductor.create({
+			sql: db.sql,
+			tasks: TaskSchemas.fromSchema([
+				defineTask({ name: "pipeline.redelivered-listener", payload: z.object({}) }),
+				defineTask({ name: "pipeline.redelivered-waiter" }),
+			]),
+			events: EventSchemas.fromSchema([event]),
+			context: {},
+		});
+		const received: string[] = [];
+		const listener = conductor.createTask(
+			{ name: "pipeline.redelivered-listener" },
+			{ event: "pipeline.redelivered" },
+			async (receivedEvent) => {
+				received.push(`listener:${receivedEvent.payload.value}`);
+			},
+		);
+		const waiter = conductor.createTask(
+			{ name: "pipeline.redelivered-waiter" },
+			{ invocable: true },
+			async (_event, ctx) => {
+				const first = await ctx.waitForEvent("first", { event });
+				const second = await ctx.waitForEvent("second", { event, timeout: 200 }).catch(() => null);
+				received.push(`waiter:${first.payload.value}:${second?.payload.value || "timeout"}`);
+			},
+		);
+		const orchestrator = Orchestrator.create({
+			conductor,
+			tasks: [listener, waiter],
+			defaultWorker: { pollIntervalMs: 10, flushIntervalMs: 10 },
+		});
+		await conductor.invoke({ name: "pipeline.redelivered-waiter" }, {});
+		await orchestrator.start();
+
+		try {
+			const waiting = (stepKey: string) =>
+				waitForCondition(async () => {
+					const rows = await db.sql`
+						select 1 from pgconductor._private_custom_event_subscriptions
+						where kind = 'execution_wait' and step_key = ${stepKey}
+					`;
+					return rows.length === 1;
+				});
+			await waiting("first");
+			const first = await conductor.emit(
+				"pipeline.redelivered",
+				{ value: "first" },
+				{ id: "delivery-1" },
+			);
+			await waiting("second");
+			const repeated = await conductor.emit(
+				"pipeline.redelivered",
+				{ value: "repeated" },
+				{ id: "delivery-1" },
+			);
+			await waitForCondition(() => received.includes("waiter:first:timeout"));
+
+			expect(repeated).toBe(first);
+			expect(received.sort()).toEqual(["listener:first", "waiter:first:timeout"]);
+		} finally {
+			await orchestrator.stop();
+		}
+	});
+
+	test("ctx.emit with an id stores one event across retried attempts", async () => {
+		const db = await database();
+		const event = defineEvent({ name: "pipeline.retried-emit", payload: z.object({}) });
+		const conductor = Conductor.create({
+			sql: db.sql,
+			tasks: TaskSchemas.fromSchema([defineTask({ name: "pipeline.retried-emitter" })]),
+			events: EventSchemas.fromSchema([event]),
+			context: {},
+		});
+		const eventIds: string[] = [];
+		const emitter = conductor.createTask(
+			{ name: "pipeline.retried-emitter" },
+			{ invocable: true },
+			async (_event, ctx) => {
+				eventIds.push(await ctx.emit("pipeline.retried-emit", {}, { id: "delivery-1" }));
+				if (eventIds.length === 1) throw new Error("first attempt fails");
+			},
+		);
+		const orchestrator = Orchestrator.create({
+			conductor,
+			tasks: [emitter],
+			defaultWorker: { pollIntervalMs: 10, flushIntervalMs: 10 },
+		});
+
+		try {
+			await db.client.setFakeTime({ date: new Date("2024-01-01T12:00:00Z") });
+			await conductor.invoke({ name: "pipeline.retried-emitter" }, {});
+			await orchestrator.drain();
+			await db.client.setFakeTime({ date: new Date("2024-01-01T12:01:00Z") });
+			await orchestrator.drain();
+		} finally {
+			await db.client.clearFakeTime();
+		}
+
+		expect(eventIds).toHaveLength(2);
+		expect(eventIds[1]).toBe(eventIds[0]);
+		const sources = await db.sql<{ id: string }[]>`
+			select id from pgconductor._private_executions where task_key = ${DISPATCH_TASK}
+		`;
+		expect(sources.map((source) => source.id)).toEqual([eventIds[0] || ""]);
+	});
+
+	test("remembers emit ids until maintenance removes day-old dispatches", async () => {
+		const db = await database();
+		const event = defineEvent({ name: "pipeline.remembered", payload: z.object({}) });
+		const conductor = Conductor.create({
+			sql: db.sql,
+			events: EventSchemas.fromSchema([event]),
+			context: {},
+		});
+		const orchestrator = Orchestrator.create({
+			conductor,
+			defaultWorker: { pollIntervalMs: 10, flushIntervalMs: 10 },
+		});
+
+		try {
+			await db.client.setFakeTime({ date: new Date("2024-01-01T12:00:00Z") });
+			const first = await conductor.emit("pipeline.remembered", {}, { id: "delivery-1" });
+			await orchestrator.drain();
+
+			const [maintenance] = await db.sql<{ count: number }[]>`
+				select count(*)::int as count from pgconductor._private_executions
+				where queue = ${INTERNAL_QUEUE} and task_key = 'pgconductor.maintenance'
+			`;
+			expect(maintenance?.count).toBe(1);
+
+			await db.client.setFakeTime({ date: new Date("2024-01-02T11:00:00Z") });
+			await db.client.removeExecutions({ queueName: INTERNAL_QUEUE, batchSize: 100 });
+			expect(await conductor.emit("pipeline.remembered", {}, { id: "delivery-1" })).toBe(first);
+
+			await db.client.setFakeTime({ date: new Date("2024-01-02T13:00:00Z") });
+			await db.client.removeExecutions({ queueName: INTERNAL_QUEUE, batchSize: 100 });
+			expect(await conductor.emit("pipeline.remembered", {}, { id: "delivery-1" })).not.toBe(first);
+		} finally {
+			await db.client.clearFakeTime();
+		}
+	});
+
 	test("only orchestrators with an event catalog dispatch events", async () => {
 		const db = await database();
 		const eventId = await db.client.emitEvent({ eventKey: "pipeline.catalog", payload: {} });
@@ -732,18 +957,18 @@ describe("event pipeline", () => {
 		]);
 
 		await settleSource(db, eventId, orchestratorId);
-		const [settled] = await db.sql<{ source_exists: boolean; destinations: number }[]>`
+		const [settled] = await db.sql<{ source_completed: boolean; destinations: number }[]>`
 			select
 				exists(
 					select 1 from pgconductor._private_executions
-					where id = ${eventId}::uuid and queue = ${INTERNAL_QUEUE}
-				) as source_exists,
+					where id = ${eventId}::uuid and queue = ${INTERNAL_QUEUE} and completed_at is not null
+				) as source_completed,
 				(
 					select count(*)::integer from pgconductor._private_executions
 					where parent_execution_id = ${eventId}::uuid and subscription_id is not null
 				) as destinations
 		`;
-		expect(settled).toEqual({ source_exists: false, destinations: 2 });
+		expect(settled).toEqual({ source_completed: true, destinations: 2 });
 	});
 
 	test("keeps unchanged subscriptions across re-registration", async () => {

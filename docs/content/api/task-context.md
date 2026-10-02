@@ -90,6 +90,23 @@ A matching event is delivered once and cached by the step key. The subscription 
 when registration commits; an event racing registration or timeout is not guaranteed to win.
 Earlier events do not satisfy the wait. If the timeout wins, `WaitForEventTimeoutError` is thrown.
 
+## ctx.emit()
+
+Emit a typed custom event from a task:
+
+```typescript
+const eventId = await ctx.emit(
+  "event-name",
+  { /* event payload */ },
+  options?: { id?: string }
+);
+```
+
+Emits are not memoized, so a retried attempt emits again. Pass an `id` derived from the
+execution's input to emit once across attempts: repeating it for the same event name returns the
+original event ID. Ids are scoped per event name and remembered for 1–2 days after the event was
+dispatched. See [Deduplicating Emits](../crafting-tasks/triggers.md#deduplicating-emits).
+
 ## ctx.invoke()
 
 Invoke a child task and wait for result:

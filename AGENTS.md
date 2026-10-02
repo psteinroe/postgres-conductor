@@ -186,6 +186,7 @@ Tables live in the `pgconductor` schema with a `_private_` prefix (`_private_exe
 **Custom Events**
 - An emitted event is an execution of the internal `pgconductor.event-dispatch` task on the `pgconductor.internal` queue; its id is the event id and there is no separate event table
 - `DatabaseClient.emitEvent` generates the event id once per call, so a retry after a lost response finds the stored event instead of emitting it twice
+- `emit(..., { id })` stores `'<event name>:<id>'` as the dispatch execution's `dedupe_key`; a repeated id returns the original event id. Completed dispatches are kept for one day (`removeOnComplete: { days: 1 }`), so ids are remembered until maintenance of the internal queue removes them
 - The dispatcher matches subscriptions and inserts one delivery execution per matching subscription in a single statement; deliveries carry `subscription_id` and `parent_execution_id` (the event)
 - Worker registration syncs a queue's trigger subscriptions; ids derive from the definition, so unchanged subscriptions keep their identity. Each trigger filter is compiled once into typed rows in `_private_event_filter_terms` (fields are ANDed, alternatives within a field are ORed)
 - Fan-out is at-least-once: a retried dispatch re-evaluates current subscriptions, and a unique index deduplicates existing deliveries

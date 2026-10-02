@@ -108,7 +108,19 @@ await conductor.emit("user.created", {
 });
 ```
 
-Each event is stored as a short-lived internal dispatch execution. Destination inserts are atomic within one database statement. If dispatch retries before the source execution completes, it re-evaluates current subscriptions: existing deliveries are deduplicated, but newly registered subscriptions may receive additional deliveries. Handlers should be prepared for at-least-once delivery. Only orchestrators whose conductor has `events` configured dispatch events.
+#### Deduplicating Emits
+
+Webhook providers redeliver, so ingress may emit the same delivery twice. Pass an `id` to make the emit idempotent:
+
+```typescript
+await conductor.emit("slack.mentioned", payload, { id: `slack:${eventId}` });
+```
+
+Repeating an `id` for the same event name stores nothing and returns the original event ID, even when two emits race. Ids are scoped per event name: the same `id` under two event names emits two events. An id is remembered while its dispatch execution exists. Completed dispatches are kept for one day and removed by the daily maintenance run of the internal queue, so an id deduplicates for 1–2 days after its event was dispatched. Outside that window, the same `id` emits a new event.
+
+From SQL, pass the id as `p_dedupe_key`: `pgconductor.emit_event('slack.mentioned', payload, p_dedupe_key := 'slack:' || event_id)`.
+
+Each event is stored as an internal dispatch execution. Destination inserts are atomic within one database statement. If dispatch retries before the source execution completes, it re-evaluates current subscriptions: existing deliveries are deduplicated, but newly registered subscriptions may receive additional deliveries. Handlers should be prepared for at-least-once delivery. Only orchestrators whose conductor has `events` configured dispatch events.
 
 ### Emitting from Database Triggers
 
