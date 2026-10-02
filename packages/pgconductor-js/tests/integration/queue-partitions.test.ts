@@ -1,7 +1,9 @@
-import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, mock, test } from "bun:test";
+import { z } from "zod";
 import { Conductor } from "../../src/conductor";
+import { defineEvent } from "../../src/event-definition";
 import { Orchestrator } from "../../src/orchestrator";
-import { TaskSchemas } from "../../src/schemas";
+import { EventSchemas, TaskSchemas } from "../../src/schemas";
 import { defineTask } from "../../src/task-definition";
 import { TestDatabasePool, type TestDatabase } from "../fixtures/test-database";
 import { waitForCondition } from "../test-utils";
@@ -83,5 +85,101 @@ describe("queue partitions", () => {
 			select distinct queue from pgconductor._private_executions
 		`;
 		expect(rows.map((row) => row.queue)).toEqual(["a_b"]);
+	}, 30_000);
+
+	test("drop_queue removes its subscriptions so other subscribers still receive events", async () => {
+		const db = await pool.child();
+		databases.push(db);
+		const event = defineEvent({ name: "thing.happened", payload: z.object({}) });
+		const conductor = Conductor.create({
+			sql: db.sql,
+			tasks: TaskSchemas.fromSchema([
+				defineTask({ name: "on-thing", queue: "doomed", payload: z.object({}) }),
+				defineTask({ name: "on-thing", payload: z.object({}) }),
+			]),
+			events: EventSchemas.fromSchema([event]),
+			context: {},
+		});
+		const handler = mock(async () => {});
+		const config = { pollIntervalMs: 10, flushIntervalMs: 10 };
+		const orchestrator = Orchestrator.create({
+			conductor,
+			workers: [
+				conductor.createWorker({
+					queue: "doomed",
+					tasks: [
+						conductor.createTask(
+							{ name: "on-thing", queue: "doomed" },
+							{ event: "thing.happened" },
+							async () => {},
+						),
+					],
+					config,
+				}),
+				conductor.createWorker({
+					queue: "default",
+					tasks: [conductor.createTask({ name: "on-thing" }, { event: "thing.happened" }, handler)],
+					config,
+				}),
+			],
+		});
+		await orchestrator.start();
+		await db.sql`select pgconductor.drop_queue('doomed')`;
+
+		await conductor.emit("thing.happened", {});
+		await waitForCondition(() => handler.mock.calls.length === 1);
+		await orchestrator.stop();
+
+		const rows = await db.sql<{ source: string }[]>`
+			select 'task' as source from pgconductor._private_tasks where queue = 'doomed'
+			union all
+			select 'subscription' from pgconductor._private_custom_event_subscriptions where queue = 'doomed'
+		`;
+		expect(rows.map((row) => row.source)).toEqual([]);
+	}, 30_000);
+
+	test("drop_queue clears dead-letter destinations in the dropped queue", async () => {
+		const db = await pool.child();
+		databases.push(db);
+		const conductor = Conductor.create({
+			sql: db.sql,
+			tasks: TaskSchemas.fromSchema([
+				defineTask({ name: "charge" }),
+				defineTask({ name: "failed-charge", queue: "doomed" }),
+			]),
+			context: {},
+		});
+		const destination = conductor.createTask(
+			{ name: "failed-charge", queue: "doomed" },
+			{ invocable: true },
+			async () => {},
+		);
+		const source = conductor.createTask(
+			{ name: "charge", maxAttempts: 1, deadLetter: { queue: "doomed", task: destination } },
+			{ invocable: true },
+			async () => {
+				throw new Error("card declined");
+			},
+		);
+		const config = { pollIntervalMs: 10, flushIntervalMs: 10 };
+		const orchestrator = Orchestrator.create({
+			conductor,
+			workers: [
+				conductor.createWorker({ queue: "doomed", tasks: [destination], config }),
+				conductor.createWorker({ queue: "default", tasks: [source], config }),
+			],
+		});
+		await orchestrator.start();
+		await db.sql`select pgconductor.drop_queue('doomed')`;
+
+		await conductor.invoke({ name: "charge" }, {});
+		await waitForCondition(async () => {
+			const rows = await db.sql`
+				select 1 from pgconductor._private_executions
+				where task_key = 'charge' and failed_at is not null
+			`;
+			return rows.length === 1;
+		});
+		await orchestrator.stop();
 	}, 30_000);
 });

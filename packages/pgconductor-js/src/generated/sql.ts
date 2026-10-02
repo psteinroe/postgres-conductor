@@ -354,16 +354,6 @@ create trigger manage_queue_partition_trigger
 -- create default queue (trigger will create its partition)
 insert into pgconductor._private_queues (name) values ('default');
 
--- drop a queue (will trigger partition deletion via trigger)
-create or replace function pgconductor.drop_queue(queue_name text)
- returns void
- language sql
- volatile
- set search_path to ''
-as $function$
-  delete from pgconductor._private_queues where name = drop_queue.queue_name;
-$function$;
-
 create type pgconductor.execution_spec as (
     task_key text,
     queue text,
@@ -959,6 +949,24 @@ create index idx_custom_event_subscription_wait_match
     on pgconductor._private_custom_event_subscriptions
        (event_key, created_at, expires_at, id)
     where kind = 'execution_wait';
+
+-- drop a queue and everything that would write into its partition (the trigger drops the partition)
+create or replace function pgconductor.drop_queue(queue_name text)
+ returns void
+ language sql
+ volatile
+ set search_path to ''
+as $function$
+  update pgconductor._private_tasks
+  set dead_letter_queue = null, dead_letter_task_key = null
+  where dead_letter_queue = drop_queue.queue_name;
+
+  delete from pgconductor._private_custom_event_subscriptions where queue = drop_queue.queue_name;
+
+  delete from pgconductor._private_tasks where queue = drop_queue.queue_name;
+
+  delete from pgconductor._private_queues where name = drop_queue.queue_name;
+$function$;
 
 -- TypeScript validates and compiles filters once. Each row is one typed OR
 -- alternative; rows sharing a subscription and field form one clause, while
