@@ -105,6 +105,35 @@ const orchestrator = conductor.createTask(
 
 Each child runs sequentially. The parent hangs up and resumes for each child.
 
+## Starting Without Waiting
+
+Use `ctx.start()` to start work that runs on its own, such as a handoff to another workflow. It returns the new execution's ID right away:
+
+```typescript
+const intake = conductor.createTask(
+  { name: "intake" },
+  { invocable: true },
+  async (event, ctx) => {
+    const handoffId = await ctx.start("handoff", { name: "support-flow" }, event.payload);
+    return { handoffId };
+  }
+);
+```
+
+| | `ctx.invoke()` | `ctx.start()` |
+|-|----------------|---------------|
+| Returns | The child's result | The execution ID |
+| Caller | Hangs up until the child settles | Continues immediately |
+| Child fails | Caller fails | Caller is unaffected |
+| Caller cancelled | Child is cancelled | Execution keeps running |
+| Retries and resumes | Return the memoized result | Return the same execution ID |
+
+Both inherit the caller's [metadata](execution-metadata.md) unless `metadata` overrides it.
+
+Retrying the starting attempt never starts a second execution, even if it crashed right after the start: the execution is deduplicated by a key derived from the caller and the step name. Pass `dedupe_key` to use your own key instead, for example to reconnect to a workflow for a conversation. If an execution of the task already holds the key, `ctx.start()` returns its ID without starting, superseding or updating anything.
+
+Await the started execution elsewhere with [`conductor.waitForResult()`](../api/conductor.md) or read it with `conductor.getExecution()`.
+
 ## What's Next?
 
 - [Retries and Steps](retries-and-steps.md) - Learn about durable execution patterns

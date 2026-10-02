@@ -172,6 +172,52 @@ const parent = conductor.createTask(
 - Throws if child fails or times out
 - The child inherits `ctx.metadata` unless `metadata` overrides it for that child
 
+## ctx.start()
+
+Start an independent execution and return its ID without waiting for it:
+
+```typescript
+const executionId = await ctx.start(
+  stepName: string,
+  taskRef: { name: string, queue?: string },
+  payload: TPayload,
+  options?: {
+    dedupe_key?: string,
+    metadata?: Metadata | ((metadata: Metadata | undefined) => Metadata),
+    run_at?: Date,
+    priority?: number,
+    group?: string,
+  }
+): Promise<string>
+```
+
+**Example:**
+
+```typescript
+const intake = conductor.createTask(
+  { name: "intake" },
+  { invocable: true },
+  async (event, ctx) => {
+    const handoffId = await ctx.start("handoff", { name: "support-flow" }, event.payload);
+    return { handoffId };
+  }
+);
+
+// elsewhere
+const result = await conductor.waitForResult({ name: "support-flow" }, handoffId);
+```
+
+**Behavior:**
+- Creates the execution and memoizes its ID under the step name in one statement, so retries
+  and resumes return the same ID
+- The execution is independent: this task does not wait for it, its failure does not fail this
+  task, and cancelling this task does not cancel it
+- `dedupe_key` defaults to a key derived from this execution and the step name. Pass your own to
+  reconnect to an execution: if one of the task already holds the key, its ID is returned and
+  nothing is started, superseded or updated
+- The execution inherits `ctx.metadata` unless `metadata` overrides it
+- Read or await it by ID with `conductor.getExecution()` or `conductor.waitForResult()`
+
 ## ctx.checkpoint()
 
 Save progress during long-running tasks:
