@@ -1155,7 +1155,6 @@ export class QueryBuilder {
 			select count(*) as count
 			from pgconductor._private_orchestrators
 			where migration_number < ${version}::integer
-			  and shutdown_signal = false
 		`;
 	}
 
