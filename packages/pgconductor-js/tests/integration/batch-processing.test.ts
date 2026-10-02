@@ -6,6 +6,8 @@ import { defineTask } from "../../src/task-definition";
 import { TestDatabasePool } from "../fixtures/test-database";
 import type { TestDatabase } from "../fixtures/test-database";
 import { TaskSchemas } from "../../src/schemas";
+import { Deferred } from "../../src/lib/deferred";
+import { waitForCondition } from "../test-utils";
 
 describe("Batch Processing", () => {
 	let pool: TestDatabasePool;
@@ -432,5 +434,81 @@ describe("Batch Processing", () => {
 		await orchestrator.stop();
 
 		expect(executed).toBe(true);
+	}, 30000);
+
+	test("fails cancelled executions claimed alongside active ones", async () => {
+		const db = await pool.child();
+		databases.push(db);
+
+		const taskDefinitions = defineTask({
+			name: "batch-cancel",
+			payload: z.object({ value: z.number() }),
+		});
+
+		const conductor = Conductor.create({
+			sql: db.sql,
+			tasks: TaskSchemas.fromSchema([taskDefinitions]),
+			context: {},
+		});
+
+		const started = new Deferred();
+		const proceed = new Deferred();
+		const batches: number[][] = [];
+
+		const batchTask = conductor.createTask(
+			{
+				name: "batch-cancel",
+				batch: { size: 2, timeoutMs: 100 },
+			},
+			{ invocable: true },
+			async (events, ctx) => {
+				batches.push(events.map((e) => e.payload.value));
+				if (batches.length === 1) {
+					started.resolve();
+					await proceed.promise;
+					await ctx.sleep("wait", 100);
+				}
+			},
+		);
+
+		const orchestrator = Orchestrator.create({
+			conductor,
+			tasks: [batchTask],
+			defaultWorker: { pollIntervalMs: 50, flushIntervalMs: 50 },
+		});
+
+		await orchestrator.start();
+
+		const [cancelledId, activeId] = await Promise.all([
+			conductor.invoke({ name: "batch-cancel" }, { value: 1 }),
+			conductor.invoke({ name: "batch-cancel" }, { value: 2 }),
+		]);
+
+		await started.promise;
+		expect(await conductor.cancel(cancelledId)).toBe(true);
+		proceed.resolve();
+
+		const states = () => db.sql<
+			{ id: string; completed_at: Date | null; failed_at: Date | null; locked_by: string | null }[]
+		>`
+			select id, completed_at, failed_at, locked_by
+			from pgconductor._private_executions
+			where task_key = 'batch-cancel'
+		`;
+
+		await waitForCondition(async () => {
+			const rows = await states();
+			return rows.every((row) => row.completed_at || row.failed_at);
+		}, 5000);
+
+		const rows = await states();
+		await orchestrator.stop();
+
+		const cancelled = rows.find((row) => row.id === cancelledId);
+		const active = rows.find((row) => row.id === activeId);
+		expect(cancelled?.failed_at).not.toBeNull();
+		expect(cancelled?.locked_by).toBeNull();
+		expect(active?.completed_at).not.toBeNull();
+		expect(batches).toEqual([[1, 2], [2]]);
 	}, 30000);
 });
