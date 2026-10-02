@@ -528,7 +528,10 @@ export class Worker<
 	 * @param task - The task to execute
 	 * @param exec - The execution details
 	 */
-	private async executeSingleTask(task: AnyTask, exec: Execution): Promise<ExecutionResult> {
+	private async executeSingleTask(
+		task: AnyTask,
+		exec: Execution,
+	): Promise<ExecutionResult | ExecutionResult[]> {
 		const taskAbortController = createTaskSignal(this.signal);
 		this._runningTasks.set(exec.id, taskAbortController);
 
@@ -603,6 +606,8 @@ export class Worker<
 							status: "permanently_failed",
 							error: exec.last_error || "Task was cancelled",
 						} as const;
+					case "suspended":
+						return [];
 					case "released":
 					case "parent-aborted":
 						return {

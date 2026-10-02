@@ -1118,7 +1118,7 @@ create or replace function pgconductor._private_register_event_wait(
     p_terms jsonb,
     p_timeout_ms bigint
 )
-returns table (timed_out boolean, timeout_ms bigint)
+returns boolean
 language plpgsql
 volatile
 set search_path to ''
@@ -1126,7 +1126,7 @@ as $function$
 declare
     v_subscription_id uuid;
     v_expires_at timestamptz;
-    v_now timestamptz;
+    v_now timestamptz := pgconductor._private_current_time();
 begin
     perform 1
     from pgconductor._private_executions execution
@@ -1140,11 +1140,8 @@ begin
     for update;
 
     if not found then
-        return query select false, null::bigint;
-        return;
+        raise exception 'execution % is not claimed by orchestrator %', p_execution_id, p_orchestrator_id;
     end if;
-
-    v_now := pgconductor._private_current_time();
 
     select subscription.id, subscription.expires_at
     into v_subscription_id, v_expires_at
@@ -1155,86 +1152,75 @@ begin
       and subscription.step_key = p_step_key
     for update;
 
-    if found then
-        if v_expires_at is not null and v_expires_at <= v_now then
-            delete from pgconductor._private_custom_event_subscriptions
-            where id = v_subscription_id;
+    if not found then
+        v_expires_at := v_now + p_timeout_ms * interval '1 millisecond';
 
-            insert into pgconductor._private_steps (execution_id, queue, key, result)
-            values (
-                p_execution_id,
-                p_queue,
-                p_step_key,
-                jsonb_build_object('status', 'timed_out')
-            )
-            on conflict (execution_id, key) do nothing;
+        insert into pgconductor._private_custom_event_subscriptions (
+            event_key,
+            task_key,
+            queue,
+            payload_fields,
+            required_field_count,
+            kind,
+            execution_id,
+            step_key,
+            expires_at
+        ) values (
+            p_event_key,
+            p_task_key,
+            p_queue,
+            null,
+            p_required_field_count,
+            'execution_wait',
+            p_execution_id,
+            p_step_key,
+            v_expires_at
+        )
+        returning id into v_subscription_id;
 
-            return query select true, null::bigint;
-            return;
-        end if;
+        insert into pgconductor._private_event_filter_terms (
+            subscription_id,
+            term_number,
+            event_key,
+            field_name,
+            operator,
+            scalar_type,
+            text_value,
+            number_value,
+            boolean_value,
+            number_range
+        )
+        select *
+        from pgconductor._private_expand_event_filter_terms(
+            v_subscription_id,
+            p_event_key,
+            p_terms
+        );
+    elsif v_expires_at <= v_now then
+        delete from pgconductor._private_custom_event_subscriptions
+        where id = v_subscription_id;
 
-        return query select false, case
-            when v_expires_at is null then null::bigint
-            else greatest(0, ceil(extract(epoch from (
-                v_expires_at - pgconductor._private_current_time()
-            )) * 1000)::bigint)
-        end;
-        return;
+        insert into pgconductor._private_steps (execution_id, queue, key, result)
+        values (
+            p_execution_id,
+            p_queue,
+            p_step_key,
+            jsonb_build_object('status', 'timed_out')
+        )
+        on conflict (execution_id, key) do nothing;
+
+        return true;
     end if;
 
-    v_expires_at := case
-        when p_timeout_ms is null then null
-        else v_now + (p_timeout_ms || ' milliseconds')::interval
-    end;
+    -- Release in the same transaction so event dispatch never sees a claimed waiter.
+    update pgconductor._private_executions
+    set attempts = greatest(attempts - 1, 0),
+        run_at = coalesce(v_expires_at, 'infinity'),
+        locked_by = null,
+        locked_at = null
+    where id = p_execution_id and queue = p_queue;
 
-    insert into pgconductor._private_custom_event_subscriptions (
-        event_key,
-        task_key,
-        queue,
-        payload_fields,
-        required_field_count,
-        kind,
-        execution_id,
-        step_key,
-        expires_at
-    ) values (
-        p_event_key,
-        p_task_key,
-        p_queue,
-        null,
-        p_required_field_count,
-        'execution_wait',
-        p_execution_id,
-        p_step_key,
-        v_expires_at
-    )
-    returning id into v_subscription_id;
-
-    insert into pgconductor._private_event_filter_terms (
-        subscription_id,
-        term_number,
-        event_key,
-        field_name,
-        operator,
-        scalar_type,
-        text_value,
-        number_value,
-        boolean_value,
-        number_range
-    )
-    select *
-    from pgconductor._private_expand_event_filter_terms(
-        v_subscription_id,
-        p_event_key,
-        p_terms
-    );
-
-    return query select false, case
-        when v_expires_at is null then null::bigint
-        else greatest(0, ceil(extract(epoch from (
-            v_expires_at - pgconductor._private_current_time()
-        )) * 1000)::bigint)
-    end;
+    return false;
 end;
 $function$;
 
