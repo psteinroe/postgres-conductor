@@ -21,7 +21,6 @@
         "cron-parser": "catalog:",
         "postgres": "catalog:",
         "prettier": "catalog:",
-        "zod": "catalog:",
       },
       "devDependencies": {
         "@opentelemetry/api": "catalog:",
@@ -29,6 +28,7 @@
         "@testcontainers/postgresql": "catalog:",
         "@types/bun": "catalog:",
         "expect-type": "catalog:",
+        "zod": "catalog:",
       },
       "peerDependencies": {
         "@opentelemetry/api": ">=1.4 <2",
