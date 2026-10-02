@@ -9,13 +9,15 @@ Define cron schedules when creating tasks:
 ```typescript
 const dailyReport = conductor.createTask(
   { name: "daily-report" },
-  { cron: "0 9 * * *", name: "morning-report" }, // 9 AM daily
+  { cron: "0 9 * * *", name: "morning-report" }, // 9 AM UTC daily
   async (event, ctx) => {
     ctx.logger.info("Generating daily report");
     // Generate report
   }
 );
 ```
+
+Cron expressions are evaluated in UTC, regardless of the timezone of the worker process.
 
 The orchestrator automatically schedules the next execution after each run. If the task fails and retries, it still reschedules the next execution.
 
