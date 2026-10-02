@@ -224,6 +224,70 @@ describe("dead-letter queues (Postgres integration)", () => {
 		expect(count[0]?.count).toBe("1");
 	}, 15000);
 
+	test("removes a source whose delivery already exists", async () => {
+		const db = await pool.child();
+		databases.push(db);
+		const conductor = Conductor.create({ sql: db.sql, context: {} });
+		await conductor.ensureInstalled();
+		await db.client.registerWorker({
+			queueName: "default",
+			taskSpecs: [
+				{
+					key: "delivered-source",
+					queue: "default",
+					maxAttempts: 1,
+					removeOnFailDays: 0,
+					deadLetterQueue: "dlq",
+					deadLetterTaskKey: "delivered-destination",
+				},
+			],
+			cronSchedules: [],
+			eventSubscriptions: [],
+		});
+		const executionId = await db.client.invoke({
+			task_key: "delivered-source",
+			queue: "default",
+			payload: {},
+		});
+		await db.sql`insert into pgconductor._private_queues (name) values ('dlq') on conflict do nothing`;
+		await db.sql`
+			insert into pgconductor._private_executions (task_key, queue, payload, dead_letter)
+			values ('delivered-destination', 'dlq', '{}', jsonb_build_object('sourceExecutionId', ${executionId}::text))
+		`;
+		const orchestratorId = crypto.randomUUID();
+		const [execution] = await db.client.getExecutions({
+			orchestratorId,
+			queueName: "default",
+			batchSize: 1,
+			filterTaskKeys: [],
+		});
+		if (!execution) throw new Error("expected claimed execution");
+
+		await db.client.returnExecutions({
+			orchestratorId,
+			completed: [],
+			failed: [
+				{
+					execution_id: execution.id,
+					queue: execution.queue,
+					task_key: execution.task_key,
+					status: "permanently_failed",
+					error: "boom",
+				},
+			],
+			released: [],
+			invokeChild: [],
+		});
+
+		const [counts] = await db.sql<{ source: string; destination: string }[]>`
+			select
+				count(*) filter (where queue = 'default')::text as source,
+				count(*) filter (where queue = 'dlq')::text as destination
+			from pgconductor._private_executions
+		`;
+		expect(counts).toEqual({ source: "0", destination: "1" });
+	}, 15000);
+
 	test("cancellation never delivers to the DLQ", async () => {
 		const db = await pool.child();
 		databases.push(db);

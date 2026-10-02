@@ -188,17 +188,14 @@ create table pgconductor._private_tasks (
 );
 
 create table pgconductor._private_steps (
-    id uuid default pgconductor._private_portable_uuidv7() primary key,
-    key text not null,
     execution_id uuid not null,
+    key text not null,
     queue text not null,
     result jsonb,
     created_at timestamptz default pgconductor._private_current_time() not null,
-    unique (key, execution_id),
+    primary key (execution_id, key),
     constraint fk_execution foreign key (execution_id, queue) references pgconductor._private_executions(id, queue) on delete cascade
 );
-
-create index idx_steps_execution_id on pgconductor._private_steps (execution_id);
 
 create unique index idx_executions_dead_letter_delivery
     on pgconductor._private_executions ((dead_letter->>'sourceExecutionId'), queue, task_key)
@@ -234,6 +231,13 @@ begin
     execute format(
       'create index %I on pgconductor.%I (priority, run_at, created_at, id) include (task_key) where is_available = true',
       'idx_' || v_partition_name || '_get_executions',
+      v_partition_name
+    );
+
+    -- index for claiming available executions of one task under concurrency limits
+    execute format(
+      'create index %I on pgconductor.%I (task_key, priority, run_at, created_at, id) where is_available = true',
+      'idx_' || v_partition_name || '_get_task_executions',
       v_partition_name
     );
 
