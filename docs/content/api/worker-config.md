@@ -98,7 +98,7 @@ How often to flush results to database:
 
 ### fetchBatchSize
 
-Maximum executions fetched per poll:
+Maximum executions fetched per poll. A worker never claims more executions than its free slots can run (a slot runs one execution, or one batch of a batched task), so the rest stays available to other workers:
 
 ```typescript
 {

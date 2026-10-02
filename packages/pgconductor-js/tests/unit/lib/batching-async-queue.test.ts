@@ -501,3 +501,43 @@ describe("BatchingAsyncQueue - Batching behavior", () => {
 		queue.close();
 	});
 });
+
+describe("BatchingAsyncQueue - pending groups", () => {
+	test("counts emitted groups until they are released", async () => {
+		const batchConfigs = new Map([["batched", { size: 2, timeoutMs: 1000 }]]);
+		const queue = new BatchingAsyncQueue<TestItem>(10, batchConfigs);
+
+		await queue.push({ task_key: "single", id: "1" });
+		await queue.push({ task_key: "batched", id: "2" });
+		expect(queue.pending).toBe(1);
+
+		await queue.push({ task_key: "batched", id: "3" });
+		expect(queue.pending).toBe(2);
+
+		await queue.next();
+		expect(queue.pending).toBe(2);
+
+		let released = false;
+		const waiting = queue.waitForRelease().then(() => {
+			released = true;
+		});
+		await new Promise((r) => setTimeout(r, 10));
+		expect(released).toBe(false);
+
+		queue.release();
+		await waiting;
+		expect(queue.pending).toBe(1);
+
+		queue.close();
+	});
+
+	test("close wakes release waiters", async () => {
+		const queue = new BatchingAsyncQueue<TestItem>(10, new Map());
+		const waiting = queue.waitForRelease();
+
+		queue.close();
+
+		await waiting;
+		await queue.waitForRelease();
+	});
+});

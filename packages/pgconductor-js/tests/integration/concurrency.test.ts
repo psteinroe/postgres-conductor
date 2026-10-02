@@ -287,4 +287,67 @@ describe("Task-Level Concurrency", () => {
 		await orchestrator.stop();
 		await orchestrator.stopped;
 	}, 30000);
+
+	test("worker claims no more executions than free slots", async () => {
+		const db = await pool.child();
+		databases.push(db);
+
+		const taskDef = defineTask({ name: "long-task" });
+		const blocker = new Deferred<void>();
+		let started = 0;
+
+		const create = () => {
+			const conductor = Conductor.create({
+				sql: db.sql,
+				tasks: TaskSchemas.fromSchema([taskDef]),
+				context: {},
+			});
+			const longTask = conductor.createTask(
+				{ name: "long-task" },
+				{ invocable: true },
+				async () => {
+					started++;
+					await blocker.promise;
+				},
+			);
+			return Orchestrator.create({
+				conductor,
+				tasks: [longTask],
+				defaultWorker: {
+					pollIntervalMs: 50,
+					flushIntervalMs: 50,
+					fetchBatchSize: 10,
+					concurrency: 1,
+				},
+			});
+		};
+
+		const first = create();
+		await first.start();
+		await db.client.invokeBatch(
+			Array.from({ length: 6 }, () => ({ task_key: "long-task", queue: "default" })),
+		);
+
+		// give the busy worker time to prefetch
+		await new Promise((r) => setTimeout(r, 500));
+
+		const second = create();
+		await second.start();
+		await new Promise((r) => setTimeout(r, 500));
+
+		const locks = await db.sql<{ locked_by: string; count: number }[]>`
+			select locked_by::text, count(*)::int as count
+			from pgconductor._private_executions
+			where task_key = 'long-task' and locked_by is not null
+			group by locked_by
+		`;
+
+		expect(started).toBe(2);
+		expect(locks).toHaveLength(2);
+		expect(locks.every((lock) => lock.count === 1)).toBe(true);
+
+		blocker.resolve();
+		await first.stop();
+		await second.stop();
+	}, 30000);
 });
