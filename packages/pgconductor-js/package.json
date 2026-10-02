@@ -46,6 +46,7 @@
 		"@testcontainers/postgresql": "catalog:",
 		"@types/bun": "catalog:",
 		"expect-type": "catalog:",
+		"prettier": "catalog:",
 		"zod": "catalog:"
 	},
 	"peerDependencies": {
@@ -55,7 +56,6 @@
 	"dependencies": {
 		"@standard-schema/spec": "catalog:",
 		"cron-parser": "catalog:",
-		"postgres": "catalog:",
-		"prettier": "catalog:"
+		"postgres": "catalog:"
 	}
 }
