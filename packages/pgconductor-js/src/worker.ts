@@ -7,6 +7,7 @@ import type {
 	ExecutionCompleted,
 	ExecutionFailed,
 	ExecutionPermamentlyFailed,
+	ExecutionCancelled,
 	ExecutionReleased,
 	ExecutionInvokeChild,
 } from "./database-client";
@@ -22,6 +23,7 @@ import { Clock } from "./lib/clock";
 import {
 	createTaskSignal,
 	isTaskAbortReason,
+	CancelledError,
 	TaskContext,
 	BatchTaskContext,
 	type TaskAbortReasons,
@@ -62,7 +64,7 @@ export const DEFAULT_WORKER_CONFIG: WorkerConfig = {
  */
 class BufferState {
 	completed: ExecutionCompleted[] = [];
-	failed: (ExecutionFailed | ExecutionPermamentlyFailed)[] = [];
+	failed: (ExecutionFailed | ExecutionPermamentlyFailed | ExecutionCancelled)[] = [];
 	released: ExecutionReleased[] = [];
 	invokeChild: ExecutionInvokeChild[] = [];
 	count = 0;
@@ -78,6 +80,7 @@ class BufferState {
 				break;
 			case "failed":
 			case "permanently_failed":
+			case "cancelled":
 				this.failed.push(result);
 				break;
 			case "released":
@@ -311,14 +314,11 @@ export class Worker<
 	 * Cancel running executions by aborting their task controllers.
 	 * Called by orchestrator when cancellation signals are received.
 	 */
-	public cancelExecutions(ids: string[]): void {
+	public cancelExecutions(ids: string[], reason: string): void {
 		for (const id of ids) {
 			const controller = this._runningTasks.get(id);
 			if (controller) {
-				controller.abort({
-					reason: "cancelled",
-					__pgconductorTaskAborted: true,
-				});
+				controller.abort(new CancelledError(reason));
 				this._runningTasks.delete(id);
 			}
 		}
@@ -484,7 +484,7 @@ export class Worker<
 						execution_id: exec.id,
 						queue: exec.queue,
 						task_key: taskKey,
-						status: "permanently_failed",
+						status: "cancelled",
 						error: exec.last_error || "Execution was cancelled",
 					}));
 				const activeExecs = executions.filter((e) => !e.cancelled);
@@ -573,6 +573,8 @@ export class Worker<
 					]),
 			});
 
+			if (output instanceof CancelledError) throw output;
+
 			if (isTaskAbortReason(output)) {
 				switch (output.reason) {
 					case "child-invocation":
@@ -586,16 +588,9 @@ export class Worker<
 							child_task_name: output.task.name,
 							child_task_queue: output.task.queue || "default",
 							child_payload: output.payload,
+							cancel_with_parent: output.cancel_with_parent,
 							group: output.group,
 							trace_context: output.trace_context,
-						} as const;
-					case "cancelled":
-						return {
-							execution_id: exec.id,
-							queue: exec.queue,
-							task_key: exec.task_key,
-							status: "permanently_failed",
-							error: exec.last_error || "Task was cancelled",
 						} as const;
 					case "suspended":
 						return [];
@@ -626,7 +621,7 @@ export class Worker<
 				execution_id: exec.id,
 				queue: exec.queue,
 				task_key: exec.task_key,
-				status: "failed",
+				status: err instanceof CancelledError ? "cancelled" : "failed",
 				error: coerceError(err).message,
 			} as const;
 		} finally {

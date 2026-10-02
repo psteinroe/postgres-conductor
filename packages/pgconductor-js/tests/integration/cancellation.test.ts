@@ -8,6 +8,8 @@ import { TestDatabasePool, type TestDatabase } from "../fixtures/test-database";
 import { TaskSchemas } from "../../src/schemas";
 import { QueryBuilder } from "../../src/query-builder";
 import { waitForCondition } from "../test-utils";
+import { Deferred } from "../../src/lib/deferred";
+import { CancelledError } from "../../src/index";
 
 describe("Cancellation Support", () => {
 	let pool: TestDatabasePool;
@@ -85,7 +87,7 @@ describe("Cancellation Support", () => {
 
 		expect(failedExecution[0]?.failed_at).not.toBeNull();
 		expect(failedExecution[0]?.last_error).toBe("Cancelled by user");
-		expect(failedExecution[0]?.cancelled).toBe(false); // Not set for pending
+		expect(failedExecution[0]?.cancelled).toBe(true);
 	}, 10000);
 
 	test("cancel running execution sets cancelled flag and signals orchestrator", async () => {
@@ -964,7 +966,14 @@ describe("Cancellation Support", () => {
 		return execution;
 	}
 
-	test("cancelling a pending child fails the workflow waiting on it", async () => {
+	async function invokeStep(db: TestDatabase, id: string) {
+		const [step] = await db.sql<[{ result: unknown }?]>`
+			select result from pgconductor._private_steps where execution_id = ${id}::uuid and key = 'child'
+		`;
+		return step?.result;
+	}
+
+	test("cancelling a pending child wakes the workflow waiting on it", async () => {
 		const db = await pool.child();
 		databases.push(db);
 		await installSchema(db);
@@ -977,18 +986,21 @@ describe("Cancellation Support", () => {
 
 		expect(await executionState(db, child)).toEqual({
 			failed: true,
-			cancelled: false,
+			cancelled: true,
 			last_error: "Cancelled by user",
 			waiting_on_execution_id: null,
 		});
-		for (const id of [parent, root]) {
-			expect(await executionState(db, id)).toEqual({
-				failed: true,
-				cancelled: false,
-				last_error: "Child execution failed: Cancelled by user",
-				waiting_on_execution_id: null,
-			});
-		}
+		expect(await executionState(db, parent)).toEqual({
+			failed: false,
+			cancelled: false,
+			last_error: null,
+			waiting_on_execution_id: null,
+		});
+		expect(await invokeStep(db, parent)).toEqual({
+			status: "cancelled",
+			error: "Cancelled by user",
+		});
+		expect((await executionState(db, root)).waiting_on_execution_id).toBe(parent);
 	}, 15000);
 
 	test("cancelling a waiting workflow cancels every execution it waits on", async () => {
@@ -1014,7 +1026,7 @@ describe("Cancellation Support", () => {
 		for (const id of [root, parent]) {
 			expect(await executionState(db, id)).toEqual({
 				failed: true,
-				cancelled: false,
+				cancelled: true,
 				last_error: "Cancelled by user",
 				waiting_on_execution_id: null,
 			});
@@ -1078,14 +1090,18 @@ describe("Cancellation Support", () => {
 		`;
 
 		const child = await insertExecution(db);
-		await insertExecution(db, { waitingOn: child });
+		const parent = await insertExecution(db, { waitingOn: child });
 
 		expect(await db.client.cancelExecution(child)).toBe(true);
 
-		const [{ count }] = await db.sql<[{ count: number }]>`
-			select count(*)::int as count from pgconductor._private_executions
+		const remaining = await db.sql<{ id: string }[]>`
+			select id from pgconductor._private_executions
 		`;
-		expect(count).toBe(0);
+		expect(remaining.map((r) => r.id)).toEqual([parent]);
+		expect(await invokeStep(db, parent)).toEqual({
+			status: "cancelled",
+			error: "Cancelled by user",
+		});
 	}, 15000);
 
 	test("superseding a running execution honors remove_on_fail_days = 0", async () => {
@@ -1160,14 +1176,17 @@ describe("Cancellation Support", () => {
 				waiting_on_execution_id: null,
 			});
 		}
-		for (const id of [parent, root]) {
-			expect(await executionState(db, id)).toEqual({
-				failed: true,
-				cancelled: false,
-				last_error: "Child execution failed: Cancelled by user",
-				waiting_on_execution_id: null,
-			});
-		}
+		expect(await executionState(db, parent)).toEqual({
+			failed: false,
+			cancelled: false,
+			last_error: null,
+			waiting_on_execution_id: null,
+		});
+		expect(await invokeStep(db, parent)).toEqual({
+			status: "cancelled",
+			error: "Cancelled by user",
+		});
+		expect((await executionState(db, root)).waiting_on_execution_id).toBe(parent);
 		const [{ count }] = await db.sql<[{ count: number }]>`
 			select count(*)::int as count from pgconductor._private_executions
 		`;
@@ -1276,13 +1295,13 @@ describe("Cancellation Support", () => {
 
 		expect(await executionState(db, child)).toEqual({
 			failed: true,
-			cancelled: false,
+			cancelled: true,
 			last_error: "Cancelled by user",
 			waiting_on_execution_id: null,
 		});
 		expect(await executionState(db, parent)).toEqual({
 			failed: true,
-			cancelled: false,
+			cancelled: true,
 			last_error: "Cancelled by user",
 			waiting_on_execution_id: null,
 		});
@@ -1392,14 +1411,14 @@ describe("Cancellation Support", () => {
 
 		expect(await executionState(db, child)).toEqual({
 			failed: true,
-			cancelled: false,
+			cancelled: true,
 			last_error: "Cancelled: parent timed out",
 			waiting_on_execution_id: null,
 		});
 		expect((await executionState(db, parent)).waiting_on_execution_id).toBeNull();
 	}, 15000);
 
-	test("a cancelled execution of a stopped orchestrator settles its workflow", async () => {
+	test("a cancelled execution of a stopped orchestrator wakes its workflow", async () => {
 		const db = await pool.child();
 		databases.push(db);
 		await installSchema(db);
@@ -1431,17 +1450,12 @@ describe("Cancellation Support", () => {
 		});
 		await orchestrator.start();
 		try {
-			await waitForCondition(async () => (await executionState(db, root)).failed);
+			await waitForCondition(async () => (await invokeStep(db, root)) !== undefined);
 		} finally {
 			await orchestrator.stop();
 		}
 
-		expect(await executionState(db, root)).toEqual({
-			failed: true,
-			cancelled: false,
-			last_error: "Child execution failed: Cancelled by user",
-			waiting_on_execution_id: null,
-		});
+		expect(await invokeStep(db, root)).toEqual({ status: "cancelled", error: "Cancelled by user" });
 		const [{ count }] = await db.sql<[{ count: number }]>`
 			select count(*)::int as count from pgconductor._private_executions where id = ${child}::uuid
 		`;
@@ -1503,5 +1517,230 @@ describe("Cancellation Support", () => {
 			waiting_on_execution_id: null,
 		});
 		expect((await executionState(db, active)).failed).toBe(false);
+	}, 15000);
+
+	async function startWorkflow(
+		db: TestDatabase,
+		{
+			cancelWithParent,
+			catchCancelled = false,
+		}: { cancelWithParent?: boolean; catchCancelled?: boolean },
+	) {
+		const conductor = Conductor.create({
+			sql: db.sql,
+			tasks: TaskSchemas.fromSchema([
+				defineTask({ name: "workflow-parent", payload: z.object({}) }),
+				defineTask({ name: "workflow-child", payload: z.object({}) }),
+			]),
+			context: {},
+		});
+		const caught: unknown[] = [];
+		const childAborts: unknown[] = [];
+		const releaseChild = new Deferred<void>();
+		const parentTask = conductor.createTask(
+			{ name: "workflow-parent" },
+			{ invocable: true },
+			async (_event, ctx) => {
+				try {
+					await ctx.invoke("child", { name: "workflow-child" }, {}, { cancelWithParent });
+				} catch (err) {
+					caught.push(err);
+					if (!catchCancelled) throw err;
+				}
+			},
+		);
+		const childTask = conductor.createTask(
+			{ name: "workflow-child" },
+			{ invocable: true },
+			async (_event, ctx) => {
+				ctx.signal.addEventListener("abort", () => {
+					if (ctx.signal.reason instanceof CancelledError) childAborts.push(ctx.signal.reason);
+				});
+				await releaseChild.promise;
+			},
+		);
+		const worker = conductor.createWorker({
+			queue: "default",
+			tasks: [parentTask, childTask],
+			config: { pollIntervalMs: 50, flushIntervalMs: 50 },
+		});
+		const orchestrator = Orchestrator.create({ conductor, workers: [worker] });
+		await orchestrator.start();
+		const parent = await conductor.invoke({ name: "workflow-parent" }, {});
+		let child = "";
+		await waitForCondition(async () => {
+			const [running] = await db.sql<{ id: string }[]>`
+				select id from pgconductor._private_executions
+				where parent_execution_id = ${parent}::uuid and locked_by is not null
+			`;
+			child = running?.id || "";
+			return child !== "";
+		});
+		return { conductor, worker, orchestrator, parent, child, caught, childAborts, releaseChild };
+	}
+
+	test("cancelling a parent cancels its running child", async () => {
+		const db = await pool.child();
+		databases.push(db);
+		const { conductor, worker, orchestrator, parent, child, childAborts, releaseChild } =
+			await startWorkflow(db, {});
+
+		try {
+			expect(await conductor.cancel(parent, { reason: "Stop workflow" })).toBe(true);
+			// deliver the cancel signal the next orchestrator heartbeat would
+			worker.cancelExecutions([child], "Stop workflow");
+			await waitForCondition(async () => (await executionState(db, child)).failed);
+		} finally {
+			releaseChild.resolve();
+			await orchestrator.stop();
+		}
+
+		expect(childAborts).toHaveLength(1);
+		expect(childAborts[0]).toBeInstanceOf(CancelledError);
+		expect((childAborts[0] as CancelledError).message).toBe("Stop workflow");
+		for (const id of [parent, child]) {
+			expect(await executionState(db, id)).toEqual({
+				failed: true,
+				cancelled: true,
+				last_error: "Stop workflow",
+				waiting_on_execution_id: null,
+			});
+		}
+	}, 15000);
+
+	test("cancelling a parent keeps a child invoked with cancelWithParent: false", async () => {
+		const db = await pool.child();
+		databases.push(db);
+		const { conductor, orchestrator, parent, child, childAborts, releaseChild } =
+			await startWorkflow(db, { cancelWithParent: false });
+
+		try {
+			expect(await conductor.cancel(parent)).toBe(true);
+			expect((await executionState(db, child)).cancelled).toBe(false);
+			releaseChild.resolve();
+			await waitForCondition(async () => {
+				const [execution] = await db.sql<[{ completed: boolean }]>`
+					select completed_at is not null as completed
+					from pgconductor._private_executions where id = ${child}::uuid
+				`;
+				return execution.completed;
+			});
+		} finally {
+			releaseChild.resolve();
+			await orchestrator.stop();
+		}
+
+		expect(childAborts).toEqual([]);
+		expect(await executionState(db, child)).toEqual({
+			failed: false,
+			cancelled: false,
+			last_error: null,
+			waiting_on_execution_id: null,
+		});
+		expect(await executionState(db, parent)).toEqual({
+			failed: true,
+			cancelled: true,
+			last_error: "Cancelled by user",
+			waiting_on_execution_id: null,
+		});
+	}, 15000);
+
+	test("a parent catches the CancelledError of a cancelled child", async () => {
+		const db = await pool.child();
+		databases.push(db);
+		const { conductor, worker, orchestrator, parent, child, caught, releaseChild } =
+			await startWorkflow(db, { catchCancelled: true });
+
+		try {
+			expect(await conductor.cancel(child, { reason: "Not needed" })).toBe(true);
+			worker.cancelExecutions([child], "Not needed");
+			await waitForCondition(async () => {
+				const [execution] = await db.sql<[{ completed: boolean }]>`
+					select completed_at is not null as completed
+					from pgconductor._private_executions where id = ${parent}::uuid
+				`;
+				return execution.completed;
+			});
+		} finally {
+			releaseChild.resolve();
+			await orchestrator.stop();
+		}
+
+		expect(caught).toHaveLength(1);
+		expect(caught[0]).toBeInstanceOf(CancelledError);
+		expect((caught[0] as CancelledError).message).toBe("Not needed");
+		expect(await executionState(db, child)).toEqual({
+			failed: true,
+			cancelled: true,
+			last_error: "Not needed",
+			waiting_on_execution_id: null,
+		});
+	}, 15000);
+
+	test("an uncaught child cancellation cancels the parent", async () => {
+		const db = await pool.child();
+		databases.push(db);
+		const { conductor, worker, orchestrator, parent, child, caught, releaseChild } =
+			await startWorkflow(db, {});
+
+		try {
+			expect(await conductor.cancel(child)).toBe(true);
+			worker.cancelExecutions([child], "Cancelled by user");
+			await waitForCondition(async () => (await executionState(db, parent)).failed);
+		} finally {
+			releaseChild.resolve();
+			await orchestrator.stop();
+		}
+
+		expect(caught).toHaveLength(1);
+		expect(await executionState(db, parent)).toEqual({
+			failed: true,
+			cancelled: true,
+			last_error: "Cancelled by user",
+			waiting_on_execution_id: null,
+		});
+	}, 15000);
+
+	test("cancelling a sleeping execution settles it immediately", async () => {
+		const db = await pool.child();
+		databases.push(db);
+		const conductor = Conductor.create({
+			sql: db.sql,
+			tasks: TaskSchemas.fromSchema([defineTask({ name: "sleeper", payload: z.object({}) })]),
+			context: {},
+		});
+		const sleeper = conductor.createTask(
+			{ name: "sleeper" },
+			{ invocable: true },
+			async (_e, ctx) => {
+				await ctx.sleep("nap", 60 * 60 * 1000);
+			},
+		);
+		const orchestrator = Orchestrator.create({
+			conductor,
+			tasks: [sleeper],
+			defaultWorker: { pollIntervalMs: 50, flushIntervalMs: 50 },
+		});
+		await orchestrator.start();
+		try {
+			const id = await conductor.invoke({ name: "sleeper" }, {});
+			await waitForCondition(async () => {
+				const [execution] = await db.sql<[{ sleeping: boolean }]>`
+					select locked_by is null and run_at > now() as sleeping
+					from pgconductor._private_executions where id = ${id}::uuid
+				`;
+				return execution.sleeping;
+			});
+
+			expect(await conductor.cancel(id)).toBe(true);
+			expect(await executionState(db, id)).toEqual({
+				failed: true,
+				cancelled: true,
+				last_error: "Cancelled by user",
+				waiting_on_execution_id: null,
+			});
+		} finally {
+			await orchestrator.stop();
+		}
 	}, 15000);
 });

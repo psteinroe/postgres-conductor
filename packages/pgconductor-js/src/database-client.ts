@@ -91,12 +91,13 @@ export type ExecutionResult =
 	| ExecutionFailed
 	| ExecutionReleased
 	| ExecutionPermamentlyFailed
+	| ExecutionCancelled
 	| ExecutionInvokeChild;
 
 export type GroupedExecutionResults = {
 	orchestratorId: string;
 	completed: ExecutionCompleted[];
-	failed: (ExecutionFailed | ExecutionPermamentlyFailed)[];
+	failed: (ExecutionFailed | ExecutionPermamentlyFailed | ExecutionCancelled)[];
 	released: ExecutionReleased[];
 	invokeChild: ExecutionInvokeChild[];
 };
@@ -134,6 +135,14 @@ export type ExecutionPermamentlyFailed = {
 	error: string;
 };
 
+export type ExecutionCancelled = {
+	execution_id: string;
+	queue: string;
+	task_key: string;
+	status: "cancelled";
+	error: string;
+};
+
 export type ExecutionInvokeChild = {
 	group?: string | null;
 	execution_id: string;
@@ -145,6 +154,7 @@ export type ExecutionInvokeChild = {
 	child_task_name: string;
 	child_task_queue: string;
 	child_payload: Payload | null;
+	cancel_with_parent?: boolean;
 	trace_context?: TraceContextCarrier | null;
 };
 

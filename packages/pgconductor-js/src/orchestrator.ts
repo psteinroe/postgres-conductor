@@ -373,7 +373,10 @@ export class Orchestrator {
 									(w) => w.queueName === signal.signal_payload?.queue,
 								);
 								if (worker) {
-									worker.cancelExecutions([signal.signal_execution_id]);
+									worker.cancelExecutions(
+										[signal.signal_execution_id],
+										signal.signal_payload.reason,
+									);
 								}
 							}
 							break;

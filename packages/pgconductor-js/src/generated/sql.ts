@@ -121,6 +121,7 @@ create table pgconductor._private_executions (
     waiting_on_execution_id uuid,
     waiting_step_key text,
     parent_execution_id uuid,
+    cancel_with_parent boolean default true not null,
     subscription_id uuid,
     singleton_on timestamptz,
 
@@ -760,14 +761,15 @@ declare
   v_orchestrator_id uuid;
   v_queue text;
   v_descendant_ids uuid[];
-  v_ancestor_ids uuid[];
+  v_parent_ids uuid[];
   v_locked_ids uuid[];
   v_rows_affected integer;
 begin
-  -- a waiting execution is cancelled with the executions it waits on, and
-  -- fails the executions waiting on it. the graph may change while we wait for
-  -- locks, so it is read again after locking. a changed graph releases the
-  -- stale locks by rolling back, then locks the new graph children first.
+  -- a waiting execution is cancelled with the executions it waits on, unless
+  -- they were invoked with cancel_with_parent = false, and wakes the execution
+  -- waiting on it. the graph may change while we wait for locks, so it is read
+  -- again after locking. a changed graph releases the stale locks by rolling
+  -- back, then locks the new graph children first.
   loop
     begin
       perform 1
@@ -777,31 +779,25 @@ begin
       for update of e;
 
       with recursive descendants as (
-        select e.waiting_on_execution_id as id, 1 as depth
+        select c.id, 1 as depth
         from pgconductor._private_executions e
-        where e.id = p_execution_id and e.waiting_on_execution_id is not null
+        join pgconductor._private_executions c on c.id = e.waiting_on_execution_id
+        where e.id = p_execution_id and c.cancel_with_parent
         union all
-        select e.waiting_on_execution_id, d.depth + 1
+        select c.id, d.depth + 1
         from descendants d
         join pgconductor._private_executions e on e.id = d.id
-        where e.waiting_on_execution_id is not null
+        join pgconductor._private_executions c on c.id = e.waiting_on_execution_id
+        where c.cancel_with_parent
       )
       select array_agg(id order by depth desc) into v_descendant_ids from descendants;
 
-      with recursive ancestors as (
-        select e.id, 1 as depth
-        from pgconductor._private_executions e
-        where e.waiting_on_execution_id = p_execution_id and e.locked_by is null
-        union all
-        select e.id, a.depth + 1
-        from ancestors a
-        join pgconductor._private_executions e on e.waiting_on_execution_id = a.id
-        where e.locked_by is null
-      )
-      select array_agg(id order by depth) into v_ancestor_ids from ancestors;
+      select array_agg(e.id) into v_parent_ids
+      from pgconductor._private_executions e
+      where e.waiting_on_execution_id = p_execution_id and e.locked_by is null;
 
-      exit when v_locked_ids = v_descendant_ids || p_execution_id || v_ancestor_ids;
-      v_locked_ids := v_descendant_ids || p_execution_id || v_ancestor_ids;
+      exit when v_locked_ids = v_descendant_ids || p_execution_id || v_parent_ids;
+      v_locked_ids := v_descendant_ids || p_execution_id || v_parent_ids;
       raise exception using errcode = 'PGC01';
     exception when sqlstate 'PGC01' then
       null;
@@ -872,13 +868,10 @@ begin
 
   -- pending: fail immediately
   with pending as (
-    select e.id, e.queue,
-      case when e.id = any(v_ancestor_ids) then 'Child execution failed: ' || p_reason
-        else p_reason end as error,
-      t.remove_on_fail_days = 0 as should_remove
+    select e.id, e.queue, t.remove_on_fail_days = 0 as should_remove
     from pgconductor._private_executions e
     left join pgconductor._private_tasks t on t.key = e.task_key and t.queue = e.queue
-    where e.id = any(v_descendant_ids || p_execution_id || v_ancestor_ids)
+    where e.id = any(v_descendant_ids || p_execution_id)
       and e.locked_by is null
       and e.completed_at is null
       and e.failed_at is null
@@ -892,11 +885,27 @@ begin
     update pgconductor._private_executions e
     set
       failed_at = pgconductor._private_current_time(),
-      last_error = p.error,
+      cancelled = true,
+      last_error = p_reason,
       waiting_on_execution_id = null,
       waiting_step_key = null
     from pending p
     where e.id = p.id and e.queue = p.queue and p.should_remove is not true
+  ),
+  parent_steps as (
+    insert into pgconductor._private_steps (execution_id, queue, key, result)
+    select e.id, e.queue, e.waiting_step_key, jsonb_build_object('status', 'cancelled', 'error', p_reason)
+    from pgconductor._private_executions e
+    where e.id = any(v_parent_ids)
+    on conflict (execution_id, key) do nothing
+  ),
+  woken_parents as (
+    update pgconductor._private_executions e
+    set
+      run_at = pgconductor._private_current_time(),
+      waiting_on_execution_id = null,
+      waiting_step_key = null
+    where e.id = any(v_parent_ids)
   )
   delete from pgconductor._private_custom_event_subscriptions s
   using pending p

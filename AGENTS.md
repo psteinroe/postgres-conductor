@@ -177,6 +177,11 @@ Tables live in the `pgconductor` schema with a `_private_` prefix (`_private_exe
 - Implemented in `buildReturnExecutions()` via the `permanently_failed_children` CTE
 - Parent receives error like "Child execution failed: <child_error>"
 
+**Cancellation**
+- Cancelled executions end with `failed_at` set and `cancelled = true`; they are never retried or dead-lettered
+- `cancel_execution()` cancels the chain of children the execution waits on, stopping at children invoked with `cancel_with_parent = false`
+- A cancelled child wakes its waiting parent with a `{ status: "cancelled" }` invoke step; `ctx.invoke()` throws `CancelledError`, and a task that lets it escape settles as `cancelled`
+
 **Infinity Pattern**
 - Postgres `'infinity'::timestamptz` for indefinite waiting
 - Used when `invoke()` is called without timeout

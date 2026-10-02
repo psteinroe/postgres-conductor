@@ -20,22 +20,50 @@ console.log(cancelled); // true if cancelled, false if already completed
 
 ## Cancellation States
 
+A cancelled execution ends with `failed_at` set, `cancelled = true` and the reason in `last_error`, so it can be told apart from a failed one. It is never retried and never delivered to a [dead letter queue](dead-letter-queue.md).
+
 **Pending execution:**
 
-- Execution is marked as failed
-- Error set to "Cancelled by user"
-- Never runs
+- Settles immediately and never runs
+- This includes executions suspended in `ctx.sleep()`, `ctx.invoke()` or `ctx.waitForEvent()`; an event wait is removed with it
 
 **Running execution:**
 
-- `ctx.signal` is aborted
+- `ctx.signal` is aborted with a `CancelledError` as `ctx.signal.reason`
 - Task should check signal and exit gracefully
-- Execution is marked as cancelled and fails once the task stops, even if it was about to sleep or invoke a child
+- Execution settles as cancelled once the task stops, even if it was about to sleep or invoke a child
 
-**Workflows:**
+## Workflows
 
-- Cancelling an execution also cancels the executions it is waiting on
-- Every workflow waiting on a cancelled execution fails with "Child execution failed: <reason>"
+Cancelling an execution also cancels the child it is waiting on, and that child's children. To keep a child running when its parent is cancelled, invoke it with `cancelWithParent: false`:
+
+```typescript
+const audit = await ctx.invoke(
+  "audit",
+  { name: "audit-log" },
+  { orderId },
+  { cancelWithParent: false }
+);
+```
+
+The parent still waits for the child. If the parent is cancelled, the child completes on its own.
+
+When a child is cancelled, the parent waiting on it resumes and `ctx.invoke()` throws a `CancelledError` with the cancellation reason as its message:
+
+```typescript
+import { CancelledError } from "pgconductor-js";
+
+try {
+  await ctx.invoke("approval", { name: "request-approval" }, { requestId });
+} catch (err) {
+  if (err instanceof CancelledError) {
+    return { status: "cancelled" };
+  }
+  throw err;
+}
+```
+
+A task that lets a `CancelledError` escape is cancelled too, with the same reason. An uncaught child cancellation therefore cancels the whole workflow waiting on it.
 
 ## Graceful Cancellation
 
@@ -53,7 +81,7 @@ const processItems = conductor.createTask(
       if (ctx.signal.aborted) {
         ctx.logger.info("Task cancelled, cleaning up...");
         await cleanup();
-        throw new Error("Task was cancelled");
+        throw ctx.signal.reason;
       }
 
       await processItem(item);
@@ -74,7 +102,7 @@ await conductor.cancel(executionId, {
 });
 ```
 
-The reason is stored in `last_error`.
+The reason is stored in `last_error` and is the message of the `CancelledError`.
 
 ## Unschedule Dynamic Cron
 

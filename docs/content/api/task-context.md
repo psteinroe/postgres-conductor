@@ -99,7 +99,7 @@ const result = await ctx.invoke<TResult>(
   stepName: string,
   taskRef: { name: string, queue?: string },
   payload: TPayload,
-  options?: { timeout?: number, group?: string }
+  options?: { timeout?: number, group?: string, cancelWithParent?: boolean }
 ): Promise<TResult>
 ```
 
@@ -126,7 +126,11 @@ const parent = conductor.createTask(
 - Creates child execution
 - Parent hangs up and waits
 - Returns child's result
-- Throws if child fails or times out
+- Throws a `CancelledError` if the child is cancelled
+- Throws if the child times out
+- Cancelling the parent cancels the child unless `cancelWithParent` is `false`
+
+See [Cancellation](../task-execution/cancellation.md#workflows).
 
 ## ctx.checkpoint()
 
@@ -225,7 +229,7 @@ ctx.logger.error("Failed to process", error);
 
 ## ctx.signal
 
-AbortSignal for cancellation:
+AbortSignal for cancellation. When the execution is cancelled, `ctx.signal.reason` is a `CancelledError` carrying the cancellation reason:
 
 ```typescript
 ctx.signal: AbortSignal
@@ -240,7 +244,7 @@ const task = conductor.createTask(
   async (event, ctx) => {
     for (const item of items) {
       if (ctx.signal.aborted) {
-        throw new Error("Task was cancelled");
+        throw ctx.signal.reason;
       }
       await processItem(item);
     }

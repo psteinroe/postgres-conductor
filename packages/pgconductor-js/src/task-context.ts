@@ -31,9 +31,7 @@ import {
 } from "./event-definition";
 import { compileEventFilter } from "./event-trigger-validation";
 
-export type TaskAbortReasons =
-	// if cancelled by a user
-	| { reason: "cancelled"; __pgconductorTaskAborted: true }
+type HangupReasons =
 	// the database already released the task
 	| { reason: "suspended"; __pgconductorTaskAborted: true }
 	// the task is released
@@ -53,18 +51,21 @@ export type TaskAbortReasons =
 			task: TaskIdentifier<string, string>;
 			payload: Payload | null;
 			group?: string | null;
+			cancel_with_parent: boolean;
 			trace_context: TraceContextCarrier | null;
 			__pgconductorTaskAborted: true;
 	  };
 
+export type TaskAbortReasons = CancelledError | HangupReasons;
+
 type DistributiveOmit<T, K extends PropertyKey> = T extends any ? Omit<T, K> : never;
 
-export function isTaskAbortReason(result: unknown): result is TaskAbortReasons {
+export function isTaskAbortReason(result: unknown): result is HangupReasons {
 	return (
 		typeof result === "object" &&
 		result !== null &&
 		"__pgconductorTaskAborted" in result &&
-		(result as TaskAbortReasons).__pgconductorTaskAborted === true
+		(result as HangupReasons).__pgconductorTaskAborted === true
 	);
 }
 
@@ -88,6 +89,14 @@ export function createTaskSignal(
 	}
 
 	return controller;
+}
+
+export class CancelledError extends Error {
+	readonly code = "PGCONDUCTOR_CANCELLED";
+	constructor(message: string) {
+		super(message);
+		this.name = "CancelledError";
+	}
 }
 
 export class WaitForEventTimeoutError extends Error {
@@ -332,7 +341,11 @@ export class TaskContext<
 		key: string,
 		task: TaskIdentifier<TName, TQueue>,
 		payload: InferPayload<TDef> = {} as InferPayload<TDef>,
-		{ timeout, group }: { timeout?: number; group?: string } = {},
+		{
+			timeout,
+			group,
+			cancelWithParent = true,
+		}: { timeout?: number; group?: string; cancelWithParent?: boolean } = {},
 	): Promise<InferReturns<TDef>> {
 		const cached = await this.opts.db.loadStep(
 			{
@@ -344,7 +357,13 @@ export class TaskContext<
 		);
 
 		if (cached !== undefined) {
-			return cached as InferReturns<TDef>;
+			const result = cached as
+				| { status: "completed"; result: InferReturns<TDef> }
+				| { status: "cancelled"; error: string };
+			if (result.status === "cancelled") {
+				throw new CancelledError(result.error);
+			}
+			return result.result;
 		}
 
 		// Check if we're already waiting (distinguishes first invoke from timeout)
@@ -373,6 +392,7 @@ export class TaskContext<
 			step_key: key,
 			payload,
 			group,
+			cancel_with_parent: cancelWithParent,
 			trace_context: this.opts.telemetry.traceContext(),
 		});
 	}
@@ -486,12 +506,12 @@ export class TaskContext<
 	 * @return Promise that never resolves
 	 **/
 	private abortAndHangup(
-		reason: DistributiveOmit<TaskAbortReasons, "__pgconductorTaskAborted">,
+		reason: DistributiveOmit<HangupReasons, "__pgconductorTaskAborted">,
 	): Promise<never> {
 		this.opts.abortController.abort({
 			__pgconductorTaskAborted: true,
 			...reason,
-		} as TaskAbortReasons);
+		} as HangupReasons);
 		return new Promise(() => {});
 	}
 }
