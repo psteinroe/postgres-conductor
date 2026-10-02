@@ -443,18 +443,24 @@ export class TaskContext<
 	 * Emit a typed custom event.
 	 * @param event - Event name to emit
 	 * @param payload - Typed event payload
+	 * @param opts.dedupe_key - Repeating a key for the same event name emits nothing and returns the original event ID
 	 * @returns Event ID
 	 */
 	async emit<
 		TName extends EventName<Events>,
 		TDef extends FindEventByIdentifier<Events, TName> = FindEventByIdentifier<Events, TName>,
-	>(event: TName, payload: InferEventPayload<TDef>): Promise<string> {
+	>(
+		event: TName,
+		payload: InferEventPayload<TDef>,
+		opts?: { dedupe_key?: string },
+	): Promise<string> {
 		payload = await validateEventPayload(this.opts.eventDefinitions, event, payload);
 		return this.opts.db.emitEvent(
 			{
 				eventKey: event,
 				payload: payload as any,
 				traceContext: this.opts.telemetry.traceContext(),
+				dedupeKey: opts?.dedupe_key,
 			},
 			{ signal: this.signal },
 		);

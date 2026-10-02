@@ -645,11 +645,11 @@ export class DatabaseClient {
 
 	async emitEvent(args: EmitEventArgs, opts?: QueryMethodOptions): Promise<string> {
 		const id = uuidv7();
-		await this.query(() => this.builder.buildEmitEvent({ ...args, id }), {
+		const result = await this.query(() => this.builder.buildEmitEvent({ ...args, id }), {
 			label: "emitEvent",
 			...opts,
 		});
-		return id;
+		return result[0]?.id || id;
 	}
 
 	/**

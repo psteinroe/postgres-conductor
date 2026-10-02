@@ -1282,7 +1282,7 @@ insert into pgconductor._private_tasks (
     key, queue, max_attempts, remove_on_complete_days, remove_on_fail_days
 )
 values (
-    'pgconductor.event-dispatch', 'pgconductor.internal', 3, 0, null
+    'pgconductor.event-dispatch', 'pgconductor.internal', 3, 1, null
 )
 on conflict (queue, key) do update set
     max_attempts = excluded.max_attempts,
@@ -1293,7 +1293,8 @@ create or replace function pgconductor.emit_event(
     p_event_key text,
     p_payload jsonb default '{}'::jsonb,
     p_trace_context jsonb default null,
-    p_id uuid default pgconductor._private_portable_uuidv7()
+    p_id uuid default pgconductor._private_portable_uuidv7(),
+    p_dedupe_key text default null
 )
 returns uuid
 language plpgsql
@@ -1315,17 +1316,29 @@ begin
     end if;
 
     insert into pgconductor._private_executions (
-        id, task_key, queue, payload, trace_context
+        id, task_key, queue, payload, trace_context, dedupe_key
     ) values (
         p_id,
         'pgconductor.event-dispatch',
         'pgconductor.internal',
         jsonb_build_object('eventKey', p_event_key, 'payload', v_payload),
-        p_trace_context
+        p_trace_context,
+        p_event_key || ':' || p_dedupe_key
     )
-    -- a retry after a lost response finds the event it already stored
-    on conflict (id, queue) do nothing;
+    on conflict do nothing;
 
-    return p_id;
+    if p_dedupe_key is null then
+        return p_id;
+    end if;
+
+    -- returning yields no row for a duplicate, do update would write a row version per redelivery,
+    -- and a cte shares the insert's snapshot and misses a concurrent winner; a new statement sees it
+    return (
+        select id
+        from pgconductor._private_executions
+        where task_key = 'pgconductor.event-dispatch'
+          and queue = 'pgconductor.internal'
+          and dedupe_key = p_event_key || ':' || p_dedupe_key
+    );
 end;
 $function$;

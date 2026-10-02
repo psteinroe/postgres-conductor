@@ -201,7 +201,7 @@ describe.serial("OpenTelemetry instrumentation", () => {
 		} as any);
 
 		await orchestrator.drain();
-		expect(await getExecution(sql, eventId)).toBeUndefined();
+		expect((await getExecution(sql, eventId))?.completed_at).not.toBeNull();
 		expect(exporter.getFinishedSpans()).toHaveLength(0);
 		await cleanup(provider);
 	});

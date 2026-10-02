@@ -67,6 +67,16 @@ await conductor.invoke(
 
 A redelivery after the webhook was processed is ignored. A redelivery that arrives while it is still running starts a new execution, so the handler can still run twice. Wrap side effects in [steps](../crafting-tasks/retries-and-steps.md) or make them idempotent.
 
+## Events
+
+`conductor.emit()` and `ctx.emit()` take the same `dedupe_key` option:
+
+```typescript
+await conductor.emit("order.paid", { orderId: "123" }, { dedupe_key: "order-123" });
+```
+
+Unlike invoke, a repeated emit never updates anything: it emits nothing and returns the original event ID, even while the event is still being dispatched. Keys are scoped per event name and remembered for 1–2 days after dispatch. See [Deduplicating Emits](../crafting-tasks/triggers.md#deduplicating-emits).
+
 **Push back a delayed execution:**
 
 ```typescript

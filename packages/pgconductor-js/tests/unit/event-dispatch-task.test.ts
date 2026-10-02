@@ -32,7 +32,7 @@ test("defines the internal event dispatch task", () => {
 		name: EVENT_DISPATCH_TASK,
 		queue: EVENT_DISPATCH_QUEUE,
 		maxAttempts: 3,
-		removeOnComplete: true,
+		removeOnComplete: { days: 1 },
 		batch: { size: 10, timeoutMs: 10 },
 	});
 });
