@@ -1,27 +1,38 @@
 # Deduplication
 
-Prevent duplicate executions of the same work.
+Keep one execution per key.
 
 ## Basic Usage
 
-Tasks with the same `dedupe_key` won't create duplicate executions:
+Invoking a task again with the same `dedupe_key` updates the pending execution instead of creating a new one:
 
 ```typescript
-await conductor.invoke(
+const first = await conductor.invoke(
   { name: "process-order" },
   { orderId: "123", status: "pending" },
   { dedupe_key: "order-123" }
 );
 
-// Returns existing execution ID - doesn't create duplicate
-await conductor.invoke(
+const second = await conductor.invoke(
   { name: "process-order" },
-  { orderId: "123", status: "pending" },
+  { orderId: "123", status: "paid" },
   { dedupe_key: "order-123" }
 );
+
+// first === second, and the execution runs once with status "paid"
 ```
 
-Both calls return the same execution ID.
+## Duplicate Keys
+
+What a repeated invoke does depends on the execution that holds the key:
+
+| Existing execution | Result |
+|--------------------|--------|
+| Waiting to run | Its payload, `run_at`, `priority` and `group` are replaced. The same ID is returned. A sleeping execution resumes right away with the new payload. |
+| Running | It is superseded: marked failed with `superseded by reinvoke`, and a new execution is created with the new payload. The running handler is not stopped, but its result is discarded. |
+| Completed or failed | Nothing runs. Its stored payload is replaced and the same ID is returned. |
+
+A key stays taken as long as its execution is stored. Once [retention](../crafting-tasks/retention.md) removes a completed or failed execution, the next invoke with that key creates a new execution.
 
 ## Deduplication Scope
 
@@ -44,10 +55,9 @@ await conductor.invoke(
 
 ## Use Cases
 
-**Prevent duplicate webhooks:**
+**Ignore redelivered webhooks:**
 
 ```typescript
-// Only process each webhook once
 await conductor.invoke(
   { name: "process-webhook" },
   event,
@@ -55,27 +65,18 @@ await conductor.invoke(
 );
 ```
 
-**Idempotent operations:**
+A redelivery after the webhook was processed is ignored. A redelivery that arrives while it is still running starts a new execution, so the handler can still run twice. Wrap side effects in [steps](../crafting-tasks/retries-and-steps.md) or make them idempotent.
+
+**Push back a delayed execution:**
 
 ```typescript
-// Ensure user is provisioned exactly once
-await conductor.invoke(
-  { name: "provision-user" },
-  { userId, email },
-  { dedupe_key: `user-${userId}` }
-);
-```
-
-**Combine with delayed execution:**
-
-```typescript
-// Deduplicate and delay
+// Each invoke moves the reminder to 24 hours from now
 await conductor.invoke(
   { name: "send-reminder" },
   { userId },
   {
     dedupe_key: `reminder-${userId}`,
-    runAfter: { hours: 24 }
+    run_at: new Date(Date.now() + 24 * 60 * 60 * 1000),
   }
 );
 ```
