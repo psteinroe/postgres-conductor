@@ -831,6 +831,7 @@ export class Worker<
 
 		let buffer = new BufferState(orchestratorId);
 		let flushTimer: ReturnType<typeof setTimeout> | null = null;
+		let timerFlush: Promise<void> = Promise.resolve();
 
 		const flushNow = async (isCleanup = false) => {
 			if (flushTimer) {
@@ -853,14 +854,15 @@ export class Worker<
 				this.logger.error("Error flushing results:", err);
 				if (!isCleanup) {
 					buffer.restore(batch);
+					scheduleFlush();
 				}
 			}
 		};
 
 		const scheduleFlush = () => {
 			if (flushTimer) clearTimeout(flushTimer);
-			flushTimer = setTimeout(async () => {
-				await flushNow();
+			flushTimer = setTimeout(() => {
+				timerFlush = flushNow();
 			}, this.flushIntervalMs);
 		};
 
@@ -878,6 +880,7 @@ export class Worker<
 			}
 		} finally {
 			if (flushTimer) clearTimeout(flushTimer);
+			await timerFlush;
 			await flushNow(true);
 		}
 	}

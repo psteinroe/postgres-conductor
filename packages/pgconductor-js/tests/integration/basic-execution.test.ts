@@ -123,4 +123,80 @@ describe("Basic Task Execution", () => {
 			await orchestrator.stop();
 		}
 	}, 30000);
+
+	test("retries a failed flush without new results", async () => {
+		const db = await pool.child();
+		databases.push(db);
+
+		const conductor = Conductor.create({
+			sql: db.sql,
+			tasks: TaskSchemas.fromSchema([defineTask({ name: "flush-task", payload: z.object({}) })]),
+			context: {},
+		});
+		const returnExecutions = conductor.db.returnExecutions.bind(conductor.db);
+		let failures = 0;
+		conductor.db.returnExecutions = async (grouped, opts) => {
+			if (failures === 0) {
+				failures++;
+				throw new Error("flush failed");
+			}
+			return returnExecutions(grouped, opts);
+		};
+		const task = conductor.createTask({ name: "flush-task" }, { invocable: true }, async () => {});
+		const orchestrator = Orchestrator.create({
+			conductor,
+			tasks: [task],
+			defaultWorker: { pollIntervalMs: 50, flushIntervalMs: 100, flushBatchSize: 10 },
+		});
+		await orchestrator.start();
+
+		try {
+			const id = await conductor.invoke({ name: "flush-task" }, {});
+			await waitForCondition(async () => {
+				const [execution] = await db.sql<{ completed: boolean }[]>`
+					select completed_at is not null as completed from pgconductor._private_executions
+					where id = ${id}
+				`;
+				return execution?.completed === true;
+			}, 3000);
+			expect(failures).toBe(1);
+		} finally {
+			await orchestrator.stop();
+		}
+	}, 30000);
+
+	test("stop() waits for an in-flight flush", async () => {
+		const db = await pool.child();
+		databases.push(db);
+
+		const conductor = Conductor.create({
+			sql: db.sql,
+			tasks: TaskSchemas.fromSchema([defineTask({ name: "flush-task", payload: z.object({}) })]),
+			context: {},
+		});
+		const returnExecutions = conductor.db.returnExecutions.bind(conductor.db);
+		const flushStarted = Promise.withResolvers<void>();
+		conductor.db.returnExecutions = async (grouped, opts) => {
+			flushStarted.resolve();
+			await Bun.sleep(500);
+			return returnExecutions(grouped, opts);
+		};
+		const task = conductor.createTask({ name: "flush-task" }, { invocable: true }, async () => {});
+		const orchestrator = Orchestrator.create({
+			conductor,
+			tasks: [task],
+			defaultWorker: { pollIntervalMs: 50, flushIntervalMs: 100, flushBatchSize: 10 },
+		});
+		await orchestrator.start();
+
+		const id = await conductor.invoke({ name: "flush-task" }, {});
+		await flushStarted.promise;
+		await orchestrator.stop();
+
+		const [execution] = await db.sql<{ completed: boolean; locked: boolean }[]>`
+			select completed_at is not null as completed, locked_by is not null as locked
+			from pgconductor._private_executions where id = ${id}
+		`;
+		expect(execution).toEqual({ completed: true, locked: false });
+	}, 30000);
 });
