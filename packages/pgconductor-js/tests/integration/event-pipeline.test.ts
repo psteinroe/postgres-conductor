@@ -283,7 +283,7 @@ describe("event pipeline", () => {
 		expect(sources.map((source) => source.id)).toEqual([eventId]);
 	});
 
-	test("an emit id deduplicates the event per event name", async () => {
+	test("an emit dedupe key deduplicates the event per event name", async () => {
 		const db = await database();
 		const first = await db.client.emitEvent({
 			eventKey: "pipeline.deduped",
@@ -318,7 +318,7 @@ describe("event pipeline", () => {
 		]);
 	});
 
-	test("concurrent emits with the same id store one event", async () => {
+	test("concurrent emits with the same dedupe key store one event", async () => {
 		const db = await database();
 		const firstSql = postgres(db.url, { max: 1 });
 		const secondSql = postgres(db.url, { max: 1 });
@@ -360,7 +360,7 @@ describe("event pipeline", () => {
 		}
 	});
 
-	test("a repeated emit id triggers tasks and resumes waits once", async () => {
+	test("a repeated emit dedupe key triggers tasks and resumes waits once", async () => {
 		const db = await database();
 		const event = defineEvent({
 			name: "pipeline.redelivered",
@@ -413,13 +413,13 @@ describe("event pipeline", () => {
 			const first = await conductor.emit(
 				"pipeline.redelivered",
 				{ value: "first" },
-				{ id: "delivery-1" },
+				{ dedupe_key: "delivery-1" },
 			);
 			await waiting("second");
 			const repeated = await conductor.emit(
 				"pipeline.redelivered",
 				{ value: "repeated" },
-				{ id: "delivery-1" },
+				{ dedupe_key: "delivery-1" },
 			);
 			await waitForCondition(() => received.includes("waiter:first:timeout"));
 
@@ -430,7 +430,7 @@ describe("event pipeline", () => {
 		}
 	});
 
-	test("ctx.emit with an id stores one event across retried attempts", async () => {
+	test("ctx.emit with a dedupe key stores one event across retried attempts", async () => {
 		const db = await database();
 		const event = defineEvent({ name: "pipeline.retried-emit", payload: z.object({}) });
 		const conductor = Conductor.create({
@@ -444,7 +444,7 @@ describe("event pipeline", () => {
 			{ name: "pipeline.retried-emitter" },
 			{ invocable: true },
 			async (_event, ctx) => {
-				eventIds.push(await ctx.emit("pipeline.retried-emit", {}, { id: "delivery-1" }));
+				eventIds.push(await ctx.emit("pipeline.retried-emit", {}, { dedupe_key: "delivery-1" }));
 				if (eventIds.length === 1) throw new Error("first attempt fails");
 			},
 		);
@@ -472,7 +472,7 @@ describe("event pipeline", () => {
 		expect(sources.map((source) => source.id)).toEqual([eventIds[0] || ""]);
 	});
 
-	test("remembers emit ids until maintenance removes day-old dispatches", async () => {
+	test("remembers emit dedupe keys until maintenance removes day-old dispatches", async () => {
 		const db = await database();
 		const event = defineEvent({ name: "pipeline.remembered", payload: z.object({}) });
 		const conductor = Conductor.create({
@@ -487,7 +487,7 @@ describe("event pipeline", () => {
 
 		try {
 			await db.client.setFakeTime({ date: new Date("2024-01-01T12:00:00Z") });
-			const first = await conductor.emit("pipeline.remembered", {}, { id: "delivery-1" });
+			const first = await conductor.emit("pipeline.remembered", {}, { dedupe_key: "delivery-1" });
 			await orchestrator.drain();
 
 			const [maintenance] = await db.sql<{ count: number }[]>`
@@ -498,11 +498,15 @@ describe("event pipeline", () => {
 
 			await db.client.setFakeTime({ date: new Date("2024-01-02T11:00:00Z") });
 			await db.client.removeExecutions({ queueName: INTERNAL_QUEUE, batchSize: 100 });
-			expect(await conductor.emit("pipeline.remembered", {}, { id: "delivery-1" })).toBe(first);
+			expect(await conductor.emit("pipeline.remembered", {}, { dedupe_key: "delivery-1" })).toBe(
+				first,
+			);
 
 			await db.client.setFakeTime({ date: new Date("2024-01-02T13:00:00Z") });
 			await db.client.removeExecutions({ queueName: INTERNAL_QUEUE, batchSize: 100 });
-			expect(await conductor.emit("pipeline.remembered", {}, { id: "delivery-1" })).not.toBe(first);
+			expect(
+				await conductor.emit("pipeline.remembered", {}, { dedupe_key: "delivery-1" }),
+			).not.toBe(first);
 		} finally {
 			await db.client.clearFakeTime();
 		}

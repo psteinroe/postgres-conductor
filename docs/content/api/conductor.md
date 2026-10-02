@@ -182,14 +182,14 @@ Emit a typed custom event:
 await conductor.emit(
   "event-name",
   { /* event payload */ },
-  options?: { id?: string }
+  options?: { dedupe_key?: string }
 );
 ```
 
 Returns the event ID. Events trigger tasks with matching event triggers.
 
-`id` deduplicates the emit: repeating it for the same event name returns the original event ID
-without emitting again. Ids are scoped per event name and remembered for 1–2 days after the event
+`dedupe_key` deduplicates the emit: repeating it for the same event name emits nothing and returns
+the original event ID. Keys are scoped per event name and remembered for 1–2 days after the event
 was dispatched. See [Deduplicating Emits](../crafting-tasks/triggers.md#deduplicating-emits).
 
 See [Task Triggers](../crafting-tasks/triggers.md) for details on event-triggered tasks.

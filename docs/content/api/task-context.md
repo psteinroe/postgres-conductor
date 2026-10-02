@@ -98,14 +98,14 @@ Emit a typed custom event from a task:
 const eventId = await ctx.emit(
   "event-name",
   { /* event payload */ },
-  options?: { id?: string }
+  options?: { dedupe_key?: string }
 );
 ```
 
-Emits are not memoized, so a retried attempt emits again. Pass an `id` derived from the
-execution's input to emit once across attempts: repeating it for the same event name returns the
-original event ID. Ids are scoped per event name and remembered for 1–2 days after the event was
-dispatched. See [Deduplicating Emits](../crafting-tasks/triggers.md#deduplicating-emits).
+Emits are not memoized, so a retried attempt emits again. Pass a `dedupe_key` derived from the
+execution's input to emit once across attempts: repeating it for the same event name emits nothing
+and returns the original event ID. Keys are scoped per event name and remembered for 1–2 days after
+the event was dispatched. See [Deduplicating Emits](../crafting-tasks/triggers.md#deduplicating-emits).
 
 ## ctx.invoke()
 

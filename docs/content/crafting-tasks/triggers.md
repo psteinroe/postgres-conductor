@@ -110,15 +110,17 @@ await conductor.emit("user.created", {
 
 #### Deduplicating Emits
 
-Webhook providers redeliver, so ingress may emit the same delivery twice. Pass an `id` to make the emit idempotent:
+Webhook providers redeliver, so ingress may emit the same delivery twice. Pass a `dedupe_key` to make the emit idempotent:
 
 ```typescript
-await conductor.emit("slack.mentioned", payload, { id: `slack:${eventId}` });
+const eventId = await conductor.emit("slack.mentioned", payload, {
+  dedupe_key: `slack:${delivery.eventId}`,
+});
 ```
 
-Repeating an `id` for the same event name stores nothing and returns the original event ID, even when two emits race. Ids are scoped per event name: the same `id` under two event names emits two events. An id is remembered while its dispatch execution exists. Completed dispatches are kept for one day and removed by the daily maintenance run of the internal queue, so an id deduplicates for 1–2 days after its event was dispatched. Outside that window, the same `id` emits a new event.
+`emit()` always returns the event ID that Postgres Conductor assigned; the `dedupe_key` is your own key and is never returned. Repeating a `dedupe_key` for the same event name stores nothing and returns the original event ID, even when two emits race. Keys are scoped per event name: the same `dedupe_key` under two event names emits two events. A key is remembered while its dispatch execution exists. Completed dispatches are kept for one day and removed by the daily maintenance run of the internal queue, so a key deduplicates for 1–2 days after its event was dispatched. Outside that window, the same `dedupe_key` emits a new event.
 
-From SQL, pass the id as `p_dedupe_key`: `pgconductor.emit_event('slack.mentioned', payload, p_dedupe_key := 'slack:' || event_id)`.
+From SQL, pass the key as `p_dedupe_key`: `pgconductor.emit_event('slack.mentioned', payload, p_dedupe_key := 'slack:' || event_id)`.
 
 Each event is stored as an internal dispatch execution. Destination inserts are atomic within one database statement. If dispatch retries before the source execution completes, it re-evaluates current subscriptions: existing deliveries are deduplicated, but newly registered subscriptions may receive additional deliveries. Handlers should be prepared for at-least-once delivery. Only orchestrators whose conductor has `events` configured dispatch events.
 
