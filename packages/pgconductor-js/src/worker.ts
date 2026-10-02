@@ -15,8 +15,7 @@ import type { TaskDefinition } from "./task-definition";
 import { waitFor } from "./lib/wait-for";
 import { mapConcurrent } from "./lib/map-concurrent";
 import { Deferred } from "./lib/deferred";
-import { type PollableAsyncIterable } from "./lib/async-queue";
-import { BatchingAsyncQueue, type BatchGroup } from "./lib/batching-async-queue";
+import { BatchingAsyncQueue } from "./lib/batching-async-queue";
 import { nextCronOccurrence } from "./lib/cron";
 import { Clock } from "./lib/clock";
 import {
@@ -395,9 +394,18 @@ export class Worker<
 		const allTasks = Array.from(this.tasks.values());
 		// Check if any tasks have windows - only then do we need time-based filtering
 		const tasksWithWindows = allTasks.filter((task) => task.window);
+		// A slot runs one execution, or one batch of a batched task
+		const executionsPerSlot = Math.max(...allTasks.map((task) => task.batch?.size || 1));
 
 		while (!this.signal?.aborted) {
 			try {
+				// Claim only what free slots can run so other workers get the rest
+				const freeSlots = this.concurrency - queue.pending;
+				if (freeSlots <= 0) {
+					await queue.waitForRelease();
+					continue;
+				}
+
 				// Filter tasks based on time windows (if any)
 				let disallowedTaskKeys: string[] = [];
 
@@ -430,7 +438,7 @@ export class Worker<
 					{
 						orchestratorId: this.orchestratorId,
 						queueName: this.queueName,
-						batchSize: this.fetchBatchSize,
+						batchSize: Math.min(this.fetchBatchSize, freeSlots * executionsPerSlot),
 						filterTaskKeys: disallowedTaskKeys,
 					},
 					{ signal: this.signal },
@@ -459,10 +467,10 @@ export class Worker<
 
 	// --- Stage 2: Execute tasks concurrently ---
 	private async *executeTasks(
-		source: PollableAsyncIterable<BatchGroup<Execution>>,
+		queue: BatchingAsyncQueue<Execution>,
 	): AsyncGenerator<ExecutionResult> {
 		for await (const result of mapConcurrent(
-			source,
+			queue,
 			this.concurrency,
 			async ({ taskKey, items: executions }): Promise<ExecutionResult | ExecutionResult[]> => {
 				// Dispatch to correct task based on task_key
@@ -503,6 +511,8 @@ export class Worker<
 				return this.executeSingleTask(task, singleExec);
 			},
 		)) {
+			queue.release();
+
 			// Yield results (may be single or array)
 			if (Array.isArray(result)) {
 				for (const r of result) yield r;

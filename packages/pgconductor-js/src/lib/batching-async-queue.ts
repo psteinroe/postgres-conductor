@@ -21,6 +21,8 @@ export class BatchingAsyncQueue<T extends { task_key: string }> implements Polla
 	private queue: BatchGroup<T>[] = [];
 	private resolvers: ((value: IteratorResult<BatchGroup<T>>) => void)[] = [];
 	private itemAvailableListeners = new Set<() => void>();
+	private releaseResolvers: (() => void)[] = [];
+	private unreleased = 0;
 	private closed = false;
 
 	// Track batches per task
@@ -109,6 +111,8 @@ export class BatchingAsyncQueue<T extends { task_key: string }> implements Polla
 	private emitGroup(group: BatchGroup<T>): void {
 		if (this.closed) return;
 
+		this.unreleased++;
+
 		// If a consumer is waiting, deliver immediately (same as AsyncQueue)
 		const resolver = this.resolvers.shift();
 		if (resolver) {
@@ -147,6 +151,29 @@ export class BatchingAsyncQueue<T extends { task_key: string }> implements Polla
 		return () => this.itemAvailableListeners.delete(listener);
 	}
 
+	/**
+	 * Number of emitted groups that the consumer has not released yet.
+	 */
+	get pending(): number {
+		return this.unreleased;
+	}
+
+	/**
+	 * Mark an emitted group as processed.
+	 */
+	release(): void {
+		this.unreleased--;
+		for (const r of this.releaseResolvers.splice(0)) r();
+	}
+
+	/**
+	 * Wait until the consumer releases a group or the queue is closed.
+	 */
+	waitForRelease(): Promise<void> {
+		if (this.closed) return Promise.resolve();
+		return new Promise((resolve) => this.releaseResolvers.push(resolve));
+	}
+
 	private notifyItemAvailable() {
 		const listeners = [...this.itemAvailableListeners];
 		this.itemAvailableListeners.clear();
@@ -175,6 +202,7 @@ export class BatchingAsyncQueue<T extends { task_key: string }> implements Polla
 		// Signal remaining waiting consumers as done
 		for (const r of this.resolvers) r({ value: undefined as any, done: true });
 		this.resolvers = [];
+		for (const r of this.releaseResolvers.splice(0)) r();
 	}
 
 	[Symbol.asyncIterator]() {
