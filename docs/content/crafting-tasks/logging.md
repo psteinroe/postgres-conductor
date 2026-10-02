@@ -49,7 +49,7 @@ ctx.logger.error("Error messages for failures");
 Provide your own logger implementation to integrate with your logging service:
 
 ```typescript
-import { Logger } from "pgconductor-js";
+import type { Logger } from "pgconductor-js";
 
 class CustomLogger implements Logger {
   info(message: string, ...args: unknown[]) {
