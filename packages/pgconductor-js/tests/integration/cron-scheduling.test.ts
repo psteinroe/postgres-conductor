@@ -6,7 +6,9 @@ import { defineTask } from "../../src/task-definition";
 import { TestDatabasePool } from "../fixtures/test-database";
 import { waitFor } from "../../src/lib/wait-for";
 import { TaskSchemas } from "../../src/schemas";
-import { waitForCondition } from "../test-utils";
+import { DatabaseClient } from "../../src/database-client";
+import { DefaultLogger } from "../../src/lib/logger";
+import { loseFirstResponse, waitForCondition } from "../test-utils";
 
 describe("Cron Scheduling", () => {
 	let pool: TestDatabasePool;
@@ -645,6 +647,33 @@ describe("Cron Scheduling", () => {
 
 		await db.destroy();
 	}, 30000);
+
+	test("a retried next-occurrence invoke keeps one schedule", async () => {
+		const db = await pool.child();
+		await Conductor.create({ sql: db.sql, context: {} }).ensureInstalled();
+		const client = new DatabaseClient({
+			sql: loseFirstResponse(db.sql, "pgconductor.invoke"),
+			logger: new DefaultLogger(),
+		});
+
+		const id = await client.invoke(
+			{
+				task_key: "retried-cron",
+				queue: "default",
+				run_at: new Date("2030-01-01T00:00:00Z"),
+				dedupe_key: "scheduled::nightly::1893456000",
+				cron_expression: "0 0 0 * * *",
+			},
+			{ signal: new AbortController().signal },
+		);
+
+		const schedules = await db.sql<{ id: string | null }[]>`
+			select id from pgconductor._private_executions where task_key = 'retried-cron'
+		`;
+		expect(schedules.map((schedule) => schedule.id)).toEqual([id]);
+
+		await db.destroy();
+	});
 
 	test("registration stores cron priority and removes overdue occurrences of dropped schedules", async () => {
 		const db = await pool.child();

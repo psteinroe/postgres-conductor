@@ -10,7 +10,7 @@ import { Orchestrator } from "../../src/orchestrator";
 import { EventSchemas, TaskSchemas } from "../../src/schemas";
 import { defineTask } from "../../src/task-definition";
 import { TestDatabasePool, type TestDatabase } from "../fixtures/test-database";
-import { waitForCondition } from "../test-utils";
+import { loseFirstResponse, waitForCondition } from "../test-utils";
 
 const INTERNAL_QUEUE = "pgconductor.internal";
 const DISPATCH_TASK = "pgconductor.event-dispatch";
@@ -265,6 +265,22 @@ describe("event pipeline", () => {
 			select to_regclass('pgconductor._private_custom_events')::text as event_table
 		`;
 		expect(schema?.event_table).toBeNull();
+	});
+
+	test("a retried emit returns the event it already stored", async () => {
+		const db = await database();
+		const client = new DatabaseClient({
+			sql: loseFirstResponse(db.sql, "emit_event"),
+			logger: new DefaultLogger(),
+		});
+		const eventId = await client.emitEvent(
+			{ eventKey: "pipeline.retried", payload: {} },
+			{ signal: new AbortController().signal },
+		);
+		const sources = await db.sql<{ id: string }[]>`
+			select id from pgconductor._private_executions where task_key = ${DISPATCH_TASK}
+		`;
+		expect(sources.map((source) => source.id)).toEqual([eventId]);
 	});
 
 	test("only orchestrators with an event catalog dispatch events", async () => {
