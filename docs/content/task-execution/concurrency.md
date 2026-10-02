@@ -54,3 +54,5 @@ Child invocations use the `group` option supplied to `ctx.invoke`. Dynamic cron 
 ## Group concurrency
 
 `group` may be supplied when invoking a task. `groupConcurrency` limits active executions within each `(queue, task, group)` scope; ungrouped invocations bypass that limit. Task and group limits compose and are intentionally soft across concurrent workers.
+
+A claim skips the pending executions of full groups one by one, so a very large backlog in a single group slows every claim of that task until the backlog drains. Spread bulk work across groups, or move it to a separate task or queue.
