@@ -274,6 +274,49 @@ describe("event pipeline", () => {
 		expect(schema?.event_table).toBeNull();
 	});
 
+	test("only orchestrators with an event catalog dispatch events", async () => {
+		const db = await database();
+		const eventId = await db.client.emitEvent({ eventKey: "pipeline.catalog", payload: {} });
+
+		const withoutEvents = Orchestrator.create({
+			conductor: Conductor.create({ sql: db.sql, context: {} }),
+		});
+		expect(withoutEvents.info.workerCount).toBe(0);
+		await withoutEvents.drain();
+		const pending = await db.sql`
+			select 1 from pgconductor._private_executions where id = ${eventId}::uuid
+		`;
+		expect(pending).toHaveLength(1);
+
+		const event = defineEvent({ name: "pipeline.catalog", payload: z.object({}) });
+		const definition = defineTask({ name: "pipeline.catalog", payload: z.object({}) });
+		const conductor = Conductor.create({
+			sql: db.sql,
+			tasks: TaskSchemas.fromSchema([definition]),
+			events: EventSchemas.fromSchema([event]),
+			context: {},
+		});
+		let received = 0;
+		const task = conductor.createTask(
+			{ name: "pipeline.catalog" },
+			{ event: "pipeline.catalog" },
+			async () => {
+				received++;
+			},
+		);
+		const withEvents = Orchestrator.create({
+			conductor,
+			tasks: [task],
+			defaultWorker: { pollIntervalMs: 10, flushIntervalMs: 10 },
+		});
+		await withEvents.start();
+		try {
+			await waitForCondition(() => received === 1);
+		} finally {
+			await withEvents.stop();
+		}
+	});
+
 	test("validates event names and payload objects at the database boundary", async () => {
 		const db = await database();
 		await db.sql`
