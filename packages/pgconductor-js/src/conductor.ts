@@ -1,5 +1,5 @@
 import type { Sql } from "postgres";
-import { DatabaseClient, type ExecutionSpec } from "./database-client";
+import { DatabaseClient, type ExecutionInfo, type ExecutionSpec } from "./database-client";
 import {
 	Task,
 	type TaskConfiguration,
@@ -8,6 +8,7 @@ import {
 	type ValidateTasksQueue,
 	type BatchConfig,
 	type ExecuteFunction,
+	type TaskIdentifier,
 	type ValidateDeadLetterConfiguration,
 } from "./task";
 import type { TaskContext, BatchTaskContext, BatchTaskEvent } from "./task-context";
@@ -25,6 +26,7 @@ import {
 import { EVENT_DISPATCH_QUEUE, EVENT_DISPATCH_TASK } from "./event-dispatch-task";
 import { Worker, type WorkerConfig } from "./worker";
 import { DefaultLogger, type Logger } from "./lib/logger";
+import { waitFor } from "./lib/wait-for";
 import { SchemaManager } from "./schema-manager";
 import { Telemetry } from "./telemetry";
 import {
@@ -40,6 +42,14 @@ import {
 	type InferTasksFromSchema,
 	type InferEventsFromSchema,
 } from "./schemas";
+
+export type WaitForResultOptions = {
+	/** Reject with a `TimeoutError` after this many milliseconds */
+	timeout?: number;
+	/** Delay between polls (default: 1000) */
+	pollIntervalMs?: number;
+	signal?: AbortSignal;
+};
 
 type ConnectionOptions =
 	| { connectionString: string; sql?: never }
@@ -358,5 +368,74 @@ export class Conductor<
 
 	async cancel(executionId: string, options?: { reason?: string }): Promise<boolean> {
 		return this.db.cancelExecution(executionId, options || {});
+	}
+
+	/**
+	 * Read an execution. Returns null for an unknown id or an execution removed by retention.
+	 * Pass the task to type the result.
+	 */
+	async getExecution(executionId: string): Promise<ExecutionInfo | null>;
+	async getExecution<TName extends TaskName<Tasks>, TQueue extends string = "default">(
+		task: TaskIdentifier<TName, TQueue>,
+		executionId: string,
+	): Promise<ExecutionInfo<InferReturns<FindTaskByIdentifier<Tasks, TName, TQueue>>> | null>;
+	async getExecution(
+		taskOrId: TaskIdentifier<string, string> | string,
+		executionId?: string,
+	): Promise<ExecutionInfo | null> {
+		if (typeof taskOrId === "string") {
+			return this.db.getExecution({ executionId: taskOrId });
+		}
+		return this.db.getExecution({
+			executionId: executionId as string,
+			task: { key: taskOrId.name, queue: taskOrId.queue || "default" },
+		});
+	}
+
+	/**
+	 * Poll an execution until it settles. Resolves with the result of a completed execution and
+	 * rejects if it failed, was cancelled, does not exist, or the timeout or signal fires first.
+	 * Pass the task to type the result.
+	 */
+	async waitForResult(executionId: string, options?: WaitForResultOptions): Promise<unknown>;
+	async waitForResult<TName extends TaskName<Tasks>, TQueue extends string = "default">(
+		task: TaskIdentifier<TName, TQueue>,
+		executionId: string,
+		options?: WaitForResultOptions,
+	): Promise<InferReturns<FindTaskByIdentifier<Tasks, TName, TQueue>>>;
+	async waitForResult(
+		taskOrId: TaskIdentifier<string, string> | string,
+		idOrOptions?: string | WaitForResultOptions,
+		options?: WaitForResultOptions,
+	): Promise<unknown> {
+		const [task, executionId, { timeout, pollIntervalMs = 1000, signal } = {}] =
+			typeof taskOrId === "string"
+				? [undefined, taskOrId, idOrOptions as WaitForResultOptions | undefined]
+				: [taskOrId, idOrOptions as string, options];
+		const stop = AbortSignal.any([
+			...(signal ? [signal] : []),
+			...(timeout ? [AbortSignal.timeout(timeout)] : []),
+		]);
+
+		while (true) {
+			stop.throwIfAborted();
+			const execution = await this.db.getExecution(
+				{
+					executionId,
+					task: task && { key: task.name, queue: task.queue || "default" },
+				},
+				{ signal: stop },
+			);
+			if (!execution) {
+				throw new Error(`Execution ${executionId} not found`);
+			}
+			if (execution.status === "completed") {
+				return execution.result;
+			}
+			if (execution.status === "failed" || execution.status === "cancelled") {
+				throw new Error(execution.error || `Execution ${execution.status}`);
+			}
+			await waitFor(pollIntervalMs, { signal: stop });
+		}
 	}
 }

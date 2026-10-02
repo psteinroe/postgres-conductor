@@ -14,6 +14,7 @@ import {
 	type RegisterWorkerArgs,
 	type ScheduleCronExecutionArgs,
 	type UnscheduleCronExecutionArgs,
+	type GetExecutionArgs,
 	type LoadStepArgs,
 	type CountStepsArgs,
 	type SaveStepArgs,
@@ -65,6 +66,23 @@ export type DeadLetterMetadata = {
 	error: string | null;
 	attempts: number;
 	failedAt: Date;
+};
+
+export type ExecutionStatus = "pending" | "running" | "completed" | "failed" | "cancelled";
+
+export type ExecutionInfo<TResult = unknown> = {
+	id: string;
+	taskKey: string;
+	queue: string;
+	status: ExecutionStatus;
+	/** Return value of a completed execution */
+	result: TResult | null;
+	/** Error of the last failed attempt, or the cancellation reason */
+	error: string | null;
+	attempts: number;
+	createdAt: Date;
+	completedAt: Date | null;
+	failedAt: Date | null;
 };
 
 export interface Execution {
@@ -486,6 +504,17 @@ export class DatabaseClient {
 			label: "getExecutions",
 			...opts,
 		});
+	}
+
+	async getExecution(
+		args: GetExecutionArgs,
+		opts?: QueryMethodOptions,
+	): Promise<ExecutionInfo | null> {
+		const rows = await this.query(() => this.builder.buildGetExecution(args), {
+			label: "getExecution",
+			...opts,
+		});
+		return rows[0] || null;
 	}
 
 	async returnExecutions(
