@@ -80,6 +80,8 @@ await ctx.schedule(
 );
 ```
 
+Dynamic schedules are kept separately from static cron triggers: they survive worker restarts and deployments, and a dynamic schedule never replaces a static trigger with the same name. They run until removed with `ctx.unschedule()`.
+
 ## Unschedule
 
 Remove a dynamic schedule:

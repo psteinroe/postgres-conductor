@@ -885,14 +885,14 @@ export class QueryBuilder {
 		const runAt = spec.run_at as Date;
 		const cronExpression = spec.cron_expression as string;
 		const timestampSeconds = Math.floor(runAt.getTime() / 1000);
-		const dedupeKey = `scheduled::${scheduleName}::${timestampSeconds}`;
+		const dedupeKey = `dynamic::${scheduleName}::${timestampSeconds}`;
 
 		return this.sql<[{ id: string }]>`
 			with removed as (
 				delete from pgconductor._private_executions
 				where task_key = ${spec.task_key}::text
 					and queue = ${spec.queue}::text
-					and dedupe_key like 'scheduled::%'
+					and dedupe_key like 'dynamic::%'
 					and split_part(dedupe_key, '::', 2) = ${scheduleName}::text
 					and cron_expression is not null
 					and is_available
@@ -924,7 +924,7 @@ export class QueryBuilder {
 				delete from pgconductor._private_executions
 				where task_key = ${taskKey}::text
 					and queue = ${queue}::text
-					and dedupe_key like 'scheduled::%'
+					and dedupe_key like 'dynamic::%'
 					and split_part(dedupe_key, '::', 2) = ${scheduleName}::text
 					and cron_expression is not null
 					and is_available
@@ -936,7 +936,7 @@ export class QueryBuilder {
 				set cancelled = true
 				where e.task_key = ${taskKey}::text
 					and e.queue = ${queue}::text
-					and e.dedupe_key like 'scheduled::%'
+					and e.dedupe_key like 'dynamic::%'
 					and split_part(e.dedupe_key, '::', 2) = ${scheduleName}::text
 					and e.cron_expression is not null
 					and e.locked_by is not null
