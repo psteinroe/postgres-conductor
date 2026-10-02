@@ -1,4 +1,5 @@
 import type { Sql } from "postgres";
+import type { StandardSchemaV1 } from "@standard-schema/spec";
 import { DatabaseClient, type ExecutionSpec } from "./database-client";
 import {
 	Task,
@@ -331,18 +332,14 @@ export class Conductor<
 		TName extends EventName<Events>,
 		TDef extends FindEventByIdentifier<Events, TName> = FindEventByIdentifier<Events, TName>,
 	>(event: TName, payload: InferEventPayload<TDef>): Promise<string> {
-		// Runtime schemas are deliberately validated before the database call. This
-		// keeps emit a persistence boundary: an invalid event can never be queued.
-		const definition = this.options.events?.definitions.find(
-			(candidate: EventDefinition<string, any, any>) => candidate.name === event,
-		);
-		const standard = (definition?.payload as any)?.["~standard"];
-		if (standard?.validate) {
-			const result = await standard.validate(payload);
-			if (result && typeof result === "object" && "issues" in result && result.issues) {
-				throw new Error(`Invalid payload for event "${String(event)}"`);
-			}
-			payload = ((result as any)?.value ?? payload) as InferEventPayload<TDef>;
+		const schema: StandardSchemaV1<unknown, InferEventPayload<TDef>> | undefined =
+			this.options.events?.definitions.find(
+				(definition: EventDefinition<string, any, any>) => definition.name === event,
+			)?.payload;
+		if (schema) {
+			const result = await schema["~standard"].validate(payload);
+			if (result.issues) throw new Error(`Invalid payload for event "${event}"`);
+			payload = result.value;
 		}
 
 		return this.db.emitEvent({

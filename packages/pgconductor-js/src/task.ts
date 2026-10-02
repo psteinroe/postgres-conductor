@@ -16,15 +16,6 @@ export type TaskIdentifier<TName extends string = string, TQueue extends string 
 	readonly queue?: TQueue;
 };
 
-type QualifiedTaskIdentifier = Required<TaskIdentifier<string, string>>;
-
-function hasSameTaskIdentity(
-	left: QualifiedTaskIdentifier,
-	right: QualifiedTaskIdentifier,
-): boolean {
-	return left.queue === right.queue && left.name === right.name;
-}
-
 export type BatchConfig = {
 	size: number;
 	timeoutMs: number;
@@ -189,11 +180,8 @@ export class Task<
 		this.batch = config.batch;
 		this.deadLetter = config.deadLetter;
 		if (
-			this.deadLetter &&
-			hasSameTaskIdentity(this, {
-				queue: this.deadLetter.queue,
-				name: this.deadLetter.task?.name ?? this.name,
-			})
+			this.deadLetter?.queue === this.queue &&
+			(this.deadLetter.task?.name || this.name) === this.name
 		) {
 			throw new Error("A task cannot dead-letter directly to itself");
 		}

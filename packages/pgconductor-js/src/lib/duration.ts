@@ -9,10 +9,6 @@ const DURATION_UNITS: Record<DurationUnit, number> = {
 	d: 86_400_000,
 };
 
-function isDurationUnit(value: string): value is DurationUnit {
-	return value in DURATION_UNITS;
-}
-
 /** Parse a non-negative duration into integer milliseconds. */
 export function parseDuration(value: DurationInput): number {
 	if (typeof value === "number") {
@@ -31,11 +27,7 @@ export function parseDuration(value: DurationInput): number {
 		throw new Error(`invalid duration: ${value}`);
 	}
 
-	const unit = match[2];
-	if (!unit || !isDurationUnit(unit)) {
-		throw new Error(`invalid duration: ${value}`);
-	}
-	const milliseconds = Number(match[1]) * DURATION_UNITS[unit];
+	const milliseconds = Number(match[1]) * DURATION_UNITS[match[2] as DurationUnit];
 	if (!Number.isSafeInteger(milliseconds)) {
 		throw new Error(`duration is too large: ${value}`);
 	}
