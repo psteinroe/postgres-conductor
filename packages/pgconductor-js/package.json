@@ -41,6 +41,8 @@
 		"perf": "bun perf/run.ts"
 	},
 	"devDependencies": {
+		"@electric-sql/pglite": "^0.5.8",
+		"@electric-sql/pglite-socket": "^0.2.11",
 		"@opentelemetry/api": "catalog:",
 		"@opentelemetry/sdk-trace-base": "catalog:",
 		"@testcontainers/postgresql": "catalog:",

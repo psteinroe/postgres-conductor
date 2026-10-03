@@ -1,3 +1,6 @@
+import { PGlite } from "@electric-sql/pglite";
+import { btree_gist } from "@electric-sql/pglite/contrib/btree_gist";
+import { PGLiteSocketServer } from "@electric-sql/pglite-socket";
 import postgres, { type Sql } from "postgres";
 import { GenericContainer, type StartedTestContainer, Wait } from "testcontainers";
 import { DatabaseClient } from "../../src/database-client";
@@ -9,6 +12,7 @@ export class TestDatabase {
 	public readonly name: string;
 	public readonly url: string;
 	private readonly masterUrl: string;
+	private pglite: { db: PGlite; server: PGLiteSocketServer; destroyed: boolean } | null = null;
 
 	private constructor(sql: Sql, name: string, masterUrl: string, url: string) {
 		this.sql = sql;
@@ -16,6 +20,20 @@ export class TestDatabase {
 		this.name = name;
 		this.masterUrl = masterUrl;
 		this.url = url;
+	}
+
+	// research/in-memory-runtime: a fresh in-process PGlite served over the wire protocol so
+	// postgres.js connects unchanged. All connections share PGlite's single backend session.
+	static async createPglite(template: PGlite): Promise<TestDatabase> {
+		const db = await template.clone();
+		if (!(db instanceof PGlite)) throw new Error("PGlite clone is not a PGlite instance");
+		const server = new PGLiteSocketServer({ db, port: 0, host: "127.0.0.1", maxConnections: 100 });
+		await server.start();
+		const url = `postgres://postgres:postgres@${server.getServerConn()}/postgres`;
+		const sql = postgres(url, { max: 1 });
+		const testDb = new TestDatabase(sql, "pglite", "", url);
+		testDb.pglite = { db, server, destroyed: false };
+		return testDb;
 	}
 
 	static async create(masterUrl: string): Promise<TestDatabase> {
@@ -41,6 +59,21 @@ export class TestDatabase {
 	}
 
 	async destroy(): Promise<void> {
+		if (this.pglite) {
+			// A connection left inside a transaction stalls every other connection, so bound teardown.
+			const { db, server } = this.pglite;
+			if (this.pglite.destroyed) return;
+			this.pglite.destroyed = true;
+			const teardown = (async () => {
+				await this.sql.end({ timeout: 0 });
+				await server.stop();
+				// Socket close handlers still touch the database after stop() resolves.
+				await Bun.sleep(250);
+				await db.close();
+			})().catch(() => {});
+			await Promise.race([teardown, Bun.sleep(3000)]);
+			return;
+		}
 		await this.sql.end();
 
 		const master = postgres(this.masterUrl, { max: 1 });
@@ -53,16 +86,23 @@ export class TestDatabase {
 }
 
 export class TestDatabasePool {
-	private readonly container: StartedTestContainer;
+	private readonly container: StartedTestContainer | null;
 	private readonly masterUrl: string;
 	private readonly children: TestDatabase[] = [];
+	private pgliteTemplate: PGlite | null = null;
 
-	private constructor(container: StartedTestContainer, masterUrl: string) {
+	private constructor(container: StartedTestContainer | null, masterUrl: string) {
 		this.container = container;
 		this.masterUrl = masterUrl;
 	}
 
 	static async create(): Promise<TestDatabasePool> {
+		if (process.env.PGC_TEST_BACKEND === "pglite") {
+			const pool = new TestDatabasePool(null, "");
+			pool.pgliteTemplate = await PGlite.create({ extensions: { btree_gist } });
+			return pool;
+		}
+
 		// If DATABASE_URL is set (e.g., in CI), use it instead of starting a container
 		const databaseUrl = process.env.DATABASE_URL;
 
@@ -76,7 +116,7 @@ export class TestDatabasePool {
 			}
 
 			// Return pool without container (container will be null)
-			return new TestDatabasePool(null as any, databaseUrl);
+			return new TestDatabasePool(null, databaseUrl);
 		}
 
 		// Local mode: start testcontainer
@@ -107,12 +147,21 @@ export class TestDatabasePool {
 	}
 
 	async child(): Promise<TestDatabase> {
-		const db = await TestDatabase.create(this.masterUrl);
+		const db = this.pgliteTemplate
+			? await TestDatabase.createPglite(this.pgliteTemplate)
+			: await TestDatabase.create(this.masterUrl);
 		this.children.push(db);
 		return db;
 	}
 
 	async destroy(): Promise<void> {
+		if (this.pgliteTemplate) {
+			await Promise.all(this.children.map((child) => child.destroy().catch(() => {})));
+			this.children.length = 0;
+			await this.pgliteTemplate.close();
+			return;
+		}
+
 		// Close all child connections
 		await Promise.all(this.children.map((child) => child.sql.end()));
 
