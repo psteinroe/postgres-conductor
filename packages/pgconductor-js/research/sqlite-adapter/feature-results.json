@@ -1,0 +1,69 @@
+{
+  "bun": "1.4.2",
+  "results": [
+    {
+      "feature": "SQLite version",
+      "supported": true,
+      "rows": [
+        {
+          "version": "3.53.2"
+        }
+      ]
+    },
+    {
+      "feature": "DML inside CTE",
+      "supported": false,
+      "error": "near \"update\": syntax error"
+    },
+    {
+      "feature": "partial expression index conflict target",
+      "supported": true,
+      "rows": []
+    },
+    {
+      "feature": "UPDATE FROM",
+      "supported": true,
+      "rows": [
+        {
+          "value": 7
+        }
+      ]
+    },
+    {
+      "feature": "RETURNING with UPSERT",
+      "supported": true,
+      "rows": [
+        {
+          "id": 1,
+          "value": 9
+        }
+      ]
+    },
+    {
+      "feature": "RETURNING inside trigger",
+      "supported": false,
+      "error": "near \"returning\": syntax error"
+    },
+    {
+      "feature": "INSERT RETURNING inside trigger",
+      "supported": false,
+      "error": "cannot use RETURNING in a trigger"
+    },
+    {
+      "feature": "json_type scalar types",
+      "supported": true,
+      "rows": [
+        {
+          "integer_number": "integer",
+          "real_number": "real",
+          "boolean_true": "true",
+          "boolean_false": "false",
+          "json_null": "null",
+          "object": "object",
+          "array": "array",
+          "string": "text"
+        }
+      ]
+    }
+  ]
+}

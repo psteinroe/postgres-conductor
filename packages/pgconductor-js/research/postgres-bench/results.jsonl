@@ -1,0 +1,9 @@
+{"roundTripMs":0.068}
+{"workers":1,"mode":"single","executionsPerSecond":3737,"seconds":5.352,"settleP50Ms":3.71,"claimedTotal":20000,"completed":20000,"attemptsOk":true}
+{"workers":2,"mode":"single","executionsPerSecond":6222,"seconds":3.214,"settleP50Ms":4.34,"claimedTotal":20000,"completed":20000,"attemptsOk":true}
+{"workers":4,"mode":"single","executionsPerSecond":11245,"seconds":1.779,"settleP50Ms":4.17,"claimedTotal":20000,"completed":20000,"attemptsOk":true}
+{"workers":8,"mode":"single","executionsPerSecond":17068,"seconds":1.172,"settleP50Ms":6.02,"claimedTotal":20000,"completed":20000,"attemptsOk":true}
+{"workers":1,"mode":"interactive","executionsPerSecond":3074,"seconds":6.507,"settleP50Ms":6.43,"claimedTotal":20000,"completed":20000,"attemptsOk":true}
+{"workers":2,"mode":"interactive","executionsPerSecond":5293,"seconds":3.779,"settleP50Ms":6.78,"claimedTotal":20000,"completed":20000,"attemptsOk":true}
+{"workers":4,"mode":"interactive","executionsPerSecond":8869,"seconds":2.255,"settleP50Ms":7.04,"claimedTotal":20000,"completed":20000,"attemptsOk":true}
+{"workers":8,"mode":"interactive","executionsPerSecond":12977,"seconds":1.541,"settleP50Ms":11.7,"claimedTotal":20000,"completed":20000,"attemptsOk":true}

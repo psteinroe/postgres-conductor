@@ -1,0 +1,73 @@
+{
+  "bun": "1.4.2",
+  "executionsPerRun": 20000,
+  "limitedFraction": 0.1,
+  "elapsedSeconds": 11.53,
+  "results": [
+    {
+      "processes": 1,
+      "synchronous": "NORMAL",
+      "executions": 20000,
+      "seconds": 1.402,
+      "executionsPerSecond": 14268,
+      "busyErrors": 0,
+      "activeMax": 5,
+      "duplicateClaims": 0,
+      "completedExactlyOnce": 20000,
+      "claimStatements": 6,
+      "settleStatements": 3
+    },
+    {
+      "processes": 2,
+      "synchronous": "NORMAL",
+      "executions": 20000,
+      "seconds": 1.545,
+      "executionsPerSecond": 12944,
+      "busyErrors": 1,
+      "activeMax": 5,
+      "duplicateClaims": 0,
+      "completedExactlyOnce": 20000,
+      "claimStatements": 6,
+      "settleStatements": 3
+    },
+    {
+      "processes": 4,
+      "synchronous": "NORMAL",
+      "executions": 20000,
+      "seconds": 1.866,
+      "executionsPerSecond": 10716,
+      "busyErrors": 0,
+      "activeMax": 5,
+      "duplicateClaims": 0,
+      "completedExactlyOnce": 20000,
+      "claimStatements": 6,
+      "settleStatements": 3
+    },
+    {
+      "processes": 8,
+      "synchronous": "NORMAL",
+      "executions": 20000,
+      "seconds": 2.232,
+      "executionsPerSecond": 8959,
+      "busyErrors": 0,
+      "activeMax": 5,
+      "duplicateClaims": 0,
+      "completedExactlyOnce": 20000,
+      "claimStatements": 6,
+      "settleStatements": 3
+    },
+    {
+      "processes": 1,
+      "synchronous": "FULL",
+      "executions": 20000,
+      "seconds": 3.561,
+      "executionsPerSecond": 5616,
+      "busyErrors": 0,
+      "activeMax": 5,
+      "duplicateClaims": 0,
+      "completedExactlyOnce": 20000,
+      "claimStatements": 6,
+      "settleStatements": 3
+    }
+  ]
+}
