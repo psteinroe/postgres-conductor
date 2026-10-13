@@ -380,6 +380,7 @@ export class Conductor<
 	 * @param event - Event name to emit
 	 * @param payload - Typed event payload
 	 * @param opts.metadata - Metadata inherited by the executions this event triggers
+	 * @param opts.dedupe_key - Repeating a key for the same event name emits nothing and returns the original event ID
 	 * @returns Event ID
 	 */
 	async emit<
@@ -388,7 +389,7 @@ export class Conductor<
 	>(
 		event: TName,
 		payload: InferEventPayload<TDef>,
-		opts?: { metadata?: Metadata },
+		opts?: { metadata?: Metadata; dedupe_key?: string },
 	): Promise<string> {
 		payload = await validateEventPayload(this.options.events?.definitions || [], event, payload);
 		const metadata = await this.validateMetadata(opts?.metadata);
@@ -402,6 +403,7 @@ export class Conductor<
 					payload: payload as any,
 					traceContext: this.telemetry.traceContext(),
 					metadata,
+					dedupeKey: opts?.dedupe_key,
 				});
 				span?.setAttribute("messaging.message.id", id);
 				return id;

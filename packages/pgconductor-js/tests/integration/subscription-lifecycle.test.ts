@@ -90,13 +90,14 @@ describe("event subscription lifecycle", () => {
 		const eventId = await conductor.emit("user.created", { userId: "user-123" });
 		await waitForCondition(() => handler.mock.calls.length === 1);
 		await waitForCondition(async () => {
-			const [source] = await db.sql<{ exists: boolean }[]>`
+			const [source] = await db.sql<{ completed: boolean }[]>`
 				select exists(
 					select 1 from pgconductor._private_executions
 					where id = ${eventId}::uuid and queue = 'pgconductor.internal'
-				) as exists
+						and completed_at is not null
+				) as completed
 			`;
-			return source?.exists === false;
+			return source?.completed === true;
 		});
 	}, 30_000);
 

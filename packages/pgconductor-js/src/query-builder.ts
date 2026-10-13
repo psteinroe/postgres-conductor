@@ -106,6 +106,7 @@ export type EmitEventArgs = {
 	payload?: Payload;
 	traceContext?: TraceContextCarrier | null;
 	metadata?: Payload | null;
+	dedupeKey?: string;
 };
 
 export type RegisterEventWaitArgs = {
@@ -1467,6 +1468,7 @@ export class QueryBuilder {
 		payload,
 		traceContext,
 		metadata,
+		dedupeKey,
 	}: EmitEventArgs & { id: string }): PendingQuery<{ id: string }[]> {
 		return this.sql<{ id: string }[]>`
 			select pgconductor.emit_event(
@@ -1474,7 +1476,8 @@ export class QueryBuilder {
 				${this.sql.json(payload || {})}::jsonb,
 				${traceContext ? this.sql.json(traceContext) : null}::jsonb,
 				${metadata ? this.sql.json(metadata) : null}::jsonb,
-				${id}::uuid
+				${id}::uuid,
+				${dedupeKey || null}::text
 			) as id
 		`;
 	}
