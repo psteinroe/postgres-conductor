@@ -334,6 +334,82 @@ test("a live orchestrator recovers executions locked by a crashed one", async ()
 	await db.client.clearFakeTime();
 });
 
+test("the heartbeat releases a claim the orchestrator does not hold", async () => {
+	const db = await pool.child();
+	databases.push(db);
+
+	const heldDefinition = defineTask({ name: "held-task" });
+	const orphanedDefinition = defineTask({ name: "orphaned-task" });
+	const conductor = Conductor.create({
+		sql: db.sql,
+		tasks: TaskSchemas.fromSchema([heldDefinition, orphanedDefinition]),
+		context: {},
+	});
+	await conductor.ensureInstalled();
+
+	const heldStarted = new Deferred<void>();
+	const finishHeld = new Deferred<void>();
+	const heldTask = conductor.createTask(heldDefinition, { invocable: true }, async () => {
+		heldStarted.resolve();
+		await finishHeld.promise;
+	});
+	let orphanedRuns = 0;
+	const orphanedTask = conductor.createTask(orphanedDefinition, { invocable: true }, async () => {
+		orphanedRuns++;
+	});
+
+	await db.client.setFakeTime({ date: new Date("2024-01-01T12:00:00Z") });
+	jest.useFakeTimers();
+	const orch = Orchestrator.create({
+		conductor,
+		tasks: [heldTask, orphanedTask],
+		defaultWorker: { concurrency: 2 },
+	});
+	await orch.start();
+	await conductor.invoke(heldDefinition, {});
+	while (!heldStarted.isSettled) {
+		jest.advanceTimersByTime(1000);
+		await db.sql`select 1`;
+	}
+
+	// A claim whose response was lost: it committed, but the worker never received it
+	await conductor.invoke(orphanedDefinition, {});
+	const [orphaned] = await db.client.getExecutions({
+		orchestratorId: orch.info.id,
+		queueName: "default",
+		batchSize: 1,
+		taskKeys: ["orphaned-task"],
+	});
+	if (!orphaned) throw new Error("expected orphaned claim");
+
+	const lockedBy = async (taskKey: string) => {
+		const [row] = await db.sql<{ locked_by: string | null }[]>`
+			select locked_by from pgconductor._private_executions where task_key = ${taskKey}
+		`;
+		return row?.locked_by;
+	};
+	const advance = async (seconds: number) => {
+		for (let elapsed = 0; elapsed < seconds && orphanedRuns === 0; elapsed++) {
+			jest.advanceTimersByTime(1000);
+			await db.sql`select 1`;
+		}
+	};
+
+	// Within the grace a claim response may still be in flight
+	await db.client.setFakeTime({ date: new Date("2024-01-01T12:00:10Z") });
+	await advance(31);
+	expect(await lockedBy("orphaned-task")).toBe(orch.info.id);
+
+	await db.client.setFakeTime({ date: new Date("2024-01-01T12:01:00Z") });
+	await advance(120);
+	expect(orphanedRuns).toBe(1);
+	expect(await lockedBy("held-task")).toBe(orch.info.id);
+
+	finishHeld.resolve();
+	await orch.stop();
+	await db.client.clearFakeTime();
+});
+
 test("an orchestrator recovered as stale aborts its running handlers and stops", async () => {
 	const db = await pool.child();
 	databases.push(db);

@@ -17,6 +17,7 @@ export type OrchestratorHeartbeatArgs = {
 	orchestratorId: string;
 	version: string;
 	migrationNumber: number;
+	held?: { executionIds: string[]; claimGrace: string };
 };
 
 export type RecoverStaleOrchestratorsArgs = {
@@ -90,6 +91,7 @@ export type SaveStepArgs = {
 	executionId: string;
 	queue: string;
 	orchestratorId: string;
+	claimToken: string;
 	key: string;
 	result: Payload | null;
 	runAtMs?: number;
@@ -99,6 +101,7 @@ export type ClearWaitingStateArgs = {
 	executionId: string;
 	queue: string;
 	orchestratorId: string;
+	claimToken: string;
 };
 
 export type EmitEventArgs = {
@@ -119,6 +122,7 @@ export type RegisterEventWaitArgs = {
 	timeoutMs: number | null;
 	orchestratorId: string;
 	suspend: boolean;
+	claimToken: string;
 };
 
 export class QueryBuilder {
@@ -128,6 +132,7 @@ export class QueryBuilder {
 		orchestratorId,
 		version,
 		migrationNumber,
+		held,
 	}: OrchestratorHeartbeatArgs): PendingQuery<
 		{
 			registered: boolean;
@@ -170,6 +175,22 @@ export class QueryBuilder {
 				-- xmax = 0 when the row was inserted rather than updated
 				returning (xmax = 0) as registered
 			),
+			${
+				held
+					? this.sql`
+			-- Release claims the workers do not hold, such as a claim whose response was lost. The
+			-- grace keeps claims whose response may still be in flight.
+			released_orphans as (
+				update pgconductor._private_executions e
+				set
+					locked_by = null,
+					locked_at = null
+				where e.locked_by = ${orchestratorId}::uuid
+					and e.locked_at < pgconductor._private_current_time() - ${held.claimGrace}::interval
+					and not (e.id = any(${this.sql.array(held.executionIds, 2951)}::uuid[]))
+			),`
+					: this.sql``
+			}
 			-- Signal shutdown if newer migration exists
 			shutdown_signal_inserted as (
 				insert into pgconductor._private_orchestrator_signals (orchestrator_id, type, payload)
@@ -383,16 +404,17 @@ export class QueryBuilder {
 					waiting_step_key = case when e.waiting_on_execution_id is null then null
 						else e.waiting_step_key end,
 					locked_by = ${orchestratorId}::uuid,
-					locked_at = (select now_ts from claim_clock)
+					locked_at = (select now_ts from claim_clock),
+					claim_token = gen_random_uuid()
 				from claimable c
 				where e.id = c.id and e.queue = ${queueName}::text and e.is_available = true
 				returning e.id, e.task_key, e.queue, e.payload, e.waiting_on_execution_id,
 					e.waiting_step_key, e.cancelled, e.last_error, e.dedupe_key, e.cron_expression,
-					e.locked_by, e."group", e.priority, e.run_at, e.created_at,
+					e.locked_by, e.claim_token, e."group", e.priority, e.run_at, e.created_at,
 					e.subscription_id, e.trace_context, e.metadata, e.dead_letter
 			)
 			select id, task_key, queue, payload, waiting_on_execution_id, waiting_step_key,
-				cancelled, last_error, dedupe_key, cron_expression, locked_by, "group",
+				cancelled, last_error, dedupe_key, cron_expression, locked_by, claim_token, "group",
 				subscription_id, trace_context, metadata, dead_letter
 			from claimed
 			order by priority asc, run_at asc, created_at asc, id asc
@@ -421,7 +443,7 @@ export class QueryBuilder {
 		ctes.push(this.sql`result_data as (
 			select * from jsonb_to_recordset(${this.sql.json(results)}::jsonb)
 			as r(
-				execution_id uuid, queue text, task_key text, status text,
+				execution_id uuid, queue text, task_key text, claim_token uuid, status text,
 				result jsonb, error text,
 				reschedule_in_ms bigint, step_key text, timeout_ms bigint,
 				child_task_name text, child_task_queue text, child_payload jsonb,
@@ -440,6 +462,7 @@ export class QueryBuilder {
 				and e.queue = r.queue
 				and e.task_key = r.task_key
 				and e.locked_by = ${orchestratorId}::uuid
+				and e.claim_token = r.claim_token
 			for update of e
 		)`);
 		ctes.push(this.sql`task_configs as materialized (
@@ -1044,6 +1067,7 @@ export class QueryBuilder {
 		result,
 		runAtMs,
 		orchestratorId,
+		claimToken,
 	}: SaveStepArgs): PendingQuery<RowList<Row[]>> {
 		if (runAtMs) {
 			return this.sql<RowList<Row[]>>`
@@ -1053,6 +1077,7 @@ export class QueryBuilder {
 					where e.id = ${executionId}::uuid
 						and e.queue = ${queue}::text
 						and e.locked_by = ${orchestratorId}::uuid
+						and e.claim_token = ${claimToken}::uuid
 					for update
 				), inserted as (
 					insert into pgconductor._private_steps (execution_id, queue, key, result)
@@ -1076,6 +1101,7 @@ export class QueryBuilder {
 				where e.id = ${executionId}::uuid
 					and e.queue = ${queue}::text
 					and e.locked_by = ${orchestratorId}::uuid
+					and e.claim_token = ${claimToken}::uuid
 				for update
 			)
 			insert into pgconductor._private_steps (execution_id, queue, key, result)
@@ -1096,6 +1122,7 @@ export class QueryBuilder {
 		timeoutMs,
 		orchestratorId,
 		suspend,
+		claimToken,
 	}: RegisterEventWaitArgs): PendingQuery<{ result: EventWaitResult | null }[]> {
 		return this.sql<{ result: EventWaitResult | null }[]>`
 			select pgconductor._private_register_event_wait(
@@ -1103,6 +1130,7 @@ export class QueryBuilder {
 				${queue}::text,
 				${taskKey}::text,
 				${orchestratorId}::uuid,
+				${claimToken}::uuid,
 				${eventKey}::text,
 				${stepKey}::text,
 				${requiredFieldCount}::smallint,
@@ -1117,6 +1145,7 @@ export class QueryBuilder {
 		executionId,
 		queue,
 		orchestratorId,
+		claimToken,
 	}: ClearWaitingStateArgs): PendingQuery<RowList<Row[]>> {
 		return this.sql<RowList<Row[]>>`
 			-- Lock the child before the parent, like cancellation and settlement do
@@ -1127,6 +1156,7 @@ export class QueryBuilder {
 				where p.id = ${executionId}::uuid
 					and p.queue = ${queue}::text
 					and p.locked_by = ${orchestratorId}::uuid
+					and p.claim_token = ${claimToken}::uuid
 				for update of c
 			), claimed_parent as materialized (
 				select e.id, e.queue, ci.child_id, ci.child_locked_by
@@ -1135,6 +1165,7 @@ export class QueryBuilder {
 				where e.id = ${executionId}::uuid
 					and e.queue = ${queue}::text
 					and e.locked_by = ${orchestratorId}::uuid
+					and e.claim_token = ${claimToken}::uuid
 				for update of e
 			),
 			-- Fail pending (not locked) children immediately

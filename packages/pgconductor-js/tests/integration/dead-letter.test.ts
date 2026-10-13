@@ -185,6 +185,7 @@ describe("dead-letter queues (Postgres integration)", () => {
 		const execution = claimed[0]!;
 		const result = {
 			execution_id: execution.id,
+			claim_token: execution.claim_token,
 			queue: execution.queue,
 			task_key: execution.task_key,
 			status: "permanently_failed" as const,
@@ -269,6 +270,7 @@ describe("dead-letter queues (Postgres integration)", () => {
 			failed: [
 				{
 					execution_id: execution.id,
+					claim_token: execution.claim_token,
 					queue: execution.queue,
 					task_key: execution.task_key,
 					status: "permanently_failed",
@@ -380,6 +382,7 @@ describe("dead-letter queues (Postgres integration)", () => {
 			failed: [
 				{
 					execution_id: execution.id,
+					claim_token: execution.claim_token,
 					queue: execution.queue,
 					task_key: execution.task_key,
 					status: "permanently_failed",
@@ -447,6 +450,7 @@ describe("dead-letter queues (Postgres integration)", () => {
 			invokeChild: [
 				{
 					execution_id: parent.id,
+					claim_token: parent.claim_token,
 					queue: parent.queue,
 					task_key: parent.task_key,
 					status: "invoke_child",
@@ -481,6 +485,7 @@ describe("dead-letter queues (Postgres integration)", () => {
 			failed: [
 				{
 					execution_id: child.id,
+					claim_token: child.claim_token,
 					queue: child.queue,
 					task_key: child.task_key,
 					status: "permanently_failed",
@@ -593,6 +598,7 @@ describe("dead-letter queues (Postgres integration)", () => {
 		`);
 		const settlement = {
 			execution_id: execution.id,
+			claim_token: execution.claim_token,
 			queue: execution.queue,
 			task_key: execution.task_key,
 			status: "permanently_failed" as const,

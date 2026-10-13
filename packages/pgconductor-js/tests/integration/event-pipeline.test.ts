@@ -105,11 +105,15 @@ describe("event pipeline", () => {
 		eventId: string,
 		orchestratorId: string,
 	): Promise<void> {
+		const [source] = await db.sql<{ claim_token: string }[]>`
+			select claim_token from pgconductor._private_executions where id = ${eventId}::uuid
+		`;
 		await db.client.returnExecutions({
 			orchestratorId,
 			completed: [
 				{
 					execution_id: eventId,
+					claim_token: source?.claim_token || "",
 					queue: INTERNAL_QUEUE,
 					task_key: DISPATCH_TASK,
 					status: "completed",
@@ -985,12 +989,13 @@ describe("event pipeline", () => {
 		const waiterId = await db.client.invoke({ task_key: "pipeline.waiter", queue: "default" });
 		if (!waiterId) throw new Error("invoke did not return an execution id");
 		const waiterOwner = crypto.randomUUID();
-		await db.client.getExecutions({
+		const [waiter] = await db.client.getExecutions({
 			orchestratorId: waiterOwner,
 			queueName: "default",
 			batchSize: 1,
 			taskKeys: ["pipeline.waiter"],
 		});
+		if (!waiter) throw new Error("expected waiter claim");
 		await db.client.registerEventWait({
 			executionId: waiterId,
 			queue: "default",
@@ -1002,6 +1007,7 @@ describe("event pipeline", () => {
 			timeoutMs: null,
 			orchestratorId: waiterOwner,
 			suspend: true,
+			claimToken: waiter.claim_token,
 		});
 		const eventId = await db.client.emitEvent({
 			eventKey: "pipeline.locked-waiter",
@@ -1063,6 +1069,7 @@ describe("event pipeline", () => {
 			failed: [
 				{
 					execution_id: failedDestination.id,
+					claim_token: failedDestination.claim_token,
 					queue: failedDestination.queue,
 					task_key: failedDestination.task_key,
 					status: "failed",
@@ -1101,6 +1108,7 @@ describe("event pipeline", () => {
 			completed: [
 				{
 					execution_id: completedDestination.id,
+					claim_token: completedDestination.claim_token,
 					queue: completedDestination.queue,
 					task_key: completedDestination.task_key,
 					status: "completed",
