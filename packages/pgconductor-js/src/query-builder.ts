@@ -95,6 +95,14 @@ export type SaveStepArgs = {
 	runAtMs?: number;
 };
 
+export type StartExecutionArgs = {
+	executionId: string;
+	queue: string;
+	orchestratorId: string;
+	key: string;
+	spec: ExecutionSpec & { dedupe_key: string };
+};
+
 export type ClearWaitingStateArgs = {
 	executionId: string;
 	queue: string;
@@ -1082,6 +1090,49 @@ export class QueryBuilder {
 			select e.id, e.queue, ${key}::text, ${this.sql.json(result)}::jsonb
 			from claimed_execution e
 			on conflict (execution_id, key) do nothing
+		`;
+	}
+
+	buildStartExecution({
+		executionId,
+		queue,
+		orchestratorId,
+		key,
+		spec,
+	}: StartExecutionArgs): PendingQuery<{ id: string }[]> {
+		return this.sql<{ id: string }[]>`
+			with claimed_execution as materialized (
+				select e.id, e.queue
+				from pgconductor._private_executions e
+				where e.id = ${executionId}::uuid
+					and e.queue = ${queue}::text
+					and e.locked_by = ${orchestratorId}::uuid
+				for update
+			), started_execution as (
+				insert into pgconductor._private_executions as e (
+					id, task_key, queue, payload, trace_context, metadata, run_at, dedupe_key, priority, "group"
+				)
+				select
+					pgconductor._private_portable_uuidv7(),
+					${spec.task_key}::text,
+					${spec.queue}::text,
+					${spec.payload ? this.sql.json(spec.payload) : null}::jsonb,
+					${spec.trace_context ? this.sql.json(spec.trace_context) : null}::jsonb,
+					${spec.metadata ? this.sql.json(spec.metadata) : null}::jsonb,
+					coalesce(${spec.run_at ? spec.run_at.toISOString() : null}::timestamptz, pgconductor._private_current_time()),
+					${spec.dedupe_key}::text,
+					${spec.priority || 0}::integer,
+					${spec.group || null}::text
+				from claimed_execution
+				on conflict (task_key, dedupe_key, queue) do update set dedupe_key = excluded.dedupe_key
+				returning e.id
+			), saved_step as (
+				insert into pgconductor._private_steps (execution_id, queue, key, result)
+				select c.id, c.queue, ${key}::text, jsonb_build_object('id', s.id)
+				from claimed_execution c, started_execution s
+				on conflict (execution_id, key) do nothing
+			)
+			select id from started_execution
 		`;
 	}
 

@@ -18,6 +18,7 @@ import {
 	type LoadStepArgs,
 	type CountStepsArgs,
 	type SaveStepArgs,
+	type StartExecutionArgs,
 	type ClearWaitingStateArgs,
 	type EmitEventArgs,
 	type RegisterEventWaitArgs,
@@ -619,6 +620,18 @@ export class DatabaseClient {
 			label: "saveStep",
 			...opts,
 		});
+	}
+
+	/** Returns null when this worker no longer holds the starting execution. */
+	async startExecution(
+		args: StartExecutionArgs,
+		opts?: QueryMethodOptions,
+	): Promise<string | null> {
+		const rows = await this.query(() => this.builder.buildStartExecution(args), {
+			label: "startExecution",
+			...opts,
+		});
+		return rows[0]?.id || null;
 	}
 
 	async checkMetadata(metadata: Payload, opts?: QueryMethodOptions): Promise<void> {

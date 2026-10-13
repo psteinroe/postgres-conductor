@@ -21,7 +21,7 @@ pgconductor/
         │   ├── worker.ts             # Fetch→execute→flush pipeline
         │   ├── task.ts               # Task wrapper with execute method
         │   ├── task-definition.ts    # Standard Schema / type-only task definitions
-        │   ├── task-context.ts       # Context API (step, sleep, invoke, waitForEvent)
+        │   ├── task-context.ts       # Context API (step, sleep, invoke, start, waitForEvent)
         │   ├── event-definition.ts   # Custom event definitions
         │   ├── event-dispatch-task.ts # Internal event fan-out task
         │   ├── maintenance-task.ts   # Per-queue retention and cleanup task
@@ -130,7 +130,8 @@ Tables live in the `pgconductor` schema with a `_private_` prefix (`_private_exe
 - Handles graceful shutdown via AbortController
 
 **TaskContext** (`task-context.ts`)
-- Provides API to task functions: `step()`, `sleep()`, `invoke()`, `waitForEvent()`, `subscribe()`
+- Provides API to task functions: `step()`, `sleep()`, `invoke()`, `start()`, `waitForEvent()`, `subscribe()`
+- `start()` inserts an independent execution and memoizes its id as a step in one statement; it never sets `parent_execution_id` (settlement fails a completed child that has a parent but no waiter)
 - All operations are idempotent (use steps as memoization)
 - Hangup pattern: abort execution and return never-resolving promise
 - Resume happens automatically when database wakes execution
