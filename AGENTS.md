@@ -22,6 +22,7 @@ pgconductor/
         │   ├── task.ts               # Task wrapper with execute method
         │   ├── task-definition.ts    # Standard Schema / type-only task definitions
         │   ├── task-context.ts       # Context API (step, sleep, invoke, waitForEvent)
+        │   ├── middleware.ts         # Per-attempt middleware types
         │   ├── event-definition.ts   # Custom event definitions
         │   ├── event-dispatch-task.ts # Internal event fan-out task
         │   ├── maintenance-task.ts   # Per-queue retention and cleanup task
@@ -179,6 +180,10 @@ Tables live in the `pgconductor` schema with a `_private_` prefix (`_private_exe
 - When a child fails permanently (attempts >= max_attempts), its parent fails too
 - Implemented in `buildReturnExecutions()` via the `permanently_failed_children` CTE
 - Parent receives error like "Child execution failed: <child_error>"
+
+**Middleware**
+- `Conductor.create({ middleware })` wraps every attempt of non-batch, non-internal tasks in `worker.ts`
+- `next(added)` merges `added` into the attempt's `TaskContext` and resolves on suspension too; the worker's outer race against the abort promise keeps a suspension from becoming a result or failure
 
 **Infinity Pattern**
 - Postgres `'infinity'::timestamptz` for indefinite waiting

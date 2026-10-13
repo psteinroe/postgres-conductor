@@ -389,12 +389,19 @@ export class QueryBuilder {
 				returning e.id, e.task_key, e.queue, e.payload, e.waiting_on_execution_id,
 					e.waiting_step_key, e.cancelled, e.last_error, e.dedupe_key, e.cron_expression,
 					e.locked_by, e."group", e.priority, e.run_at, e.created_at,
-					e.subscription_id, e.trace_context, e.metadata, e.dead_letter
+					e.subscription_id, e.trace_context, e.metadata, e.dead_letter, e.attempts,
+					e.parent_execution_id
 			)
 			select id, task_key, queue, payload, waiting_on_execution_id, waiting_step_key,
 				cancelled, last_error, dedupe_key, cron_expression, locked_by, "group",
-				subscription_id, trace_context, metadata, dead_letter
-			from claimed
+				subscription_id, trace_context, metadata, dead_letter, attempts, parent_execution_id,
+				waiting_on_execution_id is not null
+					or exists (select 1 from pgconductor._private_steps s where s.execution_id = c.id)
+					or exists (
+						select 1 from pgconductor._private_custom_event_subscriptions w
+						where w.execution_id = c.id and w.kind = 'execution_wait'
+					) as resumed
+			from claimed c
 			order by priority asc, run_at asc, created_at asc, id asc
 		`;
 	}
