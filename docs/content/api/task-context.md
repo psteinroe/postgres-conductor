@@ -129,6 +129,23 @@ const decision = await subscription.wait({ timeout: "24h" });
   creating a new one. `ctx.waitForEvent(stepKey, ...)` with the same key is equivalent to
   `wait()`.
 
+## ctx.emit()
+
+Emit a typed custom event from a task:
+
+```typescript
+const eventId = await ctx.emit(
+  "event-name",
+  { /* event payload */ },
+  options?: { dedupe_key?: string }
+);
+```
+
+Emits are not memoized, so a retried attempt emits again. Pass a `dedupe_key` derived from the
+execution's input to emit once across attempts: repeating it for the same event name emits nothing
+and returns the original event ID. Keys are scoped per event name and remembered for 1–2 days after
+the event was dispatched. See [Deduplicating Emits](../crafting-tasks/triggers.md#deduplicating-emits).
+
 ## ctx.invoke()
 
 Invoke a child task and wait for result:
