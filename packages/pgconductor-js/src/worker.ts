@@ -785,26 +785,13 @@ export class Worker<
 				}));
 			}
 
-			// Void tasks: all succeed
-			if (result === undefined) {
-				return executions.map((exec) => ({
-					execution_id: exec.id,
-					claim_token: exec.claim_token,
-					queue: exec.queue,
-					task_key: taskKey,
-					status: "completed" as const,
-					result: undefined,
-				}));
-			}
-
-			// Individual results
 			return executions.map((exec, i) => ({
 				execution_id: exec.id,
 				claim_token: exec.claim_token,
 				queue: exec.queue,
 				task_key: taskKey,
 				status: "completed" as const,
-				result: result[i],
+				result: result?.[i],
 			}));
 		} catch (err) {
 			if (this.signal.aborted) {
