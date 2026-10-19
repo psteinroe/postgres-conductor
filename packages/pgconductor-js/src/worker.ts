@@ -33,6 +33,7 @@ import { TypedAbortController } from "./lib/typed-abort-controller";
 import { Telemetry } from "./telemetry";
 import { noop } from "./lib/noop";
 import type { Middleware, MiddlewareResult } from "./middleware";
+import { SignalInbox } from "./signal-inbox";
 
 /**
  * The configuration options for the Worker.
@@ -151,6 +152,7 @@ export class Worker<
 	private _runningTasks = new Map<string, TypedAbortController<TaskAbortReasons>>();
 	// Claimed and not yet settled, including results buffered for flush
 	private readonly held = new Set<string>();
+	private _signalInboxes = new Map<string, SignalInbox>();
 
 	constructor(
 		public readonly queueName: string,
@@ -330,6 +332,26 @@ export class Worker<
 		}
 	}
 
+	/**
+	 * Abort running executions that were cancelled and hand new signals to their handlers.
+	 * Runs on the poll loop, so both arrive within about one poll interval.
+	 */
+	private async pollRunningExecutions(orchestratorId: string): Promise<void> {
+		const executions = [...this._runningTasks.keys()].map((id) => ({
+			execution_id: id,
+			after_seq: this._signalInboxes.get(id)?.afterSeq ?? null,
+		}));
+		const updates = await this.db.pollRunningExecutions(
+			{ orchestratorId, queueName: this.queueName, executions },
+			{ signal: this.signal },
+		);
+		this.cancelExecutions(updates.filter((u) => u.cancelled).map((u) => u.execution_id));
+		for (const update of updates) {
+			if (update.cancelled) continue;
+			this._signalInboxes.get(update.execution_id)?.push(update.signals);
+		}
+	}
+
 	private async register(): Promise<void> {
 		// Convert RetentionSettings to integer: null=keep, 0=delete now, N=delete after N days
 		const retentionToDays = (setting: boolean | { days: number } | undefined): number | null => {
@@ -398,16 +420,30 @@ export class Worker<
 	) {
 		assert.ok(this.orchestratorId, "orchestratorId must be set when starting the pipeline");
 
+		const orchestratorId = this.orchestratorId;
 		const allTasks = Array.from(this.tasks.values());
 		// A slot runs one execution, or one batch of a batched task
 		const executionsPerSlot = Math.max(...allTasks.map((task) => task.batch?.size || 1));
+		let lastRunningPoll = 0;
+		let release: Promise<void> | null = null;
+		const pollRunning = async () => {
+			if (Date.now() - lastRunningPoll < this.pollIntervalMs) return;
+			lastRunningPoll = Date.now();
+			await this.pollRunningExecutions(orchestratorId);
+		};
 
 		while (!this.signal?.aborted) {
 			try {
+				await pollRunning();
+
 				// Claim only what free slots can run so other workers get the rest
 				const freeSlots = this.concurrency - queue.pending;
 				if (freeSlots <= 0) {
-					await queue.waitForRelease();
+					// Wake up every poll interval to keep polling running executions
+					release ||= queue.waitForRelease().then(() => {
+						release = null;
+					});
+					await Promise.race([release, waitFor(this.pollIntervalMs, { signal: this.signal })]);
 					continue;
 				}
 
@@ -431,6 +467,11 @@ export class Worker<
 				if (executions.length === 0) {
 					if (runOnce) {
 						queue.close();
+						// Keep polling while the claimed executions finish
+						while (this._runningTasks.size > 0 && !this.signal.aborted) {
+							await waitFor(this.pollIntervalMs, { signal: this.signal });
+							await pollRunning();
+						}
 						break;
 					}
 					await waitFor(this.pollIntervalMs, { signal: this.signal });
@@ -538,6 +579,17 @@ export class Worker<
 			});
 		});
 		const taskEvent = taskEventFor(exec);
+		const signals = new SignalInbox({
+			ack: (ids) => this.db.ackSignals({ executionId: exec.id, ids }, { signal: this.signal }),
+			onError: (error) => {
+				taskAbortController.abort({
+					reason: "signal-failed",
+					error: error.message,
+					__pgconductorTaskAborted: true,
+				});
+			},
+		});
+		this._signalInboxes.set(exec.id, signals);
 
 		// Pass db and tasks as extra context to maintenance task, which skips middleware
 		const isMaintenance = task.name === "pgconductor.maintenance";
@@ -561,6 +613,7 @@ export class Worker<
 				metadataSchema: task.metadataSchema,
 				window: task.window,
 				telemetry: this.telemetry,
+				signals,
 			},
 			extraContext,
 		);
@@ -630,6 +683,15 @@ export class Worker<
 							status: "failed",
 							error: `Task timed out after ${task.timeoutMs}ms`,
 						} as const;
+					case "signal-failed":
+						return {
+							execution_id: exec.id,
+							claim_token: exec.claim_token,
+							queue: exec.queue,
+							task_key: exec.task_key,
+							status: "failed",
+							error: output.error,
+						} as const;
 					case "suspended":
 						this.held.delete(exec.id);
 						return [];
@@ -648,6 +710,19 @@ export class Worker<
 				}
 			}
 
+			// Let a running signal handler finish; signals left undelivered re-queue the execution
+			const signalFailure = await signals.close({ wait: true });
+			if (signalFailure) {
+				return {
+					execution_id: exec.id,
+					claim_token: exec.claim_token,
+					queue: exec.queue,
+					task_key: exec.task_key,
+					status: "failed",
+					error: signalFailure.message,
+				} as const;
+			}
+
 			return {
 				execution_id: exec.id,
 				claim_token: exec.claim_token,
@@ -655,6 +730,7 @@ export class Worker<
 				task_key: exec.task_key,
 				status: "completed",
 				result: output,
+				signal_names: signals.names,
 			} as const;
 		} catch (err) {
 			// A handler that stops on ctx.signal during shutdown is released, not failed
@@ -678,6 +754,9 @@ export class Worker<
 		} finally {
 			clearTimeout(timeout);
 			this._runningTasks.delete(exec.id);
+			// A hung-up or failed attempt leaves undelivered signals for the next one
+			void signals.close({ wait: false });
+			this._signalInboxes.delete(exec.id);
 		}
 	}
 

@@ -17,7 +17,7 @@ import {
 	type TaskIdentifier,
 	type ValidateDeadLetterConfiguration,
 } from "./task";
-import type { TaskContext, BatchTaskContext, BatchTaskEvent } from "./task-context";
+import type { TaskContext, BatchTaskContext, BatchTaskEvent, SignalMessage } from "./task-context";
 import {
 	type FindTaskByIdentifier,
 	type InferPayload,
@@ -433,6 +433,53 @@ export class Conductor<
 
 	async cancel(executionId: string, options?: { reason?: string }): Promise<boolean> {
 		return this.db.cancelExecution(executionId, options || {});
+	}
+
+	/**
+	 * Signal an execution. A running execution receives it right away in `ctx.onSignal`, any other
+	 * when its handler next runs. Idempotent by signal id: resending an id stores the signal once.
+	 * @returns false if the execution is completed, failed, cancelled or unknown
+	 */
+	async signal(executionId: string, signal: SignalMessage): Promise<boolean> {
+		return this.db.signalExecution({ executionId, signal });
+	}
+
+	/**
+	 * Signal the non-terminal execution of a task for `key`, or start one that receives the signal
+	 * first. Runs in one transaction under a lock on (task, key), so concurrent calls for a key
+	 * start at most one execution. A completed, failed or cancelled execution does not hold the key.
+	 * @returns ID of the execution that received the signal
+	 */
+	async signalWithStart<TName extends TaskName<Tasks>, TQueue extends string = "default">(options: {
+		task: TName;
+		queue?: TQueue;
+		key: string;
+		signal: SignalMessage;
+		/** Payload of the execution, used only when it starts one */
+		input?: InferPayload<FindTaskByIdentifier<Tasks, TName, TQueue>>;
+		priority?: number;
+		metadata?: Metadata;
+	}): Promise<string> {
+		const queue = options.queue || "default";
+		const metadata = await this.validateMetadata(options.metadata);
+		return this.telemetry.send({
+			taskKey: options.task,
+			queue,
+			run: async (span) => {
+				const id = await this.db.signalWithStart({
+					taskKey: options.task,
+					queue,
+					key: options.key,
+					signal: options.signal,
+					input: (options.input || null) as Payload | null,
+					priority: options.priority,
+					traceContext: this.telemetry.traceContext(),
+					metadata,
+				});
+				span?.setAttribute("messaging.message.id", id);
+				return id;
+			},
+		});
 	}
 
 	/**

@@ -33,6 +33,7 @@ import {
 } from "./event-definition";
 import { compileEventFilter } from "./event-trigger-validation";
 import { validateSchema } from "./lib/validate-schema";
+import type { SignalHandler, SignalInbox } from "./signal-inbox";
 
 export type TaskAbortReasons =
 	// if cancelled by a user
@@ -48,6 +49,8 @@ export type TaskAbortReasons =
 	  }
 	// the task ran longer than its timeoutMs
 	| { reason: "timed-out"; __pgconductorTaskAborted: true }
+	// a signal handler threw
+	| { reason: "signal-failed"; error: string; __pgconductorTaskAborted: true }
 	// the task invoked a child
 	| {
 			reason: "child-invocation";
@@ -100,6 +103,15 @@ export type TaskContextOptions = {
 	metadataSchema?: StandardSchemaV1<unknown, object>;
 	window?: [string, string];
 	telemetry: Telemetry;
+	signals?: SignalInbox;
+};
+
+/** A signal sent to an execution with `conductor.signal()` or `signalWithStart()`. */
+export type SignalMessage = {
+	name: string;
+	/** Identifies the signal: a signal id is stored once per execution */
+	id: string;
+	payload?: JsonValue;
 };
 
 type ScheduleOptions = {
@@ -538,6 +550,72 @@ export class TaskContext<
 			...options,
 			signal: this.signal,
 		});
+	}
+
+	/**
+	 * Listen for signals by name. Signals stored before the listener registers are delivered
+	 * first, in order, and later ones while the handler runs. Handlers run one at a time.
+	 *
+	 * Delivery is at least once per signal id, so dedupe by `id`. A signal counts as delivered
+	 * once its handler returns; a handler that throws fails the attempt like an uncaught error.
+	 * Signals this attempt listens for but has not delivered when the handler returns re-queue
+	 * the execution, so a new attempt receives them.
+	 */
+	onSignal<T extends JsonValue = JsonValue>(name: string, handler: SignalHandler<T>): void {
+		if (!this.opts.signals) {
+			throw new Error("Signals are not available in this context");
+		}
+		this.opts.signals.listen(name, handler as SignalHandler);
+	}
+
+	/**
+	 * Signal an execution. Idempotent by signal id: resending an id stores the signal once.
+	 * @returns false if the execution is completed, failed, cancelled or unknown
+	 */
+	async sendSignal(executionId: string, signal: SignalMessage): Promise<boolean> {
+		return this.opts.db.signalExecution({ executionId, signal }, { signal: this.signal });
+	}
+
+	/**
+	 * Signal the non-terminal execution of a task for `key`, or start one that receives the
+	 * signal first. Memoized by the step key.
+	 * @returns ID of the execution that received the signal
+	 */
+	async signalWithStart<
+		TName extends TaskName<Tasks>,
+		TQueue extends string = "default",
+		TDef extends FindTaskByIdentifier<Tasks, TName, TQueue> = FindTaskByIdentifier<
+			Tasks,
+			TName,
+			TQueue
+		>,
+	>(
+		stepKey: string,
+		options: {
+			task: TName;
+			queue?: TQueue;
+			key: string;
+			signal: SignalMessage;
+			/** Payload of the execution, used only when it starts one */
+			input?: InferPayload<TDef>;
+			priority?: number;
+		},
+	): Promise<string> {
+		return this.step(stepKey, () =>
+			this.opts.db.signalWithStart(
+				{
+					taskKey: options.task,
+					queue: options.queue || "default",
+					key: options.key,
+					signal: options.signal,
+					input: (options.input || null) as Payload | null,
+					priority: options.priority,
+					traceContext: this.opts.telemetry.traceContext(),
+					metadata: this.opts.execution.metadata,
+				},
+				{ signal: this.signal },
+			),
+		);
 	}
 
 	/**
