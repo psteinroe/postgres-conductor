@@ -16,7 +16,9 @@ function store() {
 		poll(inbox: SignalInbox) {
 			const afterSeq = inbox.afterSeq;
 			if (afterSeq === null) return;
-			inbox.push(signals.filter((s) => s.seq > afterSeq && !acked.includes(s.id)));
+			for (const signal of signals) {
+				if (signal.seq > afterSeq && !acked.includes(signal.id)) inbox.push(signal);
+			}
 		},
 		ack: async (ids: string[]) => {
 			acked.push(...ids);
@@ -126,7 +128,7 @@ describe("SignalInbox", () => {
 		const inbox = new SignalInbox({ ack: s.ack, onError: () => {} });
 
 		// what the worker reads with the claim
-		inbox.push(s.signals);
+		for (const signal of s.signals) inbox.push(signal);
 		expect(inbox.afterSeq).toBeNull();
 		inbox.listen("input", (_payload, { id }) => delivered.push(id));
 		expect(inbox.afterSeq).toBe(2);
@@ -154,7 +156,7 @@ describe("SignalInbox", () => {
 		await flush();
 		const closed = inbox.close({ drain: true });
 		s.add("input", "c");
-		inbox.push(s.signals);
+		for (const signal of s.signals) inbox.push(signal);
 		release.resolve();
 		expect(await closed).toBeNull();
 
@@ -191,7 +193,7 @@ describe("SignalInbox", () => {
 		const onError = mock((_error: Error) => {});
 		const inbox = new SignalInbox({ ack: s.ack, onError });
 
-		inbox.push(s.signals);
+		for (const signal of s.signals) inbox.push(signal);
 		inbox.listen("input", async () => {
 			await flush();
 			throw new Error("boom");

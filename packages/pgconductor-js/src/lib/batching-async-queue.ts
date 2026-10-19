@@ -6,6 +6,7 @@ export type BatchGroup<T> = {
 };
 
 import type { PollableAsyncIterable } from "./async-queue";
+import { Deferred } from "./deferred";
 
 /**
  * AsyncQueue that automatically batches items based on configuration.
@@ -21,7 +22,8 @@ export class BatchingAsyncQueue<T extends { task_key: string }> implements Polla
 	private queue: BatchGroup<T>[] = [];
 	private resolvers: ((value: IteratorResult<BatchGroup<T>>) => void)[] = [];
 	private itemAvailableListeners = new Set<() => void>();
-	private releaseResolvers: (() => void)[] = [];
+	// Shared by every waiter until the next release
+	private releaseWaiter: Deferred<void> | null = null;
 	private unreleased = 0;
 	private closed = false;
 
@@ -163,7 +165,8 @@ export class BatchingAsyncQueue<T extends { task_key: string }> implements Polla
 	 */
 	release(): void {
 		this.unreleased--;
-		for (const r of this.releaseResolvers.splice(0)) r();
+		this.releaseWaiter?.resolve();
+		this.releaseWaiter = null;
 	}
 
 	/**
@@ -171,7 +174,8 @@ export class BatchingAsyncQueue<T extends { task_key: string }> implements Polla
 	 */
 	waitForRelease(): Promise<void> {
 		if (this.closed) return Promise.resolve();
-		return new Promise((resolve) => this.releaseResolvers.push(resolve));
+		this.releaseWaiter ||= new Deferred<void>();
+		return this.releaseWaiter.promise;
 	}
 
 	private notifyItemAvailable() {
@@ -202,7 +206,8 @@ export class BatchingAsyncQueue<T extends { task_key: string }> implements Polla
 		// Signal remaining waiting consumers as done
 		for (const r of this.resolvers) r({ value: undefined as any, done: true });
 		this.resolvers = [];
-		for (const r of this.releaseResolvers.splice(0)) r();
+		this.releaseWaiter?.resolve();
+		this.releaseWaiter = null;
 	}
 
 	[Symbol.asyncIterator]() {

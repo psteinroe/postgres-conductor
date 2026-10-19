@@ -389,7 +389,6 @@ export class Worker<
 		const allTasks = Array.from(this.tasks.values());
 		// A slot runs one execution, or one batch of a batched task
 		const executionsPerSlot = Math.max(...allTasks.map((task) => task.batch?.size || 1));
-		let release: Promise<void> | null = null;
 
 		// Claim executions, abort cancelled running ones and hand new signals to their handlers
 		const claim = async (batchSize: number, taskKeys: string[]) => {
@@ -411,7 +410,7 @@ export class Worker<
 					.get(id)
 					?.controller.abort({ reason: "cancelled", __pgconductorTaskAborted: true });
 			}
-			for (const stored of signals) this._running.get(stored.execution_id)?.inbox.push([stored]);
+			for (const stored of signals) this._running.get(stored.execution_id)?.inbox.push(stored);
 			for (const exec of executions) this.held.add(exec.id);
 			return executions;
 		};
@@ -423,10 +422,10 @@ export class Worker<
 				if (freeSlots <= 0) {
 					// Read cancellations and signals of running executions every poll interval
 					await claim(0, []);
-					release ||= queue.waitForRelease().then(() => {
-						release = null;
-					});
-					await Promise.race([release, waitFor(this.pollIntervalMs, { signal: this.signal })]);
+					await Promise.race([
+						queue.waitForRelease(),
+						waitFor(this.pollIntervalMs, { signal: this.signal }),
+					]);
 					continue;
 				}
 
@@ -574,7 +573,7 @@ export class Worker<
 			},
 		});
 		// Signals stored before the claim are ready when the handler registers its listener
-		signals.push(exec.signals || []);
+		for (const stored of exec.signals || []) signals.push(stored);
 		this._running.set(exec.id, {
 			controller: taskAbortController,
 			claimToken: exec.claim_token,

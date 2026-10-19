@@ -54,13 +54,11 @@ export class SignalInbox {
 		this.consuming ||= this.consume();
 	}
 
-	/** Add undelivered signals in stored order; ones received before are skipped */
-	push(signals: StoredSignal[]): void {
-		for (const signal of signals) {
-			if (signal.seq <= this.lastSeq) continue;
-			this.lastSeq = signal.seq;
-			void this.queue.push(signal);
-		}
+	/** Add an undelivered signal, in stored order; one received before is skipped */
+	push(signal: StoredSignal): void {
+		if (signal.seq <= this.lastSeq) return;
+		this.lastSeq = signal.seq;
+		void this.queue.push(signal);
 	}
 
 	/**
