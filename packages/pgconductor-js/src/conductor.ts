@@ -163,16 +163,7 @@ export class Conductor<
 		this.logger = options.logger || new DefaultLogger();
 		this.telemetry = new Telemetry(options.telemetry !== false);
 
-		if ("sql" in options && options.sql) {
-			this.db = new DatabaseClient({ sql: options.sql, logger: this.logger });
-		} else if ("connectionString" in options && options.connectionString) {
-			this.db = new DatabaseClient({
-				connectionString: options.connectionString,
-				logger: this.logger,
-			});
-		} else {
-			throw new Error("Conductor requires either a connectionString or sql instance");
-		}
+		this.db = new DatabaseClient({ ...options, logger: this.logger });
 	}
 
 	static create<

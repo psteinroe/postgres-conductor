@@ -172,26 +172,7 @@ export class TaskContext<
 	}
 
 	async step<T extends JsonValue | void>(name: string, fn: () => Promise<T> | T): Promise<T> {
-		// Check abort signal
-		if (this.signal.aborted) {
-			return this.abortAndHangup({
-				reason: "released",
-				reschedule_in_ms: 0,
-			});
-		}
-
-		// Check window boundaries
-		if (this.windowChecker) {
-			const now = this.opts.clock.now();
-			if (!this.windowChecker.isWithinWindow(now)) {
-				const nextRunAt = this.windowChecker.getNextValidRunAt(now);
-				const delay = Math.max(nextRunAt.getTime() - now.getTime(), 0);
-				return this.abortAndHangup({
-					reason: "released",
-					reschedule_in_ms: delay,
-				});
-			}
-		}
+		await this.checkpoint();
 
 		// Check if step already completed
 		const cached = await this.opts.db.loadStep(
@@ -226,7 +207,6 @@ export class TaskContext<
 						claimToken: this.opts.execution.claim_token,
 						key: name,
 						result: { result: result as JsonValue },
-						runAtMs: undefined,
 					},
 					{ signal: this.signal },
 				);

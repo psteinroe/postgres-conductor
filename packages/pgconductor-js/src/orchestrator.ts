@@ -497,13 +497,6 @@ export class Orchestrator {
 		};
 	}
 
-	private get stopDeferred(): Deferred<void> {
-		if (!this._stopDeferred) {
-			throw new Error("Orchestrator is not running");
-		}
-		return this._stopDeferred;
-	}
-
 	private get startDeferred(): Deferred<void> {
 		if (!this._startDeferred) {
 			throw new Error("Orchestrator is not running");

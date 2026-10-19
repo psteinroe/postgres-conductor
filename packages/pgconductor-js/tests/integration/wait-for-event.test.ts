@@ -599,10 +599,9 @@ describe.serial("waitForEvent", () => {
 			};
 			await database.client.returnExecutions({
 				orchestratorId,
-				completed: status === "completed" ? [{ ...result, status }] : [],
-				failed: status === "permanently_failed" ? [{ ...result, status, error: "failed" }] : [],
-				released: [],
-				invokeChild: [],
+				results: [
+					status === "completed" ? { ...result, status } : { ...result, status, error: "failed" },
+				],
 			});
 
 			const [row] = await database.sql<{ n: number }[]>`
@@ -1083,8 +1082,7 @@ describe.serial("waitForEvent", () => {
 			if (!second) throw new Error("expected claim");
 			await database.client.returnExecutions({
 				orchestratorId,
-				completed: [],
-				failed: [
+				results: [
 					{
 						execution_id: executionId,
 						claim_token: second.claim_token,
@@ -1094,8 +1092,6 @@ describe.serial("waitForEvent", () => {
 						error: "failed before waiting again",
 					},
 				],
-				released: [],
-				invokeChild: [],
 			});
 			const backoff = await runAt();
 

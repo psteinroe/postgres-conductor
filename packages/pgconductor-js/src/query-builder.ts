@@ -1,5 +1,5 @@
 import type { PendingQuery, Row, RowList, Sql } from "postgres";
-import type { GroupedExecutionResults } from "./database-client";
+import type { ReturnExecutionsArgs } from "./database-client";
 import * as assert from "./lib/assert";
 import type { TraceContextCarrier } from "./telemetry";
 import type {
@@ -97,7 +97,6 @@ export type SaveStepArgs = {
 	claimToken: string;
 	key: string;
 	result: Payload | null;
-	runAtMs?: number;
 };
 
 export type StartExecutionArgs = {
@@ -570,25 +569,21 @@ export class QueryBuilder {
 
 	buildReturnExecutions({
 		orchestratorId,
-		completed,
-		failed,
-		released,
-		invokeChild,
-	}: GroupedExecutionResults): PendingQuery<any> | null {
-		const toMs = (ms: number | "infinity" | undefined) => (ms === "infinity" ? -1 : ms);
-		const results = [
-			...completed,
-			...failed,
-			...released.map((r) => ({ ...r, reschedule_in_ms: toMs(r.reschedule_in_ms) })),
-			...invokeChild.map((r) => ({ ...r, timeout_ms: toMs(r.timeout_ms) })),
-		];
-
+		results,
+	}: ReturnExecutionsArgs): PendingQuery<any> | null {
 		if (results.length === 0) return null;
+
+		const toMs = (ms: number | "infinity" | undefined) => (ms === "infinity" ? -1 : ms);
+		const rows = results.map((r) => {
+			if (r.status === "released") return { ...r, reschedule_in_ms: toMs(r.reschedule_in_ms) };
+			if (r.status === "invoke_child") return { ...r, timeout_ms: toMs(r.timeout_ms) };
+			return r;
+		});
 
 		const ctes: PendingQuery<any>[] = [];
 		ctes.push(this.sql`now_ts as (select pgconductor._private_current_time() as ts)`);
 		ctes.push(this.sql`result_data as (
-			select * from jsonb_to_recordset(${this.sql.json(results)}::jsonb)
+			select * from jsonb_to_recordset(${this.sql.json(rows)}::jsonb)
 			as r(
 				execution_id uuid, queue text, task_key text, claim_token uuid, status text,
 				result jsonb, error text,
@@ -1064,16 +1059,7 @@ export class QueryBuilder {
 			throw new Error("Cannot use both throttle and debounce - choose one");
 		}
 
-		let dedupe_seconds: number | null = null;
-		let dedupe_next_slot = false;
-
-		if (spec.throttle) {
-			dedupe_seconds = spec.throttle.seconds;
-			dedupe_next_slot = false;
-		} else if (spec.debounce) {
-			dedupe_seconds = spec.debounce.seconds;
-			dedupe_next_slot = true;
-		}
+		const dedupe = spec.throttle || spec.debounce;
 
 		return this.sql<[{ id: string | null }]>`
 			select id from pgconductor.invoke(
@@ -1082,8 +1068,8 @@ export class QueryBuilder {
 				p_payload := ${spec.payload ? this.sql.json(spec.payload) : null}::jsonb,
 				p_run_at := ${spec.run_at ? spec.run_at.toISOString() : null}::timestamptz,
 				p_dedupe_key := ${spec.dedupe_key || null}::text,
-				p_dedupe_seconds := ${dedupe_seconds}::integer,
-				p_dedupe_next_slot := ${dedupe_next_slot}::boolean,
+				p_dedupe_seconds := ${dedupe ? dedupe.seconds : null}::integer,
+				p_dedupe_next_slot := ${Boolean(spec.debounce)}::boolean,
 				p_cron_expression := ${spec.cron_expression || null}::text,
 				p_priority := ${spec.priority || null}::integer,
 				p_trace_context := ${spec.trace_context ? this.sql.json(spec.trace_context) : null}::jsonb,
@@ -1178,22 +1164,14 @@ export class QueryBuilder {
 				throw new Error("Batch invoke only supports throttle, not debounce");
 			}
 
-			let dedupe_seconds: number | null = null;
-			let dedupe_next_slot = false;
-
-			if (spec.throttle) {
-				dedupe_seconds = spec.throttle.seconds;
-				dedupe_next_slot = false;
-			}
-
 			return {
 				task_key: spec.task_key,
 				queue: spec.queue,
 				payload: spec.payload || null,
 				run_at: spec.run_at,
 				dedupe_key: spec.dedupe_key || null,
-				dedupe_seconds,
-				dedupe_next_slot,
+				dedupe_seconds: spec.throttle ? spec.throttle.seconds : null,
+				dedupe_next_slot: false,
 				cron_expression: spec.cron_expression || null,
 				trace_context: spec.trace_context,
 				metadata: spec.metadata,
@@ -1252,35 +1230,9 @@ export class QueryBuilder {
 		queue,
 		key,
 		result,
-		runAtMs,
 		orchestratorId,
 		claimToken,
 	}: SaveStepArgs): PendingQuery<RowList<Row[]>> {
-		if (runAtMs) {
-			return this.sql<RowList<Row[]>>`
-				with claimed_execution as materialized (
-					select e.id, e.queue
-					from pgconductor._private_executions e
-					where e.id = ${executionId}::uuid
-						and e.queue = ${queue}::text
-						and e.locked_by = ${orchestratorId}::uuid
-						and e.claim_token = ${claimToken}::uuid
-					for update
-				), inserted as (
-					insert into pgconductor._private_steps (execution_id, queue, key, result)
-					select e.id, e.queue, ${key}::text, ${this.sql.json(result)}::jsonb
-					from claimed_execution e
-					on conflict (execution_id, key) do nothing
-					returning 1
-				)
-				update pgconductor._private_executions e
-				set run_at = pgconductor._private_current_time() + (${runAtMs}::integer || ' milliseconds')::interval
-				from claimed_execution c
-				where e.id = c.id and e.queue = c.queue
-					and exists (select 1 from inserted)
-			`;
-		}
-
 		return this.sql<RowList<Row[]>>`
 			with claimed_execution as materialized (
 				select e.id, e.queue

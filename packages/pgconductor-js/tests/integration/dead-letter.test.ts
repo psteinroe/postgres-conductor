@@ -195,17 +195,11 @@ describe("dead-letter queues (Postgres integration)", () => {
 		};
 		await db.client.returnExecutions({
 			orchestratorId,
-			completed: [],
-			failed: [{ ...result }],
-			released: [],
-			invokeChild: [],
+			results: [{ ...result }],
 		});
 		await db.client.returnExecutions({
 			orchestratorId,
-			completed: [],
-			failed: [{ ...result }],
-			released: [],
-			invokeChild: [],
+			results: [{ ...result }],
 		});
 		const rows = await db.sql<{ count: string; source: string | null }[]>`
 			select count(*)::text as count, min(dead_letter->>'sourceExecutionId') as source
@@ -216,10 +210,7 @@ describe("dead-letter queues (Postgres integration)", () => {
 		// A result from a different worker is fenced out as well.
 		await db.client.returnExecutions({
 			orchestratorId: crypto.randomUUID(),
-			completed: [],
-			failed: [{ ...result }],
-			released: [],
-			invokeChild: [],
+			results: [{ ...result }],
 		});
 		const count = await db.sql<{ count: string }[]>`
 			select count(*)::text as count from pgconductor._private_executions where queue = 'dlq'
@@ -270,8 +261,7 @@ describe("dead-letter queues (Postgres integration)", () => {
 
 		await db.client.returnExecutions({
 			orchestratorId,
-			completed: [],
-			failed: [
+			results: [
 				{
 					execution_id: execution.id,
 					claim_token: execution.claim_token,
@@ -281,8 +271,6 @@ describe("dead-letter queues (Postgres integration)", () => {
 					error: "boom",
 				},
 			],
-			released: [],
-			invokeChild: [],
 		});
 
 		const [counts] = await db.sql<{ source: string; destination: string }[]>`
@@ -384,8 +372,7 @@ describe("dead-letter queues (Postgres integration)", () => {
 		expect(await db.client.cancelExecution(executionId)).toBe(true);
 		await db.client.returnExecutions({
 			orchestratorId,
-			completed: [],
-			failed: [
+			results: [
 				{
 					execution_id: execution.id,
 					claim_token: execution.claim_token,
@@ -395,8 +382,6 @@ describe("dead-letter queues (Postgres integration)", () => {
 					error: "Task was cancelled",
 				},
 			],
-			released: [],
-			invokeChild: [],
 		});
 
 		const [counts] = await db.sql<{ source: string; destination: string }[]>`
@@ -450,10 +435,7 @@ describe("dead-letter queues (Postgres integration)", () => {
 
 		await db.client.returnExecutions({
 			orchestratorId: parent.locked_by,
-			completed: [],
-			failed: [],
-			released: [],
-			invokeChild: [
+			results: [
 				{
 					execution_id: parent.id,
 					claim_token: parent.claim_token,
@@ -487,8 +469,7 @@ describe("dead-letter queues (Postgres integration)", () => {
 		expect(await db.client.cancelExecution(child.id)).toBe(true);
 		await db.client.returnExecutions({
 			orchestratorId: childOrchestratorId,
-			completed: [],
-			failed: [
+			results: [
 				{
 					execution_id: child.id,
 					claim_token: child.claim_token,
@@ -498,8 +479,6 @@ describe("dead-letter queues (Postgres integration)", () => {
 					error: "Task was cancelled",
 				},
 			],
-			released: [],
-			invokeChild: [],
 		});
 
 		const [counts] = await db.sql<{ source: string; destination: string }[]>`
@@ -615,10 +594,7 @@ describe("dead-letter queues (Postgres integration)", () => {
 		await expect(
 			db.client.returnExecutions({
 				orchestratorId: lockedBy,
-				completed: [],
-				failed: [settlement],
-				released: [],
-				invokeChild: [],
+				results: [settlement],
 			}),
 		).rejects.toThrow("forced destination failure");
 		const afterRollback = await db.sql<
@@ -632,10 +608,7 @@ describe("dead-letter queues (Postgres integration)", () => {
 		);
 		await db.client.returnExecutions({
 			orchestratorId: lockedBy,
-			completed: [],
-			failed: [settlement],
-			released: [],
-			invokeChild: [],
+			results: [settlement],
 		});
 		const finalRows = await db.sql<{ source: string | null; source_failed: string }[]>`
 			select dead_letter->>'sourceExecutionId' as source, (select failed_at is not null from pgconductor._private_executions where id = ${id}::uuid)::text as source_failed

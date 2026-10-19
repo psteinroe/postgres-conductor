@@ -121,12 +121,9 @@ export type ExecutionResult =
 	| ExecutionPermamentlyFailed
 	| ExecutionInvokeChild;
 
-export type GroupedExecutionResults = {
+export type ReturnExecutionsArgs = {
 	orchestratorId: string;
-	completed: ExecutionCompleted[];
-	failed: (ExecutionFailed | ExecutionPermamentlyFailed)[];
-	released: ExecutionReleased[];
-	invokeChild: ExecutionInvokeChild[];
+	results: ExecutionResult[];
 };
 
 export type ExecutionCompleted = {
@@ -580,12 +577,9 @@ export class DatabaseClient {
 		return rows[0] || null;
 	}
 
-	async returnExecutions(
-		grouped: GroupedExecutionResults,
-		opts?: QueryMethodOptions,
-	): Promise<void> {
+	async returnExecutions(args: ReturnExecutionsArgs, opts?: QueryMethodOptions): Promise<void> {
 		// A query runs once, so every attempt builds a new one.
-		await this.query(async () => this.builder.buildReturnExecutions(grouped), {
+		await this.query(async () => this.builder.buildReturnExecutions(args), {
 			label: "returnExecutions",
 			...opts,
 		});

@@ -107,10 +107,6 @@ export type FindEventByIdentifier<
 export type InferEventPayload<T> =
 	T extends EventDefinition<string, infer P, any> ? EventPayload<P> : never;
 
-export type CustomEventConfig<TName extends string> = {
-	event: TName;
-};
-
 export async function validateEventPayload<T>(
 	definitions: readonly EventDefinition<string, any, any>[],
 	event: string,

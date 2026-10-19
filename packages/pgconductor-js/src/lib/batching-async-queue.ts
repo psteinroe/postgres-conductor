@@ -33,7 +33,6 @@ export class BatchingAsyncQueue<T extends { task_key: string }> implements Polla
 		{
 			items: T[];
 			timer: Timer | null;
-			config: BatchConfig;
 		}
 	>();
 
@@ -72,7 +71,6 @@ export class BatchingAsyncQueue<T extends { task_key: string }> implements Polla
 			batch = {
 				items: [],
 				timer: null,
-				config,
 			};
 			this.batches.set(item.task_key, batch);
 		}
@@ -102,7 +100,7 @@ export class BatchingAsyncQueue<T extends { task_key: string }> implements Polla
 		}
 
 		// Emit batch as group
-		const items = [...batch.items];
+		const { items } = batch;
 		batch.items = [];
 		this.emitGroup({
 			taskKey,
@@ -187,17 +185,9 @@ export class BatchingAsyncQueue<T extends { task_key: string }> implements Polla
 	close(): void {
 		if (this.closed) return;
 
-		// Flush all pending batches using emitGroup (which handles resolvers)
-		for (const [taskKey, batch] of this.batches.entries()) {
-			if (batch.items.length > 0) {
-				if (batch.timer) {
-					clearTimeout(batch.timer);
-					batch.timer = null;
-				}
-				const items = [...batch.items];
-				batch.items = [];
-				this.emitGroup({ taskKey, items });
-			}
+		// Flush all pending batches before closing, since emitGroup drops groups once closed
+		for (const taskKey of this.batches.keys()) {
+			this.flushBatch(taskKey);
 		}
 
 		// Now mark as closed
