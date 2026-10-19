@@ -33,6 +33,7 @@ export class MockDatabaseClient implements IDatabaseClient {
 	checkMetadata = mock(async () => {});
 	clearWaitingState = mock(async () => {});
 	registerEventWait = mock(async () => null);
+	registerEventRace = mock(async () => null);
 	cancelExecution = mock(async () => true);
 	ackSignals = mock(async () => {});
 	signalExecution = mock(async () => true);

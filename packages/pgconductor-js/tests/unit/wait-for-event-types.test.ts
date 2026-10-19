@@ -14,11 +14,16 @@ describe("waitForEvent API", () => {
 			payload: z.object({ status: z.enum(["paid", "pending"]), id: z.string() }),
 			filterable: ["status"],
 		});
+		const reply = defineEvent({
+			name: "api.reply",
+			payload: z.object({ thread: z.string(), text: z.string() }),
+			filterable: ["thread"],
+		});
 		const task = defineTask({ name: "api.wait", payload: z.object({}) });
 		const conductor = Conductor.create({
 			sql: {} as any,
 			tasks: TaskSchemas.fromSchema([task]),
-			events: EventSchemas.fromSchema([event]),
+			events: EventSchemas.fromSchema([event, reply]),
 			context: {},
 		});
 		conductor.createTask({ name: "api.wait" }, { invocable: true }, async (_event, ctx) => {
@@ -48,6 +53,25 @@ describe("waitForEvent API", () => {
 			ctx.subscribe("timeout", { event, timeout: "1h" });
 			// @ts-expect-error id is not declared filterable
 			ctx.subscribe("bad", { event, filter: { id: ["x"] } });
+
+			const replied = await ctx.subscribe("reply", { event: reply, filter: { thread: ["t"] } });
+			const winner = await ctx.waitForAny(
+				"approval-or-reply",
+				{ decision: subscription, reply: replied },
+				{ timeout: "24h" },
+			);
+			expectTypeOf(winner).toEqualTypeOf<
+				| {
+						key: "decision";
+						event: { name: "api.order"; payload: { status: "paid" | "pending"; id: string } };
+				  }
+				| { key: "reply"; event: { name: "api.reply"; payload: { thread: string; text: string } } }
+				| { key: "timeout" }
+			>();
+			// @ts-expect-error branches are subscriptions
+			ctx.waitForAny("bad", { reply: { event: reply } });
+			// @ts-expect-error timeout is the result key of the timeout
+			ctx.waitForAny("bad", { timeout: subscription });
 		});
 		expect(WaitForEventTimeoutError).toBeDefined();
 	});

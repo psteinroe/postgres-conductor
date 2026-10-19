@@ -92,7 +92,8 @@ when registration commits; earlier events do not satisfy the wait. If the timeou
 recorded for the step key is final.
 
 To wait for an event caused by your own side effect, use `ctx.subscribe()` so the
-subscription is active before the side effect runs.
+subscription is active before the side effect runs. To wait for the first of several
+events, use `ctx.waitForAny()`.
 
 ## ctx.subscribe()
 
@@ -128,6 +129,54 @@ const decision = await subscription.wait({ timeout: "24h" });
 - The subscription is memoized by the step key: retries and resumes reuse it rather than
   creating a new one. `ctx.waitForEvent(stepKey, ...)` with the same key is equivalent to
   `wait()`.
+
+## ctx.waitForAny()
+
+Wait for whichever of several subscriptions receives an event first, or a timeout:
+
+```typescript
+const winner = await ctx.waitForAny(
+  stepKey: string,
+  subscriptions: Record<string, EventSubscription>,
+  options?: { timeout?: DurationInput }
+): Promise<{ key: string, event } | { key: "timeout" }>
+```
+
+**Example:**
+
+```typescript
+const decision = await ctx.subscribe("decision", {
+  event: approvalDecided,
+  filter: { approvalId: [approvalId] },
+});
+const reply = await ctx.subscribe("reply", {
+  event: threadReplied,
+  filter: { interactionId: [interactionId] },
+});
+await ctx.step("post-card", () => postApprovalCard(approvalId));
+
+const winner = await ctx.waitForAny("approval-or-reply", { decision, reply }, { timeout: "24h" });
+
+if (winner.key === "decision") {
+  // winner.event is typed as the approvalDecided event
+} else if (winner.key === "reply") {
+  // winner.event is typed as the threadReplied event
+} else {
+  // winner.key === "timeout"
+}
+```
+
+**Behavior:**
+- Each value is a subscription from `ctx.subscribe()`, and `winner.key` is the name you gave it
+  in the object.
+- Exactly one subscription wins. One that already holds an event wins without suspending. If
+  several do, the one whose event was dispatched first wins, and ties go to the one listed
+  first. Otherwise the execution suspends until the first matching event.
+- The timeout starts when `waitForAny()` is first called. When it wins, the result is
+  `{ key: "timeout" }` instead of an error, so `timeout` cannot be used as a name.
+- When the wait settles, all of the subscriptions are removed. Calling `wait()` on one that did
+  not win throws, unless its event arrived before the wait settled.
+- The result is memoized by the step key, so retries and resumes return the same winner.
 
 ## ctx.emit()
 
