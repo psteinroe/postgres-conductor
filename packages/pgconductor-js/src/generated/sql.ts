@@ -86,6 +86,10 @@ create table pgconductor._private_orchestrator_signals (
 
 create index idx_orchestrator_signals_orchestrator on pgconductor._private_orchestrator_signals(orchestrator_id, created_at);
 
+create unique index idx_orchestrator_signals_cancel_unique
+    on pgconductor._private_orchestrator_signals(orchestrator_id, execution_id)
+    where type = 'cancel_execution' and execution_id is not null;
+
 create unique index idx_orchestrator_signals_shutdown_unique
     on pgconductor._private_orchestrator_signals(orchestrator_id)
     where type = 'shutdown';
@@ -1001,7 +1005,7 @@ begin
   end if;
 
   if v_orchestrator_id is not null then
-    -- running: set cancelled flag, the worker running it aborts it on its next poll
+    -- running: signal orchestrator + set cancelled flag
     update pgconductor._private_executions
     set
       cancelled = true,
@@ -1016,19 +1020,40 @@ begin
       delete from pgconductor._private_custom_event_subscriptions
       where kind = 'execution_wait'
         and execution_id = p_execution_id;
+
+      insert into pgconductor._private_orchestrator_signals
+        (orchestrator_id, type, execution_id, payload)
+      values (
+        v_orchestrator_id,
+        'cancel_execution',
+        p_execution_id,
+        jsonb_build_object('queue', v_queue, 'reason', p_reason)
+      )
+      on conflict (orchestrator_id, execution_id)
+        where type = 'cancel_execution' and execution_id is not null
+      do nothing;
     end if;
 
     return v_rows_affected > 0;
   end if;
 
-  -- running descendants are aborted by the workers running them on their next poll
-  update pgconductor._private_executions e
-  set cancelled = true, last_error = p_reason
-  where e.id = any(v_descendant_ids)
-    and e.locked_by is not null
-    and e.completed_at is null
-    and e.failed_at is null
-    and e.cancelled = false;
+  with running as (
+    update pgconductor._private_executions e
+    set cancelled = true, last_error = p_reason
+    where e.id = any(v_descendant_ids)
+      and e.locked_by is not null
+      and e.completed_at is null
+      and e.failed_at is null
+      and e.cancelled = false
+    returning e.id, e.queue, e.locked_by
+  )
+  insert into pgconductor._private_orchestrator_signals
+    (orchestrator_id, type, execution_id, payload)
+  select r.locked_by, 'cancel_execution', r.id, jsonb_build_object('queue', r.queue, 'reason', p_reason)
+  from running r
+  on conflict (orchestrator_id, execution_id)
+    where type = 'cancel_execution' and execution_id is not null
+  do nothing;
 
   -- pending: fail immediately
   with pending as (

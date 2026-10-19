@@ -22,7 +22,6 @@ import {
 	type ClearWaitingStateArgs,
 	type EmitEventArgs,
 	type RegisterEventWaitArgs,
-	type PollRunningExecutionsArgs,
 	type AckSignalsArgs,
 	type SignalExecutionArgs,
 	type SignalWithStartArgs,
@@ -206,11 +205,10 @@ export type StoredSignal = {
 	payload: JsonValue;
 };
 
-/** Cancellation and new signals of a running execution, read on each worker poll. */
-export type RunningExecutionUpdate = {
-	execution_id: string;
-	cancelled: boolean;
-	signals: StoredSignal[];
+/** Executions claimed by a poll, and new signals of the running executions it read them for. */
+export type ClaimResult = {
+	executions: Execution[];
+	signals: (StoredSignal & { execution_id: string })[];
 };
 
 export type EventWaitResult =
@@ -378,17 +376,6 @@ export class DatabaseClient {
 	> {
 		return this.query(() => this.builder.buildOrchestratorHeartbeat(args), {
 			label: "orchestratorHeartbeat",
-			...opts,
-		});
-	}
-
-	async pollRunningExecutions(
-		args: PollRunningExecutionsArgs,
-		opts?: QueryMethodOptions,
-	): Promise<RunningExecutionUpdate[]> {
-		if (args.executions.length === 0) return [];
-		return this.query(() => this.builder.buildPollRunningExecutions(args), {
-			label: "pollRunningExecutions",
 			...opts,
 		});
 	}
@@ -576,8 +563,11 @@ export class DatabaseClient {
 
 	// Without a signal a claim is never retried: one whose response was lost may have committed.
 	// The next poll claims again, and the heartbeat releases the orphaned claim.
-	async getExecutions(args: GetExecutionsArgs): Promise<Execution[]> {
-		return this.query(() => this.builder.buildGetExecutions(args), { label: "getExecutions" });
+	async getExecutions(args: GetExecutionsArgs): Promise<ClaimResult> {
+		const [result] = await this.query(() => this.builder.buildGetExecutions(args), {
+			label: "getExecutions",
+		});
+		return result;
 	}
 
 	async getExecution(

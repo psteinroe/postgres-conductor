@@ -17,7 +17,7 @@ export class MockDatabaseClient implements IDatabaseClient {
 	countActiveOrchestratorsBelow = mock(async () => 0);
 	orchestratorShutdown = mock(async () => {});
 	getExecution = mock(async () => null);
-	getExecutions = mock(async () => []);
+	getExecutions = mock(async () => ({ executions: [], signals: [] }));
 	returnExecutions = mock(async (_results) => {});
 	removeExecutions = mock(async () => false);
 	registerWorker = mock(async () => {});
@@ -34,7 +34,6 @@ export class MockDatabaseClient implements IDatabaseClient {
 	clearWaitingState = mock(async () => {});
 	registerEventWait = mock(async () => null);
 	cancelExecution = mock(async () => true);
-	pollRunningExecutions = mock(async () => []);
 	ackSignals = mock(async () => {});
 	signalExecution = mock(async () => true);
 	signalWithStart = mock(async () => "mock-execution-id");

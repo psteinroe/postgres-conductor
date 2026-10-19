@@ -369,6 +369,21 @@ export class Orchestrator {
 								this.abortController.abort();
 							}
 							break;
+
+						case "cancel_execution":
+							if (
+								signal.signal_execution_id &&
+								signal.signal_payload &&
+								signal.signal_payload.queue
+							) {
+								const worker = this.workers.find(
+									(w) => w.queueName === signal.signal_payload?.queue,
+								);
+								if (worker) {
+									worker.cancelExecutions([signal.signal_execution_id]);
+								}
+							}
+							break;
 					}
 				}
 			} catch (err) {

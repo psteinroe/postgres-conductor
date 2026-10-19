@@ -160,6 +160,21 @@ describe("Cancellation Support", () => {
 		expect(cancelledExecution[0]?.cancelled).toBe(true);
 		expect(cancelledExecution[0]?.failed_at).toBeNull(); // Not failed yet
 
+		// Verify signal was created
+		const signals = await db.sql<
+			{
+				type: string;
+				execution_id: string;
+			}[]
+		>`
+			select type, execution_id
+			from pgconductor._private_orchestrator_signals
+		`;
+
+		expect(signals.length).toBe(1);
+		expect(signals[0]?.type).toBe("cancel_execution");
+		expect(signals[0]?.execution_id).toBe(executionId);
+
 		await orchestrator.stop();
 	}, 15000);
 
@@ -1011,6 +1026,14 @@ describe("Cancellation Support", () => {
 				waiting_on_execution_id: null,
 			});
 		}
+		const signals = await db.sql<{ orchestrator_id: string; execution_id: string }[]>`
+			select orchestrator_id, execution_id
+			from pgconductor._private_orchestrator_signals
+			where type = 'cancel_execution'
+		`;
+		expect(signals.map((s) => [s.orchestrator_id, s.execution_id])).toEqual([
+			[orchestrator.id, child],
+		]);
 	}, 15000);
 
 	test("cancellation locks a child before its waiting parent", async () => {

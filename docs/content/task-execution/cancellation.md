@@ -28,7 +28,7 @@ console.log(cancelled); // true if cancelled, false if already completed
 
 **Running execution:**
 
-- `ctx.signal` is aborted on the next poll of the worker running it, within about one `pollIntervalMs`
+- `ctx.signal` is aborted
 - Task should check signal and exit gracefully
 - Execution is marked as cancelled and fails once the task stops, even if it was about to sleep or invoke a child
 

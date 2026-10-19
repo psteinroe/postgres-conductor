@@ -3,7 +3,6 @@ import type { GroupedExecutionResults } from "./database-client";
 import * as assert from "./lib/assert";
 import type { TraceContextCarrier } from "./telemetry";
 import type {
-	Execution,
 	ExecutionInfo,
 	ExecutionSpec,
 	EventFilterTerm,
@@ -11,7 +10,7 @@ import type {
 	EventWaitResult,
 	JsonValue,
 	Payload,
-	RunningExecutionUpdate,
+	ClaimResult,
 	TaskSpec,
 } from "./database-client";
 
@@ -43,6 +42,8 @@ export type GetExecutionsArgs = {
 	queueName: string;
 	batchSize: number;
 	taskKeys: string[];
+	/** Running executions that listen for signals, to read signals stored after `after_seq` */
+	running?: { execution_id: string; claim_token: string; after_seq: number }[];
 };
 
 export type RemoveExecutionsArgs = {
@@ -121,13 +122,6 @@ export type EmitEventArgs = {
 	traceContext?: TraceContextCarrier | null;
 	metadata?: Payload | null;
 	dedupeKey?: string;
-};
-
-export type PollRunningExecutionsArgs = {
-	orchestratorId: string;
-	queueName: string;
-	/** Running executions; `after_seq` is null for one that listens for no signal */
-	executions: { execution_id: string; claim_token: string; after_seq: number | null }[];
 };
 
 export type AckSignalsArgs = {
@@ -268,43 +262,6 @@ export class QueryBuilder {
 		`;
 	}
 
-	buildPollRunningExecutions({
-		orchestratorId,
-		queueName,
-		executions,
-	}: PollRunningExecutionsArgs): PendingQuery<RunningExecutionUpdate[]> {
-		return this.sql<RunningExecutionUpdate[]>`
-			with running as (
-				select * from jsonb_to_recordset(${this.sql.json(executions)}::jsonb)
-				as r(execution_id uuid, claim_token uuid, after_seq bigint)
-			)
-			select e.id as execution_id, e.cancelled,
-				coalesce((
-					select jsonb_agg(
-						jsonb_build_object('seq', s.seq, 'id', s.id, 'name', s.name, 'payload', s.payload)
-						order by s.seq
-					)
-					from pgconductor._private_execution_signals s
-					where s.execution_id = e.id
-						and s.delivered_at is null
-						and s.seq > r.after_seq
-				), '[]'::jsonb) as signals
-			from running r
-			join pgconductor._private_executions e
-				on e.id = r.execution_id
-				and e.queue = ${queueName}::text
-				and e.locked_by = ${orchestratorId}::uuid
-				and e.claim_token = r.claim_token
-			where e.cancelled
-				or exists (
-					select 1 from pgconductor._private_execution_signals s
-					where s.execution_id = e.id
-						and s.delivered_at is null
-						and s.seq > r.after_seq
-				)
-		`;
-	}
-
 	buildAckSignals({
 		executionId,
 		queue,
@@ -436,8 +393,9 @@ export class QueryBuilder {
 		queueName,
 		batchSize,
 		taskKeys,
-	}: GetExecutionsArgs): PendingQuery<Execution[]> {
-		return this.sql<Execution[]>`
+		running = [],
+	}: GetExecutionsArgs): PendingQuery<[ClaimResult]> {
+		return this.sql<[ClaimResult]>`
 			-- Read limit mode from the database so rolling workers cannot bypass new limits.
 			with task_limits as materialized (
 				select exists (
@@ -564,22 +522,41 @@ export class QueryBuilder {
 					e.waiting_step_key, e.cancelled, e.last_error, e.dedupe_key, e.cron_expression,
 					e.locked_by, e.claim_token, e."group", e.priority, e.run_at, e.created_at,
 					e.subscription_id, e.trace_context, e.metadata, e.dead_letter, e.signal_count
+			), running_signals as (
+				select s.execution_id, s.seq, s.id, s.name, s.payload
+				from jsonb_to_recordset(${this.sql.json(running)}::jsonb)
+					as r(execution_id uuid, claim_token uuid, after_seq bigint)
+				join pgconductor._private_executions e
+					on e.id = r.execution_id
+					and e.queue = ${queueName}::text
+					and e.locked_by = ${orchestratorId}::uuid
+					and e.claim_token = r.claim_token
+				join pgconductor._private_execution_signals s
+					on s.execution_id = e.id
+					and s.delivered_at is null
+					and s.seq > r.after_seq
 			)
-			select id, task_key, queue, payload, waiting_on_execution_id, waiting_step_key,
-				cancelled, last_error, dedupe_key, cron_expression, locked_by, claim_token, "group",
-				subscription_id, trace_context, metadata, dead_letter,
-				-- Signals stored before the attempt starts are delivered before the next poll.
-				-- The claim holds the row lock senders take, so later ones have a higher seq.
-				case when c.signal_count > 0 then coalesce((
+			select
+				coalesce((
 					select jsonb_agg(
-						jsonb_build_object('seq', s.seq, 'id', s.id, 'name', s.name, 'payload', s.payload)
-						order by s.seq
+						(to_jsonb(c) - 'priority' - 'run_at' - 'created_at' - 'signal_count')
+						-- Signals stored before the attempt starts are delivered before the next poll.
+						-- The claim holds the row lock senders take, so later ones have a higher seq.
+						|| jsonb_build_object('signals', case when c.signal_count > 0 then coalesce((
+							select jsonb_agg(
+								jsonb_build_object('seq', s.seq, 'id', s.id, 'name', s.name, 'payload', s.payload)
+								order by s.seq
+							)
+							from pgconductor._private_execution_signals s
+							where s.execution_id = c.id and s.delivered_at is null
+						), '[]'::jsonb) else '[]'::jsonb end)
+						order by c.priority asc, c.run_at asc, c.created_at asc, c.id asc
 					)
-					from pgconductor._private_execution_signals s
-					where s.execution_id = c.id and s.delivered_at is null
-				), '[]'::jsonb) else '[]'::jsonb end as signals
-			from claimed c
-			order by priority asc, run_at asc, created_at asc, id asc
+					from claimed c
+				), '[]'::jsonb) as executions,
+				coalesce((
+					select jsonb_agg(to_jsonb(s) order by s.seq) from running_signals s
+				), '[]'::jsonb) as signals
 		`;
 	}
 

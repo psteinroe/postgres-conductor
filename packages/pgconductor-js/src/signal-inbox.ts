@@ -1,4 +1,5 @@
 import type { JsonValue, StoredSignal } from "./database-client";
+import { AsyncQueue } from "./lib/async-queue";
 import { coerceError } from "./lib/coerce-error";
 
 export type SignalInfo = { id: string; name: string };
@@ -17,18 +18,16 @@ export type SignalInboxOptions = {
 
 /**
  * Delivers the signals of one execution attempt to its `ctx.onSignal` handlers, one at a time in
- * the order they were stored. The worker pushes the undelivered signals read when it claimed the
- * execution before the handler starts, and new ones read on each poll. A signal is acknowledged
- * once its handler returned. Signals without a handler are kept until one registers.
+ * the order they were stored, and acknowledges each once its handler returned. A signal without a
+ * handler when it is reached stays undelivered: if a handler for it registers later, settlement
+ * re-queues the execution and the next attempt receives it.
  */
 export class SignalInbox {
 	private readonly handlers = new Map<string, SignalHandler>();
-	private readonly buffered: StoredSignal[] = [];
+	private readonly queue = new AsyncQueue<StoredSignal>(Infinity);
 	private lastSeq = 0;
-	private pumping: Promise<void> | null = null;
-	/** No more handlers or signals are accepted */
+	private consuming: Promise<void> | null = null;
 	private closed = false;
-	/** No more signals are delivered */
 	private stopped = false;
 	private failure: Error | null = null;
 
@@ -52,77 +51,58 @@ export class SignalInbox {
 			throw new Error(`A handler for signal "${name}" is already registered`);
 		}
 		this.handlers.set(name, handler);
-		this.pump();
+		this.consuming ||= this.consume();
 	}
 
 	/** Add undelivered signals in stored order; ones received before are skipped */
 	push(signals: StoredSignal[]): void {
-		if (this.closed) return;
 		for (const signal of signals) {
 			if (signal.seq <= this.lastSeq) continue;
-			this.buffered.push(signal);
 			this.lastSeq = signal.seq;
+			void this.queue.push(signal);
 		}
-		this.pump();
 	}
 
 	/**
-	 * Stop accepting handlers and signals. With `drain`, deliver the signals already received for
-	 * registered handlers first, and wait for their acknowledgements; otherwise stop after the
-	 * running handler. Returns the error that failed delivery, if any.
+	 * Stop accepting handlers and signals. With `drain`, deliver the signals already received
+	 * first; otherwise stop after the running handler. Returns the error that failed delivery.
 	 */
 	async close({ drain }: { drain: boolean }): Promise<Error | null> {
 		this.closed = true;
-		if (!drain) this.stopped = true;
-		while (this.pumping) await this.pumping;
-		this.stopped = true;
+		this.stopped = !drain;
+		this.queue.close();
+		await this.consuming;
 		return this.failure;
 	}
 
-	private pump(): void {
-		if (this.pumping || this.stopped || !this.hasDeliverable()) return;
-		this.pumping = this.pumpLoop().finally(() => {
-			this.pumping = null;
-			// a signal may have been buffered after the loop's last check
-			this.pump();
-		});
-	}
-
-	private async pumpLoop(): Promise<void> {
-		while (!this.stopped) {
-			const index = this.buffered.findIndex((signal) => this.handlers.has(signal.name));
-			const [signal] = index === -1 ? [] : this.buffered.splice(index, 1);
-			const handler = signal && this.handlers.get(signal.name);
-			if (!signal || !handler) return;
+	private async consume(): Promise<void> {
+		for await (const signal of this.queue) {
+			if (this.stopped) return;
+			const handler = this.handlers.get(signal.name);
+			if (!handler) continue;
 
 			try {
 				await handler(signal.payload, { id: signal.id, name: signal.name });
 			} catch (err) {
-				this.fail(err, `Signal handler for "${signal.name}" failed: `);
+				this.fail(
+					new Error(`Signal handler for "${signal.name}" failed: ${coerceError(err).message}`),
+				);
 				return;
 			}
 
 			try {
 				await this.opts.ack([signal.id]);
 			} catch (err) {
-				this.fail(err);
+				this.fail(coerceError(err));
 				return;
 			}
 		}
 	}
 
-	private hasDeliverable(): boolean {
-		return this.buffered.some((signal) => this.handlers.has(signal.name));
-	}
-
-	private fail(err: unknown, prefix = ""): void {
-		if (this.failure) return;
-		const error = new Error(`${prefix}${coerceError(err).message}`);
+	private fail(error: Error): void {
 		this.failure = error;
-		this.stopped = true;
 		// once closed, the error is returned by close() instead
-		const wasClosed = this.closed;
+		if (!this.closed) this.opts.onError(error);
 		this.closed = true;
-		if (!wasClosed) this.opts.onError(error);
 	}
 }

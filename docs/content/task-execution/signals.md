@@ -23,10 +23,10 @@ const session = conductor.createTask(
 ```
 
 - Signals stored before the handler started are delivered first, in the order they were sent. The worker reads them when it claims the execution, so a listener receives them as soon as it registers
-- Later signals are delivered while the handler runs. The worker reads them on its poll loop, so they arrive within about one `pollIntervalMs`
+- Later signals are delivered while the handler runs. The worker reads them with its next claim, so they arrive within about one `pollIntervalMs`
 - Handlers run one at a time. The payload is any JSON value
 - A signal counts as delivered once its handler returns
-- A signal whose name has no listener yet is kept until a listener for it registers in the same attempt
+- Register listeners before the handler awaits anything. A signal reached while its name has no listener is skipped; if a listener for it registers later in the attempt, the execution is re-queued and the next attempt receives it
 - One listener per name and attempt. The handler re-runs from the top on every attempt, so register listeners again each time
 
 ## Sending Signals

@@ -149,13 +149,10 @@ export class Worker<
 	private _startDeferred: Deferred<void> | null = null;
 	private _stopDeferred: Deferred<void> | null = null;
 	private _abortController: AbortController | null = null;
-	private _runningTasks = new Map<
-		string,
-		{ controller: TypedAbortController<TaskAbortReasons>; claimToken: string }
-	>();
+	private _runningTasks = new Map<string, TypedAbortController<TaskAbortReasons>>();
 	// Claimed and not yet settled, including results buffered for flush
 	private readonly held = new Set<string>();
-	private _signalInboxes = new Map<string, SignalInbox>();
+	private _signalInboxes = new Map<string, { claimToken: string; inbox: SignalInbox }>();
 
 	constructor(
 		public readonly queueName: string,
@@ -324,35 +321,14 @@ export class Worker<
 	 */
 	public cancelExecutions(ids: string[]): void {
 		for (const id of ids) {
-			const running = this._runningTasks.get(id);
-			if (running) {
-				running.controller.abort({
+			const controller = this._runningTasks.get(id);
+			if (controller) {
+				controller.abort({
 					reason: "cancelled",
 					__pgconductorTaskAborted: true,
 				});
 				this._runningTasks.delete(id);
 			}
-		}
-	}
-
-	/**
-	 * Abort running executions that were cancelled and hand new signals to their handlers.
-	 * Runs on the poll loop, so both arrive within about one poll interval.
-	 */
-	private async pollRunningExecutions(orchestratorId: string): Promise<void> {
-		const executions = [...this._runningTasks].map(([id, { claimToken }]) => ({
-			execution_id: id,
-			claim_token: claimToken,
-			after_seq: this._signalInboxes.get(id)?.afterSeq ?? null,
-		}));
-		const updates = await this.db.pollRunningExecutions(
-			{ orchestratorId, queueName: this.queueName, executions },
-			{ signal: this.signal },
-		);
-		this.cancelExecutions(updates.filter((u) => u.cancelled).map((u) => u.execution_id));
-		for (const update of updates) {
-			if (update.cancelled) continue;
-			this._signalInboxes.get(update.execution_id)?.push(update.signals);
 		}
 	}
 
@@ -428,26 +404,49 @@ export class Worker<
 		const allTasks = Array.from(this.tasks.values());
 		// A slot runs one execution, or one batch of a batched task
 		const executionsPerSlot = Math.max(...allTasks.map((task) => task.batch?.size || 1));
-		let lastRunningPoll = 0;
+		// False once a drain claimed everything; it then only reads signals until its executions finish
+		let claiming = true;
 		let release: Promise<void> | null = null;
-		const pollRunning = async () => {
-			if (Date.now() - lastRunningPoll < this.pollIntervalMs) return;
-			lastRunningPoll = Date.now();
-			await this.pollRunningExecutions(orchestratorId);
+
+		// Claim executions and hand new signals to the running handlers that listen for them
+		const claim = async (batchSize: number, taskKeys: string[]) => {
+			const running = [...this._signalInboxes].flatMap(([id, { claimToken, inbox }]) =>
+				inbox.afterSeq === null
+					? []
+					: [{ execution_id: id, claim_token: claimToken, after_seq: inbox.afterSeq }],
+			);
+			if (batchSize === 0 && running.length === 0) return [];
+			const { executions, signals } = await this.db.getExecutions({
+				orchestratorId,
+				queueName: this.queueName,
+				batchSize,
+				taskKeys,
+				running,
+			});
+			for (const signal of signals) {
+				this._signalInboxes.get(signal.execution_id)?.inbox.push([signal]);
+			}
+			for (const exec of executions) this.held.add(exec.id);
+			return executions;
 		};
 
 		while (!this.signal?.aborted) {
 			try {
-				await pollRunning();
-
 				// Claim only what free slots can run so other workers get the rest
-				const freeSlots = this.concurrency - queue.pending;
+				const freeSlots = claiming ? this.concurrency - queue.pending : 0;
 				if (freeSlots <= 0) {
-					// Wake up every poll interval to keep polling running executions
-					release ||= queue.waitForRelease().then(() => {
-						release = null;
-					});
-					await Promise.race([release, waitFor(this.pollIntervalMs, { signal: this.signal })]);
+					await claim(0, []);
+					if (claiming) {
+						// Wake up every poll interval to read signals for running executions
+						release ||= queue.waitForRelease().then(() => {
+							release = null;
+						});
+						await Promise.race([release, waitFor(this.pollIntervalMs, { signal: this.signal })]);
+					} else if (queue.pending > 0) {
+						await waitFor(this.pollIntervalMs, { signal: this.signal });
+					} else {
+						break;
+					}
 					continue;
 				}
 
@@ -460,23 +459,16 @@ export class Worker<
 					)
 					.map((task) => task.name);
 
-				const executions = await this.db.getExecutions({
-					orchestratorId: this.orchestratorId,
-					queueName: this.queueName,
-					batchSize: Math.min(this.fetchBatchSize, freeSlots * executionsPerSlot),
+				const executions = await claim(
+					Math.min(this.fetchBatchSize, freeSlots * executionsPerSlot),
 					taskKeys,
-				});
-				for (const exec of executions) this.held.add(exec.id);
+				);
 
 				if (executions.length === 0) {
 					if (runOnce) {
 						queue.close();
-						// Keep polling while the claimed executions finish
-						while (this._runningTasks.size > 0 && !this.signal.aborted) {
-							await waitFor(this.pollIntervalMs, { signal: this.signal });
-							await pollRunning();
-						}
-						break;
+						claiming = false;
+						continue;
 					}
 					await waitFor(this.pollIntervalMs, { signal: this.signal });
 					continue;
@@ -570,10 +562,7 @@ export class Worker<
 	): Promise<ExecutionResult | ExecutionResult[]> {
 		const taskAbortController = new TypedAbortController<TaskAbortReasons>();
 		const signal = AbortSignal.any([taskAbortController.signal, this.signal]);
-		this._runningTasks.set(exec.id, {
-			controller: taskAbortController,
-			claimToken: exec.claim_token,
-		});
+		this._runningTasks.set(exec.id, taskAbortController);
 		const timeout = task.timeoutMs
 			? setTimeout(() => {
 					taskAbortController.abort({ reason: "timed-out", __pgconductorTaskAborted: true });
@@ -608,7 +597,7 @@ export class Worker<
 		});
 		// Signals stored before the claim are ready when the handler registers its listener
 		signals.push(exec.signals || []);
-		this._signalInboxes.set(exec.id, signals);
+		this._signalInboxes.set(exec.id, { claimToken: exec.claim_token, inbox: signals });
 
 		// Pass db and tasks as extra context to maintenance task, which skips middleware
 		const isMaintenance = task.name === "pgconductor.maintenance";

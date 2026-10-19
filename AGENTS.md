@@ -130,7 +130,7 @@ Tables live in the `pgconductor` schema with a `_private_` prefix (`_private_exe
 - Executes tasks with concurrency control (via `mapConcurrent`)
 - Batches and flushes results back to the database
 - Claiming returns each execution's undelivered signals, which prime its `SignalInbox` before the handler runs
-- Each poll (at most once per `pollIntervalMs`, also while all slots are busy) reads its running executions' cancellation flags and newer undelivered signals in one query, aborts cancelled ones and hands signals to their `SignalInbox`
+- The claim statement also reads newer undelivered signals of running executions that listen for any (`running` in `getExecutions`) and hands them to their `SignalInbox`. While all slots are busy the worker still runs it every `pollIntervalMs`, with a batch size of 0, as long as some execution listens
 - Handles graceful shutdown via AbortController
 
 **TaskContext** (`task-context.ts`)
@@ -149,7 +149,7 @@ Tables live in the `pgconductor` schema with a `_private_` prefix (`_private_exe
 - Manages multiple workers, plus the internal event-dispatch worker when events are configured
 - Handles startup/shutdown coordination and heartbeats
 - Heartbeats keep running while workers drain after shutdown and stop in cleanup, so a slow handler is not recovered as stale
-- Heartbeat signals carry only shutdowns; cancellation and application signals are read by the worker poll
+- Heartbeat signals carry shutdowns and cancellations of running executions
 - Every 8th heartbeat recovers stale orchestrators (unlocks their executions); an orchestrator whose row was recovered stops itself when its next heartbeat has to re-insert the row
 - Provides `stopped` promise for graceful shutdown
 - Runs the internal event dispatch worker only when the conductor has `events` configured
@@ -218,7 +218,7 @@ Tables live in the `pgconductor` schema with a `_private_` prefix (`_private_exe
 **Signals**
 - `_private_execution_signals` stores one row per `(execution_id, id)`; `seq` orders delivery and `delivered_at` is set when a `ctx.onSignal` handler returned (at least once per id)
 - Senders lock the execution row and increment `_private_executions.signal_count`. Settlement reads `signal_count` from its locked row, which is newer than its snapshot: a completion whose count exceeds the signals it can see, or that has undelivered signals for names the attempt listened for (`signal_names` in the result), is re-queued instead of completed
-- The claim reads undelivered signals under the row lock senders take, so signals stored later have a higher `seq` and the poll reads them with `seq > after_seq`. On completion the worker drains the inbox (`close({ drain: true })`): signals already read are delivered before settling, and only ones stored after the last read re-queue
+- Claiming an execution reads its undelivered signals under the row lock senders take, so signals stored later have a higher `seq` and later claims read them with `seq > after_seq`. Signal reads and acknowledgements are fenced by the claim token. `SignalInbox` delivers in `seq` order and skips a signal whose name has no handler yet; it stays undelivered, so settlement re-queues if a handler for it registers later. On completion the worker drains the inbox (`close({ drain: true })`): signals already read are delivered before settling, and only ones stored after the last read re-queue
 - Re-queues are unbounded by design: each needs a signal stored after the previous attempt started, which the next attempt receives at claim time, so an execution re-runs only while signals keep arriving
 - `key` on `_private_executions` with a partial unique index makes at most one non-terminal, non-cancelled execution per `(task_key, key, queue)`; `signal_with_start()` takes a transaction advisory lock on the key, then signals the existing execution or inserts one
 

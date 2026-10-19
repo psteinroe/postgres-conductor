@@ -340,6 +340,26 @@ describe("Signals", () => {
 		expect(attempts()).toBe(1);
 	});
 
+	test("a signal reached before its handler registered re-queues the execution", async () => {
+		const { db, conductor, orchestrator, received, attempts } = await setup(async (state, ctx) => {
+			ctx.onSignal("input", collect(state));
+			if (state.attempt === 1) await waitForCondition(() => state.received.length > 0);
+			ctx.onSignal("late", collect(state));
+		});
+
+		const id = await conductor.invoke({ name: "session" }, {});
+		await conductor.signal(id, { name: "late", id: "l1" });
+		await conductor.signal(id, { name: "input", id: "i1" });
+		await orchestrator.start();
+
+		await waitForCondition(async () => !!(await executionRow(db, id))?.completed_at);
+		expect(attempts()).toBe(2);
+		expect(received.map((r) => [r.attempt, r.id])).toEqual([
+			[1, "i1"],
+			[2, "l1"],
+		]);
+	});
+
 	test("retrying and sleeping executions receive signals when they run again", async () => {
 		const { db, conductor, orchestrator, received } = await setup(async (state, ctx) => {
 			if (state.attempt === 1) throw new Error("first attempt fails");
@@ -518,12 +538,14 @@ describe("Signals", () => {
 
 		const orchestratorId = crypto.randomUUID();
 		const claim = async () => {
-			const [execution] = await db.client.getExecutions({
-				orchestratorId,
-				queueName: "default",
-				batchSize: 1,
-				taskKeys: ["session"],
-			});
+			const [execution] = (
+				await db.client.getExecutions({
+					orchestratorId,
+					queueName: "default",
+					batchSize: 1,
+					taskKeys: ["session"],
+				})
+			).executions;
 			if (!execution) throw new Error("expected claim");
 			return execution;
 		};
@@ -546,14 +568,18 @@ describe("Signals", () => {
 		});
 		const second = await claim();
 
-		const poll = (claimToken: string) =>
-			db.client.pollRunningExecutions({
+		const poll = async (claimToken: string) => {
+			const { signals } = await db.client.getExecutions({
 				orchestratorId,
 				queueName: "default",
-				executions: [{ execution_id: id, claim_token: claimToken, after_seq: 0 }],
+				batchSize: 0,
+				taskKeys: [],
+				running: [{ execution_id: id, claim_token: claimToken, after_seq: 0 }],
 			});
+			return signals.map((s) => s.id);
+		};
 		expect(await poll(first.claim_token)).toEqual([]);
-		expect((await poll(second.claim_token))[0]?.signals.map((s) => s.id)).toEqual(["s1"]);
+		expect(await poll(second.claim_token)).toEqual(["s1"]);
 
 		const ack = (claimToken: string) =>
 			db.client.ackSignals({
@@ -575,7 +601,7 @@ describe("Signals", () => {
 		expect(await delivered()).toBe(true);
 	});
 
-	test("cancellation reaches a running execution on the poll and drops its signals", async () => {
+	test("a cancelled running execution takes no signals and does not hold its key", async () => {
 		const started = new Deferred<void>();
 		const { db, conductor, orchestrator, received } = await setup(async (state, ctx) => {
 			ctx.onSignal("input", collect(state));
@@ -587,12 +613,7 @@ describe("Signals", () => {
 		await orchestrator.start();
 		await started.promise;
 
-		const cancelledAt = Date.now();
 		expect(await conductor.cancel(id)).toBe(true);
-		await waitForCondition(async () => !!(await executionRow(db, id))?.failed_at, 5000);
-		// aborted on the next poll (50 ms) rather than the 30 s heartbeat; settled after the flush
-		expect(Date.now() - cancelledAt).toBeLessThan(1000);
-
 		expect(await conductor.signal(id, { name: "input", id: "late" })).toBe(false);
 		expect(received).toEqual([]);
 

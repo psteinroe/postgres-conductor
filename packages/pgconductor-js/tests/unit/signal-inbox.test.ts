@@ -57,7 +57,7 @@ describe("SignalInbox", () => {
 		expect(s.acked).toEqual(["a", "b", "c"]);
 	});
 
-	test("keeps signals without a handler until one registers", async () => {
+	test("skips signals without a handler and leaves them unacknowledged", async () => {
 		const s = store();
 		s.add("later", "l1");
 		s.add("input", "i1");
@@ -67,13 +67,13 @@ describe("SignalInbox", () => {
 		inbox.listen("input", (_payload, { id }) => delivered.push(id));
 		s.poll(inbox);
 		await flush();
-		expect(delivered).toEqual(["i1"]);
-
 		inbox.listen("later", (_payload, { id }) => delivered.push(id));
 		s.poll(inbox);
-		await flush();
 		await inbox.close({ drain: true });
-		expect(delivered).toEqual(["i1", "l1"]);
+
+		// settlement re-queues the execution for l1, since this attempt listened for its name
+		expect(delivered).toEqual(["i1"]);
+		expect(s.acked).toEqual(["i1"]);
 		expect(inbox.names).toEqual(["input", "later"]);
 	});
 

@@ -555,6 +555,8 @@ export class TaskContext<
 	/**
 	 * Listen for signals by name. Signals stored before the handler started are delivered
 	 * first, in order, and later ones while the handler runs. Handlers run one at a time.
+	 * Register listeners before awaiting anything: a signal reached while its name has no listener
+	 * is skipped, and re-queues the execution if a listener for it registers later.
 	 *
 	 * Delivery is at least once per signal id, so dedupe by `id`. A signal counts as delivered
 	 * once its handler returns; a handler that throws fails the attempt like an uncaught error.

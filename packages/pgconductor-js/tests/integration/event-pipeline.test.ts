@@ -79,12 +79,14 @@ describe("event pipeline", () => {
 		eventId: string,
 		orchestratorId = crypto.randomUUID(),
 	): Promise<string> {
-		const claimed = await db.client.getExecutions({
-			orchestratorId,
-			queueName: INTERNAL_QUEUE,
-			batchSize: 10,
-			taskKeys: [DISPATCH_TASK],
-		});
+		const claimed = (
+			await db.client.getExecutions({
+				orchestratorId,
+				queueName: INTERNAL_QUEUE,
+				batchSize: 10,
+				taskKeys: [DISPATCH_TASK],
+			})
+		).executions;
 		expect(claimed.some((execution) => execution.id === eventId)).toBe(true);
 		return orchestratorId;
 	}
@@ -1218,12 +1220,14 @@ describe("event pipeline", () => {
 		const waiterId = await db.client.invoke({ task_key: "pipeline.waiter", queue: "default" });
 		if (!waiterId) throw new Error("invoke did not return an execution id");
 		const waiterOwner = crypto.randomUUID();
-		const [waiter] = await db.client.getExecutions({
-			orchestratorId: waiterOwner,
-			queueName: "default",
-			batchSize: 1,
-			taskKeys: ["pipeline.waiter"],
-		});
+		const [waiter] = (
+			await db.client.getExecutions({
+				orchestratorId: waiterOwner,
+				queueName: "default",
+				batchSize: 1,
+				taskKeys: ["pipeline.waiter"],
+			})
+		).executions;
 		if (!waiter) throw new Error("expected waiter claim");
 		await db.client.registerEventWait({
 			executionId: waiterId,
@@ -1285,12 +1289,14 @@ describe("event pipeline", () => {
 		const sourceOwner = await claimEvent(db, eventId);
 		await db.client.dispatchCustomEvents({ eventIds: [eventId], orchestratorId: sourceOwner });
 		const destinationOwner = crypto.randomUUID();
-		const [failedDestination] = await db.client.getExecutions({
-			orchestratorId: destinationOwner,
-			queueName: "default",
-			batchSize: 1,
-			taskKeys: ["pipeline.independent"],
-		});
+		const [failedDestination] = (
+			await db.client.getExecutions({
+				orchestratorId: destinationOwner,
+				queueName: "default",
+				batchSize: 1,
+				taskKeys: ["pipeline.independent"],
+			})
+		).executions;
 		if (!failedDestination) throw new Error("destination was not claimed");
 		await db.client.returnExecutions({
 			orchestratorId: destinationOwner,
@@ -1325,12 +1331,14 @@ describe("event pipeline", () => {
 			orchestratorId: secondSourceOwner,
 		});
 		const completionOwner = crypto.randomUUID();
-		const [completedDestination] = await db.client.getExecutions({
-			orchestratorId: completionOwner,
-			queueName: "default",
-			batchSize: 1,
-			taskKeys: ["pipeline.independent"],
-		});
+		const [completedDestination] = (
+			await db.client.getExecutions({
+				orchestratorId: completionOwner,
+				queueName: "default",
+				batchSize: 1,
+				taskKeys: ["pipeline.independent"],
+			})
+		).executions;
 		if (!completedDestination) throw new Error("second destination was not claimed");
 		await db.client.returnExecutions({
 			orchestratorId: completionOwner,
@@ -1422,8 +1430,8 @@ describe("event pipeline", () => {
 					}),
 				),
 			);
-			expect(claims.flat()).toHaveLength(1);
-			const winner = claims[0]?.length ? 0 : 1;
+			expect(claims.flatMap((claim) => claim.executions)).toHaveLength(1);
+			const winner = claims[0]?.executions.length ? 0 : 1;
 			expect(
 				await clients[winner]?.dispatchCustomEvents({
 					eventIds: [eventId],
