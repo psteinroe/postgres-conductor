@@ -443,12 +443,14 @@ describe.serial("waitForEvent", () => {
 		if (!executionId) throw new Error("invoke did not return an execution id");
 
 		const orchestratorId = crypto.randomUUID();
-		const [claimed] = await database.client.getExecutions({
-			orchestratorId,
-			queueName: "default",
-			batchSize: 1,
-			taskKeys: ["wait.task"],
-		});
+		const [claimed] = (
+			await database.client.getExecutions({
+				orchestratorId,
+				queueName: "default",
+				batchSize: 1,
+				taskKeys: ["wait.task"],
+			})
+		).executions;
 		if (!claimed) throw new Error("expected claim");
 		const args = {
 			executionId,
@@ -498,12 +500,14 @@ describe.serial("waitForEvent", () => {
 
 		const orchestratorId = crypto.randomUUID();
 		const claim = async () => {
-			const [execution] = await database.client.getExecutions({
-				orchestratorId,
-				queueName: "default",
-				batchSize: 1,
-				taskKeys: ["wait.task"],
-			});
+			const [execution] = (
+				await database.client.getExecutions({
+					orchestratorId,
+					queueName: "default",
+					batchSize: 1,
+					taskKeys: ["wait.task"],
+				})
+			).executions;
 			if (!execution) throw new Error("expected claim");
 			return execution;
 		};
@@ -556,12 +560,14 @@ describe.serial("waitForEvent", () => {
 			if (!executionId) throw new Error("invoke did not return an execution id");
 
 			const orchestratorId = crypto.randomUUID();
-			const [execution] = await database.client.getExecutions({
-				orchestratorId,
-				queueName: "default",
-				batchSize: 1,
-				taskKeys: ["wait.task"],
-			});
+			const [execution] = (
+				await database.client.getExecutions({
+					orchestratorId,
+					queueName: "default",
+					batchSize: 1,
+					taskKeys: ["wait.task"],
+				})
+			).executions;
 			if (!execution) throw new Error("expected claim");
 			expect(execution.id).toBe(executionId);
 			expect(
@@ -970,13 +976,15 @@ describe.serial("waitForEvent", () => {
 		if (!executionId) throw new Error("invoke did not return an execution id");
 
 		const orchestratorId = crypto.randomUUID();
-		const claim = (queueName: string, taskKey: string) =>
-			database.client.getExecutions({
-				orchestratorId,
-				queueName,
-				batchSize: 10,
-				taskKeys: [taskKey],
-			});
+		const claim = async (queueName: string, taskKey: string) =>
+			(
+				await database.client.getExecutions({
+					orchestratorId,
+					queueName,
+					batchSize: 10,
+					taskKeys: [taskKey],
+				})
+			).executions;
 		const args = {
 			executionId,
 			queue: "default",
@@ -1032,13 +1040,15 @@ describe.serial("waitForEvent", () => {
 			if (!executionId) throw new Error("invoke did not return an execution id");
 
 			const orchestratorId = crypto.randomUUID();
-			const claim = (queueName: string, taskKey: string) =>
-				database.client.getExecutions({
-					orchestratorId,
-					queueName,
-					batchSize: 10,
-					taskKeys: [taskKey],
-				});
+			const claim = async (queueName: string, taskKey: string) =>
+				(
+					await database.client.getExecutions({
+						orchestratorId,
+						queueName,
+						batchSize: 10,
+						taskKeys: [taskKey],
+					})
+				).executions;
 			const runAt = async () => {
 				const [row] = await database.sql<{ run_at: Date }[]>`
 				select run_at from pgconductor._private_executions where id = ${executionId}::uuid

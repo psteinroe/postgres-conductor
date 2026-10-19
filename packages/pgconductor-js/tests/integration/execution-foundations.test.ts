@@ -99,7 +99,7 @@ describe("execution foundations", () => {
 				batchSize: 1,
 				taskKeys: ["same-task"],
 			})
-		)[0];
+		).executions[0];
 		const second = (
 			await db.client.getExecutions({
 				orchestratorId: crypto.randomUUID(),
@@ -107,7 +107,7 @@ describe("execution foundations", () => {
 				batchSize: 1,
 				taskKeys: ["same-task"],
 			})
-		)[0];
+		).executions[0];
 		expect(first?.queue).toBe("queue-a");
 		expect(second?.queue).toBe("queue-b");
 		if (!first || !second) throw new Error("expected both executions to be claimed");
@@ -319,7 +319,7 @@ describe("execution foundations", () => {
 				batchSize: 1,
 				taskKeys: ["parent"],
 			})
-		)[0];
+		).executions[0];
 		if (!parent) throw new Error("expected parent claim");
 
 		await db.client.returnExecutions({
@@ -357,7 +357,7 @@ describe("execution foundations", () => {
 				batchSize: 1,
 				taskKeys: ["child"],
 			})
-		)[0];
+		).executions[0];
 		if (!child) throw new Error("expected child claim");
 
 		await db.client.returnExecutions({
@@ -415,7 +415,7 @@ describe("execution foundations", () => {
 				batchSize: 1,
 				taskKeys: ["parent"],
 			})
-		)[0];
+		).executions[0];
 		if (!parent) throw new Error("expected parent claim");
 
 		await db.client.returnExecutions({
@@ -446,7 +446,7 @@ describe("execution foundations", () => {
 				batchSize: 1,
 				taskKeys: ["child"],
 			})
-		)[0];
+		).executions[0];
 		if (!child) throw new Error("expected child claim");
 		await db.client.returnExecutions({
 			orchestratorId: child.locked_by,
@@ -493,7 +493,7 @@ describe("execution foundations", () => {
 				batchSize: 1,
 				taskKeys: ["cancelled"],
 			})
-		)[0];
+		).executions[0];
 		if (!claimed) throw new Error("expected claim");
 		await db.client.cancelExecution(executionId, { reason: "cancelled before flush" });
 		await db.client.returnExecutions(
@@ -539,12 +539,14 @@ describe("execution foundations", () => {
 
 		const orchestratorId = crypto.randomUUID();
 		const claim = async () => {
-			const [execution] = await db.client.getExecutions({
-				orchestratorId,
-				queueName: "replayed",
-				batchSize: 1,
-				taskKeys: ["replayed-task"],
-			});
+			const [execution] = (
+				await db.client.getExecutions({
+					orchestratorId,
+					queueName: "replayed",
+					batchSize: 1,
+					taskKeys: ["replayed-task"],
+				})
+			).executions;
 			if (!execution) throw new Error("expected claim");
 			return execution;
 		};
@@ -589,12 +591,14 @@ describe("execution foundations", () => {
 			eventSubscriptions: [],
 		});
 		await db.client.invoke({ task_key: "retried-settlement-task", queue: "retried-settlement" });
-		const [claimed] = await db.client.getExecutions({
-			orchestratorId: crypto.randomUUID(),
-			queueName: "retried-settlement",
-			batchSize: 1,
-			taskKeys: ["retried-settlement-task"],
-		});
+		const [claimed] = (
+			await db.client.getExecutions({
+				orchestratorId: crypto.randomUUID(),
+				queueName: "retried-settlement",
+				batchSize: 1,
+				taskKeys: ["retried-settlement-task"],
+			})
+		).executions;
 		if (!claimed) throw new Error("expected claim");
 
 		const blockerSql = postgres(db.url, { max: 1 });
@@ -667,7 +671,7 @@ describe("execution foundations", () => {
 				batchSize: 1,
 				taskKeys: ["parent"],
 			})
-		)[0];
+		).executions[0];
 		if (!parent) throw new Error("expected parent claim");
 		await db.client.returnExecutions({
 			orchestratorId: parent.locked_by,
@@ -734,12 +738,14 @@ describe("execution foundations", () => {
 			where id = any(${db.sql.array(ids)}::uuid[])
 			order by priority, run_at, created_at, id
 		`;
-		const claimed = await db.client.getExecutions({
-			orchestratorId: crypto.randomUUID(),
-			queueName: "enqueue-order",
-			batchSize: 3,
-			taskKeys: ["ordered"],
-		});
+		const claimed = (
+			await db.client.getExecutions({
+				orchestratorId: crypto.randomUUID(),
+				queueName: "enqueue-order",
+				batchSize: 3,
+				taskKeys: ["ordered"],
+			})
+		).executions;
 		expect(claimed.map((execution) => execution.id)).toEqual(
 			expected.map((execution) => execution.id),
 		);
@@ -792,7 +798,7 @@ describe("execution foundations", () => {
 				batchSize: 1,
 				taskKeys: ["fenced-task"],
 			})
-		)[0];
+		).executions[0];
 		if (!oldClaim) throw new Error("expected old claim");
 
 		await db.sql`
@@ -810,7 +816,7 @@ describe("execution foundations", () => {
 				batchSize: 1,
 				taskKeys: ["fenced-task"],
 			})
-		)[0];
+		).executions[0];
 		if (!currentClaim) throw new Error("expected recovered execution to be re-claimed");
 
 		const staleBase = {

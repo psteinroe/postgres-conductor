@@ -33,6 +33,7 @@ import { TypedAbortController } from "./lib/typed-abort-controller";
 import { Telemetry } from "./telemetry";
 import { noop } from "./lib/noop";
 import type { Middleware, MiddlewareResult } from "./middleware";
+import { SignalInbox } from "./signal-inbox";
 
 /**
  * The configuration options for the Worker.
@@ -148,7 +149,10 @@ export class Worker<
 	private _startDeferred: Deferred<void> | null = null;
 	private _stopDeferred: Deferred<void> | null = null;
 	private _abortController: AbortController | null = null;
-	private _runningTasks = new Map<string, TypedAbortController<TaskAbortReasons>>();
+	private _running = new Map<
+		string,
+		{ controller: TypedAbortController<TaskAbortReasons>; claimToken: string; inbox: SignalInbox }
+	>();
 	// Claimed and not yet settled, including results buffered for flush
 	private readonly held = new Set<string>();
 
@@ -313,23 +317,6 @@ export class Worker<
 		} catch {}
 	}
 
-	/**
-	 * Cancel running executions by aborting their task controllers.
-	 * Called by orchestrator when cancellation signals are received.
-	 */
-	public cancelExecutions(ids: string[]): void {
-		for (const id of ids) {
-			const controller = this._runningTasks.get(id);
-			if (controller) {
-				controller.abort({
-					reason: "cancelled",
-					__pgconductorTaskAborted: true,
-				});
-				this._runningTasks.delete(id);
-			}
-		}
-	}
-
 	private async register(): Promise<void> {
 		// Convert RetentionSettings to integer: null=keep, 0=delete now, N=delete after N days
 		const retentionToDays = (setting: boolean | { days: number } | undefined): number | null => {
@@ -398,16 +385,47 @@ export class Worker<
 	) {
 		assert.ok(this.orchestratorId, "orchestratorId must be set when starting the pipeline");
 
+		const orchestratorId = this.orchestratorId;
 		const allTasks = Array.from(this.tasks.values());
 		// A slot runs one execution, or one batch of a batched task
 		const executionsPerSlot = Math.max(...allTasks.map((task) => task.batch?.size || 1));
+
+		// Claim executions, abort cancelled running ones and hand new signals to their handlers
+		const claim = async (batchSize: number, taskKeys: string[]) => {
+			const running = [...this._running].map(([id, { claimToken, inbox }]) => ({
+				execution_id: id,
+				claim_token: claimToken,
+				after_seq: inbox.afterSeq,
+			}));
+			if (batchSize === 0 && running.length === 0) return [];
+			const { executions, signals, cancelled } = await this.db.getExecutions({
+				orchestratorId,
+				queueName: this.queueName,
+				batchSize,
+				taskKeys,
+				running,
+			});
+			for (const id of cancelled) {
+				this._running
+					.get(id)
+					?.controller.abort({ reason: "cancelled", __pgconductorTaskAborted: true });
+			}
+			for (const stored of signals) this._running.get(stored.execution_id)?.inbox.push(stored);
+			for (const exec of executions) this.held.add(exec.id);
+			return executions;
+		};
 
 		while (!this.signal?.aborted) {
 			try {
 				// Claim only what free slots can run so other workers get the rest
 				const freeSlots = this.concurrency - queue.pending;
 				if (freeSlots <= 0) {
-					await queue.waitForRelease();
+					// Read cancellations and signals of running executions every poll interval
+					await claim(0, []);
+					await Promise.race([
+						queue.waitForRelease(),
+						waitFor(this.pollIntervalMs, { signal: this.signal }),
+					]);
 					continue;
 				}
 
@@ -420,13 +438,10 @@ export class Worker<
 					)
 					.map((task) => task.name);
 
-				const executions = await this.db.getExecutions({
-					orchestratorId: this.orchestratorId,
-					queueName: this.queueName,
-					batchSize: Math.min(this.fetchBatchSize, freeSlots * executionsPerSlot),
+				const executions = await claim(
+					Math.min(this.fetchBatchSize, freeSlots * executionsPerSlot),
 					taskKeys,
-				});
-				for (const exec of executions) this.held.add(exec.id);
+				);
 
 				if (executions.length === 0) {
 					if (runOnce) {
@@ -525,7 +540,6 @@ export class Worker<
 	): Promise<ExecutionResult | ExecutionResult[]> {
 		const taskAbortController = new TypedAbortController<TaskAbortReasons>();
 		const signal = AbortSignal.any([taskAbortController.signal, this.signal]);
-		this._runningTasks.set(exec.id, taskAbortController);
 		const timeout = task.timeoutMs
 			? setTimeout(() => {
 					taskAbortController.abort({ reason: "timed-out", __pgconductorTaskAborted: true });
@@ -538,6 +552,39 @@ export class Worker<
 			});
 		});
 		const taskEvent = taskEventFor(exec);
+		const identity = {
+			execution_id: exec.id,
+			claim_token: exec.claim_token,
+			queue: exec.queue,
+			task_key: exec.task_key,
+		};
+		const signals = new SignalInbox({
+			ack: (id) =>
+				this.db.ackSignals(
+					{
+						executionId: exec.id,
+						queue: exec.queue,
+						orchestratorId: exec.locked_by,
+						claimToken: exec.claim_token,
+						id,
+					},
+					{ signal: this.signal },
+				),
+			onError: (error) => {
+				taskAbortController.abort({
+					reason: "signal-failed",
+					error: error.message,
+					__pgconductorTaskAborted: true,
+				});
+			},
+		});
+		// Signals stored before the claim are ready when the handler registers its listener
+		for (const stored of exec.signals) signals.push(stored);
+		this._running.set(exec.id, {
+			controller: taskAbortController,
+			claimToken: exec.claim_token,
+			inbox: signals,
+		});
 
 		// Pass db and tasks as extra context to maintenance task, which skips middleware
 		const isMaintenance = task.name === "pgconductor.maintenance";
@@ -561,6 +608,7 @@ export class Worker<
 				metadataSchema: task.metadataSchema,
 				window: task.window,
 				telemetry: this.telemetry,
+				signals,
 			},
 			extraContext,
 		);
@@ -598,10 +646,7 @@ export class Worker<
 				switch (output.reason) {
 					case "child-invocation":
 						return {
-							execution_id: exec.id,
-							claim_token: exec.claim_token,
-							queue: exec.queue,
-							task_key: exec.task_key,
+							...identity,
 							status: "invoke_child",
 							timeout_ms: output.timeout_ms,
 							step_key: output.step_key,
@@ -614,70 +659,71 @@ export class Worker<
 						} as const;
 					case "cancelled":
 						return {
-							execution_id: exec.id,
-							claim_token: exec.claim_token,
-							queue: exec.queue,
-							task_key: exec.task_key,
+							...identity,
 							status: "permanently_failed",
 							error: exec.last_error || "Task was cancelled",
 						} as const;
 					case "timed-out":
 						return {
-							execution_id: exec.id,
-							claim_token: exec.claim_token,
-							queue: exec.queue,
-							task_key: exec.task_key,
+							...identity,
 							status: "failed",
 							error: `Task timed out after ${task.timeoutMs}ms`,
+						} as const;
+					case "signal-failed":
+						return {
+							...identity,
+							status: "failed",
+							error: output.error,
 						} as const;
 					case "suspended":
 						this.held.delete(exec.id);
 						return [];
 					case "released":
 						return {
-							execution_id: exec.id,
-							claim_token: exec.claim_token,
-							queue: exec.queue,
+							...identity,
+							status: "released",
 							reschedule_in_ms: output.reschedule_in_ms,
 							step_key: output.step_key,
-							task_key: exec.task_key,
-							status: "released",
 						} as const;
 					default:
 						assert.never(output);
 				}
 			}
 
+			// Deliver the signals already received; ones stored later re-queue the execution
+			const signalFailure = await signals.close({ drain: true });
+			if (signalFailure) {
+				return {
+					...identity,
+					status: "failed",
+					error: signalFailure.message,
+				} as const;
+			}
+
 			return {
-				execution_id: exec.id,
-				claim_token: exec.claim_token,
-				queue: exec.queue,
-				task_key: exec.task_key,
+				...identity,
 				status: "completed",
 				result: output,
+				signal_names: signals.names,
 			} as const;
 		} catch (err) {
 			// A handler that stops on ctx.signal during shutdown is released, not failed
 			if (this.signal.aborted) {
 				return {
-					execution_id: exec.id,
-					claim_token: exec.claim_token,
-					queue: exec.queue,
-					task_key: exec.task_key,
+					...identity,
 					status: "released",
 				} as const;
 			}
 			return {
-				execution_id: exec.id,
-				claim_token: exec.claim_token,
-				queue: exec.queue,
-				task_key: exec.task_key,
+				...identity,
 				status: "failed",
 				error: coerceError(err).message,
 			} as const;
 		} finally {
 			clearTimeout(timeout);
-			this._runningTasks.delete(exec.id);
+			this._running.delete(exec.id);
+			// A hung-up or failed attempt leaves undelivered signals for the next one
+			void signals.close({ drain: false });
 		}
 	}
 

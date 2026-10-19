@@ -325,7 +325,7 @@ describe("Step Support", () => {
 				batchSize: 1,
 				taskKeys: ["reclaimed-task"],
 			})
-		)[0];
+		).executions[0];
 		if (!execution) throw new Error("expected claimed execution");
 
 		await db.client.saveStep({

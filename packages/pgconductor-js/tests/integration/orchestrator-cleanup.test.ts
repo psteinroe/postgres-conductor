@@ -304,12 +304,14 @@ test("a live orchestrator recovers executions locked by a crashed one", async ()
 		migrationNumber: 1,
 	});
 	await conductor.invoke(taskDefinition, {});
-	const claimed = await db.client.getExecutions({
-		orchestratorId: crashedId,
-		queueName: "default",
-		batchSize: 1,
-		taskKeys: ["orphaned-task"],
-	});
+	const claimed = (
+		await db.client.getExecutions({
+			orchestratorId: crashedId,
+			queueName: "default",
+			batchSize: 1,
+			taskKeys: ["orphaned-task"],
+		})
+	).executions;
 	expect(claimed.length).toBe(1);
 
 	await db.client.setFakeTime({ date: new Date("2024-01-01T12:10:00Z") });
@@ -374,12 +376,14 @@ test("the heartbeat releases a claim the orchestrator does not hold", async () =
 
 	// A claim whose response was lost: it committed, but the worker never received it
 	await conductor.invoke(orphanedDefinition, {});
-	const [orphaned] = await db.client.getExecutions({
-		orchestratorId: orch.info.id,
-		queueName: "default",
-		batchSize: 1,
-		taskKeys: ["orphaned-task"],
-	});
+	const [orphaned] = (
+		await db.client.getExecutions({
+			orchestratorId: orch.info.id,
+			queueName: "default",
+			batchSize: 1,
+			taskKeys: ["orphaned-task"],
+		})
+	).executions;
 	if (!orphaned) throw new Error("expected orphaned claim");
 
 	const lockedBy = async (taskKey: string) => {

@@ -21,7 +21,8 @@ pgconductor/
         │   ├── worker.ts             # Fetch→execute→flush pipeline
         │   ├── task.ts               # Task wrapper with execute method
         │   ├── task-definition.ts    # Standard Schema / type-only task definitions
-        │   ├── task-context.ts       # Context API (step, sleep, invoke, invokeAndWait, waitForEvent)
+        │   ├── task-context.ts       # Context API (step, sleep, invoke, invokeAndWait, waitForEvent, onSignal)
+        │   ├── signal-inbox.ts       # In-process delivery of signals to ctx.onSignal handlers
         │   ├── middleware.ts         # Per-attempt middleware types
         │   ├── event-definition.ts   # Custom event definitions
         │   ├── event-dispatch-task.ts # Internal event fan-out task
@@ -128,10 +129,12 @@ Tables live in the `pgconductor` schema with a `_private_` prefix (`_private_exe
 - Polls the database for ready executions of one queue, claiming only the tasks it registers
 - Executes tasks with concurrency control (via `mapConcurrent`)
 - Batches and flushes results back to the database
+- Claiming returns each execution's undelivered signals, which prime its `SignalInbox` before the handler runs
+- The claim statement also reads the cancellation flag and newer undelivered signals of the worker's running executions (`running` in `getExecutions`), aborts cancelled ones and hands signals to their `SignalInbox`. While all slots are busy the worker still runs it every `pollIntervalMs`, with a batch size of 0, as long as an execution runs
 - Handles graceful shutdown via AbortController
 
 **TaskContext** (`task-context.ts`)
-- Provides API to task functions: `step()`, `sleep()`, `invoke()`, `invokeAndWait()`, `waitForEvent()`, `subscribe()`
+- Provides API to task functions: `step()`, `sleep()`, `invoke()`, `invokeAndWait()`, `waitForEvent()`, `subscribe()`, `onSignal()`, `sendSignal()`, `signalWithStart()`
 - `invoke()` inserts an independent execution and memoizes its id as a step in one statement; it never sets `parent_execution_id` (settlement fails a completed child that has a parent but no waiter)
 - All operations are idempotent (use steps as memoization)
 - Hangup pattern: abort execution and return never-resolving promise
@@ -146,6 +149,7 @@ Tables live in the `pgconductor` schema with a `_private_` prefix (`_private_exe
 - Manages multiple workers, plus the internal event-dispatch worker when events are configured
 - Handles startup/shutdown coordination and heartbeats
 - Heartbeats keep running while workers drain after shutdown and stop in cleanup, so a slow handler is not recovered as stale
+- Heartbeat signals carry only shutdowns; cancellation and application signals are read by the worker's claim
 - Every 8th heartbeat recovers stale orchestrators (unlocks their executions); an orchestrator whose row was recovered stops itself when its next heartbeat has to re-insert the row
 - Provides `stopped` promise for graceful shutdown
 - Runs the internal event dispatch worker only when the conductor has `events` configured
@@ -161,7 +165,7 @@ Tables live in the `pgconductor` schema with a `_private_` prefix (`_private_exe
 **Important**: All core logic lives in Postgres. The TypeScript layer is intentionally thin - it validates input and orchestrates calls via `DatabaseClient`.
 
 - Claiming (`buildGetExecutions`) and settlement (`buildReturnExecutions`) are single statements in `query-builder.ts`
-- SQL functions in the migration: `invoke()`, `invoke_batch()`, `cancel_execution()`, `emit_event()`, `drop_queue()`, `_private_register_worker()`, `_private_current_time()`, `_private_portable_uuidv7()`, ...
+- SQL functions in the migration: `invoke()`, `invoke_batch()`, `cancel_execution()`, `signal_execution()`, `signal_with_start()`, `emit_event()`, `drop_queue()`, `_private_register_worker()`, `_private_current_time()`, `_private_portable_uuidv7()`, ...
 
 ### Key Design Patterns
 
@@ -210,6 +214,13 @@ Tables live in the `pgconductor` schema with a `_private_` prefix (`_private_exe
 - Worker registration syncs a queue's trigger subscriptions; ids derive from the definition, so unchanged subscriptions keep their identity. Each trigger filter is compiled once into typed rows in `_private_event_filter_terms` (fields are ANDed, alternatives within a field are ORed)
 - Fan-out is at-least-once: a retried dispatch re-evaluates current subscriptions, and a unique index deduplicates existing deliveries
 - Event waits are `execution_wait` subscriptions keyed by `(execution_id, step_key)`. Dispatch stores the first matching event as the step result and wakes the execution only if it is suspended at that step (`waiting_step_key`); `ctx.subscribe()` registers without suspending, so events matched while the execution runs are kept for the later wait
+
+**Signals**
+- `_private_execution_signals` stores one row per `(execution_id, id)`; `seq` orders delivery and `delivered_at` is set when a `ctx.onSignal` handler returned (at least once per id)
+- Senders lock the execution row and increment `_private_executions.signal_count`. Settlement reads `signal_count` from its locked row, which is newer than its snapshot: a completion whose count exceeds the signals it can see, or that has undelivered signals for names the attempt listened for (`signal_names` in the result), is re-queued instead of completed
+- Claiming an execution reads its undelivered signals under the row lock senders take, so signals stored later have a higher `seq` and later claims read them with `seq > after_seq`. Signal reads and acknowledgements are fenced by the claim token. `SignalInbox` delivers in `seq` order and skips a signal whose name has no handler yet; it stays undelivered, so settlement re-queues if a handler for it registers later. On completion the worker drains the inbox (`close({ drain: true })`): signals already read are delivered before settling, and only ones stored after the last read re-queue
+- Re-queues are unbounded by design: each needs a signal stored after the previous attempt started, which the next attempt receives at claim time, so an execution re-runs only while signals keep arriving
+- `key` on `_private_executions` with a partial unique index makes at most one non-terminal, non-cancelled execution per `(task_key, key, queue)`; `signal_with_start()` takes a transaction advisory lock on the key, then signals the existing execution or inserts one
 
 ### Task Configuration Options
 

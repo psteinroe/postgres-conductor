@@ -22,6 +22,9 @@ import {
 	type ClearWaitingStateArgs,
 	type EmitEventArgs,
 	type RegisterEventWaitArgs,
+	type AckSignalsArgs,
+	type SignalExecutionArgs,
+	type SignalWithStartArgs,
 } from "./query-builder";
 import { makeChildLogger, type Logger } from "./lib/logger";
 import { uuidv7 } from "./lib/uuidv7";
@@ -105,6 +108,8 @@ export interface Execution {
 	dead_letter?: (Omit<DeadLetterMetadata, "failedAt"> & { failedAt: string }) | null;
 	trace_context?: TraceContextCarrier | null;
 	metadata?: Payload | null;
+	/** Undelivered signals in stored order, read when the execution was claimed */
+	signals: StoredSignal[];
 }
 
 // todo: move all of this to query-builder too or create new types.ts file
@@ -131,6 +136,8 @@ export type ExecutionCompleted = {
 	claim_token: string;
 	status: "completed";
 	result?: Payload;
+	/** Signal names the attempt listened for; undelivered ones re-queue the execution */
+	signal_names?: string[];
 };
 
 export type ExecutionFailed = {
@@ -188,6 +195,23 @@ export type EventFilterTerm = Record<string, JsonValue | undefined> & {
 	upper_value?: number | null;
 	lower_inclusive?: boolean;
 	upper_inclusive?: boolean;
+};
+
+/** A signal stored for an execution and not yet delivered to a handler. */
+export type StoredSignal = {
+	seq: number;
+	id: string;
+	name: string;
+	payload: JsonValue;
+};
+
+/** Executions claimed by a poll, and what changed for the running executions it was given. */
+export type ClaimResult = {
+	executions: Execution[];
+	/** New signals of running executions that listen for any */
+	signals: (StoredSignal & { execution_id: string })[];
+	/** Running executions that were cancelled */
+	cancelled: string[];
 };
 
 export type EventWaitResult =
@@ -359,6 +383,29 @@ export class DatabaseClient {
 		});
 	}
 
+	async ackSignals(args: AckSignalsArgs, opts?: QueryMethodOptions): Promise<void> {
+		await this.query(() => this.builder.buildAckSignals(args), {
+			label: "ackSignals",
+			...opts,
+		});
+	}
+
+	async signalExecution(args: SignalExecutionArgs, opts?: QueryMethodOptions): Promise<boolean> {
+		const [row] = await this.query(() => this.builder.buildSignalExecution(args), {
+			label: "signalExecution",
+			...opts,
+		});
+		return row.stored;
+	}
+
+	async signalWithStart(args: SignalWithStartArgs, opts?: QueryMethodOptions): Promise<string> {
+		const [row] = await this.query(() => this.builder.buildSignalWithStart(args), {
+			label: "signalWithStart",
+			...opts,
+		});
+		return row.id;
+	}
+
 	async cancelExecution(
 		executionId: string,
 		options?: { reason?: string } & QueryMethodOptions,
@@ -515,8 +562,11 @@ export class DatabaseClient {
 
 	// Without a signal a claim is never retried: one whose response was lost may have committed.
 	// The next poll claims again, and the heartbeat releases the orphaned claim.
-	async getExecutions(args: GetExecutionsArgs): Promise<Execution[]> {
-		return this.query(() => this.builder.buildGetExecutions(args), { label: "getExecutions" });
+	async getExecutions(args: GetExecutionsArgs): Promise<ClaimResult> {
+		const [result] = await this.query(() => this.builder.buildGetExecutions(args), {
+			label: "getExecutions",
+		});
+		return result;
 	}
 
 	async getExecution(

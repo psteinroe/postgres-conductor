@@ -6,6 +6,7 @@ import { Orchestrator } from "../../src/orchestrator";
 import { defineEvent } from "../../src/event-definition";
 import { defineTask } from "../../src/task-definition";
 import { EventSchemas, TaskSchemas } from "../../src/schemas";
+import { Deferred } from "../../src/lib/deferred";
 import type { MiddlewareExecution } from "../../src/middleware";
 import { TestDatabasePool, type TestDatabase } from "../fixtures/test-database";
 import { waitForCondition } from "../test-utils";
@@ -165,6 +166,54 @@ describe("Middleware", () => {
 			{ store: id, run: 2 },
 		]);
 		expect(finished).toEqual([id, id]);
+	}, 30000);
+
+	test("runs for an attempt re-queued by a signal", async () => {
+		const db = await database();
+		const runs: string[] = [];
+		const received: string[] = [];
+		const returned = new Deferred<void>();
+
+		const conductor = Conductor.create({
+			sql: db.sql,
+			tasks: TaskSchemas.fromSchema([parentDefinition]),
+			context: {},
+			middleware: [
+				async ({ execution, ctx }, next) => {
+					runs.push(execution.id);
+					return next(ctx);
+				},
+			],
+		});
+		const parent = conductor.createTask(
+			{ name: "middleware.parent" },
+			{ invocable: true },
+			async (_event, ctx) => {
+				const count = received.length;
+				ctx.onSignal("input", (_payload, { id }) => {
+					received.push(id);
+				});
+				await waitForCondition(() => received.length > count);
+				returned.resolve();
+			},
+		);
+		const orchestrator = Orchestrator.create({
+			conductor,
+			tasks: [parent],
+			// the first result stays buffered while the second signal is sent
+			defaultWorker: { pollIntervalMs: 10, flushIntervalMs: 1000 },
+		});
+		orchestrators.push(orchestrator);
+
+		const id = await conductor.invoke({ name: "middleware.parent" }, {});
+		await conductor.signal(id, { name: "input", id: "s1" });
+		await orchestrator.start();
+		await returned.promise;
+		await conductor.signal(id, { name: "input", id: "s2" });
+		await completed(db, "middleware.parent");
+
+		expect(received).toEqual(["s1", "s2"]);
+		expect(runs).toEqual([id, id]);
 	}, 30000);
 
 	test("a middleware error fails the attempt and retries", async () => {

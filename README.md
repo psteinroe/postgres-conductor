@@ -18,6 +18,8 @@
 
 **Workflows** - Invoke child tasks and wait for results with full type safety
 
+**Signals** - Send data to running executions, or start one per key with `signalWithStart`
+
 **Performance** - Process up to 20,000 jobs per second with just Postgres
 
 **Type-Safety** - Share common event and task schemas across your services

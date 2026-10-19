@@ -3,13 +3,14 @@ import type { GroupedExecutionResults } from "./database-client";
 import * as assert from "./lib/assert";
 import type { TraceContextCarrier } from "./telemetry";
 import type {
-	Execution,
 	ExecutionInfo,
 	ExecutionSpec,
 	EventFilterTerm,
 	EventSubscriptionSpec,
 	EventWaitResult,
+	JsonValue,
 	Payload,
+	ClaimResult,
 	TaskSpec,
 } from "./database-client";
 
@@ -41,6 +42,8 @@ export type GetExecutionsArgs = {
 	queueName: string;
 	batchSize: number;
 	taskKeys: string[];
+	/** Running executions, to read their cancellation and signals stored after `after_seq` */
+	running?: { execution_id: string; claim_token: string; after_seq: number | null }[];
 };
 
 export type RemoveExecutionsArgs = {
@@ -119,6 +122,36 @@ export type EmitEventArgs = {
 	traceContext?: TraceContextCarrier | null;
 	metadata?: Payload | null;
 	dedupeKey?: string;
+};
+
+export type AckSignalsArgs = {
+	executionId: string;
+	queue: string;
+	orchestratorId: string;
+	claimToken: string;
+	id: string;
+};
+
+export type SignalArgs = {
+	name: string;
+	id: string;
+	payload?: JsonValue;
+};
+
+export type SignalExecutionArgs = {
+	executionId: string;
+	signal: SignalArgs;
+};
+
+export type SignalWithStartArgs = {
+	taskKey: string;
+	queue: string;
+	key: string;
+	signal: SignalArgs;
+	input?: Payload | null;
+	priority?: number | null;
+	traceContext?: TraceContextCarrier | null;
+	metadata?: Payload | null;
 };
 
 export type RegisterEventWaitArgs = {
@@ -229,6 +262,72 @@ export class QueryBuilder {
 		`;
 	}
 
+	buildAckSignals({
+		executionId,
+		queue,
+		orchestratorId,
+		claimToken,
+		id,
+	}: AckSignalsArgs): PendingQuery<RowList<Row[]>> {
+		return this.sql`
+			with claimed_execution as materialized (
+				select e.id
+				from pgconductor._private_executions e
+				where e.id = ${executionId}::uuid
+					and e.queue = ${queue}::text
+					and e.locked_by = ${orchestratorId}::uuid
+					and e.claim_token = ${claimToken}::uuid
+				for update
+			)
+			update pgconductor._private_execution_signals s
+			set delivered_at = pgconductor._private_current_time()
+			from claimed_execution c
+			where s.execution_id = c.id
+				and s.id = ${id}::text
+				and s.delivered_at is null
+		`;
+	}
+
+	buildSignalExecution({
+		executionId,
+		signal,
+	}: SignalExecutionArgs): PendingQuery<[{ stored: boolean }]> {
+		return this.sql<[{ stored: boolean }]>`
+			select pgconductor.signal_execution(
+				${executionId}::uuid,
+				${signal.name}::text,
+				${signal.id}::text,
+				${signal.payload === undefined ? null : this.sql.json(signal.payload)}::jsonb
+			) as stored
+		`;
+	}
+
+	buildSignalWithStart({
+		taskKey,
+		queue,
+		key,
+		signal,
+		input,
+		priority,
+		traceContext,
+		metadata,
+	}: SignalWithStartArgs): PendingQuery<[{ id: string }]> {
+		return this.sql<[{ id: string }]>`
+			select pgconductor.signal_with_start(
+				p_task_key := ${taskKey}::text,
+				p_queue := ${queue}::text,
+				p_key := ${key}::text,
+				p_name := ${signal.name}::text,
+				p_id := ${signal.id}::text,
+				p_payload := ${signal.payload === undefined ? null : this.sql.json(signal.payload)}::jsonb,
+				p_input := ${input ? this.sql.json(input) : null}::jsonb,
+				p_trace_context := ${traceContext ? this.sql.json(traceContext) : null}::jsonb,
+				p_metadata := ${metadata ? this.sql.json(metadata) : null}::jsonb,
+				p_priority := ${priority || null}::integer
+			) as id
+		`;
+	}
+
 	buildRecoverStaleOrchestrators({
 		maxAge,
 	}: RecoverStaleOrchestratorsArgs): PendingQuery<RowList<Row[]>> {
@@ -294,8 +393,9 @@ export class QueryBuilder {
 		queueName,
 		batchSize,
 		taskKeys,
-	}: GetExecutionsArgs): PendingQuery<Execution[]> {
-		return this.sql<Execution[]>`
+		running = [],
+	}: GetExecutionsArgs): PendingQuery<[ClaimResult]> {
+		return this.sql<[ClaimResult]>`
 			-- Read limit mode from the database so rolling workers cannot bypass new limits.
 			with task_limits as materialized (
 				select exists (
@@ -421,13 +521,50 @@ export class QueryBuilder {
 				returning e.id, e.task_key, e.queue, e.payload, e.waiting_on_execution_id,
 					e.waiting_step_key, e.cancelled, e.last_error, e.dedupe_key, e.cron_expression,
 					e.locked_by, e.claim_token, e."group", e.priority, e.run_at, e.created_at,
-					e.subscription_id, e.trace_context, e.metadata, e.dead_letter
+					e.subscription_id, e.trace_context, e.metadata, e.dead_letter, e.signal_count
+			), running as materialized (
+				select e.id, e.cancelled, r.after_seq
+				from jsonb_to_recordset(${this.sql.json(running)}::jsonb)
+					as r(execution_id uuid, claim_token uuid, after_seq bigint)
+				join pgconductor._private_executions e
+					on e.id = r.execution_id
+					and e.queue = ${queueName}::text
+					and e.locked_by = ${orchestratorId}::uuid
+					and e.claim_token = r.claim_token
+			), running_signals as (
+				-- an execution that listens for no signal has a null after_seq
+				select s.execution_id, s.seq, s.id, s.name, s.payload
+				from running r
+				join pgconductor._private_execution_signals s
+					on s.execution_id = r.id
+					and s.delivered_at is null
+					and s.seq > r.after_seq
+				where not r.cancelled
 			)
-			select id, task_key, queue, payload, waiting_on_execution_id, waiting_step_key,
-				cancelled, last_error, dedupe_key, cron_expression, locked_by, claim_token, "group",
-				subscription_id, trace_context, metadata, dead_letter
-			from claimed
-			order by priority asc, run_at asc, created_at asc, id asc
+			select
+				coalesce((
+					select jsonb_agg(
+						(to_jsonb(c) - 'priority' - 'run_at' - 'created_at' - 'signal_count')
+						-- Signals stored before the attempt starts are delivered before the next poll.
+						-- The claim holds the row lock senders take, so later ones have a higher seq.
+						|| jsonb_build_object('signals', case when c.signal_count > 0 then coalesce((
+							select jsonb_agg(
+								jsonb_build_object('seq', s.seq, 'id', s.id, 'name', s.name, 'payload', s.payload)
+								order by s.seq
+							)
+							from pgconductor._private_execution_signals s
+							where s.execution_id = c.id and s.delivered_at is null
+						), '[]'::jsonb) else '[]'::jsonb end)
+						order by c.priority asc, c.run_at asc, c.created_at asc, c.id asc
+					)
+					from claimed c
+				), '[]'::jsonb) as executions,
+				coalesce((
+					select jsonb_agg(to_jsonb(s) order by s.seq) from running_signals s
+				), '[]'::jsonb) as signals,
+				coalesce((
+					select jsonb_agg(r.id) from running r where r.cancelled
+				), '[]'::jsonb) as cancelled
 		`;
 	}
 
@@ -457,7 +594,7 @@ export class QueryBuilder {
 				result jsonb, error text,
 				reschedule_in_ms bigint, step_key text, timeout_ms bigint,
 				child_task_name text, child_task_queue text, child_payload jsonb,
-				"group" text, trace_context jsonb, metadata jsonb
+				"group" text, trace_context jsonb, metadata jsonb, signal_names jsonb
 			)
 		)`);
 		// Lock the claimed rows for the whole statement. This prevents recovery or a
@@ -465,7 +602,7 @@ export class QueryBuilder {
 		ctes.push(this.sql`valid_results as materialized (
 			select r.*,
 				e.cancelled as execution_cancelled, e.last_error as execution_last_error,
-				e.subscription_id
+				e.subscription_id, e.signal_count as execution_signal_count
 			from result_data r
 			join pgconductor._private_executions e
 				on e.id = r.execution_id
@@ -483,8 +620,46 @@ export class QueryBuilder {
 			) r
 			join pgconductor._private_tasks t on t.queue = r.queue and t.key = r.task_key
 		)`);
-		ctes.push(this.sql`completed_results as (
+		ctes.push(this.sql`completed_candidates as (
 			select * from valid_results where status = 'completed' and not execution_cancelled
+		)`);
+		// A completion must not drop signals the handler did not get. signal_count comes from the
+		// locked row, so it counts signals committed after this statement's snapshot, which the
+		// count below cannot see. Signals named by no listener of the attempt do not re-queue it.
+		ctes.push(this.sql`signal_requeued as materialized (
+			select c.execution_id, c.queue
+			from completed_candidates c
+			where c.execution_signal_count > 0
+				and (
+					c.execution_signal_count > (
+						select count(*) from pgconductor._private_execution_signals s
+						where s.execution_id = c.execution_id
+					)
+					or exists (
+						select 1 from pgconductor._private_execution_signals s
+						where s.execution_id = c.execution_id
+							and s.delivered_at is null
+							and s.name in (
+								select jsonb_array_elements_text(coalesce(c.signal_names, '[]'::jsonb))
+							)
+					)
+				)
+		)`);
+		ctes.push(this.sql`completed_results as (
+			select c.* from completed_candidates c
+			where not exists (
+				select 1 from signal_requeued q where q.execution_id = c.execution_id
+			)
+		)`);
+		// A new attempt runs right away and receives the signals; the result is discarded
+		ctes.push(this.sql`updated_signal_requeued as (
+			update pgconductor._private_executions e
+			set attempts = greatest(e.attempts - 1, 0), run_at = nt.ts,
+				locked_by = null, locked_at = null
+			from now_ts nt, signal_requeued q
+			where e.id = q.execution_id and e.queue = q.queue
+				and e.locked_by = ${orchestratorId}::uuid
+			returning e.id
 		)`);
 		ctes.push(this.sql`failed_results as (
 			select * from valid_results
@@ -566,7 +741,9 @@ export class QueryBuilder {
 		ctes.push(this.sql`permanently_failed_children as materialized (
 			select r.execution_id, r.queue, r.task_key,
 				r.execution_cancelled,
-				coalesce(r.error, r.execution_last_error, 'unknown error') as child_error,
+				-- the cancellation reason on the locked row, not the attempt's view of it
+				coalesce(case when r.execution_cancelled then r.execution_last_error end,
+					r.error, r.execution_last_error, 'unknown error') as child_error,
 				e."group" as execution_group,
 				e.payload as execution_payload,
 				e.attempts as execution_attempts,

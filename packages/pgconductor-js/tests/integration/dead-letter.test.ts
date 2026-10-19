@@ -175,12 +175,14 @@ describe("dead-letter queues (Postgres integration)", () => {
 			payload: { value: "x" },
 		});
 		const orchestratorId = crypto.randomUUID();
-		const claimed = await db.client.getExecutions({
-			orchestratorId,
-			queueName: "default",
-			batchSize: 1,
-			taskKeys: ["settle-source"],
-		});
+		const claimed = (
+			await db.client.getExecutions({
+				orchestratorId,
+				queueName: "default",
+				batchSize: 1,
+				taskKeys: ["settle-source"],
+			})
+		).executions;
 		expect(claimed).toHaveLength(1);
 		const execution = claimed[0]!;
 		const result = {
@@ -256,12 +258,14 @@ describe("dead-letter queues (Postgres integration)", () => {
 			values ('delivered-destination', 'dlq', '{}', jsonb_build_object('sourceExecutionId', ${executionId}::text))
 		`;
 		const orchestratorId = crypto.randomUUID();
-		const [execution] = await db.client.getExecutions({
-			orchestratorId,
-			queueName: "default",
-			batchSize: 1,
-			taskKeys: ["delivered-source"],
-		});
+		const [execution] = (
+			await db.client.getExecutions({
+				orchestratorId,
+				queueName: "default",
+				batchSize: 1,
+				taskKeys: ["delivered-source"],
+			})
+		).executions;
 		if (!execution) throw new Error("expected claimed execution");
 
 		await db.client.returnExecutions({
@@ -367,12 +371,14 @@ describe("dead-letter queues (Postgres integration)", () => {
 			version: "test",
 			migrationNumber: 1,
 		});
-		const [execution] = await db.client.getExecutions({
-			orchestratorId,
-			queueName: "default",
-			batchSize: 1,
-			taskKeys: ["cancelled-running-source"],
-		});
+		const [execution] = (
+			await db.client.getExecutions({
+				orchestratorId,
+				queueName: "default",
+				batchSize: 1,
+				taskKeys: ["cancelled-running-source"],
+			})
+		).executions;
 		if (!execution || !executionId) throw new Error("expected claimed execution");
 
 		expect(await db.client.cancelExecution(executionId)).toBe(true);
@@ -439,7 +445,7 @@ describe("dead-letter queues (Postgres integration)", () => {
 				batchSize: 1,
 				taskKeys: ["cancelled-child-parent"],
 			})
-		)[0];
+		).executions[0];
 		if (!parent || !parentId) throw new Error("expected claimed parent execution");
 
 		await db.client.returnExecutions({
@@ -475,7 +481,7 @@ describe("dead-letter queues (Postgres integration)", () => {
 				batchSize: 1,
 				taskKeys: ["cancelled-child"],
 			})
-		)[0];
+		).executions[0];
 		if (!child) throw new Error("expected claimed child execution");
 
 		expect(await db.client.cancelExecution(child.id)).toBe(true);
@@ -580,12 +586,14 @@ describe("dead-letter queues (Postgres integration)", () => {
 			queue: "default",
 			payload: { value: "rollback" },
 		});
-		const claimed = await db.client.getExecutions({
-			orchestratorId: crypto.randomUUID(),
-			queueName: "default",
-			batchSize: 1,
-			taskKeys: ["rollback-source"],
-		});
+		const claimed = (
+			await db.client.getExecutions({
+				orchestratorId: crypto.randomUUID(),
+				queueName: "default",
+				batchSize: 1,
+				taskKeys: ["rollback-source"],
+			})
+		).executions;
 		const execution = claimed[0]!;
 		if (!execution.locked_by) throw new Error("execution was not claimed");
 		const lockedBy = execution.locked_by;

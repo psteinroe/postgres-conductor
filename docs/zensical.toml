@@ -72,6 +72,7 @@ nav = [
     { "Retries & Backoff" = "task-execution/retries.md" },
     { "Timeouts" = "task-execution/timeouts.md" },
     { "Cancellation" = "task-execution/cancellation.md" },
+    { "Signals" = "task-execution/signals.md" },
     { "Priority" = "task-execution/priority.md" },
     { "Concurrency" = "task-execution/concurrency.md" },
     { "Dead-letter queues" = "task-execution/dead-letter-queue.md" },

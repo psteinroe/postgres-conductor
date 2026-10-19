@@ -531,6 +531,21 @@ describe("BatchingAsyncQueue - pending groups", () => {
 		queue.close();
 	});
 
+	test("release waiters share one promise until the next release", async () => {
+		const queue = new BatchingAsyncQueue<TestItem>(10, new Map());
+		await queue.push({ task_key: "a", id: "1" });
+		await queue.next();
+
+		const waiting = queue.waitForRelease();
+		expect(queue.waitForRelease()).toBe(waiting);
+
+		queue.release();
+		await waiting;
+		expect(queue.waitForRelease()).not.toBe(waiting);
+
+		queue.close();
+	});
+
 	test("close wakes release waiters", async () => {
 		const queue = new BatchingAsyncQueue<TestItem>(10, new Map());
 		const waiting = queue.waitForRelease();
