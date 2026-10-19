@@ -26,7 +26,7 @@ describe("Cancellation Support", () => {
 		await pool?.destroy();
 	});
 
-	test("cancel pending execution sets failed_at", async () => {
+	test("cancel pending execution sets failed_at and the cancelled flag", async () => {
 		const db = await pool.child();
 		databases.push(db);
 
@@ -85,7 +85,7 @@ describe("Cancellation Support", () => {
 
 		expect(failedExecution[0]?.failed_at).not.toBeNull();
 		expect(failedExecution[0]?.last_error).toBe("Cancelled by user");
-		expect(failedExecution[0]?.cancelled).toBe(false); // Not set for pending
+		expect(failedExecution[0]?.cancelled).toBe(true);
 	}, 10000);
 
 	test("cancel running execution sets cancelled flag and signals orchestrator", async () => {
@@ -969,7 +969,7 @@ describe("Cancellation Support", () => {
 
 		expect(await executionState(db, child)).toEqual({
 			failed: true,
-			cancelled: false,
+			cancelled: true,
 			last_error: "Cancelled by user",
 			waiting_on_execution_id: null,
 		});
@@ -1006,7 +1006,7 @@ describe("Cancellation Support", () => {
 		for (const id of [root, parent]) {
 			expect(await executionState(db, id)).toEqual({
 				failed: true,
-				cancelled: false,
+				cancelled: true,
 				last_error: "Cancelled by user",
 				waiting_on_execution_id: null,
 			});
@@ -1254,13 +1254,13 @@ describe("Cancellation Support", () => {
 
 		expect(await executionState(db, child)).toEqual({
 			failed: true,
-			cancelled: false,
+			cancelled: true,
 			last_error: "Cancelled by user",
 			waiting_on_execution_id: null,
 		});
 		expect(await executionState(db, parent)).toEqual({
 			failed: true,
-			cancelled: false,
+			cancelled: true,
 			last_error: "Cancelled by user",
 			waiting_on_execution_id: null,
 		});

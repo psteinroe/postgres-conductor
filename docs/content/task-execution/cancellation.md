@@ -22,7 +22,7 @@ console.log(cancelled); // true if cancelled, false if already completed
 
 **Pending execution:**
 
-- Execution is marked as failed
+- Execution is marked as cancelled and failed
 - Error set to "Cancelled by user"
 - Never runs
 
