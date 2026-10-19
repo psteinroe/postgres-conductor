@@ -36,7 +36,7 @@ await conductor.emit("slack.mentioned", payload, {
 });
 ```
 
-The schema validates metadata on `conductor.invoke()`, `conductor.emit()` and `ctx.invoke()`
+The schema validates metadata on `conductor.invoke()`, `conductor.emit()` and `ctx.invokeAndWait()`
 overrides, like event payloads.
 
 ## Reading Metadata
@@ -58,21 +58,21 @@ const handleMention = conductor.createTask(
 These executions inherit the metadata of the execution or event that created them:
 
 - Executions triggered by an event
-- Children created with `ctx.invoke()`
+- Children created with `ctx.invokeAndWait()`
 - Events emitted with `ctx.emit()`, and the executions they trigger
 - Cron executions scheduled with `ctx.schedule()`
 - Dead-letter deliveries
 
-Retries and resumes after `ctx.sleep()`, `ctx.invoke()` or `ctx.waitForEvent()` run the same
+Retries and resumes after `ctx.sleep()`, `ctx.invokeAndWait()` or `ctx.waitForEvent()` run the same
 execution and keep its metadata. Cron schedules declared as task triggers have no metadata.
 
 ## Overriding Metadata for a Child
 
-Pass `metadata` to `ctx.invoke()` to replace the metadata of that child only. A function
+Pass `metadata` to `ctx.invokeAndWait()` to replace the metadata of that child only. A function
 receives the current metadata:
 
 ```typescript
-await ctx.invoke("reply", { name: "post-reply" }, payload, {
+await ctx.invokeAndWait("reply", { name: "post-reply" }, payload, {
   metadata: (metadata) => ({ ...metadata, tenant: "acme", replyTo: "thread-2" }),
 });
 ```
@@ -82,7 +82,7 @@ The parent and later children keep the original metadata.
 ## Size Limit
 
 Metadata is limited to 8 KB (8192 bytes of its JSON text in Postgres). Larger metadata is
-rejected with `Execution metadata must not exceed 8192 bytes`. An oversized `ctx.invoke()`
+rejected with `Execution metadata must not exceed 8192 bytes`. An oversized `ctx.invokeAndWait()`
 override fails the invoking attempt. Store references in metadata, not payloads.
 
 ## What's Next?

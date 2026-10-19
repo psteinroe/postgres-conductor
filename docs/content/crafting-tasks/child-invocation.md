@@ -1,10 +1,10 @@
 # Child Invocation
 
-Tasks can invoke other tasks to create workflows. The parent task waits for the child to complete and receives its return value.
+Tasks can invoke other tasks to create workflows. With `ctx.invokeAndWait()` the parent waits for the child to complete and receives its return value. With `ctx.invoke()` the child runs on its own.
 
 ## Basic Invocation
 
-Use `ctx.invoke()` to call another task:
+Use `ctx.invokeAndWait()` to call another task:
 
 ```typescript
 const childProcessor = conductor.createTask(
@@ -24,7 +24,7 @@ const parentWorkflow = conductor.createTask(
     const { value } = event.payload;
 
     // Invoke child task
-    const childResult = await ctx.invoke(
+    const childResult = await ctx.invokeAndWait(
       "process-step", // Step name (for idempotency)
       { name: "child-processor" },
       { input: value }
@@ -38,7 +38,7 @@ const parentWorkflow = conductor.createTask(
 
 ## How It Works
 
-When `ctx.invoke()` is called:
+When `ctx.invokeAndWait()` is called:
 
 1. The child task execution is created in the database
 2. The parent task is released by the worker
@@ -53,7 +53,7 @@ This ensures workers aren't blocked while waiting for child tasks.
 Set a timeout for child execution:
 
 ```typescript
-const result = await ctx.invoke(
+const result = await ctx.invokeAndWait(
   "fetch-data",
   { name: "external-api-call" },
   { url: "https://api.example.com" },
@@ -80,19 +80,19 @@ const orchestrator = conductor.createTask(
   { invocable: true },
   async (event, ctx) => {
     // Sequential execution
-    const step1 = await ctx.invoke(
+    const step1 = await ctx.invokeAndWait(
       "step-1",
       { name: "validate" },
       event.payload
     );
 
-    const step2 = await ctx.invoke(
+    const step2 = await ctx.invokeAndWait(
       "step-2",
       { name: "process" },
       { data: step1.validatedData }
     );
 
-    const step3 = await ctx.invoke(
+    const step3 = await ctx.invokeAndWait(
       "step-3",
       { name: "notify" },
       { result: step2.processedData }
@@ -105,23 +105,23 @@ const orchestrator = conductor.createTask(
 
 Each child runs sequentially. The parent hangs up and resumes for each child.
 
-## Starting Without Waiting
+## Invoking Without Waiting
 
-Use `ctx.start()` to start work that runs on its own, such as a handoff to another workflow. It returns the new execution's ID right away:
+Use `ctx.invoke()` to start work that runs on its own, such as a handoff to another workflow. It returns the new execution's ID right away:
 
 ```typescript
 const intake = conductor.createTask(
   { name: "intake" },
   { invocable: true },
   async (event, ctx) => {
-    const handoffId = await ctx.start("handoff", { name: "support-flow" }, event.payload);
+    const handoffId = await ctx.invoke("handoff", { name: "support-flow" }, event.payload);
     return { handoffId };
   }
 );
 ```
 
-| | `ctx.invoke()` | `ctx.start()` |
-|-|----------------|---------------|
+| | `ctx.invokeAndWait()` | `ctx.invoke()` |
+|-|-----------------------|----------------|
 | Returns | The child's result | The execution ID |
 | Caller | Hangs up until the child settles | Continues immediately |
 | Child fails | Caller fails | Caller is unaffected |
@@ -130,9 +130,9 @@ const intake = conductor.createTask(
 
 Both inherit the caller's [metadata](execution-metadata.md) unless `metadata` overrides it.
 
-Retrying the starting attempt never starts a second execution, even if it crashed right after the start: the execution is deduplicated by a key derived from the caller and the step name. Pass `dedupe_key` to use your own key instead, for example to reconnect to a workflow for a conversation. If an execution of the task already holds the key, `ctx.start()` returns its ID without starting, superseding or updating anything.
+Retrying the invoking attempt never starts a second execution, even if it crashed right after the start: the execution is deduplicated by a key derived from the caller and the step name. Pass `dedupe_key` to use your own key instead, for example to reconnect to a workflow for a conversation. If an execution of the task already holds the key, `ctx.invoke()` returns its ID without starting, superseding or updating anything.
 
-Await the started execution elsewhere with [`conductor.waitForResult()`](../api/conductor.md) or read it with `conductor.getExecution()`.
+Await the invoked execution elsewhere with [`conductor.waitForResult()`](../api/conductor.md) or read it with `conductor.getExecution()`.
 
 ## What's Next?
 

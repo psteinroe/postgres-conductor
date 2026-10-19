@@ -101,6 +101,7 @@ export type StartExecutionArgs = {
 	executionId: string;
 	queue: string;
 	orchestratorId: string;
+	claimToken: string;
 	key: string;
 	spec: ExecutionSpec & { dedupe_key: string };
 };
@@ -1124,6 +1125,7 @@ export class QueryBuilder {
 		executionId,
 		queue,
 		orchestratorId,
+		claimToken,
 		key,
 		spec,
 	}: StartExecutionArgs): PendingQuery<{ id: string }[]> {
@@ -1134,6 +1136,7 @@ export class QueryBuilder {
 				where e.id = ${executionId}::uuid
 					and e.queue = ${queue}::text
 					and e.locked_by = ${orchestratorId}::uuid
+					and e.claim_token = ${claimToken}::uuid
 				for update
 			), started_execution as (
 				insert into pgconductor._private_executions as e (

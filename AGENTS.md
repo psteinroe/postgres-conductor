@@ -21,7 +21,7 @@ pgconductor/
         │   ├── worker.ts             # Fetch→execute→flush pipeline
         │   ├── task.ts               # Task wrapper with execute method
         │   ├── task-definition.ts    # Standard Schema / type-only task definitions
-        │   ├── task-context.ts       # Context API (step, sleep, invoke, start, waitForEvent)
+        │   ├── task-context.ts       # Context API (step, sleep, invoke, invokeAndWait, waitForEvent)
         │   ├── middleware.ts         # Per-attempt middleware types
         │   ├── event-definition.ts   # Custom event definitions
         │   ├── event-dispatch-task.ts # Internal event fan-out task
@@ -131,8 +131,8 @@ Tables live in the `pgconductor` schema with a `_private_` prefix (`_private_exe
 - Handles graceful shutdown via AbortController
 
 **TaskContext** (`task-context.ts`)
-- Provides API to task functions: `step()`, `sleep()`, `invoke()`, `start()`, `waitForEvent()`, `subscribe()`
-- `start()` inserts an independent execution and memoizes its id as a step in one statement; it never sets `parent_execution_id` (settlement fails a completed child that has a parent but no waiter)
+- Provides API to task functions: `step()`, `sleep()`, `invoke()`, `invokeAndWait()`, `waitForEvent()`, `subscribe()`
+- `invoke()` inserts an independent execution and memoizes its id as a step in one statement; it never sets `parent_execution_id` (settlement fails a completed child that has a parent but no waiter)
 - All operations are idempotent (use steps as memoization)
 - Hangup pattern: abort execution and return never-resolving promise
 - Resume happens automatically when database wakes execution
@@ -166,7 +166,7 @@ Tables live in the `pgconductor` schema with a `_private_` prefix (`_private_exe
 ### Key Design Patterns
 
 **Hangup/Resume**
-- When a task calls `ctx.sleep()`, `ctx.invoke()` or `ctx.waitForEvent()`, the worker aborts the task
+- When a task calls `ctx.sleep()`, `ctx.invokeAndWait()` or `ctx.waitForEvent()`, the worker aborts the task
 - The execution remains in the database with updated `run_at` or `waiting_on_execution_id`
 - Worker polls and resumes execution when ready
 - Steps provide memoization across hangups
@@ -194,13 +194,13 @@ Tables live in the `pgconductor` schema with a `_private_` prefix (`_private_exe
 
 **Infinity Pattern**
 - Postgres `'infinity'::timestamptz` for indefinite waiting
-- Used when `invoke()` is called without timeout
+- Used when `ctx.invokeAndWait()` is called without timeout
 - Parent waits forever until child completes
 
 **Execution Metadata**
 - `metadata jsonb` on `_private_executions` follows the same paths as `trace_context`: event → triggered executions, parent → child, terminal failure → dead-letter delivery, cron occurrence → next occurrence
-- `TaskContext` passes its metadata explicitly to `ctx.invoke` children, `ctx.emit` and `ctx.schedule`
-- `pgconductor._private_check_metadata()` enforces the 8 KB limit where metadata enters (`invoke()`, `emit_event()`, and `ctx.invoke` overrides before hang-up, so settlement never fails on size)
+- `TaskContext` passes its metadata explicitly to `ctx.invokeAndWait` children, `ctx.emit` and `ctx.schedule`
+- `pgconductor._private_check_metadata()` enforces the 8 KB limit where metadata enters (`invoke()`, `emit_event()`, and `ctx.invokeAndWait` overrides before hang-up, so settlement never fails on size)
 
 **Custom Events**
 - An emitted event is an execution of the internal `pgconductor.event-dispatch` task on the `pgconductor.internal` queue; its id is the event id and there is no separate event table

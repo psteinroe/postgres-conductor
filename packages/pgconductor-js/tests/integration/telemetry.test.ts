@@ -439,7 +439,7 @@ describe.serial("trace propagation across internal executions", () => {
 					span.name.startsWith("process ") && span.attributes["pgconductor.task.name"] === taskKey,
 			);
 
-	test("ctx.invoke children continue the parent's trace", async () => {
+	test("ctx.invokeAndWait children continue the parent's trace", async () => {
 		const { exporter, provider } = installProvider();
 		const db = await pool.child();
 		const conductor = Conductor.create({
@@ -459,7 +459,7 @@ describe.serial("trace propagation across internal executions", () => {
 			{ name: "trace-parent" },
 			{ invocable: true },
 			async (_event, ctx) => {
-				await ctx.invoke("child", { name: "trace-child" });
+				await ctx.invokeAndWait("child", { name: "trace-child" });
 			},
 		);
 		const orchestrator = Orchestrator.create({

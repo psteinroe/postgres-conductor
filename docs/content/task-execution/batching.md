@@ -126,7 +126,7 @@ const batchTask = conductor.createTask(
     ctx.signal; // AbortSignal for cancellation
 
     // ctx.sleep("retry-later", 1000) reschedules the entire batch.
-    // NOT available in batch tasks: ctx.step(), ctx.invoke().
+    // NOT available in batch tasks: ctx.step(), ctx.invokeAndWait().
   }
 );
 ```

@@ -10,7 +10,7 @@ import { loseFirstResponse, waitForCondition } from "../test-utils";
 
 const metadataSchema = z.object({ tenant: z.string(), replyTo: z.string().optional() });
 
-describe("ctx.start (Postgres integration)", () => {
+describe("ctx.invoke without waiting (Postgres integration)", () => {
 	let pool: TestDatabasePool;
 	const databases: TestDatabase[] = [];
 
@@ -58,7 +58,7 @@ describe("ctx.start (Postgres integration)", () => {
 			{ name: "starter" },
 			{ invocable: true },
 			async (_e, ctx) => {
-				const id = await ctx.start(
+				const id = await ctx.invoke(
 					"start-work",
 					{ name: "work" },
 					{ value: 2 },
@@ -110,7 +110,7 @@ describe("ctx.start (Postgres integration)", () => {
 			{ name: "starter", maxAttempts: 2 },
 			{ invocable: true },
 			async (_e, ctx) => {
-				ids.push(await ctx.start("start-work", { name: "work" }, {}));
+				ids.push(await ctx.invoke("start-work", { name: "work" }, {}));
 				await ctx.sleep("pause", 0);
 				if (ids.length === 2) {
 					await db.sql`delete from pgconductor._private_steps where key = 'start-work'`;
@@ -163,7 +163,7 @@ describe("ctx.start (Postgres integration)", () => {
 			{ name: "starter" },
 			{ invocable: true },
 			async (_e, ctx) => {
-				return { id: await ctx.start("start-work", { name: "work" }, {}) };
+				return { id: await ctx.invoke("start-work", { name: "work" }, {}) };
 			},
 		);
 		const orchestrator = Orchestrator.create({ conductor, tasks: [starter, work] });
@@ -202,7 +202,7 @@ describe("ctx.start (Postgres integration)", () => {
 			{ name: "starter" },
 			{ invocable: true },
 			async (_e, ctx) => {
-				workId = await ctx.start("start-work", { name: "work" }, {});
+				workId = await ctx.invoke("start-work", { name: "work" }, {});
 				await ctx.sleep("wait", 60 * 60 * 1000);
 			},
 		);
@@ -250,8 +250,8 @@ describe("ctx.start (Postgres integration)", () => {
 			{ name: "starter" },
 			{ invocable: true },
 			async (_e, ctx) => {
-				await ctx.start("inherited", { name: "work" }, { label: "inherited" });
-				await ctx.start(
+				await ctx.invoke("inherited", { name: "work" }, { label: "inherited" });
+				await ctx.invoke(
 					"overridden",
 					{ name: "work" },
 					{ label: "overridden" },
@@ -297,7 +297,7 @@ describe("ctx.start (Postgres integration)", () => {
 			{ name: "starter" },
 			{ invocable: true },
 			async (_e, ctx) => {
-				const id = await ctx.start(
+				const id = await ctx.invoke(
 					"reconnect",
 					{ name: "work" },
 					{ label: "started" },

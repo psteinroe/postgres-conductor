@@ -314,7 +314,7 @@ export class TaskContext<
 		};
 	}
 
-	async invoke<
+	async invokeAndWait<
 		TName extends TaskName<Tasks>,
 		TQueue extends string = "default",
 		TDef extends FindTaskByIdentifier<Tasks, TName, TQueue> = FindTaskByIdentifier<
@@ -388,7 +388,7 @@ export class TaskContext<
 	 * Memoized by the step key: retries and resumes return the same execution.
 	 * The execution is not cancelled with this one, and its outcome does not affect it.
 	 */
-	async start<
+	async invoke<
 		TName extends TaskName<Tasks>,
 		TQueue extends string = "default",
 		TDef extends FindTaskByIdentifier<Tasks, TName, TQueue> = FindTaskByIdentifier<
@@ -437,6 +437,7 @@ export class TaskContext<
 				executionId: this.opts.execution.id,
 				queue: this.opts.execution.queue,
 				orchestratorId: this.opts.execution.locked_by,
+				claimToken: this.opts.execution.claim_token,
 				key,
 				spec: {
 					task_key: task.name,

@@ -31,8 +31,8 @@ describe("execution metadata types", () => {
 				Readonly<{ tenant: string; replyTo?: string | undefined }> | undefined
 			>();
 
-			await ctx.invoke("child", { name: "worker" }, {}, { metadata: { tenant: "acme" } });
-			await ctx.invoke(
+			await ctx.invokeAndWait("child", { name: "worker" }, {}, { metadata: { tenant: "acme" } });
+			await ctx.invokeAndWait(
 				"child",
 				{ name: "worker" },
 				{},
@@ -44,16 +44,16 @@ describe("execution metadata types", () => {
 				},
 			);
 			expectTypeOf(
-				await ctx.start("start", { name: "worker" }, {}, { metadata: { tenant: "acme" } }),
+				await ctx.invoke("start", { name: "worker" }, {}, { metadata: { tenant: "acme" } }),
 			).toEqualTypeOf<string>();
 
 			if (false) {
 				// @ts-expect-error - metadata is readonly
 				ctx.metadata = { tenant: "acme" };
 				// @ts-expect-error - wrong metadata shape
-				await ctx.invoke("child", { name: "worker" }, {}, { metadata: { tenant: 1 } });
+				await ctx.invokeAndWait("child", { name: "worker" }, {}, { metadata: { tenant: 1 } });
 				// @ts-expect-error - wrong metadata shape
-				await ctx.start("start", { name: "worker" }, {}, { metadata: { tenant: 1 } });
+				await ctx.invoke("start", { name: "worker" }, {}, { metadata: { tenant: 1 } });
 			}
 		});
 

@@ -349,7 +349,7 @@ describe("batch task types", () => {
 				await ctx.sleep({ seconds: 5 });
 
 				// @ts-expect-error - invoke not available in BatchTaskContext
-				await ctx.invoke({ name: "other-task" }, {});
+				await ctx.invokeAndWait({ name: "other-task" }, {});
 
 				// Only signal and logger are available
 				expectTypeOf(ctx.signal).toMatchTypeOf<AbortSignal>();
@@ -392,7 +392,7 @@ describe("batch task types", () => {
 				// Regular context has step, sleep, invoke methods
 				expectTypeOf(ctx.step).toBeFunction();
 				expectTypeOf(ctx.sleep).toBeFunction();
-				expectTypeOf(ctx.invoke).toBeFunction();
+				expectTypeOf(ctx.invokeAndWait).toBeFunction();
 			},
 		);
 

@@ -146,12 +146,12 @@ execution's input to emit once across attempts: repeating it for the same event 
 and returns the original event ID. Keys are scoped per event name and remembered for 1–2 days after
 the event was dispatched. See [Deduplicating Emits](../crafting-tasks/triggers.md#deduplicating-emits).
 
-## ctx.invoke()
+## ctx.invokeAndWait()
 
 Invoke a child task and wait for result:
 
 ```typescript
-const result = await ctx.invoke<TResult>(
+const result = await ctx.invokeAndWait<TResult>(
   stepName: string,
   taskRef: { name: string, queue?: string },
   payload: TPayload,
@@ -170,7 +170,7 @@ const parent = conductor.createTask(
   { name: "parent" },
   { invocable: true },
   async (event, ctx) => {
-    const childResult = await ctx.invoke(
+    const childResult = await ctx.invokeAndWait(
       "call-child",
       { name: "child-task" },
       { input: event.payload.value },
@@ -189,12 +189,12 @@ const parent = conductor.createTask(
 - Throws if child fails or times out
 - The child inherits `ctx.metadata` unless `metadata` overrides it for that child
 
-## ctx.start()
+## ctx.invoke()
 
-Start an independent execution and return its ID without waiting for it:
+Invoke a task without waiting for it and return the execution ID, like `conductor.invoke()`:
 
 ```typescript
-const executionId = await ctx.start(
+const executionId = await ctx.invoke(
   stepName: string,
   taskRef: { name: string, queue?: string },
   payload: TPayload,
@@ -215,7 +215,7 @@ const intake = conductor.createTask(
   { name: "intake" },
   { invocable: true },
   async (event, ctx) => {
-    const handoffId = await ctx.start("handoff", { name: "support-flow" }, event.payload);
+    const handoffId = await ctx.invoke("handoff", { name: "support-flow" }, event.payload);
     return { handoffId };
   }
 );
