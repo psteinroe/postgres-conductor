@@ -4,11 +4,6 @@ import type {
 	Execution,
 	ExecutionResult,
 	ExecutionSpec,
-	ExecutionCompleted,
-	ExecutionFailed,
-	ExecutionPermamentlyFailed,
-	ExecutionReleased,
-	ExecutionInvokeChild,
 } from "./database-client";
 import type { AnyTask, BatchConfig } from "./task";
 import type { TaskDefinition } from "./task-definition";
@@ -56,47 +51,6 @@ export const DEFAULT_WORKER_CONFIG: WorkerConfig = {
 	pollIntervalMs: 1000,
 	flushIntervalMs: 2000,
 };
-
-/**
- * Encapsulates buffered execution results with internal counting.
- */
-class BufferState {
-	completed: ExecutionCompleted[] = [];
-	failed: (ExecutionFailed | ExecutionPermamentlyFailed)[] = [];
-	released: ExecutionReleased[] = [];
-	invokeChild: ExecutionInvokeChild[] = [];
-	count = 0;
-
-	constructor(readonly orchestratorId: string) {}
-
-	add(result: ExecutionResult): void {
-		this.count++;
-
-		switch (result.status) {
-			case "completed":
-				this.completed.push(result);
-				break;
-			case "failed":
-			case "permanently_failed":
-				this.failed.push(result);
-				break;
-			case "released":
-				this.released.push(result);
-				break;
-			case "invoke_child":
-				this.invokeChild.push(result);
-				break;
-		}
-	}
-
-	restore(other: BufferState): void {
-		this.completed.push(...other.completed);
-		this.failed.push(...other.failed);
-		this.released.push(...other.released);
-		this.invokeChild.push(...other.invokeChild);
-		this.count += other.count;
-	}
-}
 
 function taskEventFor(execution: Execution): { name: string; payload?: unknown } {
 	if (execution.cron_expression) {
@@ -912,7 +866,7 @@ export class Worker<
 		const orchestratorId = this.orchestratorId;
 		assert.ok(orchestratorId, "orchestratorId must be set when starting the pipeline");
 
-		let buffer = new BufferState(orchestratorId);
+		let buffer: ExecutionResult[] = [];
 		let flushTimer: ReturnType<typeof setTimeout> | null = null;
 		let timerFlush: Promise<void> = Promise.resolve();
 
@@ -922,29 +876,24 @@ export class Worker<
 				flushTimer = null;
 			}
 
-			if (buffer.count === 0) return;
+			if (buffer.length === 0) return;
 
-			const batch = buffer;
-			buffer = new BufferState(orchestratorId);
+			const results = buffer;
+			buffer = [];
 
 			try {
 				await this.telemetry.settle({
 					queue: this.queueName,
-					batchMessageCount: batch.count,
-					run: () => this.db.returnExecutions(batch, { signal: this.signal }),
+					batchMessageCount: results.length,
+					run: () => this.db.returnExecutions({ orchestratorId, results }, { signal: this.signal }),
 				});
-				for (const result of [
-					...batch.completed,
-					...batch.failed,
-					...batch.released,
-					...batch.invokeChild,
-				]) {
+				for (const result of results) {
 					this.held.delete(result.execution_id);
 				}
 			} catch (err) {
 				this.logger.error("Error flushing results:", err);
 				if (!isCleanup) {
-					buffer.restore(batch);
+					buffer.push(...results);
 					scheduleFlush();
 				}
 			}
@@ -959,12 +908,12 @@ export class Worker<
 
 		try {
 			for await (const result of source) {
-				buffer.add(result);
+				buffer.push(result);
 
 				// Start timer only after first result arrives
 				if (!flushTimer) scheduleFlush();
 
-				if (buffer.count >= this.flushBatchSize) {
+				if (buffer.length >= this.flushBatchSize) {
 					await flushNow();
 					scheduleFlush();
 				}

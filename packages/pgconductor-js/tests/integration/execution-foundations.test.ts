@@ -33,14 +33,11 @@ describe("execution foundations", () => {
 
 	function grouped(
 		orchestratorId: string,
-		result: Parameters<TestDatabase["client"]["returnExecutions"]>[0]["completed"][number],
+		result: Parameters<TestDatabase["client"]["returnExecutions"]>[0]["results"][number],
 	) {
 		return {
 			orchestratorId,
-			completed: [result],
-			failed: [],
-			released: [],
-			invokeChild: [],
+			results: [result],
 		};
 	}
 
@@ -324,10 +321,7 @@ describe("execution foundations", () => {
 
 		await db.client.returnExecutions({
 			orchestratorId: parent.locked_by,
-			completed: [],
-			failed: [],
-			released: [],
-			invokeChild: [
+			results: [
 				{
 					execution_id: parent.id,
 					claim_token: parent.claim_token,
@@ -362,8 +356,7 @@ describe("execution foundations", () => {
 
 		await db.client.returnExecutions({
 			orchestratorId: child.locked_by,
-			completed: [],
-			failed: [
+			results: [
 				{
 					execution_id: child.id,
 					claim_token: child.claim_token,
@@ -373,8 +366,6 @@ describe("execution foundations", () => {
 					error: "child failed",
 				},
 			],
-			released: [],
-			invokeChild: [],
 		});
 
 		const retained = await db.sql<
@@ -420,10 +411,7 @@ describe("execution foundations", () => {
 
 		await db.client.returnExecutions({
 			orchestratorId: parent.locked_by,
-			completed: [],
-			failed: [],
-			released: [],
-			invokeChild: [
+			results: [
 				{
 					execution_id: parent.id,
 					claim_token: parent.claim_token,
@@ -450,8 +438,7 @@ describe("execution foundations", () => {
 		if (!child) throw new Error("expected child claim");
 		await db.client.returnExecutions({
 			orchestratorId: child.locked_by,
-			completed: [],
-			failed: [
+			results: [
 				{
 					execution_id: child.id,
 					claim_token: child.claim_token,
@@ -461,8 +448,6 @@ describe("execution foundations", () => {
 					error: "child failed",
 				},
 			],
-			released: [],
-			invokeChild: [],
 		});
 
 		const outcome = await db.sql<{ failed_at: Date | null; last_error: string | null }[]>`
@@ -554,9 +539,7 @@ describe("execution foundations", () => {
 		const first = await claim();
 		const release = {
 			orchestratorId,
-			completed: [],
-			failed: [],
-			released: [
+			results: [
 				{
 					execution_id: first.id,
 					claim_token: first.claim_token,
@@ -566,7 +549,6 @@ describe("execution foundations", () => {
 					reschedule_in_ms: 0,
 				},
 			],
-			invokeChild: [],
 		};
 		await db.client.returnExecutions(release);
 		await claim();
@@ -675,10 +657,7 @@ describe("execution foundations", () => {
 		if (!parent) throw new Error("expected parent claim");
 		await db.client.returnExecutions({
 			orchestratorId: parent.locked_by,
-			completed: [],
-			failed: [],
-			released: [],
-			invokeChild: [
+			results: [
 				{
 					execution_id: parent.id,
 					claim_token: parent.claim_token,
@@ -827,10 +806,11 @@ describe("execution foundations", () => {
 		};
 		await db.client.returnExecutions({
 			orchestratorId: oldOrchestrator,
-			completed: [{ ...staleBase, status: "completed" }],
-			failed: [{ ...staleBase, status: "failed", error: "stale" }],
-			released: [{ ...staleBase, status: "released", reschedule_in_ms: 0 }],
-			invokeChild: [],
+			results: [
+				{ ...staleBase, status: "completed" },
+				{ ...staleBase, status: "failed", error: "stale" },
+				{ ...staleBase, status: "released", reschedule_in_ms: 0 },
+			],
 		});
 
 		const untouched = await db.sql<

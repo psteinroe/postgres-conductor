@@ -1,5 +1,5 @@
 import type { PendingQuery, Row, RowList, Sql } from "postgres";
-import type { GroupedExecutionResults } from "./database-client";
+import type { ReturnExecutionsArgs } from "./database-client";
 import * as assert from "./lib/assert";
 import type { TraceContextCarrier } from "./telemetry";
 import type {
@@ -570,25 +570,21 @@ export class QueryBuilder {
 
 	buildReturnExecutions({
 		orchestratorId,
-		completed,
-		failed,
-		released,
-		invokeChild,
-	}: GroupedExecutionResults): PendingQuery<any> | null {
-		const toMs = (ms: number | "infinity" | undefined) => (ms === "infinity" ? -1 : ms);
-		const results = [
-			...completed,
-			...failed,
-			...released.map((r) => ({ ...r, reschedule_in_ms: toMs(r.reschedule_in_ms) })),
-			...invokeChild.map((r) => ({ ...r, timeout_ms: toMs(r.timeout_ms) })),
-		];
-
+		results,
+	}: ReturnExecutionsArgs): PendingQuery<any> | null {
 		if (results.length === 0) return null;
+
+		const toMs = (ms: number | "infinity" | undefined) => (ms === "infinity" ? -1 : ms);
+		const rows = results.map((r) => {
+			if (r.status === "released") return { ...r, reschedule_in_ms: toMs(r.reschedule_in_ms) };
+			if (r.status === "invoke_child") return { ...r, timeout_ms: toMs(r.timeout_ms) };
+			return r;
+		});
 
 		const ctes: PendingQuery<any>[] = [];
 		ctes.push(this.sql`now_ts as (select pgconductor._private_current_time() as ts)`);
 		ctes.push(this.sql`result_data as (
-			select * from jsonb_to_recordset(${this.sql.json(results)}::jsonb)
+			select * from jsonb_to_recordset(${this.sql.json(rows)}::jsonb)
 			as r(
 				execution_id uuid, queue text, task_key text, claim_token uuid, status text,
 				result jsonb, error text,
