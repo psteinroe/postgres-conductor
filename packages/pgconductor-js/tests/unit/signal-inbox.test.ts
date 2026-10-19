@@ -20,8 +20,8 @@ function store() {
 				if (signal.seq > afterSeq && !acked.includes(signal.id)) inbox.push(signal);
 			}
 		},
-		ack: async (ids: string[]) => {
-			acked.push(...ids);
+		ack: async (id: string) => {
+			acked.push(id);
 		},
 	};
 }

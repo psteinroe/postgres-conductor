@@ -10,8 +10,8 @@ export type SignalHandler<T extends JsonValue = JsonValue> = (
 ) => unknown;
 
 export type SignalInboxOptions = {
-	/** Mark signals delivered */
-	ack: (ids: string[]) => Promise<void>;
+	/** Mark a signal delivered */
+	ack: (id: string) => Promise<void>;
 	/** A handler threw, or a signal could not be acknowledged, while the inbox was open */
 	onError: (error: Error) => void;
 };
@@ -89,7 +89,7 @@ export class SignalInbox {
 			}
 
 			try {
-				await this.opts.ack([signal.id]);
+				await this.opts.ack(signal.id);
 			} catch (err) {
 				this.fail(coerceError(err));
 				return;

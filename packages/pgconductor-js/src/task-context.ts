@@ -103,7 +103,7 @@ export type TaskContextOptions = {
 	metadataSchema?: StandardSchemaV1<unknown, object>;
 	window?: [string, string];
 	telemetry: Telemetry;
-	signals?: SignalInbox;
+	signals: SignalInbox;
 };
 
 /** A signal sent to an execution with `conductor.signal()` or `signalWithStart()`. */
@@ -565,9 +565,6 @@ export class TaskContext<
 	 * attempt receives them when it starts.
 	 */
 	onSignal<T extends JsonValue = JsonValue>(name: string, handler: SignalHandler<T>): void {
-		if (!this.opts.signals) {
-			throw new Error("Signals are not available in this context");
-		}
 		this.opts.signals.listen(name, handler as SignalHandler);
 	}
 

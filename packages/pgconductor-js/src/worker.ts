@@ -553,14 +553,14 @@ export class Worker<
 		});
 		const taskEvent = taskEventFor(exec);
 		const signals = new SignalInbox({
-			ack: (ids) =>
+			ack: (id) =>
 				this.db.ackSignals(
 					{
 						executionId: exec.id,
 						queue: exec.queue,
 						orchestratorId: exec.locked_by,
 						claimToken: exec.claim_token,
-						ids,
+						id,
 					},
 					{ signal: this.signal },
 				),
@@ -573,7 +573,7 @@ export class Worker<
 			},
 		});
 		// Signals stored before the claim are ready when the handler registers its listener
-		for (const stored of exec.signals || []) signals.push(stored);
+		for (const stored of exec.signals) signals.push(stored);
 		this._running.set(exec.id, {
 			controller: taskAbortController,
 			claimToken: exec.claim_token,

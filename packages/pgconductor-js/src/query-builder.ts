@@ -129,7 +129,7 @@ export type AckSignalsArgs = {
 	queue: string;
 	orchestratorId: string;
 	claimToken: string;
-	ids: string[];
+	id: string;
 };
 
 export type SignalArgs = {
@@ -267,7 +267,7 @@ export class QueryBuilder {
 		queue,
 		orchestratorId,
 		claimToken,
-		ids,
+		id,
 	}: AckSignalsArgs): PendingQuery<RowList<Row[]>> {
 		return this.sql`
 			with claimed_execution as materialized (
@@ -283,7 +283,7 @@ export class QueryBuilder {
 			set delivered_at = pgconductor._private_current_time()
 			from claimed_execution c
 			where s.execution_id = c.id
-				and s.id = any(${this.sql.array(ids, 1009)}::text[])
+				and s.id = ${id}::text
 				and s.delivered_at is null
 		`;
 	}

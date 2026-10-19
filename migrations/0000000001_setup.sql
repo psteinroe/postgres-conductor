@@ -782,8 +782,8 @@ end;
 $function$
 ;
 
--- stores a signal for an execution whose row the caller has locked. returns false when the id
--- was stored before. the worker running the execution reads it on its next poll.
+-- stores a signal for an execution whose row the caller has locked; an id stored before is
+-- ignored. the worker running the execution reads it with its next claim.
 create or replace function pgconductor._private_store_signal(
   p_execution_id uuid,
   p_queue text,
@@ -791,7 +791,7 @@ create or replace function pgconductor._private_store_signal(
   p_id text,
   p_payload jsonb
 )
-returns boolean
+returns void
 language plpgsql
 volatile
 set search_path to ''
@@ -801,15 +801,11 @@ begin
   values (p_execution_id, p_queue, p_id, p_name, p_payload)
   on conflict (execution_id, id) do nothing;
 
-  if not found then
-    return false;
+  if found then
+    update pgconductor._private_executions
+    set signal_count = signal_count + 1
+    where id = p_execution_id and queue = p_queue;
   end if;
-
-  update pgconductor._private_executions
-  set signal_count = signal_count + 1
-  where id = p_execution_id and queue = p_queue;
-
-  return true;
 end;
 $function$;
 

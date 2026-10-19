@@ -587,7 +587,7 @@ describe("Signals", () => {
 				queue: "default",
 				orchestratorId,
 				claimToken,
-				ids: ["s1"],
+				id: "s1",
 			});
 		const delivered = async () => {
 			const [row] = await db.sql<{ delivered_at: Date | null }[]>`

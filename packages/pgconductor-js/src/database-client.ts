@@ -109,7 +109,7 @@ export interface Execution {
 	trace_context?: TraceContextCarrier | null;
 	metadata?: Payload | null;
 	/** Undelivered signals in stored order, read when the execution was claimed */
-	signals?: StoredSignal[];
+	signals: StoredSignal[];
 }
 
 // todo: move all of this to query-builder too or create new types.ts file
@@ -391,22 +391,18 @@ export class DatabaseClient {
 	}
 
 	async signalExecution(args: SignalExecutionArgs, opts?: QueryMethodOptions): Promise<boolean> {
-		const rows = await this.query(() => this.builder.buildSignalExecution(args), {
+		const [row] = await this.query(() => this.builder.buildSignalExecution(args), {
 			label: "signalExecution",
 			...opts,
 		});
-		return rows[0]?.stored || false;
+		return row.stored;
 	}
 
 	async signalWithStart(args: SignalWithStartArgs, opts?: QueryMethodOptions): Promise<string> {
-		const rows = await this.query(() => this.builder.buildSignalWithStart(args), {
+		const [row] = await this.query(() => this.builder.buildSignalWithStart(args), {
 			label: "signalWithStart",
 			...opts,
 		});
-		const row = rows[0];
-		if (!row) {
-			throw new Error("signalWithStart returned no rows");
-		}
 		return row.id;
 	}
 
