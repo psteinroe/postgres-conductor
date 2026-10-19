@@ -22,6 +22,7 @@ pgconductor/
         │   ├── task.ts               # Task wrapper with execute method
         │   ├── task-definition.ts    # Standard Schema / type-only task definitions
         │   ├── task-context.ts       # Context API (step, sleep, invoke, waitForEvent)
+        │   ├── middleware.ts         # Per-attempt middleware types
         │   ├── event-definition.ts   # Custom event definitions
         │   ├── event-dispatch-task.ts # Internal event fan-out task
         │   ├── maintenance-task.ts   # Per-queue retention and cleanup task
@@ -185,6 +186,10 @@ Tables live in the `pgconductor` schema with a `_private_` prefix (`_private_exe
 - `DatabaseClient.query()` retries connection errors only when called with a `signal`, and a connection error is ambiguous: the statement may have committed. `getExecutions` and the periodic heartbeat are called without one and never retried; a failed poll or heartbeat is followed by the next one
 - A claim whose response was lost is recovered like an expired lease: each worker tracks the executions it holds (claimed and not yet settled), and the heartbeat releases rows locked by its orchestrator that are not held and were locked more than one heartbeat interval ago
 - `query()` retries by calling its callback again; build the query inside the callback, because a postgres.js query only runs once
+
+**Middleware**
+- `Conductor.create({ middleware })` wraps every attempt of non-batch, non-internal tasks in `worker.ts`
+- `next(added)` merges `added` into the attempt's `TaskContext` and resolves on suspension too; the worker's outer race against the abort promise keeps a suspension from becoming a result or failure
 
 **Infinity Pattern**
 - Postgres `'infinity'::timestamptz` for indefinite waiting
