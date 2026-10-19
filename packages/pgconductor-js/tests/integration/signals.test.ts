@@ -191,12 +191,12 @@ describe("Signals", () => {
 		// store a signal after the first attempt returned and before it settles
 		const returnExecutions = conductor.db.returnExecutions.bind(conductor.db);
 		let sent = false;
-		conductor.db.returnExecutions = async (grouped, opts) => {
-			if (!sent && grouped.completed.length > 0) {
+		conductor.db.returnExecutions = async (args, opts) => {
+			if (!sent && args.results.some((r) => r.status === "completed")) {
 				sent = true;
 				await conductor.signal(id, { name: "input", id: "s2" });
 			}
-			return returnExecutions(grouped, opts);
+			return returnExecutions(args, opts);
 		};
 
 		await orchestrator.start();
@@ -273,8 +273,10 @@ describe("Signals", () => {
 		cleanups.push(() => sql.end());
 		const returnExecutions = conductor.db.returnExecutions.bind(conductor.db);
 		let held = false;
-		conductor.db.returnExecutions = async (grouped, opts) => {
-			if (held || grouped.completed.length === 0) return returnExecutions(grouped, opts);
+		conductor.db.returnExecutions = async (args, opts) => {
+			if (held || !args.results.some((r) => r.status === "completed")) {
+				return returnExecutions(args, opts);
+			}
 			held = true;
 			const locked = new Deferred<void>();
 			const commit = new Deferred<void>();
@@ -284,7 +286,7 @@ describe("Signals", () => {
 				await commit.promise;
 			});
 			await locked.promise;
-			const settled = returnExecutions(grouped, opts);
+			const settled = returnExecutions(args, opts);
 			await Bun.sleep(200);
 			commit.resolve();
 			await tx;
@@ -552,9 +554,7 @@ describe("Signals", () => {
 		const first = await claim();
 		await db.client.returnExecutions({
 			orchestratorId,
-			completed: [],
-			failed: [],
-			released: [
+			results: [
 				{
 					execution_id: id,
 					claim_token: first.claim_token,
@@ -564,7 +564,6 @@ describe("Signals", () => {
 					reschedule_in_ms: 0,
 				},
 			],
-			invokeChild: [],
 		});
 		const second = await claim();
 
