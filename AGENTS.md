@@ -129,7 +129,8 @@ Tables live in the `pgconductor` schema with a `_private_` prefix (`_private_exe
 - Polls the database for ready executions of one queue, claiming only the tasks it registers
 - Executes tasks with concurrency control (via `mapConcurrent`)
 - Batches and flushes results back to the database
-- Each poll (at most once per `pollIntervalMs`, also while all slots are busy) reads its running executions' cancellation flags and undelivered signals in one query, aborts cancelled ones and hands signals to their `SignalInbox`
+- Claiming returns each execution's undelivered signals, which prime its `SignalInbox` before the handler runs
+- Each poll (at most once per `pollIntervalMs`, also while all slots are busy) reads its running executions' cancellation flags and newer undelivered signals in one query, aborts cancelled ones and hands signals to their `SignalInbox`
 - Handles graceful shutdown via AbortController
 
 **TaskContext** (`task-context.ts`)
@@ -217,6 +218,8 @@ Tables live in the `pgconductor` schema with a `_private_` prefix (`_private_exe
 **Signals**
 - `_private_execution_signals` stores one row per `(execution_id, id)`; `seq` orders delivery and `delivered_at` is set when a `ctx.onSignal` handler returned (at least once per id)
 - Senders lock the execution row and increment `_private_executions.signal_count`. Settlement reads `signal_count` from its locked row, which is newer than its snapshot: a completion whose count exceeds the signals it can see, or that has undelivered signals for names the attempt listened for (`signal_names` in the result), is re-queued instead of completed
+- The claim reads undelivered signals under the row lock senders take, so signals stored later have a higher `seq` and the poll reads them with `seq > after_seq`. On completion the worker drains the inbox (`close({ drain: true })`): signals already read are delivered before settling, and only ones stored after the last read re-queue
+- Re-queues are unbounded by design: each needs a signal stored after the previous attempt started, which the next attempt receives at claim time, so an execution re-runs only while signals keep arriving
 - `key` on `_private_executions` with a partial unique index makes at most one non-terminal, non-cancelled execution per `(task_key, key, queue)`; `signal_with_start()` takes a transaction advisory lock on the key, then signals the existing execution or inserts one
 
 ### Task Configuration Options

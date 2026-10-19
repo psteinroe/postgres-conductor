@@ -109,6 +109,8 @@ export interface Execution {
 	dead_letter?: (Omit<DeadLetterMetadata, "failedAt"> & { failedAt: string }) | null;
 	trace_context?: TraceContextCarrier | null;
 	metadata?: Payload | null;
+	/** Undelivered signals in stored order, read when the execution was claimed */
+	signals?: StoredSignal[];
 }
 
 // todo: move all of this to query-builder too or create new types.ts file

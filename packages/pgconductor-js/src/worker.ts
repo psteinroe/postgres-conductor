@@ -589,6 +589,8 @@ export class Worker<
 				});
 			},
 		});
+		// Signals stored before the claim are ready when the handler registers its listener
+		signals.push(exec.signals || []);
 		this._signalInboxes.set(exec.id, signals);
 
 		// Pass db and tasks as extra context to maintenance task, which skips middleware
@@ -710,8 +712,8 @@ export class Worker<
 				}
 			}
 
-			// Let a running signal handler finish; signals left undelivered re-queue the execution
-			const signalFailure = await signals.close({ wait: true });
+			// Deliver the signals already received; ones stored later re-queue the execution
+			const signalFailure = await signals.close({ drain: true });
 			if (signalFailure) {
 				return {
 					execution_id: exec.id,
@@ -755,7 +757,7 @@ export class Worker<
 			clearTimeout(timeout);
 			this._runningTasks.delete(exec.id);
 			// A hung-up or failed attempt leaves undelivered signals for the next one
-			void signals.close({ wait: false });
+			void signals.close({ drain: false });
 			this._signalInboxes.delete(exec.id);
 		}
 	}

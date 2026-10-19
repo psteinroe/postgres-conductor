@@ -17,15 +17,19 @@ export type SignalInboxOptions = {
 
 /**
  * Delivers the signals of one execution attempt to its `ctx.onSignal` handlers, one at a time in
- * the order they were stored. The worker pushes undelivered signals read on each poll. A signal is
- * acknowledged once its handler returned. Signals without a handler are kept until one registers.
+ * the order they were stored. The worker pushes the undelivered signals read when it claimed the
+ * execution before the handler starts, and new ones read on each poll. A signal is acknowledged
+ * once its handler returned. Signals without a handler are kept until one registers.
  */
 export class SignalInbox {
 	private readonly handlers = new Map<string, SignalHandler>();
 	private readonly buffered: StoredSignal[] = [];
 	private lastSeq = 0;
 	private pumping: Promise<void> | null = null;
+	/** No more handlers or signals are accepted */
 	private closed = false;
+	/** No more signals are delivered */
+	private stopped = false;
 	private failure: Error | null = null;
 
 	constructor(private readonly opts: SignalInboxOptions) {}
@@ -63,17 +67,20 @@ export class SignalInbox {
 	}
 
 	/**
-	 * Stop delivering. With `wait`, wait for the running handler and its acknowledgement.
-	 * Returns the error that failed delivery, if any.
+	 * Stop accepting handlers and signals. With `drain`, deliver the signals already received for
+	 * registered handlers first, and wait for their acknowledgements; otherwise stop after the
+	 * running handler. Returns the error that failed delivery, if any.
 	 */
-	async close({ wait }: { wait: boolean }): Promise<Error | null> {
+	async close({ drain }: { drain: boolean }): Promise<Error | null> {
 		this.closed = true;
-		if (wait) await this.pumping;
+		if (!drain) this.stopped = true;
+		while (this.pumping) await this.pumping;
+		this.stopped = true;
 		return this.failure;
 	}
 
 	private pump(): void {
-		if (this.pumping || this.closed || !this.hasDeliverable()) return;
+		if (this.pumping || this.stopped || !this.hasDeliverable()) return;
 		this.pumping = this.pumpLoop().finally(() => {
 			this.pumping = null;
 			// a signal may have been buffered after the loop's last check
@@ -82,7 +89,7 @@ export class SignalInbox {
 	}
 
 	private async pumpLoop(): Promise<void> {
-		while (!this.closed) {
+		while (!this.stopped) {
 			const index = this.buffered.findIndex((signal) => this.handlers.has(signal.name));
 			const [signal] = index === -1 ? [] : this.buffered.splice(index, 1);
 			const handler = signal && this.handlers.get(signal.name);
@@ -112,6 +119,8 @@ export class SignalInbox {
 		if (this.failure) return;
 		const error = new Error(`${prefix}${coerceError(err).message}`);
 		this.failure = error;
+		this.stopped = true;
+		// once closed, the error is returned by close() instead
 		const wasClosed = this.closed;
 		this.closed = true;
 		if (!wasClosed) this.opts.onError(error);

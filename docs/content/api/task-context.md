@@ -237,7 +237,7 @@ const result = await conductor.waitForResult({ name: "support-flow" }, handoffId
 
 ## ctx.onSignal()
 
-Listen for signals by name. Earlier signals are delivered first, in order. A signal handler that throws fails the attempt. See [Signals](../task-execution/signals.md).
+Listen for signals by name. Signals stored before the handler started are delivered first, in order. A signal handler that throws fails the attempt. See [Signals](../task-execution/signals.md).
 
 ```typescript
 ctx.onSignal("input", async (payload, { id, name }) => {

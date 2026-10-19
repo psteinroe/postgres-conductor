@@ -22,7 +22,7 @@ const session = conductor.createTask(
 );
 ```
 
-- Signals stored before the handler registered its listener are delivered first, in the order they were sent
+- Signals stored before the handler started are delivered first, in the order they were sent. The worker reads them when it claims the execution, so a listener receives them as soon as it registers
 - Later signals are delivered while the handler runs. The worker reads them on its poll loop, so they arrive within about one `pollIntervalMs`
 - Handlers run one at a time. The payload is any JSON value
 - A signal counts as delivered once its handler returns
@@ -82,14 +82,16 @@ Delivery is **at least once per signal id**. A handler may see a signal again af
 
 No signal is lost when the handler returns:
 
-- **Completion:** settlement checks, in the same transaction, for signals the attempt listens for but did not deliver. If there are any, the execution is not completed but re-queued, and a new attempt receives them. Its result is discarded and the re-run does not count as an attempt
+- **Completion:** when the handler returns, the attempt first delivers the signals it has already read to their listeners. Settlement then checks, in the same transaction, for signals the attempt listens for but did not deliver, which are ones stored after the worker last read them. If there are any, the execution is not completed but re-queued, and the new attempt receives them when it starts. Its result is discarded and the re-run does not count as an attempt
 - **Signals with no listener:** a signal whose name the attempt never listened for does not re-queue it. The execution completes and the signal is not delivered
 - **Retries:** a failed attempt delivers its remaining signals to the next attempt
 - **Sleeping or waiting:** signals for an execution that sleeps, waits for a child or waits for an event are kept and delivered when its handler next runs. A signal does not wake it
 - **Pending executions** receive their signals when they first run
 - **Cancellation and permanent failure:** undelivered signals are dropped. Signalling a cancelled execution returns `false`
 
-When the handler returns while a signal handler is still running, the attempt waits for it before settling.
+When the handler returns while signal handlers are still running or signals it already read are waiting for them, the attempt waits for them before settling. Signals that arrive after the handler returned are left to the re-queued attempt.
+
+A handler does not have to wait for its signals: one that registers listeners and returns right away still receives every signal stored before it started. Re-queues are not limited, because each one needs a signal stored after the previous attempt started, and the next attempt receives that signal when it starts. An execution therefore re-runs only while new signals keep arriving. To handle a stream of signals in one attempt, keep the handler running, for example until it has been idle for a while.
 
 ## Errors
 

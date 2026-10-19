@@ -32,7 +32,7 @@ describe("SignalInbox", () => {
 		expect(inbox.afterSeq).toBeNull();
 		inbox.listen("input", () => {});
 		expect(inbox.afterSeq).toBe(0);
-		await inbox.close({ wait: true });
+		await inbox.close({ drain: true });
 		expect(inbox.afterSeq).toBeNull();
 	});
 
@@ -51,7 +51,7 @@ describe("SignalInbox", () => {
 		await flush();
 		s.add("input", "c");
 		s.poll(inbox);
-		await inbox.close({ wait: true });
+		await inbox.close({ drain: true });
 
 		expect(delivered).toEqual(["a", "b", "c"]);
 		expect(s.acked).toEqual(["a", "b", "c"]);
@@ -72,7 +72,7 @@ describe("SignalInbox", () => {
 		inbox.listen("later", (_payload, { id }) => delivered.push(id));
 		s.poll(inbox);
 		await flush();
-		await inbox.close({ wait: true });
+		await inbox.close({ drain: true });
 		expect(delivered).toEqual(["i1", "l1"]);
 		expect(inbox.names).toEqual(["input", "later"]);
 	});
@@ -94,7 +94,7 @@ describe("SignalInbox", () => {
 		expect(delivered).toEqual(["a"]);
 		release.resolve();
 		await flush();
-		await inbox.close({ wait: true });
+		await inbox.close({ drain: true });
 		expect(delivered).toEqual(["a", "b"]);
 	});
 
@@ -115,10 +115,30 @@ describe("SignalInbox", () => {
 		expect(onError).toHaveBeenCalledTimes(1);
 		expect(onError.mock.calls[0]?.[0].message).toBe('Signal handler for "input" failed: boom');
 		expect(s.acked).toEqual([]);
-		expect((await inbox.close({ wait: true }))?.message).toContain("boom");
+		expect((await inbox.close({ drain: true }))?.message).toContain("boom");
 	});
 
-	test("close waits for the running handler and stops further deliveries", async () => {
+	test("signals pushed before a handler registers are delivered when it does", async () => {
+		const s = store();
+		s.add("input", "a");
+		s.add("input", "b");
+		const delivered: string[] = [];
+		const inbox = new SignalInbox({ ack: s.ack, onError: () => {} });
+
+		// what the worker reads with the claim
+		inbox.push(s.signals);
+		expect(inbox.afterSeq).toBeNull();
+		inbox.listen("input", (_payload, { id }) => delivered.push(id));
+		expect(inbox.afterSeq).toBe(2);
+		// a poll does not read them again
+		s.poll(inbox);
+		await inbox.close({ drain: true });
+
+		expect(delivered).toEqual(["a", "b"]);
+		expect(s.acked).toEqual(["a", "b"]);
+	});
+
+	test("close with drain delivers the received signals and accepts no more", async () => {
 		const s = store();
 		s.add("input", "a");
 		s.add("input", "b");
@@ -132,13 +152,56 @@ describe("SignalInbox", () => {
 		});
 		s.poll(inbox);
 		await flush();
-		const closed = inbox.close({ wait: true });
+		const closed = inbox.close({ drain: true });
+		s.add("input", "c");
+		inbox.push(s.signals);
+		release.resolve();
+		expect(await closed).toBeNull();
+
+		expect(delivered).toEqual(["a", "b"]);
+		expect(s.acked).toEqual(["a", "b"]);
+		expect(() => inbox.listen("other", () => {})).toThrow();
+	});
+
+	test("close without drain stops after the running handler", async () => {
+		const s = store();
+		s.add("input", "a");
+		s.add("input", "b");
+		const release = new Deferred<void>();
+		const delivered: string[] = [];
+		const inbox = new SignalInbox({ ack: s.ack, onError: () => {} });
+
+		inbox.listen("input", async (_payload, { id }) => {
+			delivered.push(id);
+			await release.promise;
+		});
+		s.poll(inbox);
+		await flush();
+		const closed = inbox.close({ drain: false });
 		release.resolve();
 		expect(await closed).toBeNull();
 
 		expect(delivered).toEqual(["a"]);
 		expect(s.acked).toEqual(["a"]);
-		expect(() => inbox.listen("other", () => {})).toThrow();
+	});
+
+	test("a handler that throws while draining fails close without reporting an error", async () => {
+		const s = store();
+		s.add("input", "a");
+		const onError = mock((_error: Error) => {});
+		const inbox = new SignalInbox({ ack: s.ack, onError });
+
+		inbox.push(s.signals);
+		inbox.listen("input", async () => {
+			await flush();
+			throw new Error("boom");
+		});
+
+		expect((await inbox.close({ drain: true }))?.message).toBe(
+			'Signal handler for "input" failed: boom',
+		);
+		expect(onError).not.toHaveBeenCalled();
+		expect(s.acked).toEqual([]);
 	});
 
 	test("rejects a second handler for a name", () => {

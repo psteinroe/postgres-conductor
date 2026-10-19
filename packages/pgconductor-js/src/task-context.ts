@@ -553,13 +553,14 @@ export class TaskContext<
 	}
 
 	/**
-	 * Listen for signals by name. Signals stored before the listener registers are delivered
+	 * Listen for signals by name. Signals stored before the handler started are delivered
 	 * first, in order, and later ones while the handler runs. Handlers run one at a time.
 	 *
 	 * Delivery is at least once per signal id, so dedupe by `id`. A signal counts as delivered
 	 * once its handler returns; a handler that throws fails the attempt like an uncaught error.
-	 * Signals this attempt listens for but has not delivered when the handler returns re-queue
-	 * the execution, so a new attempt receives them.
+	 * When the handler returns, signals already read are delivered before the attempt settles.
+	 * Ones stored later for a name this attempt listens for re-queue the execution, so a new
+	 * attempt receives them when it starts.
 	 */
 	onSignal<T extends JsonValue = JsonValue>(name: string, handler: SignalHandler<T>): void {
 		if (!this.opts.signals) {

@@ -47,7 +47,7 @@ describe("Signals", () => {
 			ctx: { attempt: number; received: Received[] },
 			taskCtx: Parameters<Parameters<ReturnType<typeof createConductor>["createTask"]>[2]>[1],
 		) => Promise<void>,
-		options: { flushIntervalMs?: number } = {},
+		options: { flushIntervalMs?: number; pollIntervalMs?: number } = {},
 	) {
 		const db = await pool.child();
 		databases.push(db);
@@ -63,7 +63,10 @@ describe("Signals", () => {
 		const orchestrator = Orchestrator.create({
 			conductor,
 			tasks: [task],
-			defaultWorker: { pollIntervalMs: 50, flushIntervalMs: options.flushIntervalMs || 50 },
+			defaultWorker: {
+				pollIntervalMs: options.pollIntervalMs || 50,
+				flushIntervalMs: options.flushIntervalMs || 50,
+			},
 		});
 		cleanups.push(() => orchestrator.stop());
 
@@ -141,6 +144,71 @@ describe("Signals", () => {
 		`;
 		expect(row?.count).toBe(4);
 	});
+
+	test("signals stored before the claim reach a handler that returns right away", async () => {
+		const { db, conductor, orchestrator, received, attempts } = await setup(
+			async (state, ctx) => {
+				ctx.onSignal("input", collect(state));
+			},
+			// no poll runs while the execution is claimed
+			{ pollIntervalMs: 60_000 },
+		);
+
+		const id = await conductor.invoke({ name: "session" }, {});
+		for (const n of [1, 2, 3]) {
+			await conductor.signal(id, { name: "input", id: `s${n}`, payload: n });
+		}
+		await orchestrator.start();
+
+		await waitForCondition(async () => !!(await executionRow(db, id))?.completed_at, 5000);
+		expect(attempts()).toBe(1);
+		expect(received.map((r) => [r.attempt, r.id, r.payload])).toEqual([
+			[1, "s1", 1],
+			[1, "s2", 2],
+			[1, "s3", 3],
+		]);
+		const [row] = await db.sql<{ attempts: number; undelivered: number }[]>`
+			select e.attempts, (
+				select count(*)::int from pgconductor._private_execution_signals s
+				where s.execution_id = e.id and s.delivered_at is null
+			) as undelivered
+			from pgconductor._private_executions e where e.id = ${id}::uuid
+		`;
+		expect(row).toEqual({ attempts: 1, undelivered: 0 });
+	});
+
+	test("a re-queued attempt receives its pending signals when it starts", async () => {
+		const { db, conductor, orchestrator, received, attempts } = await setup(
+			async (state, ctx) => {
+				ctx.onSignal("input", collect(state));
+			},
+			{ pollIntervalMs: 1000 },
+		);
+
+		const id = await conductor.invoke({ name: "session" }, {});
+		await conductor.signal(id, { name: "input", id: "s1" });
+
+		// store a signal after the first attempt returned and before it settles
+		const returnExecutions = conductor.db.returnExecutions.bind(conductor.db);
+		let sent = false;
+		conductor.db.returnExecutions = async (grouped, opts) => {
+			if (!sent && grouped.completed.length > 0) {
+				sent = true;
+				await conductor.signal(id, { name: "input", id: "s2" });
+			}
+			return returnExecutions(grouped, opts);
+		};
+
+		await orchestrator.start();
+		await waitForCondition(async () => !!(await executionRow(db, id))?.completed_at, 10000);
+
+		expect(sent).toBe(true);
+		expect(attempts()).toBe(2);
+		expect(received.map((r) => [r.attempt, r.id])).toEqual([
+			[1, "s1"],
+			[2, "s2"],
+		]);
+	}, 20000);
 
 	test("concurrent signalWithStart calls start one execution and deliver every signal", async () => {
 		const total = 20;

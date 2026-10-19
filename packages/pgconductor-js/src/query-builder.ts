@@ -543,12 +543,22 @@ export class QueryBuilder {
 				returning e.id, e.task_key, e.queue, e.payload, e.waiting_on_execution_id,
 					e.waiting_step_key, e.cancelled, e.last_error, e.dedupe_key, e.cron_expression,
 					e.locked_by, e.claim_token, e."group", e.priority, e.run_at, e.created_at,
-					e.subscription_id, e.trace_context, e.metadata, e.dead_letter
+					e.subscription_id, e.trace_context, e.metadata, e.dead_letter, e.signal_count
 			)
 			select id, task_key, queue, payload, waiting_on_execution_id, waiting_step_key,
 				cancelled, last_error, dedupe_key, cron_expression, locked_by, claim_token, "group",
-				subscription_id, trace_context, metadata, dead_letter
-			from claimed
+				subscription_id, trace_context, metadata, dead_letter,
+				-- Signals stored before the attempt starts are delivered before the next poll.
+				-- The claim holds the row lock senders take, so later ones have a higher seq.
+				case when c.signal_count > 0 then coalesce((
+					select jsonb_agg(
+						jsonb_build_object('seq', s.seq, 'id', s.id, 'name', s.name, 'payload', s.payload)
+						order by s.seq
+					)
+					from pgconductor._private_execution_signals s
+					where s.execution_id = c.id and s.delivered_at is null
+				), '[]'::jsonb) else '[]'::jsonb end as signals
+			from claimed c
 			order by priority asc, run_at asc, created_at asc, id asc
 		`;
 	}
