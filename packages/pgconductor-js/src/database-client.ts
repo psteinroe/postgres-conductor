@@ -22,6 +22,10 @@ import {
 	type ClearWaitingStateArgs,
 	type EmitEventArgs,
 	type RegisterEventWaitArgs,
+	type PollRunningExecutionsArgs,
+	type AckSignalsArgs,
+	type SignalExecutionArgs,
+	type SignalWithStartArgs,
 } from "./query-builder";
 import { makeChildLogger, type Logger } from "./lib/logger";
 import { uuidv7 } from "./lib/uuidv7";
@@ -131,6 +135,8 @@ export type ExecutionCompleted = {
 	claim_token: string;
 	status: "completed";
 	result?: Payload;
+	/** Signal names the attempt listened for; undelivered ones re-queue the execution */
+	signal_names?: string[];
 };
 
 export type ExecutionFailed = {
@@ -188,6 +194,21 @@ export type EventFilterTerm = Record<string, JsonValue | undefined> & {
 	upper_value?: number | null;
 	lower_inclusive?: boolean;
 	upper_inclusive?: boolean;
+};
+
+/** A signal stored for an execution and not yet delivered to a handler. */
+export type StoredSignal = {
+	seq: number;
+	id: string;
+	name: string;
+	payload: JsonValue;
+};
+
+/** Cancellation and new signals of a running execution, read on each worker poll. */
+export type RunningExecutionUpdate = {
+	execution_id: string;
+	cancelled: boolean;
+	signals: StoredSignal[];
 };
 
 export type EventWaitResult =
@@ -357,6 +378,44 @@ export class DatabaseClient {
 			label: "orchestratorHeartbeat",
 			...opts,
 		});
+	}
+
+	async pollRunningExecutions(
+		args: PollRunningExecutionsArgs,
+		opts?: QueryMethodOptions,
+	): Promise<RunningExecutionUpdate[]> {
+		if (args.executions.length === 0) return [];
+		return this.query(() => this.builder.buildPollRunningExecutions(args), {
+			label: "pollRunningExecutions",
+			...opts,
+		});
+	}
+
+	async ackSignals(args: AckSignalsArgs, opts?: QueryMethodOptions): Promise<void> {
+		await this.query(() => this.builder.buildAckSignals(args), {
+			label: "ackSignals",
+			...opts,
+		});
+	}
+
+	async signalExecution(args: SignalExecutionArgs, opts?: QueryMethodOptions): Promise<boolean> {
+		const rows = await this.query(() => this.builder.buildSignalExecution(args), {
+			label: "signalExecution",
+			...opts,
+		});
+		return rows[0]?.stored || false;
+	}
+
+	async signalWithStart(args: SignalWithStartArgs, opts?: QueryMethodOptions): Promise<string> {
+		const rows = await this.query(() => this.builder.buildSignalWithStart(args), {
+			label: "signalWithStart",
+			...opts,
+		});
+		const row = rows[0];
+		if (!row) {
+			throw new Error("signalWithStart returned no rows");
+		}
+		return row.id;
 	}
 
 	async cancelExecution(

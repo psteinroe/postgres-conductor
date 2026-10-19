@@ -86,10 +86,6 @@ create table pgconductor._private_orchestrator_signals (
 
 create index idx_orchestrator_signals_orchestrator on pgconductor._private_orchestrator_signals(orchestrator_id, created_at);
 
-create unique index idx_orchestrator_signals_cancel_unique
-    on pgconductor._private_orchestrator_signals(orchestrator_id, execution_id)
-    where type = 'cancel_execution' and execution_id is not null;
-
 create unique index idx_orchestrator_signals_shutdown_unique
     on pgconductor._private_orchestrator_signals(orchestrator_id)
     where type = 'shutdown';
@@ -103,6 +99,8 @@ create table pgconductor._private_executions (
     task_key text not null,
     queue text not null default 'default',
     dedupe_key text,
+    -- addresses the one non-terminal execution of a task for signal_with_start()
+    key text,
     cron_expression text,
     created_at timestamptz default pgconductor._private_current_time() not null,
     failed_at timestamptz,
@@ -127,6 +125,9 @@ create table pgconductor._private_executions (
     parent_execution_id uuid,
     subscription_id uuid,
     singleton_on timestamptz,
+    -- signals ever stored for this execution; settlement reads it from the locked row to see
+    -- signals committed after its snapshot was taken
+    signal_count integer default 0 not null,
 
     -- source execution metadata of a dead-letter delivery, copied so the source row may be removed
     dead_letter jsonb,
@@ -142,6 +143,11 @@ create table pgconductor._private_executions (
 -- use coalesce to treat NULL dedupe_key as empty string for singleton matching
 create unique index on pgconductor._private_executions (task_key, singleton_on, coalesce(dedupe_key, ''), queue)
 where singleton_on is not null and completed_at is null and failed_at is null and cancelled = false;
+
+-- at most one non-terminal execution per (task, key). a cancelled execution no longer holds its key,
+-- so a signal sent after cancellation starts a new execution instead of being dropped
+create unique index on pgconductor._private_executions (task_key, key, queue)
+where key is not null and completed_at is null and failed_at is null and cancelled = false;
 
 create table pgconductor._private_tasks (
     key text not null,
@@ -200,6 +206,29 @@ create table pgconductor._private_steps (
     primary key (execution_id, key),
     constraint fk_execution foreign key (execution_id, queue) references pgconductor._private_executions(id, queue) on delete cascade
 );
+
+-- application signals of an execution. seq orders delivery; delivered_at is set once a handler
+-- returned for the signal, and a redelivered id is stored once
+create table pgconductor._private_execution_signals (
+    execution_id uuid not null,
+    queue text not null,
+    id text not null,
+    name text not null,
+    payload jsonb,
+    seq bigint generated always as identity,
+    created_at timestamptz default pgconductor._private_current_time() not null,
+    delivered_at timestamptz,
+    primary key (execution_id, id),
+    constraint chk_execution_signal_names check (
+        btrim(id) <> '' and octet_length(id) <= 255
+        and btrim(name) <> '' and octet_length(name) <= 255
+    ),
+    constraint fk_execution foreign key (execution_id, queue) references pgconductor._private_executions(id, queue) on delete cascade
+);
+
+create index idx_execution_signals_undelivered
+    on pgconductor._private_execution_signals (execution_id, seq)
+    where delivered_at is null;
 
 create unique index idx_executions_dead_letter_delivery
     on pgconductor._private_executions ((dead_letter->>'sourceExecutionId'), queue, task_key)
@@ -767,6 +796,137 @@ end;
 $function$
 ;
 
+-- stores a signal for an execution whose row the caller has locked. returns false when the id
+-- was stored before. the worker running the execution reads it on its next poll.
+create or replace function pgconductor._private_store_signal(
+  p_execution_id uuid,
+  p_queue text,
+  p_name text,
+  p_id text,
+  p_payload jsonb
+)
+returns boolean
+language plpgsql
+volatile
+set search_path to ''
+as $function$
+begin
+  insert into pgconductor._private_execution_signals (execution_id, queue, id, name, payload)
+  values (p_execution_id, p_queue, p_id, p_name, p_payload)
+  on conflict (execution_id, id) do nothing;
+
+  if not found then
+    return false;
+  end if;
+
+  update pgconductor._private_executions
+  set signal_count = signal_count + 1
+  where id = p_execution_id and queue = p_queue;
+
+  return true;
+end;
+$function$;
+
+-- signal an execution. returns false when it is completed, failed, cancelled or unknown.
+create or replace function pgconductor.signal_execution(
+  p_execution_id uuid,
+  p_name text,
+  p_id text,
+  p_payload jsonb default null
+)
+returns boolean
+language plpgsql
+volatile
+set search_path to ''
+as $function$
+declare
+  v_queue text;
+begin
+  -- the row lock orders this with settlement, which re-queues an execution that has signals it
+  -- did not deliver
+  select e.queue
+  into v_queue
+  from pgconductor._private_executions e
+  where e.id = p_execution_id
+    and e.completed_at is null
+    and e.failed_at is null
+    and not e.cancelled
+  for update;
+
+  if not found then
+    return false;
+  end if;
+
+  perform pgconductor._private_store_signal(p_execution_id, v_queue, p_name, p_id, p_payload);
+  return true;
+end;
+$function$;
+
+-- signal the non-terminal execution of (task, key), or start one with the signal stored
+create or replace function pgconductor.signal_with_start(
+  p_task_key text,
+  p_queue text,
+  p_key text,
+  p_name text,
+  p_id text,
+  p_payload jsonb default null,
+  p_input jsonb default null,
+  p_trace_context jsonb default null,
+  p_metadata jsonb default null,
+  p_priority integer default null
+)
+returns uuid
+language plpgsql
+volatile
+set search_path to ''
+as $function$
+declare
+  v_execution_id uuid;
+begin
+  if p_key is null or btrim(p_key) = '' then
+    raise exception 'signal_with_start requires a non-empty key';
+  end if;
+
+  perform pgconductor._private_check_metadata(p_metadata);
+
+  perform pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(
+    'pgconductor.key:' || p_queue || ':' || p_task_key || ':' || p_key, 0
+  ));
+
+  -- a concurrent settlement holding the row is waited for; if it completed the execution, the
+  -- row no longer matches and a new execution starts
+  select e.id
+  into v_execution_id
+  from pgconductor._private_executions e
+  where e.task_key = p_task_key
+    and e.queue = p_queue
+    and e.key = p_key
+    and e.completed_at is null
+    and e.failed_at is null
+    and not e.cancelled
+  for update;
+
+  if not found then
+    insert into pgconductor._private_executions (
+      id, task_key, queue, payload, trace_context, metadata, key, priority
+    ) values (
+      pgconductor._private_portable_uuidv7(),
+      p_task_key,
+      p_queue,
+      p_input,
+      p_trace_context,
+      p_metadata,
+      p_key,
+      coalesce(p_priority, 0)
+    )
+    returning id into v_execution_id;
+  end if;
+
+  perform pgconductor._private_store_signal(v_execution_id, p_queue, p_name, p_id, p_payload);
+  return v_execution_id;
+end;
+$function$;
+
 -- cancel an execution
 create or replace function pgconductor.cancel_execution(
   p_execution_id uuid,
@@ -841,7 +1001,7 @@ begin
   end if;
 
   if v_orchestrator_id is not null then
-    -- running: signal orchestrator + set cancelled flag
+    -- running: set cancelled flag, the worker running it aborts it on its next poll
     update pgconductor._private_executions
     set
       cancelled = true,
@@ -856,40 +1016,19 @@ begin
       delete from pgconductor._private_custom_event_subscriptions
       where kind = 'execution_wait'
         and execution_id = p_execution_id;
-
-      insert into pgconductor._private_orchestrator_signals
-        (orchestrator_id, type, execution_id, payload)
-      values (
-        v_orchestrator_id,
-        'cancel_execution',
-        p_execution_id,
-        jsonb_build_object('queue', v_queue, 'reason', p_reason)
-      )
-      on conflict (orchestrator_id, execution_id)
-        where type = 'cancel_execution' and execution_id is not null
-      do nothing;
     end if;
 
     return v_rows_affected > 0;
   end if;
 
-  with running as (
-    update pgconductor._private_executions e
-    set cancelled = true, last_error = p_reason
-    where e.id = any(v_descendant_ids)
-      and e.locked_by is not null
-      and e.completed_at is null
-      and e.failed_at is null
-      and e.cancelled = false
-    returning e.id, e.queue, e.locked_by
-  )
-  insert into pgconductor._private_orchestrator_signals
-    (orchestrator_id, type, execution_id, payload)
-  select r.locked_by, 'cancel_execution', r.id, jsonb_build_object('queue', r.queue, 'reason', p_reason)
-  from running r
-  on conflict (orchestrator_id, execution_id)
-    where type = 'cancel_execution' and execution_id is not null
-  do nothing;
+  -- running descendants are aborted by the workers running them on their next poll
+  update pgconductor._private_executions e
+  set cancelled = true, last_error = p_reason
+  where e.id = any(v_descendant_ids)
+    and e.locked_by is not null
+    and e.completed_at is null
+    and e.failed_at is null
+    and e.cancelled = false;
 
   -- pending: fail immediately
   with pending as (
