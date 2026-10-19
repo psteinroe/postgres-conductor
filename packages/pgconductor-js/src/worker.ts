@@ -149,10 +149,12 @@ export class Worker<
 	private _startDeferred: Deferred<void> | null = null;
 	private _stopDeferred: Deferred<void> | null = null;
 	private _abortController: AbortController | null = null;
-	private _runningTasks = new Map<string, TypedAbortController<TaskAbortReasons>>();
+	private _running = new Map<
+		string,
+		{ controller: TypedAbortController<TaskAbortReasons>; claimToken: string; inbox: SignalInbox }
+	>();
 	// Claimed and not yet settled, including results buffered for flush
 	private readonly held = new Set<string>();
-	private _signalInboxes = new Map<string, { claimToken: string; inbox: SignalInbox }>();
 
 	constructor(
 		public readonly queueName: string,
@@ -280,7 +282,6 @@ export class Worker<
 				this.logger.error("Worker pipeline error:", error);
 			} finally {
 				queue.close();
-				this._abortController?.abort();
 				this._stopDeferred?.resolve();
 				this.resetLifecycle();
 			}
@@ -314,20 +315,6 @@ export class Worker<
 		try {
 			await currentStopDeferred.promise;
 		} catch {}
-	}
-
-	/** Abort running executions whose cancellation the claim read */
-	private cancelExecutions(ids: string[]): void {
-		for (const id of ids) {
-			const controller = this._runningTasks.get(id);
-			if (controller) {
-				controller.abort({
-					reason: "cancelled",
-					__pgconductorTaskAborted: true,
-				});
-				this._runningTasks.delete(id);
-			}
-		}
 	}
 
 	private async register(): Promise<void> {
@@ -399,23 +386,18 @@ export class Worker<
 		assert.ok(this.orchestratorId, "orchestratorId must be set when starting the pipeline");
 
 		const orchestratorId = this.orchestratorId;
-		// The loop of a drain outlives the claims; the pipeline aborts this signal when it ends
-		const signal = this.signal;
 		const allTasks = Array.from(this.tasks.values());
 		// A slot runs one execution, or one batch of a batched task
 		const executionsPerSlot = Math.max(...allTasks.map((task) => task.batch?.size || 1));
-		// False once a drain claimed everything; it then only reads cancellations and signals until its executions finish
-		let claiming = true;
 		let release: Promise<void> | null = null;
 
 		// Claim executions, abort cancelled running ones and hand new signals to their handlers
 		const claim = async (batchSize: number, taskKeys: string[]) => {
-			const running = [...this._runningTasks.keys()].flatMap((id) => {
-				const entry = this._signalInboxes.get(id);
-				return entry
-					? [{ execution_id: id, claim_token: entry.claimToken, after_seq: entry.inbox.afterSeq }]
-					: [];
-			});
+			const running = [...this._running].map(([id, { claimToken, inbox }]) => ({
+				execution_id: id,
+				claim_token: claimToken,
+				after_seq: inbox.afterSeq,
+			}));
 			if (batchSize === 0 && running.length === 0) return [];
 			const { executions, signals, cancelled } = await this.db.getExecutions({
 				orchestratorId,
@@ -424,31 +406,27 @@ export class Worker<
 				taskKeys,
 				running,
 			});
-			this.cancelExecutions(cancelled);
-			for (const stored of signals) {
-				this._signalInboxes.get(stored.execution_id)?.inbox.push([stored]);
+			for (const id of cancelled) {
+				this._running
+					.get(id)
+					?.controller.abort({ reason: "cancelled", __pgconductorTaskAborted: true });
 			}
+			for (const stored of signals) this._running.get(stored.execution_id)?.inbox.push([stored]);
 			for (const exec of executions) this.held.add(exec.id);
 			return executions;
 		};
 
-		while (!signal.aborted) {
+		while (!this.signal?.aborted) {
 			try {
 				// Claim only what free slots can run so other workers get the rest
-				const freeSlots = claiming ? this.concurrency - queue.pending : 0;
+				const freeSlots = this.concurrency - queue.pending;
 				if (freeSlots <= 0) {
+					// Read cancellations and signals of running executions every poll interval
 					await claim(0, []);
-					if (claiming) {
-						// Wake up every poll interval to read cancellations and signals of running executions
-						release ||= queue.waitForRelease().then(() => {
-							release = null;
-						});
-						await Promise.race([release, waitFor(this.pollIntervalMs, { signal })]);
-					} else if (queue.pending > 0) {
-						await waitFor(this.pollIntervalMs, { signal });
-					} else {
-						break;
-					}
+					release ||= queue.waitForRelease().then(() => {
+						release = null;
+					});
+					await Promise.race([release, waitFor(this.pollIntervalMs, { signal: this.signal })]);
 					continue;
 				}
 
@@ -469,19 +447,18 @@ export class Worker<
 				if (executions.length === 0) {
 					if (runOnce) {
 						queue.close();
-						claiming = false;
-						continue;
+						break;
 					}
-					await waitFor(this.pollIntervalMs, { signal });
+					await waitFor(this.pollIntervalMs, { signal: this.signal });
 					continue;
 				}
 
 				for (const exec of executions) {
 					await queue.push(exec); // waits if full
-					if (signal.aborted) break;
+					if (this.signal.aborted) break;
 				}
 			} catch {
-				await waitFor(2000, { signal });
+				await waitFor(2000, { signal: this.signal });
 			}
 		}
 
@@ -564,7 +541,6 @@ export class Worker<
 	): Promise<ExecutionResult | ExecutionResult[]> {
 		const taskAbortController = new TypedAbortController<TaskAbortReasons>();
 		const signal = AbortSignal.any([taskAbortController.signal, this.signal]);
-		this._runningTasks.set(exec.id, taskAbortController);
 		const timeout = task.timeoutMs
 			? setTimeout(() => {
 					taskAbortController.abort({ reason: "timed-out", __pgconductorTaskAborted: true });
@@ -599,7 +575,11 @@ export class Worker<
 		});
 		// Signals stored before the claim are ready when the handler registers its listener
 		signals.push(exec.signals || []);
-		this._signalInboxes.set(exec.id, { claimToken: exec.claim_token, inbox: signals });
+		this._running.set(exec.id, {
+			controller: taskAbortController,
+			claimToken: exec.claim_token,
+			inbox: signals,
+		});
 
 		// Pass db and tasks as extra context to maintenance task, which skips middleware
 		const isMaintenance = task.name === "pgconductor.maintenance";
@@ -763,10 +743,9 @@ export class Worker<
 			} as const;
 		} finally {
 			clearTimeout(timeout);
-			this._runningTasks.delete(exec.id);
+			this._running.delete(exec.id);
 			// A hung-up or failed attempt leaves undelivered signals for the next one
 			void signals.close({ drain: false });
-			this._signalInboxes.delete(exec.id);
 		}
 	}
 
