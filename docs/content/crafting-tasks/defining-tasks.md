@@ -123,7 +123,7 @@ const conductor = Conductor.create({
 
 ## Return Types
 
-Tasks can return typed results when invoked from other tasks using `ctx.invoke()`:
+Tasks can return typed results when invoked from other tasks using `ctx.invokeAndWait()`:
 
 ```typescript
 export const processDataTask = defineTask({
@@ -155,8 +155,8 @@ const parentTask = conductor.createTask(
   { name: "parent-task" },
   { invocable: true },
   async (event, ctx) => {
-    // ctx.invoke() waits for completion and returns the result
-    const result = await ctx.invoke(
+    // ctx.invokeAndWait() waits for completion and returns the result
+    const result = await ctx.invokeAndWait(
       "process-data",
       { name: "process-data" },
       { items: ["a", "b", "c"] }
@@ -168,7 +168,7 @@ const parentTask = conductor.createTask(
 );
 ```
 
-**Note**: `conductor.invoke()` (called from outside a task) does not wait for completion and does not return results. Return types are only useful with `ctx.invoke()` (called from within a task).
+**Note**: `conductor.invoke()` (called from outside a task) does not wait for completion and does not return results. Return types are only useful with `ctx.invokeAndWait()` (called from within a task).
 
 ## Sharing Definitions
 

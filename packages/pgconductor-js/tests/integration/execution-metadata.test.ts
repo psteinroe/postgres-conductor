@@ -84,14 +84,14 @@ describe("execution metadata (Postgres integration)", () => {
 			{ name: "parent" },
 			{ invocable: true },
 			async (_e, ctx) => {
-				await ctx.invoke("inherited", { name: "child" }, { label: "inherited" });
-				await ctx.invoke(
+				await ctx.invokeAndWait("inherited", { name: "child" }, { label: "inherited" });
+				await ctx.invokeAndWait(
 					"overridden",
 					{ name: "child" },
 					{ label: "overridden" },
 					{ metadata: (metadata) => ({ tenant: metadata?.tenant || "", replyTo: "thread-2" }) },
 				);
-				await ctx.invoke("after", { name: "child" }, { label: "after" });
+				await ctx.invokeAndWait("after", { name: "child" }, { label: "after" });
 				seen.parent = ctx.metadata;
 			},
 		);
@@ -290,7 +290,7 @@ describe("execution metadata (Postgres integration)", () => {
 		await conductor.invoke({ name: "noop" }, {}, { metadata: { tenant: "acme", blob: "x" } });
 	});
 
-	test("an oversized ctx.invoke override fails only the invoking attempt", async () => {
+	test("an oversized ctx.invokeAndWait override fails only the invoking attempt", async () => {
 		const db = await child();
 		const conductor = Conductor.create({
 			sql: db.sql,
@@ -306,7 +306,12 @@ describe("execution metadata (Postgres integration)", () => {
 			{ name: "parent", maxAttempts: 1 },
 			{ invocable: true },
 			async (_e, ctx) => {
-				await ctx.invoke("child", { name: "child" }, {}, { metadata: { blob: "x".repeat(8192) } });
+				await ctx.invokeAndWait(
+					"child",
+					{ name: "child" },
+					{},
+					{ metadata: { blob: "x".repeat(8192) } },
+				);
 			},
 		);
 		const bystander = conductor.createTask(

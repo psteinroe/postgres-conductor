@@ -312,7 +312,7 @@ describe("Cancellation Support", () => {
 			{ invocable: true },
 			async (event, ctx) => {
 				if (event.name === "pgconductor.invoke") {
-					const childResult = await ctx.invoke("invoke-child", { name: "child-task" }, {});
+					const childResult = await ctx.invokeAndWait("invoke-child", { name: "child-task" }, {});
 					return { result: `parent got: ${childResult.result}` };
 				}
 				throw new Error("Unexpected event");
@@ -401,7 +401,11 @@ describe("Cancellation Support", () => {
 			{ invocable: true },
 			async (event, ctx) => {
 				if (event.name === "pgconductor.invoke") {
-					const childResult = await ctx.invoke("invoke-child-2", { name: "child-task-2" }, {});
+					const childResult = await ctx.invokeAndWait(
+						"invoke-child-2",
+						{ name: "child-task-2" },
+						{},
+					);
 					return { result: `parent got: ${childResult.result}` };
 				}
 				throw new Error("Unexpected event");

@@ -51,7 +51,7 @@ TypeScript infers the context type automatically.
 
 ## Middleware
 
-`context` is created once and shared by every execution. When a handler needs objects built per execution, such as a client for the current tenant, add middleware. Middleware runs before the handler on every attempt, including each resume after `ctx.sleep()`, `ctx.waitForEvent()` and `ctx.invoke()`:
+`context` is created once and shared by every execution. When a handler needs objects built per execution, such as a client for the current tenant, add middleware. Middleware runs before the handler on every attempt, including each resume after `ctx.sleep()`, `ctx.waitForEvent()` and `ctx.invokeAndWait()`:
 
 ```typescript
 const conductor = Conductor.create({

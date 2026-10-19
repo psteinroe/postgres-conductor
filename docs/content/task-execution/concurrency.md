@@ -45,7 +45,7 @@ This happens entirely in Postgres - no external coordination needed.
 
 Scale a queue by running more replicas of the same codebase. Every orchestrator polling a queue must run the same task set; separate services need separate queues (see [One Queue, One Codebase](../scaling/horizontal.md#one-queue-one-codebase)).
 
-Child invocations use the `group` option supplied to `ctx.invoke`. Dynamic cron schedules accept `group` alongside `cron`, and each subsequent cron execution preserves it.
+Child invocations use the `group` option supplied to `ctx.invokeAndWait`. Dynamic cron schedules accept `group` alongside `cron`, and each subsequent cron execution preserves it.
 
 ## What's Next?
 

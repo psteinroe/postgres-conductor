@@ -42,7 +42,7 @@ After a failed attempt, the next attempt waits:
 
 With the default of 3 attempts, a task retries after 15 and 30 seconds, then fails.
 
-Resuming after `ctx.sleep()` or `ctx.waitForEvent()` does not count as an attempt. Resuming after `ctx.invoke()` does.
+Resuming after `ctx.sleep()` or `ctx.waitForEvent()` does not count as an attempt. Resuming after `ctx.invokeAndWait()` does.
 
 ## Max Attempts
 
@@ -96,7 +96,7 @@ const parent = conductor.createTask(
   { name: "parent" },
   { invocable: true },
   async (event, ctx) => {
-    const child = await ctx.invoke(
+    const child = await ctx.invokeAndWait(
       "call-child",
       { name: "child" },
       { data: event.payload }

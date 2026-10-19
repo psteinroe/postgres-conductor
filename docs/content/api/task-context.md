@@ -146,12 +146,12 @@ execution's input to emit once across attempts: repeating it for the same event 
 and returns the original event ID. Keys are scoped per event name and remembered for 1–2 days after
 the event was dispatched. See [Deduplicating Emits](../crafting-tasks/triggers.md#deduplicating-emits).
 
-## ctx.invoke()
+## ctx.invokeAndWait()
 
 Invoke a child task and wait for result:
 
 ```typescript
-const result = await ctx.invoke<TResult>(
+const result = await ctx.invokeAndWait<TResult>(
   stepName: string,
   taskRef: { name: string, queue?: string },
   payload: TPayload,
@@ -170,7 +170,7 @@ const parent = conductor.createTask(
   { name: "parent" },
   { invocable: true },
   async (event, ctx) => {
-    const childResult = await ctx.invoke(
+    const childResult = await ctx.invokeAndWait(
       "call-child",
       { name: "child-task" },
       { input: event.payload.value },
@@ -188,6 +188,52 @@ const parent = conductor.createTask(
 - Returns child's result
 - Throws if child fails or times out
 - The child inherits `ctx.metadata` unless `metadata` overrides it for that child
+
+## ctx.invoke()
+
+Invoke a task without waiting for it and return the execution ID, like `conductor.invoke()`:
+
+```typescript
+const executionId = await ctx.invoke(
+  stepName: string,
+  taskRef: { name: string, queue?: string },
+  payload: TPayload,
+  options?: {
+    dedupe_key?: string,
+    metadata?: Metadata | ((metadata: Metadata | undefined) => Metadata),
+    run_at?: Date,
+    priority?: number,
+    group?: string,
+  }
+): Promise<string>
+```
+
+**Example:**
+
+```typescript
+const intake = conductor.createTask(
+  { name: "intake" },
+  { invocable: true },
+  async (event, ctx) => {
+    const handoffId = await ctx.invoke("handoff", { name: "support-flow" }, event.payload);
+    return { handoffId };
+  }
+);
+
+// elsewhere
+const result = await conductor.waitForResult({ name: "support-flow" }, handoffId);
+```
+
+**Behavior:**
+- Creates the execution and memoizes its ID under the step name in one statement, so retries
+  and resumes return the same ID
+- The execution is independent: this task does not wait for it, its failure does not fail this
+  task, and cancelling this task does not cancel it
+- `dedupe_key` defaults to a key derived from this execution and the step name. Pass your own to
+  reconnect to an execution: if one of the task already holds the key, its ID is returned and
+  nothing is started, superseded or updated
+- The execution inherits `ctx.metadata` unless `metadata` overrides it
+- Read or await it by ID with `conductor.getExecution()` or `conductor.waitForResult()`
 
 ## ctx.checkpoint()
 

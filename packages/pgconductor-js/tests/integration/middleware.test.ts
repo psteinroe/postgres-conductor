@@ -76,7 +76,7 @@ describe("Middleware", () => {
 			async (_event, ctx) => {
 				await ctx.sleep("nap", 1);
 				await ctx.waitForEvent("approval", { event: approval });
-				await ctx.invoke("child", { name: "middleware.child" }, {});
+				await ctx.invokeAndWait("child", { name: "middleware.child" }, {});
 			},
 		);
 		const child = conductor.createTask(

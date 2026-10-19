@@ -72,7 +72,7 @@ describe("Invoke Support", () => {
 			{ invocable: true },
 			async (event, ctx) => {
 				if (event.name === "pgconductor.invoke") {
-					const childResult = await ctx.invoke(
+					const childResult = await ctx.invokeAndWait(
 						"invoke-child",
 						{ name: "child-task" },
 						{ input: event.payload.value },
@@ -137,7 +137,7 @@ describe("Invoke Support", () => {
 			{ invocable: true },
 			async (_event, ctx) => {
 				try {
-					await ctx.invoke("invoke-slow", { name: "slow-child" }, {}, { timeout: 1000 });
+					await ctx.invokeAndWait("invoke-slow", { name: "slow-child" }, {}, { timeout: 1000 });
 					return { success: true };
 				} catch (err) {
 					parentError(err as Error);
@@ -232,7 +232,7 @@ describe("Invoke Support", () => {
 			async (event, ctx) => {
 				if (event.name === "pgconductor.invoke") {
 					parentAttempts++;
-					const childResult = await ctx.invoke(
+					const childResult = await ctx.invokeAndWait(
 						"invoke-once",
 						{ name: "once-child" },
 						{ input: event.payload.value },
@@ -306,7 +306,11 @@ describe("Invoke Support", () => {
 			{ name: "patient-parent" },
 			{ invocable: true },
 			async (_event, ctx) => {
-				const childResult = await ctx.invoke("invoke-eventual", { name: "eventual-child" }, {});
+				const childResult = await ctx.invokeAndWait(
+					"invoke-eventual",
+					{ name: "eventual-child" },
+					{},
+				);
 				return { childResult: childResult.result };
 			},
 		);
@@ -365,7 +369,7 @@ describe("Invoke Support", () => {
 			{ name: "cascade-parent" },
 			{ invocable: true },
 			async (_event, ctx) => {
-				await ctx.invoke("invoke-failing", { name: "failing-child" }, {});
+				await ctx.invokeAndWait("invoke-failing", { name: "failing-child" }, {});
 				return { success: true };
 			},
 		);
@@ -459,7 +463,7 @@ describe("Invoke Support", () => {
 			{ invocable: true },
 			async (event, ctx) => {
 				if (event.name === "pgconductor.invoke") {
-					const childResult = await ctx.invoke(
+					const childResult = await ctx.invokeAndWait(
 						"invoke-child",
 						{ queue: "child-queue", name: "child-task" },
 						{ input: event.payload.value },
@@ -537,7 +541,7 @@ describe("Invoke Support", () => {
 			{ name: "timeout-parent-2" },
 			{ invocable: true },
 			async (_event, ctx) => {
-				await ctx.invoke(
+				await ctx.invokeAndWait(
 					"invoke-slow",
 					{ name: "slow-child-2", queue: "pending-child-queue" },
 					{},

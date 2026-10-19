@@ -25,7 +25,7 @@ When the timeout elapses, the worker:
 
 The failed attempt is retried like any other failure until `maxAttempts` is reached (see [Retries & Backoff](retries.md)). For batch tasks, the timeout applies to the whole batch and every execution in it fails.
 
-The timer covers a single run of the handler. When a task resumes after `ctx.sleep()`, `ctx.invoke()` or `ctx.waitForEvent()`, the timer starts again.
+The timer covers a single run of the handler. When a task resumes after `ctx.sleep()`, `ctx.invokeAndWait()` or `ctx.waitForEvent()`, the timer starts again.
 
 JavaScript cannot stop a running function. A handler that ignores `ctx.signal` keeps running after the timeout and may overlap with its own retry. Pass `ctx.signal` to I/O that supports it, or check `ctx.signal.aborted` in long loops. `ctx.step()` does not start new steps once the signal is aborted.
 
@@ -43,7 +43,7 @@ const parent = conductor.createTask(
   { invocable: true },
   async (event, ctx) => {
     try {
-      const result = await ctx.invoke(
+      const result = await ctx.invokeAndWait(
         "call-api",
         { name: "external-api" },
         { url: event.payload.url },
@@ -76,7 +76,7 @@ Omit the timeout option to wait indefinitely:
 
 ```typescript
 // Wait forever for child to complete
-const result = await ctx.invoke(
+const result = await ctx.invokeAndWait(
   "process-step",
   { name: "long-task" },
   { data: largeDataset }
