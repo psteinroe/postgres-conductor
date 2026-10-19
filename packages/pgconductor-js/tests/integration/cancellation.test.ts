@@ -917,6 +917,8 @@ describe("Cancellation Support", () => {
 		await conductor.ensureInstalled();
 	}
 
+	const claimToken = crypto.randomUUID();
+
 	async function insertExecution(
 		db: TestDatabase,
 		{
@@ -927,12 +929,13 @@ describe("Cancellation Support", () => {
 	) {
 		const [execution] = await db.sql<[{ id: string }]>`
 			insert into pgconductor._private_executions
-				(task_key, payload, run_at, waiting_on_execution_id, waiting_step_key, locked_by, locked_at)
+				(task_key, payload, run_at, waiting_on_execution_id, waiting_step_key, locked_by, locked_at, claim_token)
 			values (
 				${taskKey}, '{}'::jsonb,
 				${waitingOn ? "infinity" : "now"}::text::timestamptz,
 				${waitingOn || null}::uuid, ${waitingOn ? "child" : null},
-				${lockedBy || null}::uuid, ${lockedBy ? "now" : null}::text::timestamptz
+				${lockedBy || null}::uuid, ${lockedBy ? "now" : null}::text::timestamptz,
+				${lockedBy ? claimToken : null}::uuid
 			)
 			returning id
 		`;
@@ -1130,7 +1133,7 @@ describe("Cancellation Support", () => {
 		expect(await db.client.cancelExecution(sleeping)).toBe(true);
 		expect(await db.client.cancelExecution(invoking)).toBe(true);
 
-		const execution = { queue: "default", task_key: "workflow-task" };
+		const execution = { queue: "default", task_key: "workflow-task", claim_token: claimToken };
 		await db.client.returnExecutions({
 			orchestratorId: orchestrator.id,
 			completed: [],
@@ -1199,6 +1202,7 @@ describe("Cancellation Support", () => {
 			failed: [
 				{
 					execution_id: child,
+					claim_token: claimToken,
 					queue: "default",
 					task_key: "workflow-task",
 					status: "permanently_failed",
@@ -1359,7 +1363,7 @@ describe("Cancellation Support", () => {
 		const parent = await insertExecution(db, { waitingOn: child });
 		await db.sql`
 			update pgconductor._private_executions
-			set locked_by = ${orchestrator.id}::uuid, locked_at = now()
+			set locked_by = ${orchestrator.id}::uuid, locked_at = now(), claim_token = ${claimToken}::uuid
 			where id = ${parent}::uuid
 		`;
 
@@ -1374,6 +1378,7 @@ describe("Cancellation Support", () => {
 					executionId: parent,
 					queue: "default",
 					orchestratorId: orchestrator.id,
+					claimToken,
 				})
 				.execute();
 			await waitForCondition(async () => {

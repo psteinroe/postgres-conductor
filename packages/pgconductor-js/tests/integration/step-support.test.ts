@@ -332,6 +332,7 @@ describe("Step Support", () => {
 			executionId: execution.id,
 			queue: execution.queue,
 			orchestratorId: execution.locked_by,
+			claimToken: execution.claim_token,
 			key: "side-effect",
 			result: { result: 42 },
 		});

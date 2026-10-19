@@ -94,6 +94,7 @@ export interface Execution {
 	waiting_on_execution_id: string | null;
 	waiting_step_key: string | null;
 	locked_by: string;
+	claim_token: string;
 	cancelled: boolean;
 	last_error: string | null;
 	dedupe_key?: string | null;
@@ -126,6 +127,7 @@ export type ExecutionCompleted = {
 	execution_id: string;
 	queue: string;
 	task_key: string;
+	claim_token: string;
 	status: "completed";
 	result?: Payload;
 };
@@ -134,6 +136,7 @@ export type ExecutionFailed = {
 	execution_id: string;
 	queue: string;
 	task_key: string;
+	claim_token: string;
 	status: "failed";
 	error: string;
 };
@@ -142,6 +145,7 @@ export type ExecutionReleased = {
 	execution_id: string;
 	queue: string;
 	task_key: string;
+	claim_token: string;
 	status: "released";
 	reschedule_in_ms?: number | "infinity";
 	step_key?: string;
@@ -151,6 +155,7 @@ export type ExecutionPermamentlyFailed = {
 	execution_id: string;
 	queue: string;
 	task_key: string;
+	claim_token: string;
 	status: "permanently_failed";
 	error: string;
 };
@@ -160,6 +165,7 @@ export type ExecutionInvokeChild = {
 	execution_id: string;
 	queue: string;
 	task_key: string;
+	claim_token: string;
 	status: "invoke_child";
 	timeout_ms: number | "infinity";
 	step_key: string;
@@ -506,11 +512,10 @@ export class DatabaseClient {
 		}
 	}
 
-	async getExecutions(args: GetExecutionsArgs, opts?: QueryMethodOptions): Promise<Execution[]> {
-		return this.query(() => this.builder.buildGetExecutions(args), {
-			label: "getExecutions",
-			...opts,
-		});
+	// Without a signal a claim is never retried: one whose response was lost may have committed.
+	// The next poll claims again, and the heartbeat releases the orphaned claim.
+	async getExecutions(args: GetExecutionsArgs): Promise<Execution[]> {
+		return this.query(() => this.builder.buildGetExecutions(args), { label: "getExecutions" });
 	}
 
 	async getExecution(
@@ -528,13 +533,11 @@ export class DatabaseClient {
 		grouped: GroupedExecutionResults,
 		opts?: QueryMethodOptions,
 	): Promise<void> {
-		const query = this.builder.buildReturnExecutions(grouped);
-
-		if (!query) {
-			return;
-		}
-
-		await this.query(() => query, { label: "returnExecutions", ...opts });
+		// A query runs once, so every attempt builds a new one.
+		await this.query(async () => this.builder.buildReturnExecutions(grouped), {
+			label: "returnExecutions",
+			...opts,
+		});
 	}
 
 	async removeExecutions(args: RemoveExecutionsArgs, opts?: QueryMethodOptions): Promise<boolean> {
