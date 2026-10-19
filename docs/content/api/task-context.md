@@ -235,6 +235,36 @@ const result = await conductor.waitForResult({ name: "support-flow" }, handoffId
 - The execution inherits `ctx.metadata` unless `metadata` overrides it
 - Read or await it by ID with `conductor.getExecution()` or `conductor.waitForResult()`
 
+## ctx.onSignal()
+
+Listen for signals by name. Earlier signals are delivered first, in order. A signal handler that throws fails the attempt. See [Signals](../task-execution/signals.md).
+
+```typescript
+ctx.onSignal("input", async (payload, { id, name }) => {
+  await handleInput(id, payload);
+});
+```
+
+## ctx.sendSignal()
+
+Send a signal to an execution. Idempotent by signal id. Returns `false` if the execution is completed, failed, cancelled or unknown.
+
+```typescript
+await ctx.sendSignal(executionId, { name: "input", id: "report-1", payload });
+```
+
+## ctx.signalWithStart()
+
+Like `conductor.signalWithStart()`, memoized by the step key. An execution it starts inherits this execution's metadata.
+
+```typescript
+const sessionId = await ctx.signalWithStart("start-session", {
+  task: "session",
+  key: threadKey,
+  signal: { name: "input", id: messageId, payload },
+});
+```
+
 ## ctx.checkpoint()
 
 Save progress during long-running tasks:

@@ -216,6 +216,30 @@ const cancelled = await conductor.cancel(
 
 Returns `true` if cancelled, `false` if already completed.
 
+## conductor.signal()
+
+Send a signal to an execution. Returns `false` if the execution is completed, failed, cancelled or unknown. Sending a signal id again stores it once. See [Signals](../task-execution/signals.md).
+
+```typescript
+await conductor.signal(executionId, { name: "input", id: requestId, payload: { text: "hi" } });
+```
+
+## conductor.signalWithStart()
+
+Signal the non-terminal execution of a task for a key, or start one that receives the signal first. Returns the execution ID.
+
+```typescript
+const executionId = await conductor.signalWithStart({
+  task: "session",
+  queue: "default", // optional
+  key: "thread-1",
+  signal: { name: "input", id: requestId, payload },
+  input: {}, // used only when it starts an execution
+  priority: 0, // optional
+  metadata: {}, // optional
+});
+```
+
 ## conductor.getExecution()
 
 Read an execution by ID:
