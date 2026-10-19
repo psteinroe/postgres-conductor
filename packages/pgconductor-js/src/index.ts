@@ -8,6 +8,7 @@ export { SchemaManager } from "./schema-manager";
 export { MigrationStore } from "./migration-store";
 export { WaitForEventTimeoutError } from "./task-context";
 export type { EventSubscription } from "./task-context";
+export type { Middleware, MiddlewareExecution, MiddlewareResult } from "./middleware";
 export type { EventDefinition, DefineEvent, FilterForEvent } from "./event-definition";
 export { defineEvent } from "./event-definition";
 export { parseDuration } from "./lib/duration";

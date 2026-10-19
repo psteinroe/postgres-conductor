@@ -14,6 +14,7 @@ const conductor = Conductor.create({
   sql,                  // postgres.js SQL instance (or use connectionString)
   tasks,                // TaskSchemas from defineTask
   context,              // Custom context object
+  middleware?,          // Optional per-attempt middleware
   logger?,              // Optional custom logger
   events?,              // Optional EventSchemas
   metadata?,            // Optional Standard Schema for execution metadata
@@ -27,6 +28,7 @@ const conductor = Conductor.create({
 - `connectionString`: Postgres connection string (mutually exclusive with `sql`)
 - `tasks`: `TaskSchemas.fromSchema([...])` array of task definitions
 - `context`: Object passed to task handlers as `ctx.{property}` (see [Custom Context](../crafting-tasks/custom-context.md))
+- `middleware`: (optional) Functions that run around every attempt of a non-batch task and can add to `ctx` (see [Middleware](../crafting-tasks/custom-context.md#middleware))
 - `logger`: (optional) Custom logger implementation
 - `events`: (optional) `EventSchemas.fromSchema([...])` for typed custom events
 - `metadata`: (optional) Standard Schema that types and validates execution metadata (see [Execution Metadata](../crafting-tasks/execution-metadata.md))
