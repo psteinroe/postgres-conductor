@@ -1059,16 +1059,7 @@ export class QueryBuilder {
 			throw new Error("Cannot use both throttle and debounce - choose one");
 		}
 
-		let dedupe_seconds: number | null = null;
-		let dedupe_next_slot = false;
-
-		if (spec.throttle) {
-			dedupe_seconds = spec.throttle.seconds;
-			dedupe_next_slot = false;
-		} else if (spec.debounce) {
-			dedupe_seconds = spec.debounce.seconds;
-			dedupe_next_slot = true;
-		}
+		const dedupe = spec.throttle || spec.debounce;
 
 		return this.sql<[{ id: string | null }]>`
 			select id from pgconductor.invoke(
@@ -1077,8 +1068,8 @@ export class QueryBuilder {
 				p_payload := ${spec.payload ? this.sql.json(spec.payload) : null}::jsonb,
 				p_run_at := ${spec.run_at ? spec.run_at.toISOString() : null}::timestamptz,
 				p_dedupe_key := ${spec.dedupe_key || null}::text,
-				p_dedupe_seconds := ${dedupe_seconds}::integer,
-				p_dedupe_next_slot := ${dedupe_next_slot}::boolean,
+				p_dedupe_seconds := ${dedupe ? dedupe.seconds : null}::integer,
+				p_dedupe_next_slot := ${Boolean(spec.debounce)}::boolean,
 				p_cron_expression := ${spec.cron_expression || null}::text,
 				p_priority := ${spec.priority || null}::integer,
 				p_trace_context := ${spec.trace_context ? this.sql.json(spec.trace_context) : null}::jsonb,
@@ -1173,22 +1164,14 @@ export class QueryBuilder {
 				throw new Error("Batch invoke only supports throttle, not debounce");
 			}
 
-			let dedupe_seconds: number | null = null;
-			let dedupe_next_slot = false;
-
-			if (spec.throttle) {
-				dedupe_seconds = spec.throttle.seconds;
-				dedupe_next_slot = false;
-			}
-
 			return {
 				task_key: spec.task_key,
 				queue: spec.queue,
 				payload: spec.payload || null,
 				run_at: spec.run_at,
 				dedupe_key: spec.dedupe_key || null,
-				dedupe_seconds,
-				dedupe_next_slot,
+				dedupe_seconds: spec.throttle ? spec.throttle.seconds : null,
+				dedupe_next_slot: false,
 				cron_expression: spec.cron_expression || null,
 				trace_context: spec.trace_context,
 				metadata: spec.metadata,
