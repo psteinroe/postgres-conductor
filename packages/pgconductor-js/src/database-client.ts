@@ -25,6 +25,7 @@ import {
 	type AckSignalsArgs,
 	type SignalExecutionArgs,
 	type SignalWithStartArgs,
+	type RegisterEventRaceArgs,
 } from "./query-builder";
 import { makeChildLogger, type Logger } from "./lib/logger";
 import { uuidv7 } from "./lib/uuidv7";
@@ -213,7 +214,12 @@ export type ClaimResult = {
 
 export type EventWaitResult =
 	| { status: "resolved"; event: { name: string; payload: Payload } }
-	| { status: "timed_out" };
+	| { status: "timed_out" }
+	| { status: "closed" };
+
+export type EventRaceBranch = { key: string; stepKey: string };
+
+export type EventRaceResult = { key: string; event?: { name: string; payload: Payload } };
 
 export interface EventSubscriptionSpec {
 	task_key: string;
@@ -701,6 +707,17 @@ export class DatabaseClient {
 	): Promise<EventWaitResult | null> {
 		const rows = await this.query(() => this.builder.buildRegisterEventWait(args), {
 			label: "registerEventWait",
+			...opts,
+		});
+		return rows[0]?.result || null;
+	}
+
+	async registerEventRace(
+		args: RegisterEventRaceArgs,
+		opts?: QueryMethodOptions,
+	): Promise<EventRaceResult | null> {
+		const rows = await this.query(() => this.builder.buildRegisterEventRace(args), {
+			label: "registerEventRace",
 			...opts,
 		});
 		return rows[0]?.result || null;

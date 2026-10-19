@@ -9,6 +9,8 @@ import type {
 	EventSubscriptionSpec,
 	EventWaitResult,
 	JsonValue,
+	EventRaceBranch,
+	EventRaceResult,
 	Payload,
 	ClaimResult,
 	TaskSpec,
@@ -164,6 +166,17 @@ export type RegisterEventWaitArgs = {
 	timeoutMs: number | null;
 	orchestratorId: string;
 	suspend: boolean;
+	claimToken: string;
+};
+
+export type RegisterEventRaceArgs = {
+	executionId: string;
+	queue: string;
+	taskKey: string;
+	stepKey: string;
+	branches: EventRaceBranch[];
+	timeoutMs: number | null;
+	orchestratorId: string;
 	claimToken: string;
 };
 
@@ -1325,6 +1338,30 @@ export class QueryBuilder {
 		`;
 	}
 
+	buildRegisterEventRace({
+		executionId,
+		queue,
+		taskKey,
+		stepKey,
+		branches,
+		timeoutMs,
+		orchestratorId,
+		claimToken,
+	}: RegisterEventRaceArgs): PendingQuery<{ result: EventRaceResult | null }[]> {
+		return this.sql<{ result: EventRaceResult | null }[]>`
+			select pgconductor._private_register_event_race(
+				${executionId}::uuid,
+				${queue}::text,
+				${taskKey}::text,
+				${orchestratorId}::uuid,
+				${claimToken}::uuid,
+				${stepKey}::text,
+				${this.sql.json(branches)}::jsonb,
+				${timeoutMs}::bigint
+			) as result
+		`;
+	}
+
 	buildClearWaitingState({
 		executionId,
 		queue,
@@ -1622,11 +1659,13 @@ export class QueryBuilder {
 				order by subscription.id, source.created_at, source.event_id
 			), locked_wait_executions as materialized (
 				-- A claimed or retrying subscriber keeps the result for its next wait.
-				-- Only an execution suspended at this wait is woken. The flag is read
+				-- Only an execution suspended at an event wait is woken; it may be waiting
+				-- on another of its subscriptions and suspend again. The flag is read
 				-- from the locked row because the statement snapshot may be older.
 				select execution.id, execution.queue,
 					execution.locked_by is null
-						and execution.waiting_step_key = wait.step_key as suspended
+						and execution.waiting_on_execution_id is null
+						and execution.waiting_step_key is not null as suspended
 				from pgconductor._private_executions execution
 				join selected_waits wait
 					on wait.execution_id = execution.id and wait.queue = execution.queue

@@ -213,7 +213,8 @@ Tables live in the `pgconductor` schema with a `_private_` prefix (`_private_exe
 - The dispatcher matches subscriptions and inserts one delivery execution per matching subscription in a single statement; deliveries carry `subscription_id` and `parent_execution_id` (the event)
 - Worker registration syncs a queue's trigger subscriptions; ids derive from the definition, so unchanged subscriptions keep their identity. Each trigger filter is compiled once into typed rows in `_private_event_filter_terms` (fields are ANDed, alternatives within a field are ORed)
 - Fan-out is at-least-once: a retried dispatch re-evaluates current subscriptions, and a unique index deduplicates existing deliveries
-- Event waits are `execution_wait` subscriptions keyed by `(execution_id, step_key)`. Dispatch stores the first matching event as the step result and wakes the execution only if it is suspended at that step (`waiting_step_key`); `ctx.subscribe()` registers without suspending, so events matched while the execution runs are kept for the later wait
+- Event waits are `execution_wait` subscriptions keyed by `(execution_id, step_key)`. Dispatch stores the first matching event as the step result and wakes the execution only if it is suspended at an event wait (`waiting_step_key`), which may be at another of its subscriptions; `ctx.subscribe()` registers without suspending, so events matched while the execution runs are kept for the later wait
+- `ctx.waitForAny()` suspends at its own step key over existing `ctx.subscribe()` subscriptions; dispatch stores branch events under their own keys as usual. `_private_register_event_race` picks the winner (earliest stored, then branch order), caches it under the waitForAny key and removes and closes all branch subscriptions
 
 **Signals**
 - `_private_execution_signals` stores one row per `(execution_id, id)`; `seq` orders delivery and `delivered_at` is set when a `ctx.onSignal` handler returned (at least once per id)

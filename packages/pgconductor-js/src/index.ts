@@ -7,7 +7,7 @@ export { Task } from "./task";
 export { SchemaManager } from "./schema-manager";
 export { MigrationStore } from "./migration-store";
 export { WaitForEventTimeoutError } from "./task-context";
-export type { EventSubscription, SignalMessage } from "./task-context";
+export type { EventSubscription, SignalMessage, WaitForAnyResult } from "./task-context";
 export type { SignalHandler, SignalInfo } from "./signal-inbox";
 export type { Middleware, MiddlewareExecution, MiddlewareResult } from "./middleware";
 export type { EventDefinition, DefineEvent, FilterForEvent } from "./event-definition";

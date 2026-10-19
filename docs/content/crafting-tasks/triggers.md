@@ -233,6 +233,25 @@ const decision = await subscription.wait({ timeout: "24h" });
 A matching event emitted after `subscribe()` resolves is kept for `wait()`, even if the task
 is still running. The timeout starts at `wait()`. See [ctx.subscribe()](../api/task-context.md#ctxsubscribe).
 
+To wait for whichever of several events comes first, subscribe to each and pass the
+subscriptions to `ctx.waitForAny()`. It returns the one that received an event first, or
+`{ key: "timeout" }`:
+
+```typescript
+const reply = await ctx.subscribe("reply", {
+  event: threadReplied,
+  filter: { interactionId: [interactionId] },
+});
+const winner = await ctx.waitForAny(
+  "approval-or-reply",
+  { decision: subscription, reply },
+  { timeout: "24h" },
+);
+```
+
+The other subscriptions are removed when one wins. See
+[ctx.waitForAny()](../api/task-context.md#ctxwaitforany).
+
 ## Multiple Triggers
 
 Tasks can respond to multiple trigger types:

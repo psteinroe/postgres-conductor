@@ -18,6 +18,11 @@ const event = defineEvent({
 	}),
 	filterable: ["kind", "amount", "code"],
 });
+const reply = defineEvent({
+	name: "wait.reply",
+	payload: z.object({ id: z.string(), thread: z.string() }),
+	filterable: ["thread"],
+});
 const taskDefinition = defineTask({ name: "wait.task", payload: z.object({ id: z.string() }) });
 
 type Handler = (id: string, ctx: any) => Promise<void>;
@@ -40,7 +45,7 @@ async function setup(
 	const conductor = Conductor.create({
 		sql: db.sql,
 		tasks: TaskSchemas.fromSchema([taskDefinition]),
-		events: EventSchemas.fromSchema([event]),
+		events: EventSchemas.fromSchema([event, reply]),
 		context: {},
 	});
 	const task = conductor.createTask(
@@ -1107,4 +1112,256 @@ describe.serial("waitForEvent", () => {
 			expect(await runAt()).toEqual(backoff);
 		},
 	);
+
+	async function raceSubscriptions(database: TestDatabase, stepKey: string) {
+		const [row] = await database.sql<{ n: number }[]>`
+			select count(*)::int as n
+			from pgconductor._private_custom_event_subscriptions
+			where execution_id = (
+				select execution_id from pgconductor._private_steps where key = ${stepKey}
+			)
+		`;
+		return row?.n;
+	}
+
+	test.serial("waitForAny resolves with the branch that matches first", async () => {
+		const database = await db();
+		const winners: Record<string, unknown> = {};
+		const remaining: Record<string, number | undefined> = {};
+		const handles: Record<string, string> = {};
+		const { conductor } = await setup(
+			database,
+			async (id, ctx) => {
+				const decision = await ctx.subscribe(`decision:${id}`, { event, filter: { code: [id] } });
+				const replied = await ctx.subscribe(`reply:${id}`, {
+					event: reply,
+					filter: { thread: [id] },
+				});
+				const winner = await ctx.waitForAny(`any:${id}`, { decision, reply: replied });
+				winners[id] = winner;
+				remaining[id] = await raceSubscriptions(database, `any:${id}`);
+				handles[id] = await decision.wait().then(
+					() => "resolved",
+					(error: Error) => error.message,
+				);
+			},
+			orchestrators,
+		);
+
+		const one = await conductor.invoke({ name: "wait.task" }, { id: "one" });
+		const two = await conductor.invoke({ name: "wait.task" }, { id: "two" });
+		if (!one || !two) throw new Error("invoke did not return an execution id");
+		await suspendedAt(database, "any:one");
+		await suspendedAt(database, "any:two");
+		await waiting(database, 4);
+		await conductor.emit("wait.order", { id: "approved", kind: "match", code: "one" });
+		await conductor.emit("wait.reply", { id: "hello", thread: "two" });
+		await until(async () => Object.keys(handles).length === 2);
+
+		expect(winners).toEqual({
+			one: {
+				key: "decision",
+				event: { name: "wait.order", payload: { id: "approved", kind: "match", code: "one" } },
+			},
+			two: { key: "reply", event: { name: "wait.reply", payload: { id: "hello", thread: "two" } } },
+		});
+		expect(await step(database, one, "any:one")).toEqual(winners.one);
+		expect(remaining).toEqual({ one: 0, two: 0 });
+		expect(handles).toEqual({
+			one: "resolved",
+			two: 'Event subscription "decision:two" was closed by ctx.waitForAny()',
+		});
+	});
+
+	test.serial("waitForAny picks one winner when several branches match at once", async () => {
+		const database = await db();
+		const outcomes: Record<string, unknown[]> = {};
+		const handler: Handler = async (id, ctx) => {
+			const decision = await ctx.subscribe(`decision:${id}`, { event, filter: { code: [id] } });
+			const replied = await ctx.subscribe(`reply:${id}`, {
+				event: reply,
+				filter: { thread: [id] },
+			});
+			const winner = await ctx.waitForAny(`any:${id}`, { decision, reply: replied });
+			outcomes[id] = [...(outcomes[id] || []), winner];
+		};
+		const { conductor } = await setup(database, handler, orchestrators);
+		await setup(database, handler, orchestrators);
+
+		const ids = Array.from({ length: 10 }, (_, index) => String(index));
+		const executions = new Map<string, string>();
+		for (const id of ids) {
+			const executionId = await conductor.invoke({ name: "wait.task" }, { id });
+			if (!executionId) throw new Error("invoke did not return an execution id");
+			executions.set(id, executionId);
+		}
+		await waiting(database, ids.length * 2);
+		await Promise.all(
+			ids.flatMap((id) => [
+				conductor.emit("wait.order", { id, kind: "match", code: id }),
+				conductor.emit("wait.reply", { id, thread: id }),
+			]),
+		);
+		await until(async () => Object.keys(outcomes).length === ids.length);
+		await Bun.sleep(100);
+
+		for (const [id, executionId] of executions) {
+			expect(outcomes[id]).toEqual([await step(database, executionId, `any:${id}`)]);
+		}
+		await waiting(database, 0);
+	});
+
+	test.serial("waitForAny returns a buffered subscription event without suspending", async () => {
+		const database = await db();
+		const entered: string[] = [];
+		const winners: unknown[] = [];
+		const stored = async (key: string) => {
+			const [row] = await database.sql`select 1 from pgconductor._private_steps where key = ${key}`;
+			return row !== undefined;
+		};
+		const { conductor } = await setup(
+			database,
+			async (id, ctx) => {
+				entered.push(id);
+				const first = await ctx.subscribe("first", { event, filter: { code: ["first"] } });
+				const second = await ctx.subscribe("second", { event, filter: { code: ["second"] } });
+				const replied = await ctx.subscribe("reply", { event: reply });
+				await ctx.step("post-cards", async () => {
+					await ctx.emit("wait.order", { id: "earlier", kind: "match", code: "second" });
+					await until(() => stored("second"));
+					await ctx.emit("wait.order", { id: "later", kind: "match", code: "first" });
+					await until(() => stored("first"));
+				});
+				const winner = await ctx.waitForAny(
+					"any",
+					{ first, second, reply: replied },
+					{ timeout: "1h" },
+				);
+				winners.push(winner);
+				await waiting(database, 0);
+			},
+			orchestrators,
+		);
+
+		await conductor.invoke({ name: "wait.task" }, { id: "buffered" });
+		await until(async () => winners.length === 1);
+		expect(entered).toEqual(["buffered"]);
+		expect(winners).toEqual([
+			{
+				key: "second",
+				event: { name: "wait.order", payload: { id: "earlier", kind: "match", code: "second" } },
+			},
+		]);
+	});
+
+	test.serial("waitForAny resolves to timeout measured from the waitForAny call", async () => {
+		const database = await db();
+		const winners: unknown[] = [];
+		const remaining: (number | undefined)[] = [];
+		const { conductor } = await setup(
+			database,
+			async (id, ctx) => {
+				const decision = await ctx.subscribe(`decision:${id}`, { event });
+				const replied = await ctx.subscribe(`reply:${id}`, { event: reply });
+				await ctx.step("slow", () => Bun.sleep(200));
+				const winner = await ctx.waitForAny(
+					`any:${id}`,
+					{ decision, reply: replied },
+					{ timeout: "1s" },
+				);
+				remaining.push(await raceSubscriptions(database, `any:${id}`));
+				winners.push(winner);
+			},
+			orchestrators,
+		);
+
+		const executionId = await conductor.invoke({ name: "wait.task" }, { id: "timeout" });
+		if (!executionId) throw new Error("invoke did not return an execution id");
+		await suspendedAt(database, "any:timeout");
+		const [subscription] = await database.sql<{ timeout_ms: number }[]>`
+			select extract(epoch from expires_at - created_at) * 1000 as timeout_ms
+			from pgconductor._private_custom_event_subscriptions
+			where execution_id = ${executionId}::uuid and step_key = 'decision:timeout'
+		`;
+		expect(Number(subscription?.timeout_ms)).toBeGreaterThanOrEqual(1200);
+		await until(async () => winners.length === 1);
+		expect(winners).toEqual([{ key: "timeout" }]);
+		expect(remaining).toEqual([0]);
+		expect(await step(database, executionId, "any:timeout")).toEqual({ key: "timeout" });
+	});
+
+	test.serial("waitForAny returns the cached winner after a retry", async () => {
+		const database = await db();
+		const winners: unknown[] = [];
+		const { conductor } = await setup(
+			database,
+			async (id, ctx) => {
+				const decision = await ctx.subscribe(`decision:${id}`, { event, filter: { code: [id] } });
+				const replied = await ctx.subscribe(`reply:${id}`, {
+					event: reply,
+					filter: { thread: [id] },
+				});
+				const winner = await ctx.waitForAny(`any:${id}`, { decision, reply: replied });
+				winners.push(winner);
+				if (winners.length === 1) throw new Error("crash after the race");
+			},
+			orchestrators,
+		);
+
+		const executionId = await conductor.invoke({ name: "wait.task" }, { id: "retry" });
+		if (!executionId) throw new Error("invoke did not return an execution id");
+		await suspendedAt(database, "any:retry");
+		await conductor.emit("wait.reply", { id: "first", thread: "retry" });
+		await until(async () => {
+			const [row] = await database.sql`
+				select 1 from pgconductor._private_executions
+				where id = ${executionId}::uuid and last_error is not null and locked_by is null
+			`;
+			return row !== undefined;
+		});
+		await conductor.emit("wait.order", { id: "second", kind: "match", code: "retry" });
+		await Bun.sleep(100);
+		await database.sql`
+			update pgconductor._private_executions
+			set run_at = pgconductor._private_current_time()
+			where id = ${executionId}::uuid
+		`;
+		await until(async () => winners.length === 2);
+		const first = {
+			key: "reply",
+			event: { name: "wait.reply", payload: { id: "first", thread: "retry" } },
+		};
+		expect(winners).toEqual([first, first]);
+	});
+
+	test.serial("an event for another subscription wakes a wait, which suspends again", async () => {
+		const database = await db();
+		const entered: string[] = [];
+		const result: string[] = [];
+		const { conductor } = await setup(
+			database,
+			async (id, ctx) => {
+				entered.push(id);
+				const later = await ctx.subscribe("later", { event: reply });
+				const value = await ctx.waitForEvent("first", { event, filter: { code: [id] } });
+				result.push(value.payload.id, (await later.wait()).payload.id);
+			},
+			orchestrators,
+		);
+
+		const executionId = await conductor.invoke({ name: "wait.task" }, { id: "spurious" });
+		if (!executionId) throw new Error("invoke did not return an execution id");
+		await suspendedAt(database, "first");
+		await conductor.emit("wait.reply", { id: "reply", thread: "t" });
+		await until(async () => (await step(database, executionId, "later")) !== undefined);
+		await until(async () => entered.length === 2);
+		await suspendedAt(database, "first");
+		expect(result).toEqual([]);
+
+		await conductor.emit("wait.order", { id: "order", kind: "match", code: "spurious" });
+		await until(async () => result.length === 2);
+		expect(entered).toEqual(["spurious", "spurious", "spurious"]);
+		expect(result).toEqual(["order", "reply"]);
+		await waiting(database, 0);
+	});
 });

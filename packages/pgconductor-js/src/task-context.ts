@@ -85,12 +85,23 @@ export class WaitForEventTimeoutError extends Error {
 
 /** A durable event subscription created by `ctx.subscribe()`. */
 export type EventSubscription<TEvent> = {
+	/** The step key the subscription is memoized under. */
+	readonly key: string;
 	/**
 	 * Resolve with the matching event kept since the subscription, suspending
 	 * until one arrives. The timeout starts when `wait()` is first called.
 	 */
 	wait(options?: { timeout?: DurationInput }): Promise<TEvent>;
 };
+
+/** The branch of a `ctx.waitForAny()` that won, with its event, or the timeout. */
+export type WaitForAnyResult<TBranches> =
+	| {
+			[K in keyof TBranches & string]: TBranches[K] extends EventSubscription<infer TEvent>
+				? { key: K; event: TEvent }
+				: never;
+	  }[keyof TBranches & string]
+	| { key: "timeout" };
 
 export type TaskContextOptions = {
 	abortController: TypedAbortController<TaskAbortReasons>;
@@ -282,6 +293,9 @@ export class TaskContext<
 		const result = cached || (await this.registerEventWait(stepKey, options, true));
 		if (!result) return this.abortAndHangup({ reason: "suspended" });
 		if (result.status === "timed_out") throw new WaitForEventTimeoutError(stepKey);
+		if (result.status === "closed") {
+			throw new Error(`Event subscription "${stepKey}" was closed by ctx.waitForAny()`);
+		}
 		return result.event as { name: TDef["name"]; payload: InferEventPayload<TDef> };
 	}
 
@@ -302,8 +316,40 @@ export class TaskContext<
 	): Promise<EventSubscription<{ name: TDef["name"]; payload: InferEventPayload<TDef> }>> {
 		await this.registerEventWait(stepKey, options, false);
 		return {
+			key: stepKey,
 			wait: ({ timeout } = {}) => this.waitForEvent<TName, TDef>(stepKey, { ...options, timeout }),
 		};
+	}
+
+	/**
+	 * Wait for the first event among several `ctx.subscribe()` subscriptions, or
+	 * the timeout. An event a subscription kept before this call wins at once;
+	 * when several did, the one dispatched first wins. All subscriptions are
+	 * removed when the wait settles, and the winner is memoized by the step key.
+	 */
+	async waitForAny<TBranches extends Record<string, EventSubscription<unknown>>>(
+		stepKey: string,
+		branches: TBranches & { timeout?: never },
+		options: { timeout?: DurationInput } = {},
+	): Promise<WaitForAnyResult<TBranches>> {
+		const result = await this.opts.db.registerEventRace(
+			{
+				executionId: this.opts.execution.id,
+				queue: this.opts.execution.queue,
+				taskKey: this.opts.execution.task_key,
+				stepKey,
+				branches: Object.entries(branches).map(([key, subscription]) => ({
+					key,
+					stepKey: subscription.key,
+				})),
+				timeoutMs: options.timeout === undefined ? null : parseDuration(options.timeout),
+				orchestratorId: this.opts.execution.locked_by,
+				claimToken: this.opts.execution.claim_token,
+			},
+			{ signal: this.signal },
+		);
+		if (!result) return this.abortAndHangup({ reason: "suspended" });
+		return result as WaitForAnyResult<TBranches>;
 	}
 
 	async invokeAndWait<

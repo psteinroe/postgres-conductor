@@ -1277,7 +1277,8 @@ $function$;
 -- Registers the subscription for a wait step and, when p_suspend is set,
 -- releases the execution until an event or the timeout wakes it. Without
 -- p_suspend the execution keeps running and dispatch stores a matching event
--- as the step result. Returns the step result once the wait has settled.
+-- as the step result; an existing subscription is left as it is. Returns the
+-- step result once the wait has settled.
 create or replace function pgconductor._private_register_event_wait(
     p_execution_id uuid,
     p_queue text,
@@ -1383,6 +1384,8 @@ begin
             p_event_key,
             p_terms
         );
+    elsif not p_suspend then
+        return null;
     elsif v_expires_at <= v_now then
         delete from pgconductor._private_custom_event_subscriptions
         where id = v_subscription_id;
@@ -1397,7 +1400,7 @@ begin
         on conflict (execution_id, key) do nothing;
 
         return jsonb_build_object('status', 'timed_out');
-    elsif v_expires_at is null and p_suspend then
+    elsif v_expires_at is null then
         -- A subscription registered without suspending starts its timeout here.
         v_expires_at := v_now + p_timeout_ms * interval '1 millisecond';
 
@@ -1417,6 +1420,119 @@ begin
     end if;
 
     return null;
+end;
+$function$;
+
+-- Registers a waitForAny step over subscriptions created by
+-- _private_register_event_wait, referenced by their step keys. The branch whose
+-- event was stored first wins (then branch order). Otherwise the timeout is set
+-- on all branch subscriptions and the execution is released until dispatch wakes
+-- it or the timeout passes. Settling removes the branch subscriptions and closes
+-- the branches, so subscribing again on a resume is a no-op.
+create or replace function pgconductor._private_register_event_race(
+    p_execution_id uuid,
+    p_queue text,
+    p_task_key text,
+    p_orchestrator_id uuid,
+    p_claim_token uuid,
+    p_step_key text,
+    p_branches jsonb,
+    p_timeout_ms bigint
+)
+returns jsonb
+language plpgsql
+volatile
+set search_path to ''
+as $function$
+declare
+    v_step_keys text[] := array(select jsonb_array_elements(p_branches)->>'stepKey');
+    v_result jsonb;
+    v_expires_at timestamptz;
+    v_now timestamptz := pgconductor._private_current_time();
+begin
+    perform 1
+    from pgconductor._private_executions execution
+    where execution.id = p_execution_id
+      and execution.queue = p_queue
+      and execution.task_key = p_task_key
+      and execution.locked_by = p_orchestrator_id
+      and execution.claim_token = p_claim_token
+      and execution.completed_at is null
+      and execution.failed_at is null
+      and not execution.cancelled
+    for update;
+
+    if not found then
+        raise exception 'execution % is not claimed by orchestrator %', p_execution_id, p_orchestrator_id;
+    end if;
+
+    select step.result
+    into v_result
+    from pgconductor._private_steps step
+    where step.execution_id = p_execution_id
+      and step.key = p_step_key;
+
+    if found then
+        return v_result;
+    end if;
+
+    select jsonb_build_object('key', branch.value->>'key', 'event', step.result->'event')
+    into v_result
+    from jsonb_array_elements(p_branches) with ordinality branch
+    join pgconductor._private_steps step
+        on step.execution_id = p_execution_id
+        and step.key = branch.value->>'stepKey'
+    where step.result->>'status' = 'resolved'
+    order by step.created_at, branch.ordinality
+    limit 1;
+
+    if v_result is null then
+        -- The first call sets the timeout, so later calls find it set.
+        select max(subscription.expires_at)
+        into v_expires_at
+        from pgconductor._private_custom_event_subscriptions subscription
+        where subscription.kind = 'execution_wait'
+          and subscription.execution_id = p_execution_id
+          and subscription.step_key = any(v_step_keys);
+
+        if v_expires_at is null then
+            v_expires_at := v_now + p_timeout_ms * interval '1 millisecond';
+
+            update pgconductor._private_custom_event_subscriptions subscription
+            set expires_at = v_expires_at
+            where subscription.kind = 'execution_wait'
+              and subscription.execution_id = p_execution_id
+              and subscription.step_key = any(v_step_keys);
+        elsif v_expires_at <= v_now then
+            v_result := jsonb_build_object('key', 'timeout');
+        end if;
+    end if;
+
+    if v_result is null then
+        update pgconductor._private_executions
+        set attempts = greatest(attempts - 1, 0),
+            run_at = coalesce(v_expires_at, 'infinity'),
+            waiting_step_key = p_step_key,
+            locked_by = null,
+            locked_at = null
+        where id = p_execution_id and queue = p_queue;
+
+        return null;
+    end if;
+
+    insert into pgconductor._private_steps (execution_id, queue, key, result)
+    select p_execution_id, p_queue, p_step_key, v_result
+    union all
+    select p_execution_id, p_queue, step_key, jsonb_build_object('status', 'closed')
+    from unnest(v_step_keys) step_key
+    on conflict (execution_id, key) do nothing;
+
+    delete from pgconductor._private_custom_event_subscriptions subscription
+    where subscription.kind = 'execution_wait'
+      and subscription.execution_id = p_execution_id
+      and subscription.step_key = any(v_step_keys);
+
+    return v_result;
 end;
 $function$;
 
