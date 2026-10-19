@@ -552,6 +552,12 @@ export class Worker<
 			});
 		});
 		const taskEvent = taskEventFor(exec);
+		const identity = {
+			execution_id: exec.id,
+			claim_token: exec.claim_token,
+			queue: exec.queue,
+			task_key: exec.task_key,
+		};
 		const signals = new SignalInbox({
 			ack: (id) =>
 				this.db.ackSignals(
@@ -640,10 +646,7 @@ export class Worker<
 				switch (output.reason) {
 					case "child-invocation":
 						return {
-							execution_id: exec.id,
-							claim_token: exec.claim_token,
-							queue: exec.queue,
-							task_key: exec.task_key,
+							...identity,
 							status: "invoke_child",
 							timeout_ms: output.timeout_ms,
 							step_key: output.step_key,
@@ -656,28 +659,19 @@ export class Worker<
 						} as const;
 					case "cancelled":
 						return {
-							execution_id: exec.id,
-							claim_token: exec.claim_token,
-							queue: exec.queue,
-							task_key: exec.task_key,
+							...identity,
 							status: "permanently_failed",
 							error: exec.last_error || "Task was cancelled",
 						} as const;
 					case "timed-out":
 						return {
-							execution_id: exec.id,
-							claim_token: exec.claim_token,
-							queue: exec.queue,
-							task_key: exec.task_key,
+							...identity,
 							status: "failed",
 							error: `Task timed out after ${task.timeoutMs}ms`,
 						} as const;
 					case "signal-failed":
 						return {
-							execution_id: exec.id,
-							claim_token: exec.claim_token,
-							queue: exec.queue,
-							task_key: exec.task_key,
+							...identity,
 							status: "failed",
 							error: output.error,
 						} as const;
@@ -686,13 +680,10 @@ export class Worker<
 						return [];
 					case "released":
 						return {
-							execution_id: exec.id,
-							claim_token: exec.claim_token,
-							queue: exec.queue,
+							...identity,
+							status: "released",
 							reschedule_in_ms: output.reschedule_in_ms,
 							step_key: output.step_key,
-							task_key: exec.task_key,
-							status: "released",
 						} as const;
 					default:
 						assert.never(output);
@@ -703,20 +694,14 @@ export class Worker<
 			const signalFailure = await signals.close({ drain: true });
 			if (signalFailure) {
 				return {
-					execution_id: exec.id,
-					claim_token: exec.claim_token,
-					queue: exec.queue,
-					task_key: exec.task_key,
+					...identity,
 					status: "failed",
 					error: signalFailure.message,
 				} as const;
 			}
 
 			return {
-				execution_id: exec.id,
-				claim_token: exec.claim_token,
-				queue: exec.queue,
-				task_key: exec.task_key,
+				...identity,
 				status: "completed",
 				result: output,
 				signal_names: signals.names,
@@ -725,18 +710,12 @@ export class Worker<
 			// A handler that stops on ctx.signal during shutdown is released, not failed
 			if (this.signal.aborted) {
 				return {
-					execution_id: exec.id,
-					claim_token: exec.claim_token,
-					queue: exec.queue,
-					task_key: exec.task_key,
+					...identity,
 					status: "released",
 				} as const;
 			}
 			return {
-				execution_id: exec.id,
-				claim_token: exec.claim_token,
-				queue: exec.queue,
-				task_key: exec.task_key,
+				...identity,
 				status: "failed",
 				error: coerceError(err).message,
 			} as const;
