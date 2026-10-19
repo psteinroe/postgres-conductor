@@ -130,7 +130,7 @@ Tables live in the `pgconductor` schema with a `_private_` prefix (`_private_exe
 - Executes tasks with concurrency control (via `mapConcurrent`)
 - Batches and flushes results back to the database
 - Claiming returns each execution's undelivered signals, which prime its `SignalInbox` before the handler runs
-- The claim statement also reads newer undelivered signals of running executions that listen for any (`running` in `getExecutions`) and hands them to their `SignalInbox`. While all slots are busy the worker still runs it every `pollIntervalMs`, with a batch size of 0, as long as some execution listens
+- The claim statement also reads the cancellation flag and newer undelivered signals of the worker's running executions (`running` in `getExecutions`), aborts cancelled ones and hands signals to their `SignalInbox`. While all slots are busy the worker still runs it every `pollIntervalMs`, with a batch size of 0, as long as an execution runs
 - Handles graceful shutdown via AbortController
 
 **TaskContext** (`task-context.ts`)
@@ -149,7 +149,7 @@ Tables live in the `pgconductor` schema with a `_private_` prefix (`_private_exe
 - Manages multiple workers, plus the internal event-dispatch worker when events are configured
 - Handles startup/shutdown coordination and heartbeats
 - Heartbeats keep running while workers drain after shutdown and stop in cleanup, so a slow handler is not recovered as stale
-- Heartbeat signals carry shutdowns and cancellations of running executions
+- Heartbeat signals carry only shutdowns; cancellation and application signals are read by the worker's claim
 - Every 8th heartbeat recovers stale orchestrators (unlocks their executions); an orchestrator whose row was recovered stops itself when its next heartbeat has to re-insert the row
 - Provides `stopped` promise for graceful shutdown
 - Runs the internal event dispatch worker only when the conductor has `events` configured

@@ -205,10 +205,13 @@ export type StoredSignal = {
 	payload: JsonValue;
 };
 
-/** Executions claimed by a poll, and new signals of the running executions it read them for. */
+/** Executions claimed by a poll, and what changed for the running executions it was given. */
 export type ClaimResult = {
 	executions: Execution[];
+	/** New signals of running executions that listen for any */
 	signals: (StoredSignal & { execution_id: string })[];
+	/** Running executions that were cancelled */
+	cancelled: string[];
 };
 
 export type EventWaitResult =

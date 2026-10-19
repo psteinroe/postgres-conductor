@@ -42,8 +42,8 @@ export type GetExecutionsArgs = {
 	queueName: string;
 	batchSize: number;
 	taskKeys: string[];
-	/** Running executions that listen for signals, to read signals stored after `after_seq` */
-	running?: { execution_id: string; claim_token: string; after_seq: number }[];
+	/** Running executions, to read their cancellation and signals stored after `after_seq` */
+	running?: { execution_id: string; claim_token: string; after_seq: number | null }[];
 };
 
 export type RemoveExecutionsArgs = {
@@ -522,8 +522,8 @@ export class QueryBuilder {
 					e.waiting_step_key, e.cancelled, e.last_error, e.dedupe_key, e.cron_expression,
 					e.locked_by, e.claim_token, e."group", e.priority, e.run_at, e.created_at,
 					e.subscription_id, e.trace_context, e.metadata, e.dead_letter, e.signal_count
-			), running_signals as (
-				select s.execution_id, s.seq, s.id, s.name, s.payload
+			), running as materialized (
+				select e.id, e.cancelled, r.after_seq
 				from jsonb_to_recordset(${this.sql.json(running)}::jsonb)
 					as r(execution_id uuid, claim_token uuid, after_seq bigint)
 				join pgconductor._private_executions e
@@ -531,10 +531,15 @@ export class QueryBuilder {
 					and e.queue = ${queueName}::text
 					and e.locked_by = ${orchestratorId}::uuid
 					and e.claim_token = r.claim_token
+			), running_signals as (
+				-- an execution that listens for no signal has a null after_seq
+				select s.execution_id, s.seq, s.id, s.name, s.payload
+				from running r
 				join pgconductor._private_execution_signals s
-					on s.execution_id = e.id
+					on s.execution_id = r.id
 					and s.delivered_at is null
 					and s.seq > r.after_seq
+				where not r.cancelled
 			)
 			select
 				coalesce((
@@ -556,7 +561,10 @@ export class QueryBuilder {
 				), '[]'::jsonb) as executions,
 				coalesce((
 					select jsonb_agg(to_jsonb(s) order by s.seq) from running_signals s
-				), '[]'::jsonb) as signals
+				), '[]'::jsonb) as signals,
+				coalesce((
+					select jsonb_agg(r.id) from running r where r.cancelled
+				), '[]'::jsonb) as cancelled
 		`;
 	}
 

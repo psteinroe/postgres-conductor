@@ -601,7 +601,7 @@ describe("Signals", () => {
 		expect(await delivered()).toBe(true);
 	});
 
-	test("a cancelled running execution takes no signals and does not hold its key", async () => {
+	test("cancellation reaches a running execution on the poll and drops its signals", async () => {
 		const started = new Deferred<void>();
 		const { db, conductor, orchestrator, received } = await setup(async (state, ctx) => {
 			ctx.onSignal("input", collect(state));
@@ -613,7 +613,12 @@ describe("Signals", () => {
 		await orchestrator.start();
 		await started.promise;
 
+		const cancelledAt = Date.now();
 		expect(await conductor.cancel(id)).toBe(true);
+		await waitForCondition(async () => !!(await executionRow(db, id))?.failed_at, 5000);
+		// aborted on the next poll (50 ms) rather than the 30 s heartbeat; settled after the flush
+		expect(Date.now() - cancelledAt).toBeLessThan(1000);
+
 		expect(await conductor.signal(id, { name: "input", id: "late" })).toBe(false);
 		expect(received).toEqual([]);
 

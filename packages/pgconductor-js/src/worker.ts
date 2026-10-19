@@ -280,6 +280,7 @@ export class Worker<
 				this.logger.error("Worker pipeline error:", error);
 			} finally {
 				queue.close();
+				this._abortController?.abort();
 				this._stopDeferred?.resolve();
 				this.resetLifecycle();
 			}
@@ -315,11 +316,8 @@ export class Worker<
 		} catch {}
 	}
 
-	/**
-	 * Cancel running executions by aborting their task controllers.
-	 * Called by orchestrator when cancellation signals are received.
-	 */
-	public cancelExecutions(ids: string[]): void {
+	/** Abort running executions whose cancellation the claim read */
+	private cancelExecutions(ids: string[]): void {
 		for (const id of ids) {
 			const controller = this._runningTasks.get(id);
 			if (controller) {
@@ -401,49 +399,53 @@ export class Worker<
 		assert.ok(this.orchestratorId, "orchestratorId must be set when starting the pipeline");
 
 		const orchestratorId = this.orchestratorId;
+		// The loop of a drain outlives the claims; the pipeline aborts this signal when it ends
+		const signal = this.signal;
 		const allTasks = Array.from(this.tasks.values());
 		// A slot runs one execution, or one batch of a batched task
 		const executionsPerSlot = Math.max(...allTasks.map((task) => task.batch?.size || 1));
-		// False once a drain claimed everything; it then only reads signals until its executions finish
+		// False once a drain claimed everything; it then only reads cancellations and signals until its executions finish
 		let claiming = true;
 		let release: Promise<void> | null = null;
 
-		// Claim executions and hand new signals to the running handlers that listen for them
+		// Claim executions, abort cancelled running ones and hand new signals to their handlers
 		const claim = async (batchSize: number, taskKeys: string[]) => {
-			const running = [...this._signalInboxes].flatMap(([id, { claimToken, inbox }]) =>
-				inbox.afterSeq === null
-					? []
-					: [{ execution_id: id, claim_token: claimToken, after_seq: inbox.afterSeq }],
-			);
+			const running = [...this._runningTasks.keys()].flatMap((id) => {
+				const entry = this._signalInboxes.get(id);
+				return entry
+					? [{ execution_id: id, claim_token: entry.claimToken, after_seq: entry.inbox.afterSeq }]
+					: [];
+			});
 			if (batchSize === 0 && running.length === 0) return [];
-			const { executions, signals } = await this.db.getExecutions({
+			const { executions, signals, cancelled } = await this.db.getExecutions({
 				orchestratorId,
 				queueName: this.queueName,
 				batchSize,
 				taskKeys,
 				running,
 			});
-			for (const signal of signals) {
-				this._signalInboxes.get(signal.execution_id)?.inbox.push([signal]);
+			this.cancelExecutions(cancelled);
+			for (const stored of signals) {
+				this._signalInboxes.get(stored.execution_id)?.inbox.push([stored]);
 			}
 			for (const exec of executions) this.held.add(exec.id);
 			return executions;
 		};
 
-		while (!this.signal?.aborted) {
+		while (!signal.aborted) {
 			try {
 				// Claim only what free slots can run so other workers get the rest
 				const freeSlots = claiming ? this.concurrency - queue.pending : 0;
 				if (freeSlots <= 0) {
 					await claim(0, []);
 					if (claiming) {
-						// Wake up every poll interval to read signals for running executions
+						// Wake up every poll interval to read cancellations and signals of running executions
 						release ||= queue.waitForRelease().then(() => {
 							release = null;
 						});
-						await Promise.race([release, waitFor(this.pollIntervalMs, { signal: this.signal })]);
+						await Promise.race([release, waitFor(this.pollIntervalMs, { signal })]);
 					} else if (queue.pending > 0) {
-						await waitFor(this.pollIntervalMs, { signal: this.signal });
+						await waitFor(this.pollIntervalMs, { signal });
 					} else {
 						break;
 					}
@@ -470,16 +472,16 @@ export class Worker<
 						claiming = false;
 						continue;
 					}
-					await waitFor(this.pollIntervalMs, { signal: this.signal });
+					await waitFor(this.pollIntervalMs, { signal });
 					continue;
 				}
 
 				for (const exec of executions) {
 					await queue.push(exec); // waits if full
-					if (this.signal.aborted) break;
+					if (signal.aborted) break;
 				}
 			} catch {
-				await waitFor(2000, { signal: this.signal });
+				await waitFor(2000, { signal });
 			}
 		}
 
