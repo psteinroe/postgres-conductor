@@ -182,7 +182,7 @@ Tables live in the `pgconductor` schema with a `_private_` prefix (`_private_exe
 
 **Claims and Retries**
 - Every claim sets a fresh `claim_token`. Settlement, `saveStep`, `registerEventWait` and `clearWaitingState` require it alongside `locked_by`, so a retried or late request from an earlier claim by the same orchestrator cannot modify a newer claim
-- `DatabaseClient.query()` retries connection errors, but a connection error is ambiguous: the statement may have committed. `getExecutions` and the heartbeat only retry rollback errors (`40001`, `40P01`, `55P03`); a failed poll or heartbeat is followed by the next one
+- `DatabaseClient.query()` retries connection errors only when called with a `signal`, and a connection error is ambiguous: the statement may have committed. `getExecutions` and the periodic heartbeat are called without one and never retried; a failed poll or heartbeat is followed by the next one
 - A claim whose response was lost is recovered like an expired lease: each worker tracks the executions it holds (claimed and not yet settled), and the heartbeat releases rows locked by its orchestrator that are not held and were locked more than one heartbeat interval ago
 - `query()` retries by calling its callback again; build the query inside the callback, because a postgres.js query only runs once
 

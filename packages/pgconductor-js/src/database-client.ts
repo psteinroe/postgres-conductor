@@ -201,16 +201,10 @@ export interface EventSubscriptionSpec {
 	terms: EventFilterTerm[];
 }
 
-// Postgres rolled the statement back, so it is safe to retry any statement
-const ROLLBACK_SQLSTATE_CODES = new Set([
+const RETRYABLE_SQLSTATE_CODES = new Set([
 	"40001", // serialization_failure
 	"40P01", // deadlock_detected
 	"55P03", // lock_not_available
-]);
-
-// Connection failures are ambiguous: the statement may have committed before the connection failed
-const RETRYABLE_SQLSTATE_CODES = new Set([
-	...ROLLBACK_SQLSTATE_CODES,
 	"57P01", // admin_shutdown
 	"57P02", // crash_shutdown
 	"57P03", // cannot_connect_now
@@ -256,7 +250,6 @@ type QueryOptions = {
 	label?: string;
 	expectError?: boolean;
 	signal?: AbortSignal;
-	onlyRetryRollbacks?: boolean;
 };
 
 type QueryMethodOptions = Pick<QueryOptions, "signal">;
@@ -307,7 +300,7 @@ export class DatabaseClient {
 				return await callback(this.sql);
 			} catch (error) {
 				const err = error as ErrorWithOptionalCode;
-				if (!this.isRetryableError(err, options?.onlyRetryRollbacks)) {
+				if (!this.isRetryableError(err)) {
 					if (!options?.expectError) {
 						logger.error(`Non-retryable database error${label}: ${err.message}`);
 					}
@@ -340,13 +333,10 @@ export class DatabaseClient {
 		}
 	}
 
-	private isRetryableError(err: ErrorWithOptionalCode, onlyRollbacks = false): boolean {
+	private isRetryableError(err: ErrorWithOptionalCode): boolean {
 		const code = err.code;
 		if (!code) {
 			return false;
-		}
-		if (onlyRollbacks) {
-			return ROLLBACK_SQLSTATE_CODES.has(code);
 		}
 		return RETRYABLE_SQLSTATE_CODES.has(code) || RETRYABLE_SYSTEM_ERROR_CODES.has(code);
 	}
@@ -362,11 +352,8 @@ export class DatabaseClient {
 			signal_payload: Record<string, any> | null;
 		}[]
 	> {
-		// A retry would release claims made after the held executions were collected, so a failed
-		// heartbeat waits for the next one.
 		return this.query(() => this.builder.buildOrchestratorHeartbeat(args), {
 			label: "orchestratorHeartbeat",
-			onlyRetryRollbacks: true,
 			...opts,
 		});
 	}
@@ -525,14 +512,10 @@ export class DatabaseClient {
 		}
 	}
 
-	async getExecutions(args: GetExecutionsArgs, opts?: QueryMethodOptions): Promise<Execution[]> {
-		// A claim whose response was lost may have committed, so it is not retried. The next poll
-		// claims again, and the heartbeat releases the orphaned claim.
-		return this.query(() => this.builder.buildGetExecutions(args), {
-			label: "getExecutions",
-			onlyRetryRollbacks: true,
-			...opts,
-		});
+	// Without a signal a claim is never retried: one whose response was lost may have committed.
+	// The next poll claims again, and the heartbeat releases the orphaned claim.
+	async getExecutions(args: GetExecutionsArgs): Promise<Execution[]> {
+		return this.query(() => this.builder.buildGetExecutions(args), { label: "getExecutions" });
 	}
 
 	async getExecution(

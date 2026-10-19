@@ -336,19 +336,17 @@ export class Orchestrator {
 					);
 				}
 
-				// Send heartbeat and process signals
-				const signals = await this.db.orchestratorHeartbeat(
-					{
-						orchestratorId: this.orchestratorId,
-						version: PACKAGE_VERSION,
-						migrationNumber: this.migrationStore.getLatestMigrationNumber(),
-						held: {
-							executionIds: this.workers.flatMap((worker) => worker.heldExecutionIds),
-							claimGrace: `${HEARTBEAT_INTERVAL_MS} milliseconds`,
-						},
+				// Send heartbeat and process signals. Without a signal it is not retried: a retry would
+				// release claims made after the held executions were collected.
+				const signals = await this.db.orchestratorHeartbeat({
+					orchestratorId: this.orchestratorId,
+					version: PACKAGE_VERSION,
+					migrationNumber: this.migrationStore.getLatestMigrationNumber(),
+					held: {
+						executionIds: this.workers.flatMap((worker) => worker.heldExecutionIds),
+						claimGrace: `${HEARTBEAT_INTERVAL_MS} milliseconds`,
 					},
-					{ signal },
-				);
+				});
 
 				// Our row was gone, so another orchestrator recovered our executions
 				if (signals.some((s) => s.registered)) {

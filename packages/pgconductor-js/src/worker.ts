@@ -418,15 +418,12 @@ export class Worker<
 					)
 					.map((task) => task.name);
 
-				const executions = await this.db.getExecutions(
-					{
-						orchestratorId: this.orchestratorId,
-						queueName: this.queueName,
-						batchSize: Math.min(this.fetchBatchSize, freeSlots * executionsPerSlot),
-						taskKeys,
-					},
-					{ signal: this.signal },
-				);
+				const executions = await this.db.getExecutions({
+					orchestratorId: this.orchestratorId,
+					queueName: this.queueName,
+					batchSize: Math.min(this.fetchBatchSize, freeSlots * executionsPerSlot),
+					taskKeys,
+				});
 				for (const exec of executions) this.held.add(exec.id);
 
 				if (executions.length === 0) {
