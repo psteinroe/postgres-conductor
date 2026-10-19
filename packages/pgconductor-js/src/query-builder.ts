@@ -127,11 +127,14 @@ export type PollRunningExecutionsArgs = {
 	orchestratorId: string;
 	queueName: string;
 	/** Running executions; `after_seq` is null for one that listens for no signal */
-	executions: { execution_id: string; after_seq: number | null }[];
+	executions: { execution_id: string; claim_token: string; after_seq: number | null }[];
 };
 
 export type AckSignalsArgs = {
 	executionId: string;
+	queue: string;
+	orchestratorId: string;
+	claimToken: string;
 	ids: string[];
 };
 
@@ -273,7 +276,7 @@ export class QueryBuilder {
 		return this.sql<RunningExecutionUpdate[]>`
 			with running as (
 				select * from jsonb_to_recordset(${this.sql.json(executions)}::jsonb)
-				as r(execution_id uuid, after_seq bigint)
+				as r(execution_id uuid, claim_token uuid, after_seq bigint)
 			)
 			select e.id as execution_id, e.cancelled,
 				coalesce((
@@ -291,6 +294,7 @@ export class QueryBuilder {
 				on e.id = r.execution_id
 				and e.queue = ${queueName}::text
 				and e.locked_by = ${orchestratorId}::uuid
+				and e.claim_token = r.claim_token
 			where e.cancelled
 				or exists (
 					select 1 from pgconductor._private_execution_signals s
@@ -301,13 +305,29 @@ export class QueryBuilder {
 		`;
 	}
 
-	buildAckSignals({ executionId, ids }: AckSignalsArgs): PendingQuery<RowList<Row[]>> {
+	buildAckSignals({
+		executionId,
+		queue,
+		orchestratorId,
+		claimToken,
+		ids,
+	}: AckSignalsArgs): PendingQuery<RowList<Row[]>> {
 		return this.sql`
-			update pgconductor._private_execution_signals
+			with claimed_execution as materialized (
+				select e.id
+				from pgconductor._private_executions e
+				where e.id = ${executionId}::uuid
+					and e.queue = ${queue}::text
+					and e.locked_by = ${orchestratorId}::uuid
+					and e.claim_token = ${claimToken}::uuid
+				for update
+			)
+			update pgconductor._private_execution_signals s
 			set delivered_at = pgconductor._private_current_time()
-			where execution_id = ${executionId}::uuid
-				and id = any(${this.sql.array(ids, 1009)}::text[])
-				and delivered_at is null
+			from claimed_execution c
+			where s.execution_id = c.id
+				and s.id = any(${this.sql.array(ids, 1009)}::text[])
+				and s.delivered_at is null
 		`;
 	}
 

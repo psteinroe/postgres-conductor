@@ -502,6 +502,79 @@ describe("Signals", () => {
 		expect(signals.map((s) => s.id)).toEqual(["s1"]);
 	});
 
+	test("a stale claim neither reads nor acknowledges signals", async () => {
+		const db = await pool.child();
+		databases.push(db);
+		const conductor = createConductor(db);
+		await conductor.ensureInstalled();
+		await db.client.registerWorker({
+			queueName: "default",
+			taskSpecs: [{ key: "session", queue: "default", maxAttempts: 3 }],
+			cronSchedules: [],
+			eventSubscriptions: [],
+		});
+		const id = await conductor.invoke({ name: "session" }, {});
+		await conductor.signal(id, { name: "input", id: "s1" });
+
+		const orchestratorId = crypto.randomUUID();
+		const claim = async () => {
+			const [execution] = await db.client.getExecutions({
+				orchestratorId,
+				queueName: "default",
+				batchSize: 1,
+				taskKeys: ["session"],
+			});
+			if (!execution) throw new Error("expected claim");
+			return execution;
+		};
+		const first = await claim();
+		await db.client.returnExecutions({
+			orchestratorId,
+			completed: [],
+			failed: [],
+			released: [
+				{
+					execution_id: id,
+					claim_token: first.claim_token,
+					queue: "default",
+					task_key: "session",
+					status: "released",
+					reschedule_in_ms: 0,
+				},
+			],
+			invokeChild: [],
+		});
+		const second = await claim();
+
+		const poll = (claimToken: string) =>
+			db.client.pollRunningExecutions({
+				orchestratorId,
+				queueName: "default",
+				executions: [{ execution_id: id, claim_token: claimToken, after_seq: 0 }],
+			});
+		expect(await poll(first.claim_token)).toEqual([]);
+		expect((await poll(second.claim_token))[0]?.signals.map((s) => s.id)).toEqual(["s1"]);
+
+		const ack = (claimToken: string) =>
+			db.client.ackSignals({
+				executionId: id,
+				queue: "default",
+				orchestratorId,
+				claimToken,
+				ids: ["s1"],
+			});
+		const delivered = async () => {
+			const [row] = await db.sql<{ delivered_at: Date | null }[]>`
+				select delivered_at from pgconductor._private_execution_signals where id = 's1'
+			`;
+			return !!row?.delivered_at;
+		};
+		await ack(first.claim_token);
+		expect(await delivered()).toBe(false);
+		await ack(second.claim_token);
+		expect(await delivered()).toBe(true);
+	});
+
 	test("cancellation reaches a running execution on the poll and drops its signals", async () => {
 		const started = new Deferred<void>();
 		const { db, conductor, orchestrator, received } = await setup(async (state, ctx) => {

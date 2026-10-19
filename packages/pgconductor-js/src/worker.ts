@@ -149,7 +149,10 @@ export class Worker<
 	private _startDeferred: Deferred<void> | null = null;
 	private _stopDeferred: Deferred<void> | null = null;
 	private _abortController: AbortController | null = null;
-	private _runningTasks = new Map<string, TypedAbortController<TaskAbortReasons>>();
+	private _runningTasks = new Map<
+		string,
+		{ controller: TypedAbortController<TaskAbortReasons>; claimToken: string }
+	>();
 	// Claimed and not yet settled, including results buffered for flush
 	private readonly held = new Set<string>();
 	private _signalInboxes = new Map<string, SignalInbox>();
@@ -321,9 +324,9 @@ export class Worker<
 	 */
 	public cancelExecutions(ids: string[]): void {
 		for (const id of ids) {
-			const controller = this._runningTasks.get(id);
-			if (controller) {
-				controller.abort({
+			const running = this._runningTasks.get(id);
+			if (running) {
+				running.controller.abort({
 					reason: "cancelled",
 					__pgconductorTaskAborted: true,
 				});
@@ -337,8 +340,9 @@ export class Worker<
 	 * Runs on the poll loop, so both arrive within about one poll interval.
 	 */
 	private async pollRunningExecutions(orchestratorId: string): Promise<void> {
-		const executions = [...this._runningTasks.keys()].map((id) => ({
+		const executions = [...this._runningTasks].map(([id, { claimToken }]) => ({
 			execution_id: id,
+			claim_token: claimToken,
 			after_seq: this._signalInboxes.get(id)?.afterSeq ?? null,
 		}));
 		const updates = await this.db.pollRunningExecutions(
@@ -566,7 +570,10 @@ export class Worker<
 	): Promise<ExecutionResult | ExecutionResult[]> {
 		const taskAbortController = new TypedAbortController<TaskAbortReasons>();
 		const signal = AbortSignal.any([taskAbortController.signal, this.signal]);
-		this._runningTasks.set(exec.id, taskAbortController);
+		this._runningTasks.set(exec.id, {
+			controller: taskAbortController,
+			claimToken: exec.claim_token,
+		});
 		const timeout = task.timeoutMs
 			? setTimeout(() => {
 					taskAbortController.abort({ reason: "timed-out", __pgconductorTaskAborted: true });
@@ -580,7 +587,17 @@ export class Worker<
 		});
 		const taskEvent = taskEventFor(exec);
 		const signals = new SignalInbox({
-			ack: (ids) => this.db.ackSignals({ executionId: exec.id, ids }, { signal: this.signal }),
+			ack: (ids) =>
+				this.db.ackSignals(
+					{
+						executionId: exec.id,
+						queue: exec.queue,
+						orchestratorId: exec.locked_by,
+						claimToken: exec.claim_token,
+						ids,
+					},
+					{ signal: this.signal },
+				),
 			onError: (error) => {
 				taskAbortController.abort({
 					reason: "signal-failed",
