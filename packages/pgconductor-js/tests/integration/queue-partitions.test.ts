@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, describe, expect, mock, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, test, vi } from "vitest";
 import { z } from "zod";
 import { Conductor } from "../../src/conductor";
 import { defineEvent } from "../../src/event-definition";
@@ -100,7 +100,7 @@ describe("queue partitions", () => {
 			events: EventSchemas.fromSchema([event]),
 			context: {},
 		});
-		const handler = mock(async () => {});
+		const handler = vi.fn(async () => {});
 		const config = { pollIntervalMs: 10, flushIntervalMs: 10 };
 		const orchestrator = Orchestrator.create({
 			conductor,

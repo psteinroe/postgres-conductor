@@ -1,18 +1,18 @@
-import { createEventDispatchTask, EVENT_DISPATCH_QUEUE } from "./event-dispatch-task";
-import { DEFAULT_WORKER_CONFIG, Worker, type WorkerConfig } from "./worker";
-import { DatabaseClient } from "./database-client";
-import { MigrationStore } from "./migration-store";
-import { SchemaManager } from "./schema-manager";
-import { Deferred } from "./lib/deferred";
-import type { Conductor } from "./conductor";
-import { type AnyTask, type ValidateTasksQueue, Task } from "./task";
-import { PACKAGE_VERSION } from "./versions";
-import { makeChildLogger, type Logger } from "./lib/logger";
-import * as assert from "./lib/assert";
-import { SIGNALS, type Signal } from "./lib/signals";
-import { noop } from "./lib/noop";
-import { coerceError } from "./lib/coerce-error";
-import { waitFor } from "./lib/wait-for";
+import { createEventDispatchTask, EVENT_DISPATCH_QUEUE } from "./event-dispatch-task.js";
+import { DEFAULT_WORKER_CONFIG, Worker, type WorkerConfig } from "./worker.js";
+import { DatabaseClient } from "./database-client.js";
+import { MigrationStore } from "./migration-store.js";
+import { SchemaManager } from "./schema-manager.js";
+import { Deferred } from "./lib/deferred.js";
+import type { Conductor } from "./conductor.js";
+import { type AnyTask, type ValidateTasksQueue, Task } from "./task.js";
+import { PACKAGE_VERSION } from "./versions.js";
+import { makeChildLogger, type Logger } from "./lib/logger.js";
+import * as assert from "./lib/assert.js";
+import { SIGNALS, type Signal } from "./lib/signals.js";
+import { noop } from "./lib/noop.js";
+import { coerceError } from "./lib/coerce-error.js";
+import { waitFor } from "./lib/wait-for.js";
 
 export type OrchestratorOptions<TTasks extends readonly AnyTask[] = readonly AnyTask[]> = {
 	conductor: Conductor<any, any, any, any, any, any, any>;

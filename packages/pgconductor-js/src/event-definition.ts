@@ -1,5 +1,5 @@
 import type { StandardSchemaV1 } from "@standard-schema/spec";
-import { validateSchema } from "./lib/validate-schema";
+import { validateSchema } from "./lib/validate-schema.js";
 
 type ObjectSchema = StandardSchemaV1<unknown, object>;
 type EnsureObject<T> = T extends object ? T : {};

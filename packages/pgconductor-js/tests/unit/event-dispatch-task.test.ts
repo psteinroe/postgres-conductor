@@ -1,4 +1,4 @@
-import { expect, mock, test } from "bun:test";
+import { expect, test, vi } from "vitest";
 import {
 	createEventDispatchTask,
 	EVENT_DISPATCH_QUEUE,
@@ -14,13 +14,13 @@ function context() {
 		abortController,
 		abortController.signal,
 		new DefaultLogger(),
-		{ countSteps: mock(async () => 0) },
+		{ countSteps: vi.fn(async () => 0) },
 		[],
 	);
 }
 
 test("defines the internal event dispatch task", () => {
-	const task = createEventDispatchTask({ dispatchCustomEvents: mock(async () => []) });
+	const task = createEventDispatchTask({ dispatchCustomEvents: vi.fn(async () => []) });
 
 	expect({
 		name: task.name,
@@ -40,7 +40,7 @@ test("defines the internal event dispatch task", () => {
 test("dispatches from ordinary batch event execution metadata", async () => {
 	const id = "00000000-0000-0000-0000-000000000001";
 	const owner = "00000000-0000-0000-0000-000000000002";
-	const dispatchCustomEvents = mock(async () => [id]);
+	const dispatchCustomEvents = vi.fn(async () => [id]);
 	const task = createEventDispatchTask({ dispatchCustomEvents });
 	const batchContext = context();
 
@@ -68,7 +68,7 @@ test("dispatches from ordinary batch event execution metadata", async () => {
 });
 
 test("leaves stale claim settlement to the ordinary worker", async () => {
-	const dispatchCustomEvents = mock(async () => []);
+	const dispatchCustomEvents = vi.fn(async () => []);
 	const task = createEventDispatchTask({ dispatchCustomEvents });
 	const result = await task.execute(
 		[
@@ -90,7 +90,7 @@ test("leaves stale claim settlement to the ordinary worker", async () => {
 });
 
 test("rejects empty and mixed-owner batches", async () => {
-	const task = createEventDispatchTask({ dispatchCustomEvents: mock(async () => []) });
+	const task = createEventDispatchTask({ dispatchCustomEvents: vi.fn(async () => []) });
 	const owner = "00000000-0000-0000-0000-000000000001";
 	const event = (id: string, lockedBy: string) => ({
 		name: "pgconductor.invoke" as const,

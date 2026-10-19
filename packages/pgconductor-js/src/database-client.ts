@@ -1,6 +1,6 @@
 import postgres, { type Sql } from "postgres";
-import { waitFor } from "./lib/wait-for";
-import type { Migration } from "./migration-store";
+import { waitFor } from "./lib/wait-for.js";
+import type { Migration } from "./migration-store.js";
 import {
 	QueryBuilder,
 	type OrchestratorHeartbeatArgs,
@@ -26,10 +26,10 @@ import {
 	type SignalExecutionArgs,
 	type SignalWithStartArgs,
 	type RegisterEventRaceArgs,
-} from "./query-builder";
-import { makeChildLogger, type Logger } from "./lib/logger";
-import { uuidv7 } from "./lib/uuidv7";
-import type { TraceContextCarrier } from "./telemetry";
+} from "./query-builder.js";
+import { makeChildLogger, type Logger } from "./lib/logger.js";
+import { uuidv7 } from "./lib/uuidv7.js";
+import type { TraceContextCarrier } from "./telemetry.js";
 
 export type JsonValue = string | number | boolean | null | Payload | JsonValue[];
 export type Payload = { [key: string]: JsonValue };

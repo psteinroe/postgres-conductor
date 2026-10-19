@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { test, expect, describe, beforeAll, afterAll, afterEach } from "bun:test";
+import { test, expect, describe, beforeAll, afterAll, afterEach } from "vitest";
 import { Conductor } from "../../src/conductor";
 import { Orchestrator } from "../../src/orchestrator";
 import { defineTask } from "../../src/task-definition";

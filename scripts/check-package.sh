@@ -2,7 +2,7 @@
 
 # Packs pgconductor-js, installs the tarball with npm into a temporary project
 # and checks that it works for a plain Node consumer: ESM imports, TypeScript
-# types and the CLI. Bun is only used to build and pack.
+# types and the CLI.
 
 set -euo pipefail
 
@@ -11,7 +11,7 @@ JS_DIR="$SCRIPT_DIR/../packages/pgconductor-js"
 WORK_DIR="$(mktemp -d)"
 trap 'rm -rf "$WORK_DIR"' EXIT
 
-(cd "$JS_DIR" && bun run build && bun pm pack --destination "$WORK_DIR" --quiet)
+(cd "$JS_DIR" && pnpm run build && pnpm pack --pack-destination "$WORK_DIR")
 
 cd "$WORK_DIR"
 

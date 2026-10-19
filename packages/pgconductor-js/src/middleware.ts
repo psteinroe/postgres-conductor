@@ -1,5 +1,5 @@
-import type { Payload } from "./database-client";
-import type { TaskContext } from "./task-context";
+import type { Payload } from "./database-client.js";
+import type { TaskContext } from "./task-context.js";
 
 declare const middlewareContext: unique symbol;
 

@@ -1,4 +1,4 @@
-import { describe, test, expect, beforeAll, afterAll, afterEach } from "bun:test";
+import { describe, test, expect, beforeAll, afterAll, afterEach } from "vitest";
 import { TestDatabasePool } from "../fixtures/test-database";
 import type { TestDatabase } from "../fixtures/test-database";
 import { Conductor } from "../../src/conductor";

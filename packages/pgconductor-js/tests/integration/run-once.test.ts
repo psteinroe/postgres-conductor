@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { test, expect, describe, beforeAll, afterAll, afterEach, mock } from "bun:test";
+import { test, expect, describe, beforeAll, afterAll, afterEach, vi } from "vitest";
 import { Conductor } from "../../src/conductor";
 import { Orchestrator } from "../../src/orchestrator";
 import { defineTask } from "../../src/task-definition";
@@ -103,7 +103,7 @@ describe("drain() Mode", () => {
 			name: "empty-task",
 		});
 
-		const executionCount = mock(() => {});
+		const executionCount = vi.fn(() => {});
 
 		const conductor = Conductor.create({
 			sql: db.sql,
@@ -300,7 +300,7 @@ describe("drain() Mode", () => {
 			name: "continuous-task",
 		});
 
-		const executionCount = mock(() => {});
+		const executionCount = vi.fn(() => {});
 
 		const conductor = Conductor.create({
 			sql: db.sql,

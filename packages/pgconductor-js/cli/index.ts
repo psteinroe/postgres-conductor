@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import postgres from "postgres";
-import * as assert from "./lib/assert";
+import * as assert from "./lib/assert.js";
 
 interface Column {
 	table_schema: string;

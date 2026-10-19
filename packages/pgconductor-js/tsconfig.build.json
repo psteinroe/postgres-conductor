@@ -1,11 +1,14 @@
 {
-	"extends": "../../tsconfig.json",
+	"extends": "./tsconfig.json",
 	"compilerOptions": {
+		"target": "ES2023",
+		"module": "NodeNext",
+		"moduleResolution": "NodeNext",
+		"allowImportingTsExtensions": false,
 		"noEmit": false,
 		"declaration": true,
-		"emitDeclarationOnly": true,
-		"outDir": "dist/types",
-		"rootDir": "src"
+		"outDir": "dist",
+		"rootDir": "."
 	},
-	"include": ["src"]
+	"include": ["src", "cli"]
 }

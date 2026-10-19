@@ -1,4 +1,4 @@
-import { getMigrations } from "./generated/sql";
+import { getMigrations } from "./generated/sql.js";
 
 export interface Migration {
 	version: number;

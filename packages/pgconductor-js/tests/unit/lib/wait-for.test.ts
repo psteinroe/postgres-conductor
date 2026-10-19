@@ -1,4 +1,4 @@
-import { test, expect, describe } from "bun:test";
+import { test, expect, describe } from "vitest";
 import { waitFor } from "../../../src/lib/wait-for";
 
 describe("waitFor", () => {

@@ -1,7 +1,7 @@
-import { Task, type AnyTask } from "./task";
-import type { DatabaseClient } from "./database-client";
+import { Task, type AnyTask } from "./task.js";
+import type { DatabaseClient } from "./database-client.js";
 import crypto from "crypto";
-import type { TaskContext } from "./task-context";
+import type { TaskContext } from "./task-context.js";
 
 function hashToJitter(str: string): number {
 	const hash = crypto.createHash("sha256").update(str).digest();

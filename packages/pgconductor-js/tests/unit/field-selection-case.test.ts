@@ -1,4 +1,4 @@
-import { test } from "bun:test";
+import { test } from "vitest";
 import { z } from "zod";
 import type { SelectedRow } from "../../src/select-columns";
 

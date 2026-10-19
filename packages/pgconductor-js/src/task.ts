@@ -6,11 +6,15 @@ import type {
 	HasCron,
 	HasCustomEvent,
 	CronTrigger,
-} from "./task-definition";
-import type { EventDefinition, FindEventByIdentifier, InferEventPayload } from "./event-definition";
-import type { SelectedRow } from "./select-columns";
-import * as assert from "./lib/assert";
-import { compileEventTriggers, type CompiledEventTrigger } from "./event-trigger-validation";
+} from "./task-definition.js";
+import type {
+	EventDefinition,
+	FindEventByIdentifier,
+	InferEventPayload,
+} from "./event-definition.js";
+import type { SelectedRow } from "./select-columns.js";
+import * as assert from "./lib/assert.js";
+import { compileEventTriggers, type CompiledEventTrigger } from "./event-trigger-validation.js";
 
 export type TaskIdentifier<TName extends string = string, TQueue extends string = "default"> = {
 	readonly name: TName;

@@ -1,4 +1,4 @@
-import type { Logger } from "./logger";
+import type { Logger } from "./logger.js";
 
 const DATABASE_CLOCK_REFRESH_INTERVAL_MS = 10 * 60 * 1000;
 

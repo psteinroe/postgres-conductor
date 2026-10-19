@@ -1,4 +1,4 @@
-import { describe, expect, mock, test } from "bun:test";
+import { describe, expect, test, vi } from "vitest";
 import type { StoredSignal } from "../../src/database-client";
 import { SignalInbox } from "../../src/signal-inbox";
 import { Deferred } from "../../src/lib/deferred";
@@ -104,7 +104,7 @@ describe("SignalInbox", () => {
 		const s = store();
 		s.add("input", "a");
 		s.add("input", "b");
-		const onError = mock((_error: Error) => {});
+		const onError = vi.fn((_error: Error) => {});
 		const inbox = new SignalInbox({ ack: s.ack, onError });
 
 		inbox.listen("input", () => {
@@ -190,7 +190,7 @@ describe("SignalInbox", () => {
 	test("a handler that throws while draining fails close without reporting an error", async () => {
 		const s = store();
 		s.add("input", "a");
-		const onError = mock((_error: Error) => {});
+		const onError = vi.fn((_error: Error) => {});
 		const inbox = new SignalInbox({ ack: s.ack, onError });
 
 		for (const signal of s.signals) inbox.push(signal);

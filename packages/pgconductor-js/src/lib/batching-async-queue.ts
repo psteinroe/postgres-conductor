@@ -5,8 +5,8 @@ export type BatchGroup<T> = {
 	items: T[];
 };
 
-import type { PollableAsyncIterable } from "./async-queue";
-import { Deferred } from "./deferred";
+import type { PollableAsyncIterable } from "./async-queue.js";
+import { Deferred } from "./deferred.js";
 
 /**
  * AsyncQueue that automatically batches items based on configuration.
@@ -32,7 +32,7 @@ export class BatchingAsyncQueue<T extends { task_key: string }> implements Polla
 		string,
 		{
 			items: T[];
-			timer: Timer | null;
+			timer: ReturnType<typeof setTimeout> | null;
 		}
 	>();
 

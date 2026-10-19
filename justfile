@@ -11,23 +11,23 @@ build-migrations:
     bash ./scripts/build-migrations.sh
 
 lint:
-    bun run oxlint --type-aware --deny-warnings
-    (cd packages/pgconductor-js && bun run typecheck)
+    pnpm exec oxlint --type-aware --deny-warnings
+    (cd packages/pgconductor-js && pnpm run typecheck)
 
 test:
-    (cd packages/pgconductor-js && bun run test)
+    (cd packages/pgconductor-js && pnpm run test)
 
 test-unit:
-    (cd packages/pgconductor-js && bun run test:unit)
+    (cd packages/pgconductor-js && pnpm run test:unit)
 
 test-integration:
-    (cd packages/pgconductor-js && bun run test:integration)
+    (cd packages/pgconductor-js && pnpm run test:integration)
 
 lint-fix:
-    bun run oxlint --type-aware --fix --deny-warnings
+    pnpm exec oxlint --type-aware --fix --deny-warnings
 
 format:
-    bun run oxfmt
+    pnpm exec oxfmt
 
 ready:
     just lint

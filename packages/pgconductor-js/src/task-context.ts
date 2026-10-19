@@ -6,23 +6,23 @@ import type {
 	DeadLetterMetadata,
 	EventWaitResult,
 	JsonValue,
-} from "./database-client";
-import { nextCronOccurrence } from "./lib/cron";
-import type { Clock } from "./lib/clock";
+} from "./database-client.js";
+import { nextCronOccurrence } from "./lib/cron.js";
+import type { Clock } from "./lib/clock.js";
 import type {
 	TaskDefinition,
 	TaskName,
 	FindTaskByIdentifier,
 	InferPayload,
 	InferReturns,
-} from "./task-definition";
-import type { TaskIdentifier } from "./task";
-import type { Logger } from "./lib/logger";
-import { WindowChecker } from "./lib/window-checker";
-import type { TypedAbortController } from "./lib/typed-abort-controller";
-import { parseDuration, type DurationInput } from "./lib/duration";
+} from "./task-definition.js";
+import type { TaskIdentifier } from "./task.js";
+import type { Logger } from "./lib/logger.js";
+import { WindowChecker } from "./lib/window-checker.js";
+import type { TypedAbortController } from "./lib/typed-abort-controller.js";
+import { parseDuration, type DurationInput } from "./lib/duration.js";
 import { SpanKind } from "@opentelemetry/api";
-import type { Telemetry, TraceContextCarrier } from "./telemetry";
+import type { Telemetry, TraceContextCarrier } from "./telemetry.js";
 import {
 	validateEventPayload,
 	type EventDefinition,
@@ -30,10 +30,10 @@ import {
 	type FindEventByIdentifier,
 	type InferEventPayload,
 	type FilterForEvent,
-} from "./event-definition";
-import { compileEventFilter } from "./event-trigger-validation";
-import { validateSchema } from "./lib/validate-schema";
-import type { SignalHandler, SignalInbox } from "./signal-inbox";
+} from "./event-definition.js";
+import { compileEventFilter } from "./event-trigger-validation.js";
+import { validateSchema } from "./lib/validate-schema.js";
+import type { SignalHandler, SignalInbox } from "./signal-inbox.js";
 
 export type TaskAbortReasons =
 	// if cancelled by a user

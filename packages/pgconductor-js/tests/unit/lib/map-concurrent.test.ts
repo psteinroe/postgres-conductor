@@ -1,4 +1,5 @@
-import { test, expect, describe } from "bun:test";
+import { setTimeout as sleep } from "node:timers/promises";
+import { test, expect, describe } from "vitest";
 import { mapConcurrent } from "../../../src/lib/map-concurrent";
 import { AsyncQueue, type PollableAsyncIterable } from "../../../src/lib/async-queue";
 import { BatchingAsyncQueue } from "../../../src/lib/batching-async-queue";
@@ -86,7 +87,7 @@ describe("mapConcurrent", () => {
 
 			const startedBeforeFirstCompleted = await Promise.race([
 				secondStarted.promise.then(() => true),
-				Bun.sleep(100).then(() => false),
+				sleep(100).then(() => false),
 			]);
 			expect(startedBeforeFirstCompleted).toBe(true);
 		} finally {

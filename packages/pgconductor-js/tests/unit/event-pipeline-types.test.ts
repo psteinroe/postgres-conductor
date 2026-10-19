@@ -1,4 +1,4 @@
-import { describe, expectTypeOf, test } from "bun:test";
+import { describe, expectTypeOf, test } from "vitest";
 import { z } from "zod";
 import { defineEvent, type FilterForEvent } from "../../src/event-definition";
 

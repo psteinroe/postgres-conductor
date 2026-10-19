@@ -1,6 +1,6 @@
 import { z } from "zod";
 import postgres from "postgres";
-import { test, expect, describe, beforeAll, afterAll, afterEach, mock } from "bun:test";
+import { test, expect, describe, beforeAll, afterAll, afterEach, vi } from "vitest";
 import { Conductor } from "../../src/conductor";
 import { Orchestrator } from "../../src/orchestrator";
 import { defineTask } from "../../src/task-definition";
@@ -45,7 +45,7 @@ describe("Invoke Support", () => {
 			returns: z.object({ output: z.number() }),
 		});
 
-		const childFn = mock((n: number) => n * 2);
+		const childFn = vi.fn((n: number) => n * 2);
 		const childCompleted = new Deferred<void>();
 
 		const conductor = Conductor.create({
@@ -115,7 +115,7 @@ describe("Invoke Support", () => {
 			returns: z.object({ completed: z.boolean() }),
 		});
 
-		const parentError = mock((err: Error) => err.message);
+		const parentError = vi.fn((err: Error) => err.message);
 
 		const conductor = Conductor.create({
 			sql: db.sql,
@@ -204,7 +204,7 @@ describe("Invoke Support", () => {
 			returns: z.object({ output: z.number() }),
 		});
 
-		const childFn = mock((n: number) => n * 3);
+		const childFn = vi.fn((n: number) => n * 3);
 		const parentCompleted = new Deferred<void>();
 
 		const conductor = Conductor.create({
@@ -282,7 +282,7 @@ describe("Invoke Support", () => {
 			returns: z.object({ result: z.string() }),
 		});
 
-		const childFn = mock(() => "completed");
+		const childFn = vi.fn(() => "completed");
 		const childCompleted = new Deferred<void>();
 
 		const conductor = Conductor.create({
@@ -346,7 +346,7 @@ describe("Invoke Support", () => {
 			returns: z.object({ result: z.string() }),
 		});
 
-		const childFn = mock(() => {
+		const childFn = vi.fn(() => {
 			throw new Error("Child always fails");
 		});
 
@@ -449,7 +449,7 @@ describe("Invoke Support", () => {
 			returns: z.object({ output: z.number() }),
 		});
 
-		const childFn = mock((n: number) => n * 2);
+		const childFn = vi.fn((n: number) => n * 2);
 		const childCalled = new Deferred<void>();
 
 		const conductor = Conductor.create({

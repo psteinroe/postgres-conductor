@@ -1,4 +1,5 @@
-import { afterAll, afterEach, beforeAll, test, expect, jest } from "bun:test";
+import { setTimeout as sleep } from "node:timers/promises";
+import { afterAll, afterEach, beforeAll, test, expect, vi } from "vitest";
 import postgres from "postgres";
 import { TestDatabasePool } from "../fixtures/test-database";
 import type { TestDatabase } from "../fixtures/test-database";
@@ -17,7 +18,7 @@ beforeAll(async () => {
 }, 60000);
 
 afterEach(async () => {
-	jest.useRealTimers();
+	vi.useRealTimers();
 	await Promise.all(databases.map((db) => db.destroy()));
 	databases.length = 0;
 });
@@ -169,11 +170,11 @@ test("stop() waits for an in-flight heartbeat and nothing runs after cleanup", a
 		return heartbeat(args, opts);
 	};
 
-	jest.useFakeTimers();
+	vi.useFakeTimers();
 	const orch = Orchestrator.create({ conductor });
 	await orch.start();
 
-	jest.advanceTimersByTime(30_000);
+	vi.advanceTimersByTime(30_000);
 	await heartbeatStarted.promise;
 
 	const stopping = orch.stop();
@@ -186,7 +187,7 @@ test("stop() waits for an in-flight heartbeat and nothing runs after cleanup", a
 	`;
 	expect(rows.length).toBe(0);
 
-	jest.advanceTimersByTime(120_000);
+	vi.advanceTimersByTime(120_000);
 	await db.sql`select 1`;
 	expect(heartbeats).toBe(2);
 	process.off("unhandledRejection", onUnhandled);
@@ -237,7 +238,7 @@ test("stop() waits for the running step and releases at the next step", async ()
 	const stopping = orch.stop().then(() => {
 		stopped = true;
 	});
-	await Bun.sleep(200);
+	await sleep(200);
 	expect(stopped).toBe(false);
 
 	finishStep.resolve();
@@ -273,7 +274,7 @@ test("stop() releases a handler that throws on ctx.signal", async () => {
 		async (_event, ctx) => {
 			started.resolve();
 			while (!ctx.signal.aborted) {
-				await Bun.sleep(10);
+				await sleep(10);
 			}
 			throw new Error("Task was cancelled");
 		},
@@ -392,7 +393,7 @@ test("stop() waits for a running batch handler and saves its results", async () 
 	const stopping = orch.stop().then(() => {
 		stopped = true;
 	});
-	await Bun.sleep(200);
+	await sleep(200);
 	expect(stopped).toBe(false);
 
 	finish.resolve();
@@ -436,7 +437,7 @@ test("stop() leaves a conductor with an owned connection usable until close()", 
 
 	await conductor.close();
 
-	expect(conductor.invoke({ name: "noop" }, {})).rejects.toThrow();
+	await expect(conductor.invoke({ name: "noop" }, {})).rejects.toThrow();
 });
 
 test("stop() while another session holds the migration lock does not migrate", async () => {

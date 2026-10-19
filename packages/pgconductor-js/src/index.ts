@@ -1,10 +1,10 @@
-export { Conductor } from "./conductor";
-export type { ConductorOptions, WaitForResultOptions } from "./conductor";
-export { Orchestrator } from "./orchestrator";
-export type { OrchestratorOptions } from "./orchestrator";
-export { Worker } from "./worker";
-export type { WorkerConfig } from "./worker";
-export { Task } from "./task";
+export { Conductor } from "./conductor.js";
+export type { ConductorOptions, WaitForResultOptions } from "./conductor.js";
+export { Orchestrator } from "./orchestrator.js";
+export type { OrchestratorOptions } from "./orchestrator.js";
+export { Worker } from "./worker.js";
+export type { WorkerConfig } from "./worker.js";
+export { Task } from "./task.js";
 export type {
 	AnyTask,
 	BatchConfig,
@@ -14,20 +14,20 @@ export type {
 	TaskConfiguration,
 	TaskEvent,
 	TaskIdentifier,
-} from "./task";
-export { TaskSchemas, EventSchemas } from "./schemas";
-export { SchemaManager } from "./schema-manager";
-export { MigrationStore } from "./migration-store";
-export { TaskContext, BatchTaskContext, WaitForEventTimeoutError } from "./task-context";
+} from "./task.js";
+export { TaskSchemas, EventSchemas } from "./schemas.js";
+export { SchemaManager } from "./schema-manager.js";
+export { MigrationStore } from "./migration-store.js";
+export { TaskContext, BatchTaskContext, WaitForEventTimeoutError } from "./task-context.js";
 export type {
 	BatchTaskEvent,
 	EventSubscription,
 	SignalMessage,
 	WaitForAnyResult,
-} from "./task-context";
-export type { SignalHandler, SignalInfo } from "./signal-inbox";
-export type { Middleware, MiddlewareExecution, MiddlewareResult } from "./middleware";
-export { defineTask } from "./task-definition";
+} from "./task-context.js";
+export type { SignalHandler, SignalInfo } from "./signal-inbox.js";
+export type { Middleware, MiddlewareExecution, MiddlewareResult } from "./middleware.js";
+export { defineTask } from "./task-definition.js";
 export type {
 	TaskDefinition,
 	DefineTask,
@@ -37,16 +37,16 @@ export type {
 	InvocableTrigger,
 	CronTrigger,
 	CustomEventTrigger,
-} from "./task-definition";
+} from "./task-definition.js";
 export type {
 	EventDefinition,
 	DefineEvent,
 	EventFilter,
 	FilterForEvent,
 	InferEventPayload,
-} from "./event-definition";
-export { defineEvent } from "./event-definition";
-export type { ExecutionInfo, ExecutionStatus, JsonValue, Payload } from "./database-client";
-export type { Logger, LogArg } from "./lib/logger";
-export { parseDuration } from "./lib/duration";
-export type { DurationInput, DurationUnit } from "./lib/duration";
+} from "./event-definition.js";
+export { defineEvent } from "./event-definition.js";
+export type { ExecutionInfo, ExecutionStatus, JsonValue, Payload } from "./database-client.js";
+export type { Logger, LogArg } from "./lib/logger.js";
+export { parseDuration } from "./lib/duration.js";
+export type { DurationInput, DurationUnit } from "./lib/duration.js";

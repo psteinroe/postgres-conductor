@@ -4,8 +4,8 @@ import type {
 	FilterForEvent,
 	FindEventByIdentifier,
 	InferEventPayload,
-} from "./event-definition";
-import type { ValidateColumns } from "./select-columns";
+} from "./event-definition.js";
+import type { ValidateColumns } from "./select-columns.js";
 
 type ObjectSchema = StandardSchemaV1<unknown, object>;
 

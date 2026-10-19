@@ -4,31 +4,31 @@ import type {
 	Execution,
 	ExecutionResult,
 	ExecutionSpec,
-} from "./database-client";
-import type { AnyTask, BatchConfig } from "./task";
-import type { TaskDefinition } from "./task-definition";
-import { waitFor } from "./lib/wait-for";
-import { mapConcurrent } from "./lib/map-concurrent";
-import { Deferred } from "./lib/deferred";
-import { BatchingAsyncQueue } from "./lib/batching-async-queue";
-import { nextCronOccurrence } from "./lib/cron";
-import { Clock } from "./lib/clock";
+} from "./database-client.js";
+import type { AnyTask, BatchConfig } from "./task.js";
+import type { TaskDefinition } from "./task-definition.js";
+import { waitFor } from "./lib/wait-for.js";
+import { mapConcurrent } from "./lib/map-concurrent.js";
+import { Deferred } from "./lib/deferred.js";
+import { BatchingAsyncQueue } from "./lib/batching-async-queue.js";
+import { nextCronOccurrence } from "./lib/cron.js";
+import { Clock } from "./lib/clock.js";
 import {
 	isTaskAbortReason,
 	TaskContext,
 	BatchTaskContext,
 	type TaskAbortReasons,
-} from "./task-context";
-import * as assert from "./lib/assert";
-import { createMaintenanceTask } from "./maintenance-task";
-import { makeChildLogger, type Logger } from "./lib/logger";
-import type { EventDefinition } from "./event-definition";
-import { coerceError } from "./lib/coerce-error";
-import { TypedAbortController } from "./lib/typed-abort-controller";
-import { Telemetry } from "./telemetry";
-import { noop } from "./lib/noop";
-import type { Middleware, MiddlewareResult } from "./middleware";
-import { SignalInbox } from "./signal-inbox";
+} from "./task-context.js";
+import * as assert from "./lib/assert.js";
+import { createMaintenanceTask } from "./maintenance-task.js";
+import { makeChildLogger, type Logger } from "./lib/logger.js";
+import type { EventDefinition } from "./event-definition.js";
+import { coerceError } from "./lib/coerce-error.js";
+import { TypedAbortController } from "./lib/typed-abort-controller.js";
+import { Telemetry } from "./telemetry.js";
+import { noop } from "./lib/noop.js";
+import type { Middleware, MiddlewareResult } from "./middleware.js";
+import { SignalInbox } from "./signal-inbox.js";
 
 /**
  * The configuration options for the Worker.

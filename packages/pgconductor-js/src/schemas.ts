@@ -1,5 +1,5 @@
-import type { TaskDefinition } from "./task-definition";
-import type { EventDefinition } from "./event-definition";
+import type { TaskDefinition } from "./task-definition.js";
+import type { EventDefinition } from "./event-definition.js";
 
 /**
  * Stackable adapter for task definitions.

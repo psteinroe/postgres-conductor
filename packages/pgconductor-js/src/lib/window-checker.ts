@@ -1,4 +1,4 @@
-import * as assert from "./assert";
+import * as assert from "./assert.js";
 
 export class WindowChecker {
 	private startMinutes: number;

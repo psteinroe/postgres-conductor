@@ -1,6 +1,7 @@
+import { setTimeout as sleep } from "node:timers/promises";
 import postgres from "postgres";
 import { z } from "zod";
-import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, test } from "vitest";
 import { Conductor } from "../../src/conductor";
 import { Orchestrator } from "../../src/orchestrator";
 import { defineTask } from "../../src/task-definition";
@@ -104,7 +105,7 @@ describe("Signals", () => {
 		const id = await conductor.invoke({ name: "session" }, {});
 		await orchestrator.start();
 		await started.promise;
-		await Bun.sleep(200);
+		await sleep(200);
 
 		const sentAt = Date.now();
 		expect(await conductor.signal(id, { name: "input", id: "s1", payload: { text: "hi" } })).toBe(
@@ -287,7 +288,7 @@ describe("Signals", () => {
 			});
 			await locked.promise;
 			const settled = returnExecutions(args, opts);
-			await Bun.sleep(200);
+			await sleep(200);
 			commit.resolve();
 			await tx;
 			return settled;

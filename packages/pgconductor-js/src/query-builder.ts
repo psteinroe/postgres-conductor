@@ -1,7 +1,7 @@
 import type { PendingQuery, Row, RowList, Sql } from "postgres";
-import type { ReturnExecutionsArgs } from "./database-client";
-import * as assert from "./lib/assert";
-import type { TraceContextCarrier } from "./telemetry";
+import type { ReturnExecutionsArgs } from "./database-client.js";
+import * as assert from "./lib/assert.js";
+import type { TraceContextCarrier } from "./telemetry.js";
 import type {
 	ExecutionInfo,
 	ExecutionSpec,
@@ -14,7 +14,7 @@ import type {
 	Payload,
 	ClaimResult,
 	TaskSpec,
-} from "./database-client";
+} from "./database-client.js";
 
 export type OrchestratorHeartbeatArgs = {
 	orchestratorId: string;

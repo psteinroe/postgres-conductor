@@ -8,7 +8,7 @@ pnpm install pgconductor-js @opentelemetry/api
 
 `@opentelemetry/api` is a required peer dependency. Without a registered OpenTelemetry SDK, tracing is a no-op.
 
-The package is ESM-only and runs on Node.js 20+ and Bun. It ships its own TypeScript types. CommonJS projects can load it with `await import("pgconductor-js")`.
+The package is ESM-only and runs on Node.js 20+. It ships its own TypeScript types. CommonJS projects can load it with `await import("pgconductor-js")`.
 
 ## Database Setup
 

@@ -1,4 +1,4 @@
-import { test, expect, describe, mock } from "bun:test";
+import { test, expect, describe, vi } from "vitest";
 import { DatabaseClient } from "../../src/database-client";
 import type { Sql } from "postgres";
 
@@ -41,10 +41,10 @@ describe("DatabaseClient retry behavior", () => {
 		const db = new DatabaseClient({
 			sql: mockSql,
 			logger: {
-				info: mock(),
-				warn: mock(),
-				error: mock(),
-				debug: mock(),
+				info: vi.fn(),
+				warn: vi.fn(),
+				error: vi.fn(),
+				debug: vi.fn(),
 			},
 		});
 
@@ -74,10 +74,10 @@ describe("DatabaseClient retry behavior", () => {
 		const db = new DatabaseClient({
 			sql: mockSql,
 			logger: {
-				info: mock(),
-				warn: mock(),
-				error: mock(),
-				debug: mock(),
+				info: vi.fn(),
+				warn: vi.fn(),
+				error: vi.fn(),
+				debug: vi.fn(),
 			},
 		});
 
@@ -106,10 +106,10 @@ describe("DatabaseClient retry behavior", () => {
 		const db = new DatabaseClient({
 			sql: mockSql,
 			logger: {
-				info: mock(),
-				warn: mock(),
-				error: mock(),
-				debug: mock(),
+				info: vi.fn(),
+				warn: vi.fn(),
+				error: vi.fn(),
+				debug: vi.fn(),
 			},
 		});
 
@@ -146,10 +146,10 @@ describe("DatabaseClient retry behavior", () => {
 		const db = new DatabaseClient({
 			sql: mockSql,
 			logger: {
-				info: mock(),
-				warn: mock(),
-				error: mock(),
-				debug: mock(),
+				info: vi.fn(),
+				warn: vi.fn(),
+				error: vi.fn(),
+				debug: vi.fn(),
 			},
 		});
 
@@ -183,10 +183,10 @@ describe("DatabaseClient retry behavior", () => {
 		const db = new DatabaseClient({
 			sql: mockSql,
 			logger: {
-				info: mock(),
-				warn: mock(),
-				error: mock(),
-				debug: mock(),
+				info: vi.fn(),
+				warn: vi.fn(),
+				error: vi.fn(),
+				debug: vi.fn(),
 			},
 		});
 
@@ -213,10 +213,10 @@ describe("DatabaseClient retry behavior", () => {
 		const db = new DatabaseClient({
 			sql: mockSql,
 			logger: {
-				info: mock(),
-				warn: mock(),
-				error: mock(),
-				debug: mock(),
+				info: vi.fn(),
+				warn: vi.fn(),
+				error: vi.fn(),
+				debug: vi.fn(),
 			},
 		});
 
@@ -262,10 +262,10 @@ describe("DatabaseClient retry behavior", () => {
 		const db = new DatabaseClient({
 			sql: mockSql,
 			logger: {
-				info: mock(),
-				warn: mock(),
-				error: mock(),
-				debug: mock(),
+				info: vi.fn(),
+				warn: vi.fn(),
+				error: vi.fn(),
+				debug: vi.fn(),
 			},
 		});
 
@@ -298,10 +298,10 @@ describe("DatabaseClient retry behavior", () => {
 		const db = new DatabaseClient({
 			sql: mockSql,
 			logger: {
-				info: mock(),
-				warn: mock(),
-				error: mock(),
-				debug: mock(),
+				info: vi.fn(),
+				warn: vi.fn(),
+				error: vi.fn(),
+				debug: vi.fn(),
 			},
 		});
 

@@ -1,4 +1,5 @@
-import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
+import { setTimeout as sleep } from "node:timers/promises";
+import { afterAll, afterEach, beforeAll, describe, expect, test } from "vitest";
 import { z } from "zod";
 import { Conductor } from "../../src/conductor";
 import { Orchestrator } from "../../src/orchestrator";
@@ -31,7 +32,7 @@ async function until(check: () => Promise<boolean>, timeout = 20_000) {
 	const end = Date.now() + timeout;
 	while (Date.now() < end) {
 		if (await check()) return;
-		await Bun.sleep(10);
+		await sleep(10);
 	}
 	throw new Error("condition was not met");
 }
@@ -63,7 +64,7 @@ async function setup(
 	return { conductor, orchestrator };
 }
 
-describe.serial("waitForEvent", () => {
+describe("waitForEvent", () => {
 	let pool: TestDatabasePool;
 	const databases: TestDatabase[] = [];
 	const orchestrators: Orchestrator[] = [];
@@ -116,58 +117,55 @@ describe.serial("waitForEvent", () => {
 		});
 	}
 
-	test.serial(
-		"matches filters, fans out, and replays a step without another subscription",
-		async () => {
-			const database = await db();
-			const entries: string[] = [];
-			const { conductor } = await setup(
-				database,
-				async (id, ctx) => {
-					entries.push(`entered:${id}`);
-					const result = await ctx.waitForEvent(`order:${id}`, {
-						event,
-						filter: { kind: ["match"] },
-					});
-					entries.push(`result:${result.payload.id}`);
-					const replay = await ctx.waitForEvent(`order:${id}`, { event });
-					entries.push(`replay:${replay.payload.id}`);
-				},
-				orchestrators,
-			);
+	test("matches filters, fans out, and replays a step without another subscription", async () => {
+		const database = await db();
+		const entries: string[] = [];
+		const { conductor } = await setup(
+			database,
+			async (id, ctx) => {
+				entries.push(`entered:${id}`);
+				const result = await ctx.waitForEvent(`order:${id}`, {
+					event,
+					filter: { kind: ["match"] },
+				});
+				entries.push(`result:${result.payload.id}`);
+				const replay = await ctx.waitForEvent(`order:${id}`, { event });
+				entries.push(`replay:${replay.payload.id}`);
+			},
+			orchestrators,
+		);
 
-			const one = await conductor.invoke({ name: "wait.task" }, { id: "one" });
-			const two = await conductor.invoke({ name: "wait.task" }, { id: "two" });
-			await waiting(database, 2);
-			await conductor.emit("wait.order", { id: "no", kind: "other" });
-			await Bun.sleep(100);
-			expect(entries).toEqual(["entered:one", "entered:two"]);
-			await conductor.emit("wait.order", { id: "yes", kind: "match" });
-			await until(async () => entries.filter((entry) => entry.startsWith("replay:")).length === 2);
-			expect(entries).toEqual([
-				"entered:one",
-				"entered:two",
-				"entered:one",
-				"result:yes",
-				"replay:yes",
-				"entered:two",
-				"result:yes",
-				"replay:yes",
-			]);
-			expect(one).not.toBe(two);
-			if (!one) throw new Error("invoke did not return an execution id");
-			const [step] = await database.sql<{ result: unknown }[]>`
+		const one = await conductor.invoke({ name: "wait.task" }, { id: "one" });
+		const two = await conductor.invoke({ name: "wait.task" }, { id: "two" });
+		await waiting(database, 2);
+		await conductor.emit("wait.order", { id: "no", kind: "other" });
+		await sleep(100);
+		expect(entries).toEqual(["entered:one", "entered:two"]);
+		await conductor.emit("wait.order", { id: "yes", kind: "match" });
+		await until(async () => entries.filter((entry) => entry.startsWith("replay:")).length === 2);
+		expect(entries).toEqual([
+			"entered:one",
+			"entered:two",
+			"entered:one",
+			"result:yes",
+			"replay:yes",
+			"entered:two",
+			"result:yes",
+			"replay:yes",
+		]);
+		expect(one).not.toBe(two);
+		if (!one) throw new Error("invoke did not return an execution id");
+		const [step] = await database.sql<{ result: unknown }[]>`
 				select result from pgconductor._private_steps
 				where execution_id = ${one}::uuid and key = 'order:one'
 			`;
-			expect(step?.result).toEqual({
-				status: "resolved",
-				event: { name: "wait.order", payload: { id: "yes", kind: "match" } },
-			});
-		},
-	);
+		expect(step?.result).toEqual({
+			status: "resolved",
+			event: { name: "wait.order", payload: { id: "yes", kind: "match" } },
+		});
+	});
 
-	test.serial("uses the shared typed filter operators", async () => {
+	test("uses the shared typed filter operators", async () => {
 		const database = await db();
 		const result: string[] = [];
 		const { conductor } = await setup(
@@ -193,7 +191,7 @@ describe.serial("waitForEvent", () => {
 			code: "ord-1",
 			amount: 25,
 		});
-		await Bun.sleep(100);
+		await sleep(100);
 		expect(result).toEqual([]);
 		await conductor.emit("wait.order", {
 			id: "inside",
@@ -205,7 +203,7 @@ describe.serial("waitForEvent", () => {
 		expect(result).toEqual(["inside"]);
 	});
 
-	test.serial("rejects events outside the runtime catalog", async () => {
+	test("rejects events outside the runtime catalog", async () => {
 		const database = await db();
 		const errors: Error[] = [];
 		const unknownEvent = defineEvent({
@@ -231,41 +229,37 @@ describe.serial("waitForEvent", () => {
 		await waiting(database, 0);
 	});
 
-	test.serial(
-		"supports more waits than the retry budget",
-		async () => {
-			const database = await db();
-			const received: string[] = [];
-			const { conductor } = await setup(
-				database,
-				async (id, ctx) => {
-					for (let index = 0; index < 5; index++) {
-						const value = await ctx.waitForEvent(`many:${id}:${index}`, { event });
-						received[index] = value.payload.id;
-					}
-				},
-				orchestrators,
-			);
-			const executionId = await conductor.invoke({ name: "wait.task" }, { id: "many" });
-			if (!executionId) throw new Error("invoke did not return an execution id");
-			for (let index = 0; index < 5; index++) {
-				await waitingAt(database, `many:many:${index}`);
-				await conductor.emit("wait.order", { id: String(index), kind: "match" });
-				await until(async () => received.length === index + 1);
-			}
-			await until(async () => {
-				const [row] = await database.sql<{ completed: boolean }[]>`
+	test("supports more waits than the retry budget", async () => {
+		const database = await db();
+		const received: string[] = [];
+		const { conductor } = await setup(
+			database,
+			async (id, ctx) => {
+				for (let index = 0; index < 5; index++) {
+					const value = await ctx.waitForEvent(`many:${id}:${index}`, { event });
+					received[index] = value.payload.id;
+				}
+			},
+			orchestrators,
+		);
+		const executionId = await conductor.invoke({ name: "wait.task" }, { id: "many" });
+		if (!executionId) throw new Error("invoke did not return an execution id");
+		for (let index = 0; index < 5; index++) {
+			await waitingAt(database, `many:many:${index}`);
+			await conductor.emit("wait.order", { id: String(index), kind: "match" });
+			await until(async () => received.length === index + 1);
+		}
+		await until(async () => {
+			const [row] = await database.sql<{ completed: boolean }[]>`
 				select completed_at is not null as completed
 				from pgconductor._private_executions where id = ${executionId}::uuid
 			`;
-				return row?.completed === true;
-			});
-			expect(received).toEqual(["0", "1", "2", "3", "4"]);
-		},
-		60_000,
-	);
+			return row?.completed === true;
+		});
+		expect(received).toEqual(["0", "1", "2", "3", "4"]);
+	}, 60_000);
 
-	test.serial("uses a stable payload-based key when a timeout resumes the function", async () => {
+	test("uses a stable payload-based key when a timeout resumes the function", async () => {
 		const database = await db();
 		const entered: string[] = [];
 		const errors: unknown[] = [];
@@ -295,7 +289,7 @@ describe.serial("waitForEvent", () => {
 		expect(step?.result).toEqual({ status: "timed_out" });
 	});
 
-	test.serial("events emitted immediately after registration win the wait", async () => {
+	test("events emitted immediately after registration win the wait", async () => {
 		const database = await db();
 		const result: string[] = [];
 		const { conductor } = await setup(
@@ -314,34 +308,30 @@ describe.serial("waitForEvent", () => {
 		expect(result).toEqual(["race"]);
 	});
 
-	test.serial(
-		"events emitted before the worker flushes resolve the wait",
-		async () => {
-			const database = await db();
-			const { conductor } = await setup(
-				database,
-				async (id, ctx) => {
-					await ctx.waitForEvent(`unflushed:${id}`, { event });
-				},
-				orchestrators,
-				1_000,
-			);
+	test("events emitted before the worker flushes resolve the wait", async () => {
+		const database = await db();
+		const { conductor } = await setup(
+			database,
+			async (id, ctx) => {
+				await ctx.waitForEvent(`unflushed:${id}`, { event });
+			},
+			orchestrators,
+			1_000,
+		);
 
-			const executionId = await conductor.invoke({ name: "wait.task" }, { id: "race" });
-			await waiting(database);
-			await conductor.emit("wait.order", { id: "race", kind: "match" });
-			await until(async () => {
-				const [row] = await database.sql<{ completed: boolean }[]>`
+		const executionId = await conductor.invoke({ name: "wait.task" }, { id: "race" });
+		await waiting(database);
+		await conductor.emit("wait.order", { id: "race", kind: "match" });
+		await until(async () => {
+			const [row] = await database.sql<{ completed: boolean }[]>`
 				select completed_at is not null as completed
 				from pgconductor._private_executions where id = ${executionId}::uuid
 			`;
-				return row?.completed === true;
-			}, 5_000);
-		},
-		10_000,
-	);
+			return row?.completed === true;
+		}, 5_000);
+	}, 10_000);
 
-	test.serial("does not deliver events emitted before the subscription boundary", async () => {
+	test("does not deliver events emitted before the subscription boundary", async () => {
 		const database = await db();
 		const result: string[] = [];
 		await database.client.emitEvent({
@@ -355,7 +345,7 @@ describe.serial("waitForEvent", () => {
 		const first = await setup(database, handler, orchestrators);
 		const executionId = await first.conductor.invoke({ name: "wait.task" }, { id: "run" });
 		await waiting(database);
-		await Bun.sleep(100);
+		await sleep(100);
 		expect(result).toEqual([]);
 		await first.orchestrator.stop();
 		const second = await setup(database, handler, orchestrators);
@@ -365,7 +355,7 @@ describe.serial("waitForEvent", () => {
 		expect(executionId).toBeTruthy();
 	});
 
-	test.serial("restarts the same handler with the same step key", async () => {
+	test("restarts the same handler with the same step key", async () => {
 		const database = await db();
 		const entered: string[] = [];
 		const result: string[] = [];
@@ -385,7 +375,7 @@ describe.serial("waitForEvent", () => {
 		expect(result).toEqual(["restart"]);
 	});
 
-	test.serial("delivers the oldest matching event", async () => {
+	test("delivers the oldest matching event", async () => {
 		const database = await db();
 		const result: string[] = [];
 		const { conductor } = await setup(
@@ -402,15 +392,15 @@ describe.serial("waitForEvent", () => {
 		await conductor.invoke({ name: "wait.task" }, { id: "oldest" });
 		await waiting(database);
 		await conductor.emit("wait.order", { id: "first", kind: "match" });
-		await Bun.sleep(5);
+		await sleep(5);
 		await conductor.emit("wait.order", { id: "second", kind: "match" });
-		await Bun.sleep(5);
+		await sleep(5);
 		await conductor.emit("wait.order", { id: "third", kind: "match" });
 		await until(async () => result.length === 1);
 		expect(result).toEqual(["first"]);
 	});
 
-	test.serial("does not register a wait with a stale execution claim", async () => {
+	test("does not register a wait with a stale execution claim", async () => {
 		const database = await db();
 		const { conductor, orchestrator } = await setup(database, async () => {}, orchestrators);
 		await orchestrator.stop();
@@ -440,7 +430,7 @@ describe.serial("waitForEvent", () => {
 		expect(rows[0]?.waiting_step_key).toBeNull();
 	});
 
-	test.serial("preserves the original deadline when registration is retried", async () => {
+	test("preserves the original deadline when registration is retried", async () => {
 		const database = await db();
 		const { conductor, orchestrator } = await setup(database, async () => {}, orchestrators);
 		await orchestrator.stop();
@@ -482,7 +472,7 @@ describe.serial("waitForEvent", () => {
 		const first = await execution();
 		expect(first?.locked_by).toBeNull();
 
-		await Bun.sleep(50);
+		await sleep(50);
 		const claimToken = crypto.randomUUID();
 		await database.sql`
 			update pgconductor._private_executions
@@ -496,7 +486,7 @@ describe.serial("waitForEvent", () => {
 		expect(second?.run_at).toEqual(first?.run_at);
 	});
 
-	test.serial("does not let a replayed registration release a later claim", async () => {
+	test("does not let a replayed registration release a later claim", async () => {
 		const database = await db();
 		const { conductor, orchestrator } = await setup(database, async () => {}, orchestrators);
 		await orchestrator.stop();
@@ -555,7 +545,7 @@ describe.serial("waitForEvent", () => {
 		expect(row?.subscriptions).toBe(0);
 	});
 
-	test.serial("cleans abandoned waits when executions settle", async () => {
+	test("cleans abandoned waits when executions settle", async () => {
 		const database = await db();
 		const { conductor, orchestrator } = await setup(database, async () => {}, orchestrators);
 		await orchestrator.stop();
@@ -618,7 +608,7 @@ describe.serial("waitForEvent", () => {
 		}
 	});
 
-	test.serial("leaves attempts unchanged while an execution waits", async () => {
+	test("leaves attempts unchanged while an execution waits", async () => {
 		const database = await db();
 		const { conductor } = await setup(
 			database,
@@ -636,7 +626,7 @@ describe.serial("waitForEvent", () => {
 		expect(Number(rows[0]?.attempts)).toBe(0);
 	});
 
-	test.serial("match and timeout produce exactly one terminal outcome", async () => {
+	test("match and timeout produce exactly one terminal outcome", async () => {
 		const database = await db();
 		const outcomes: string[] = [];
 		const { conductor } = await setup(
@@ -656,7 +646,7 @@ describe.serial("waitForEvent", () => {
 		await waiting(database);
 		await conductor.emit("wait.order", { id: "outcome", kind: "match" });
 		await until(async () => outcomes.length === 1);
-		await Bun.sleep(150);
+		await sleep(150);
 		expect(outcomes).toEqual(["match:outcome"]);
 		expect(
 			Number(
@@ -667,7 +657,7 @@ describe.serial("waitForEvent", () => {
 		).toBe(0);
 	});
 
-	test.serial("cancellation removes the wait and prevents a resume", async () => {
+	test("cancellation removes the wait and prevents a resume", async () => {
 		const database = await db();
 		const entered: string[] = [];
 		const result: string[] = [];
@@ -686,44 +676,40 @@ describe.serial("waitForEvent", () => {
 		await database.client.cancelExecution(executionId);
 		await waiting(database, 0);
 		await conductor.emit("wait.order", { id: "cancel", kind: "match" });
-		await Bun.sleep(150);
+		await sleep(150);
 		expect(entered).toEqual(["cancel"]);
 		expect(result).toEqual([]);
 	});
 
-	test.serial(
-		"does not duplicate subscriptions or resume an execution twice",
-		async () => {
-			const database = await db();
-			const entered: string[] = [];
-			const result: string[] = [];
-			const { conductor } = await setup(
-				database,
-				async (id, ctx) => {
-					entered.push(id);
-					const value = await ctx.waitForEvent(`once:${id}`, { event });
-					result.push(value.payload.id);
-				},
-				orchestrators,
-			);
-			await conductor.invoke({ name: "wait.task" }, { id: "once" });
-			await waiting(database);
-			await Bun.sleep(100);
-			expect(
-				Number(
-					(
-						await database.sql`select count(*)::int as n from pgconductor._private_custom_event_subscriptions where kind = 'execution_wait'`
-					)[0]?.n,
-				),
-			).toBe(1);
-			await conductor.emit("wait.order", { id: "once", kind: "match" });
-			await until(async () => result.length === 1);
-			await Bun.sleep(100);
-			expect(entered).toEqual(["once", "once"]);
-			expect(result).toEqual(["once"]);
-		},
-		60_000,
-	);
+	test("does not duplicate subscriptions or resume an execution twice", async () => {
+		const database = await db();
+		const entered: string[] = [];
+		const result: string[] = [];
+		const { conductor } = await setup(
+			database,
+			async (id, ctx) => {
+				entered.push(id);
+				const value = await ctx.waitForEvent(`once:${id}`, { event });
+				result.push(value.payload.id);
+			},
+			orchestrators,
+		);
+		await conductor.invoke({ name: "wait.task" }, { id: "once" });
+		await waiting(database);
+		await sleep(100);
+		expect(
+			Number(
+				(
+					await database.sql`select count(*)::int as n from pgconductor._private_custom_event_subscriptions where kind = 'execution_wait'`
+				)[0]?.n,
+			),
+		).toBe(1);
+		await conductor.emit("wait.order", { id: "once", kind: "match" });
+		await until(async () => result.length === 1);
+		await sleep(100);
+		expect(entered).toEqual(["once", "once"]);
+		expect(result).toEqual(["once"]);
+	}, 60_000);
 
 	async function step(database: TestDatabase, executionId: string, key: string) {
 		const [row] = await database.sql<{ result: unknown }[]>`
@@ -745,56 +731,53 @@ describe.serial("waitForEvent", () => {
 		});
 	}
 
-	test.serial(
-		"subscribe buffers an event emitted before wait while the execution runs",
-		async () => {
-			const database = await db();
-			const entered: string[] = [];
-			const claimed: (string | null)[] = [];
-			const result: string[] = [];
-			const { conductor } = await setup(
-				database,
-				async (id, ctx) => {
-					entered.push(id);
-					const subscription = await ctx.subscribe(`approve:${id}`, {
-						event,
-						filter: { kind: ["match"] },
-					});
-					await ctx.step("post-card", async () => {
-						await ctx.emit("wait.order", { id: "click", kind: "match" });
-						await until(async () => {
-							const [row] = await database.sql<{ locked_by: string | null }[]>`
+	test("subscribe buffers an event emitted before wait while the execution runs", async () => {
+		const database = await db();
+		const entered: string[] = [];
+		const claimed: (string | null)[] = [];
+		const result: string[] = [];
+		const { conductor } = await setup(
+			database,
+			async (id, ctx) => {
+				entered.push(id);
+				const subscription = await ctx.subscribe(`approve:${id}`, {
+					event,
+					filter: { kind: ["match"] },
+				});
+				await ctx.step("post-card", async () => {
+					await ctx.emit("wait.order", { id: "click", kind: "match" });
+					await until(async () => {
+						const [row] = await database.sql<{ locked_by: string | null }[]>`
 							select e.locked_by
 							from pgconductor._private_steps s
 							join pgconductor._private_executions e on e.id = s.execution_id
 							where s.key = ${`approve:${id}`}
 						`;
-							if (!row) return false;
-							claimed.push(row.locked_by);
-							return true;
-						});
+						if (!row) return false;
+						claimed.push(row.locked_by);
+						return true;
 					});
-					const value = await subscription.wait({ timeout: "1h" });
-					result.push(value.payload.id);
-				},
-				orchestrators,
-			);
+				});
+				const value = await subscription.wait({ timeout: "1h" });
+				result.push(value.payload.id);
+			},
+			orchestrators,
+		);
 
-			const executionId = await conductor.invoke({ name: "wait.task" }, { id: "buffered" });
-			if (!executionId) throw new Error("invoke did not return an execution id");
-			await until(async () => result.length === 1);
-			expect(entered).toEqual(["buffered"]);
-			expect(result).toEqual(["click"]);
-			expect(claimed[0]).not.toBeNull();
-			expect(await step(database, executionId, "approve:buffered")).toEqual({
-				status: "resolved",
-				event: { name: "wait.order", payload: { id: "click", kind: "match" } },
-			});
-			await waiting(database, 0);
-		},
-	);
+		const executionId = await conductor.invoke({ name: "wait.task" }, { id: "buffered" });
+		if (!executionId) throw new Error("invoke did not return an execution id");
+		await until(async () => result.length === 1);
+		expect(entered).toEqual(["buffered"]);
+		expect(result).toEqual(["click"]);
+		expect(claimed[0]).not.toBeNull();
+		expect(await step(database, executionId, "approve:buffered")).toEqual({
+			status: "resolved",
+			event: { name: "wait.order", payload: { id: "click", kind: "match" } },
+		});
+		await waiting(database, 0);
+	});
 
-	test.serial("subscribe ignores events emitted before it", async () => {
+	test("subscribe ignores events emitted before it", async () => {
 		const database = await db();
 		const result: string[] = [];
 		const { conductor } = await setup(
@@ -814,7 +797,7 @@ describe.serial("waitForEvent", () => {
 		expect(result).toEqual(["fresh"]);
 	});
 
-	test.serial("subscribe resolves a wait that already suspended", async () => {
+	test("subscribe resolves a wait that already suspended", async () => {
 		const database = await db();
 		const entered: string[] = [];
 		const result: string[] = [];
@@ -839,14 +822,14 @@ describe.serial("waitForEvent", () => {
 		await waiting(database, 0);
 	});
 
-	test.serial("subscribe times out from the start of wait", async () => {
+	test("subscribe times out from the start of wait", async () => {
 		const database = await db();
 		const errors: unknown[] = [];
 		const { conductor } = await setup(
 			database,
 			async (id, ctx) => {
 				const subscription = await ctx.subscribe(`deadline:${id}`, { event });
-				await ctx.step("slow", () => Bun.sleep(200));
+				await ctx.step("slow", () => sleep(200));
 				try {
 					await subscription.wait({ timeout: "1s" });
 				} catch (error) {
@@ -873,53 +856,50 @@ describe.serial("waitForEvent", () => {
 		await waiting(database, 0);
 	});
 
-	test.serial(
-		"subscribe produces exactly one outcome when an event races the timeout",
-		async () => {
-			const database = await db();
-			const outcomes: string[] = [];
-			const { conductor } = await setup(
-				database,
-				async (id, ctx) => {
-					const subscription = await ctx.subscribe(`race:${id}`, { event });
-					try {
-						const value = await subscription.wait({ timeout: "300ms" });
-						outcomes.push(`${id}:match:${value.payload.id}`);
-					} catch (error) {
-						if (!(error instanceof WaitForEventTimeoutError)) throw error;
-						outcomes.push(`${id}:timeout`);
-					}
-				},
-				orchestrators,
+	test("subscribe produces exactly one outcome when an event races the timeout", async () => {
+		const database = await db();
+		const outcomes: string[] = [];
+		const { conductor } = await setup(
+			database,
+			async (id, ctx) => {
+				const subscription = await ctx.subscribe(`race:${id}`, { event });
+				try {
+					const value = await subscription.wait({ timeout: "300ms" });
+					outcomes.push(`${id}:match:${value.payload.id}`);
+				} catch (error) {
+					if (!(error instanceof WaitForEventTimeoutError)) throw error;
+					outcomes.push(`${id}:timeout`);
+				}
+			},
+			orchestrators,
+		);
+
+		const ids = Array.from({ length: 10 }, (_, index) => String(index));
+		const executions = new Map<string, string>();
+		for (const id of ids) {
+			const executionId = await conductor.invoke({ name: "wait.task" }, { id });
+			if (!executionId) throw new Error("invoke did not return an execution id");
+			executions.set(id, executionId);
+		}
+		await waiting(database, ids.length);
+		await sleep(250);
+		await conductor.emit("wait.order", { id: "racer", kind: "match" });
+		await until(async () => outcomes.length === ids.length);
+		await sleep(100);
+		const expected: string[] = [];
+		for (const [id, executionId] of executions) {
+			const result = await step(database, executionId, `race:${id}`);
+			expected.push(
+				(result as { status: string }).status === "timed_out"
+					? `${id}:timeout`
+					: `${id}:match:racer`,
 			);
+		}
+		expect(outcomes.toSorted()).toEqual(expected.toSorted());
+		await waiting(database, 0);
+	});
 
-			const ids = Array.from({ length: 10 }, (_, index) => String(index));
-			const executions = new Map<string, string>();
-			for (const id of ids) {
-				const executionId = await conductor.invoke({ name: "wait.task" }, { id });
-				if (!executionId) throw new Error("invoke did not return an execution id");
-				executions.set(id, executionId);
-			}
-			await waiting(database, ids.length);
-			await Bun.sleep(250);
-			await conductor.emit("wait.order", { id: "racer", kind: "match" });
-			await until(async () => outcomes.length === ids.length);
-			await Bun.sleep(100);
-			const expected: string[] = [];
-			for (const [id, executionId] of executions) {
-				const result = await step(database, executionId, `race:${id}`);
-				expected.push(
-					(result as { status: string }).status === "timed_out"
-						? `${id}:timeout`
-						: `${id}:match:racer`,
-				);
-			}
-			expect(outcomes.toSorted()).toEqual(expected.toSorted());
-			await waiting(database, 0);
-		},
-	);
-
-	test.serial("retries after subscribe keep one subscription and its buffered event", async () => {
+	test("retries after subscribe keep one subscription and its buffered event", async () => {
 		const database = await db();
 		const attempts: number[] = [];
 		const result: string[] = [];
@@ -972,7 +952,7 @@ describe.serial("waitForEvent", () => {
 		expect(await subscriptions()).toHaveLength(0);
 	});
 
-	test.serial("an event dispatched while a timed out waiter is claimed wins the wait", async () => {
+	test("an event dispatched while a timed out waiter is claimed wins the wait", async () => {
 		const database = await db();
 		const { conductor, orchestrator } = await setup(database, async () => {}, orchestrators);
 		await orchestrator.stop();
@@ -1011,7 +991,7 @@ describe.serial("waitForEvent", () => {
 			eventKey: event.name,
 			payload: { id: "claimed", kind: "match" },
 		});
-		await Bun.sleep(150);
+		await sleep(150);
 		const [second] = await claim("default", "wait.task");
 		expect(second?.id).toBe(executionId);
 		if (!second) throw new Error("expected claim");
@@ -1034,84 +1014,81 @@ describe.serial("waitForEvent", () => {
 		await waiting(database, 0);
 	});
 
-	test.serial(
-		"a delayed event does not wake a timed out waiter that failed before waiting again",
-		async () => {
-			const database = await db();
-			const { conductor, orchestrator } = await setup(database, async () => {}, orchestrators);
-			await orchestrator.stop();
-			const executionId = await conductor.invoke({ name: "wait.task" }, { id: "backoff" });
-			if (!executionId) throw new Error("invoke did not return an execution id");
+	test("a delayed event does not wake a timed out waiter that failed before waiting again", async () => {
+		const database = await db();
+		const { conductor, orchestrator } = await setup(database, async () => {}, orchestrators);
+		await orchestrator.stop();
+		const executionId = await conductor.invoke({ name: "wait.task" }, { id: "backoff" });
+		if (!executionId) throw new Error("invoke did not return an execution id");
 
-			const orchestratorId = crypto.randomUUID();
-			const claim = async (queueName: string, taskKey: string) =>
-				(
-					await database.client.getExecutions({
-						orchestratorId,
-						queueName,
-						batchSize: 10,
-						taskKeys: [taskKey],
-					})
-				).executions;
-			const runAt = async () => {
-				const [row] = await database.sql<{ run_at: Date }[]>`
+		const orchestratorId = crypto.randomUUID();
+		const claim = async (queueName: string, taskKey: string) =>
+			(
+				await database.client.getExecutions({
+					orchestratorId,
+					queueName,
+					batchSize: 10,
+					taskKeys: [taskKey],
+				})
+			).executions;
+		const runAt = async () => {
+			const [row] = await database.sql<{ run_at: Date }[]>`
 				select run_at from pgconductor._private_executions where id = ${executionId}::uuid
 			`;
-				return row?.run_at;
-			};
+			return row?.run_at;
+		};
 
-			const [first] = await claim("default", "wait.task");
-			if (!first) throw new Error("expected claim");
-			expect(
-				await database.client.registerEventWait({
-					executionId,
-					queue: "default",
-					taskKey: "wait.task",
-					eventKey: event.name,
-					stepKey: "backoff:wait",
-					requiredFieldCount: 0,
-					terms: [],
-					timeoutMs: 100,
-					orchestratorId,
-					claimToken: first.claim_token,
-					suspend: true,
-				}),
-			).toBeNull();
-			await database.client.emitEvent({
+		const [first] = await claim("default", "wait.task");
+		if (!first) throw new Error("expected claim");
+		expect(
+			await database.client.registerEventWait({
+				executionId,
+				queue: "default",
+				taskKey: "wait.task",
 				eventKey: event.name,
-				payload: { id: "late", kind: "match" },
-			});
-			await Bun.sleep(150);
-			const [second] = await claim("default", "wait.task");
-			expect(second?.id).toBe(executionId);
-			if (!second) throw new Error("expected claim");
-			await database.client.returnExecutions({
+				stepKey: "backoff:wait",
+				requiredFieldCount: 0,
+				terms: [],
+				timeoutMs: 100,
 				orchestratorId,
-				results: [
-					{
-						execution_id: executionId,
-						claim_token: second.claim_token,
-						queue: "default",
-						task_key: "wait.task",
-						status: "failed",
-						error: "failed before waiting again",
-					},
-				],
-			});
-			const backoff = await runAt();
+				claimToken: first.claim_token,
+				suspend: true,
+			}),
+		).toBeNull();
+		await database.client.emitEvent({
+			eventKey: event.name,
+			payload: { id: "late", kind: "match" },
+		});
+		await sleep(150);
+		const [second] = await claim("default", "wait.task");
+		expect(second?.id).toBe(executionId);
+		if (!second) throw new Error("expected claim");
+		await database.client.returnExecutions({
+			orchestratorId,
+			results: [
+				{
+					execution_id: executionId,
+					claim_token: second.claim_token,
+					queue: "default",
+					task_key: "wait.task",
+					status: "failed",
+					error: "failed before waiting again",
+				},
+			],
+		});
+		const backoff = await runAt();
 
-			const events = await claim("pgconductor.internal", "pgconductor.event-dispatch");
-			await database.client.dispatchCustomEvents({
-				eventIds: events.map((execution) => execution.id),
-				orchestratorId,
-			});
-			expect(await step(database, executionId, "backoff:wait")).toEqual({
-				status: "resolved",
-				event: { name: "wait.order", payload: { id: "late", kind: "match" } },
-			});
-			expect(await runAt()).toEqual(backoff);
-		},
-	);
+		const events = await claim("pgconductor.internal", "pgconductor.event-dispatch");
+		await database.client.dispatchCustomEvents({
+			eventIds: events.map((execution) => execution.id),
+			orchestratorId,
+		});
+		expect(await step(database, executionId, "backoff:wait")).toEqual({
+			status: "resolved",
+			event: { name: "wait.order", payload: { id: "late", kind: "match" } },
+		});
+		expect(await runAt()).toEqual(backoff);
+	});
 
 	async function raceSubscriptions(database: TestDatabase, stepKey: string) {
 		const [row] = await database.sql<{ n: number }[]>`
@@ -1124,7 +1101,7 @@ describe.serial("waitForEvent", () => {
 		return row?.n;
 	}
 
-	test.serial("waitForAny resolves with the branch that matches first", async () => {
+	test("waitForAny resolves with the branch that matches first", async () => {
 		const database = await db();
 		const winners: Record<string, unknown> = {};
 		const remaining: Record<string, number | undefined> = {};
@@ -1173,7 +1150,7 @@ describe.serial("waitForEvent", () => {
 		});
 	});
 
-	test.serial("waitForAny picks one winner when several branches match at once", async () => {
+	test("waitForAny picks one winner when several branches match at once", async () => {
 		const database = await db();
 		const outcomes: Record<string, unknown[]> = {};
 		const handler: Handler = async (id, ctx) => {
@@ -1203,7 +1180,7 @@ describe.serial("waitForEvent", () => {
 			]),
 		);
 		await until(async () => Object.keys(outcomes).length === ids.length);
-		await Bun.sleep(100);
+		await sleep(100);
 
 		for (const [id, executionId] of executions) {
 			expect(outcomes[id]).toEqual([await step(database, executionId, `any:${id}`)]);
@@ -1211,7 +1188,7 @@ describe.serial("waitForEvent", () => {
 		await waiting(database, 0);
 	});
 
-	test.serial("waitForAny returns a buffered subscription event without suspending", async () => {
+	test("waitForAny returns a buffered subscription event without suspending", async () => {
 		const database = await db();
 		const entered: string[] = [];
 		const winners: unknown[] = [];
@@ -1254,7 +1231,7 @@ describe.serial("waitForEvent", () => {
 		]);
 	});
 
-	test.serial("waitForAny resolves to timeout measured from the waitForAny call", async () => {
+	test("waitForAny resolves to timeout measured from the waitForAny call", async () => {
 		const database = await db();
 		const winners: unknown[] = [];
 		const remaining: (number | undefined)[] = [];
@@ -1263,7 +1240,7 @@ describe.serial("waitForEvent", () => {
 			async (id, ctx) => {
 				const decision = await ctx.subscribe(`decision:${id}`, { event });
 				const replied = await ctx.subscribe(`reply:${id}`, { event: reply });
-				await ctx.step("slow", () => Bun.sleep(200));
+				await ctx.step("slow", () => sleep(200));
 				const winner = await ctx.waitForAny(
 					`any:${id}`,
 					{ decision, reply: replied },
@@ -1290,7 +1267,7 @@ describe.serial("waitForEvent", () => {
 		expect(await step(database, executionId, "any:timeout")).toEqual({ key: "timeout" });
 	});
 
-	test.serial("waitForAny returns the cached winner after a retry", async () => {
+	test("waitForAny returns the cached winner after a retry", async () => {
 		const database = await db();
 		const winners: unknown[] = [];
 		const { conductor } = await setup(
@@ -1320,7 +1297,7 @@ describe.serial("waitForEvent", () => {
 			return row !== undefined;
 		});
 		await conductor.emit("wait.order", { id: "second", kind: "match", code: "retry" });
-		await Bun.sleep(100);
+		await sleep(100);
 		await database.sql`
 			update pgconductor._private_executions
 			set run_at = pgconductor._private_current_time()
@@ -1334,7 +1311,7 @@ describe.serial("waitForEvent", () => {
 		expect(winners).toEqual([first, first]);
 	});
 
-	test.serial("an event for another subscription wakes a wait, which suspends again", async () => {
+	test("an event for another subscription wakes a wait, which suspends again", async () => {
 		const database = await db();
 		const entered: string[] = [];
 		const result: string[] = [];

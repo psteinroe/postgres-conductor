@@ -1,12 +1,12 @@
-import { beforeEach, describe, expect, mock, test } from "bun:test";
+import { beforeEach, describe, expect, test, vi } from "vitest";
 import { Clock } from "../../src/lib/clock";
 import { nextCronOccurrence } from "../../src/lib/cron";
 
 const logger = {
-	info: mock(),
-	warn: mock(),
-	error: mock(),
-	debug: mock(),
+	info: vi.fn(),
+	warn: vi.fn(),
+	error: vi.fn(),
+	debug: vi.fn(),
 };
 
 const date = (ms: number): Date => new Date(ms);

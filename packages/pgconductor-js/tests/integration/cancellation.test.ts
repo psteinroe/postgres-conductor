@@ -1,6 +1,6 @@
 import postgres from "postgres";
 import { z } from "zod";
-import { test, expect, describe, beforeAll, afterAll, afterEach, mock } from "bun:test";
+import { test, expect, describe, beforeAll, afterAll, afterEach, vi } from "vitest";
 import { Conductor } from "../../src/conductor";
 import { Orchestrator } from "../../src/orchestrator";
 import { defineTask } from "../../src/task-definition";
@@ -173,7 +173,7 @@ describe("Cancellation Support", () => {
 			returns: z.object({ result: z.string() }),
 		});
 
-		const taskFn = mock(() => {
+		const taskFn = vi.fn(() => {
 			return { result: "success" };
 		});
 

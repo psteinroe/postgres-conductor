@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, test } from "vitest";
 import { Worker } from "../../src/worker";
 import { DefaultLogger } from "../../src/lib/logger";
 import { MockDatabaseClient } from "../mocks/database-client.mock";

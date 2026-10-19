@@ -54,13 +54,16 @@ just format                        # oxfmt
 
 ### Running Tests
 
-Tests use the Bun test runner. Run them from `packages/pgconductor-js`. **Always run typecheck with tests:**
+Tests use Vitest. Run them from `packages/pgconductor-js`. **Always run typecheck with tests:**
 
 ```bash
-bun test && bun run typecheck      # Run tests and type checking (ALWAYS)
-bun test tests/unit/               # Unit tests only
-bun test tests/integration/        # Integration tests only
+pnpm test && pnpm typecheck                    # Run tests and type checking (ALWAYS)
+pnpm test:unit                                 # Unit tests only
+pnpm test:integration                          # Integration tests only
+pnpm vitest run tests/integration/<file>       # One file
 ```
+
+`vitest.config.ts` has a `unit` and an `integration` project. The integration project's global setup starts one Postgres container (or uses `DATABASE_URL`) and provides its URL to every test file; `TestDatabasePool.create()` reads it with `inject("databaseUrl")`. Files run in parallel on 2 workers, each test in its own database.
 
 **Unit Tests** (`tests/unit/`)
 - Test utilities and type-level APIs in isolation (no database required)
@@ -302,11 +305,11 @@ await db.client.clearFakeTime();
 
 Useful for sleeps, timeouts, backoff schedules and time windows. Always clean up fake time at the end of tests.
 
-Cron scheduling and time windows (worker fetch filtering, `ctx.step()` and `ctx.checkpoint()`) use the worker's `Clock` (`src/lib/clock.ts`): local time corrected by an offset sampled from the database when the worker starts and every 10 minutes. Set fake time before starting the orchestrator. To move time while a worker runs, restart the orchestrator or also shift the local clock with `setSystemTime` from `bun:test` (see `tests/integration/window-execution.test.ts`).
+Cron scheduling and time windows (worker fetch filtering, `ctx.step()` and `ctx.checkpoint()`) use the worker's `Clock` (`src/lib/clock.ts`): local time corrected by an offset sampled from the database when the worker starts and every 10 minutes. Set fake time before starting the orchestrator. To move time while a worker runs, restart the orchestrator or also shift the local clock with `vi.setSystemTime()` (see `tests/integration/window-execution.test.ts`). Without `vi.useFakeTimers()` it only fakes `Date` and timers keep running; `vi.useRealTimers()` restores it. `vi.useFakeTimers()` fakes timers and `Date` but not `setImmediate`, which postgres.js needs to send queries (`fakeTimers` in `vitest.config.ts`).
 
 ## Development Environment
 
-This project uses Bun for running TypeScript, tests, and package management.
+This project uses Node (LTS), pnpm for package management and Vitest for tests. The package builds with plain `tsc` (`tsconfig.build.json`, NodeNext), so relative imports in `src/` and `cli/` need a `.js` extension; `scripts/check-package.sh` packs the package and checks it from a Node consumer. Scripts that run TypeScript directly (`pnpm perf`, subprocess tests) use `tsx`, because the source uses parameter properties that Node's type stripping does not support.
 
 ### Code Quality
 
@@ -314,7 +317,7 @@ This project uses Bun for running TypeScript, tests, and package management.
 - **Tests**: Ensure all tests pass and clean up resources (database connections, fake time, etc.)
 - **Type checking**: Always run both tests AND typecheck together:
   ```bash
-  bun run typecheck && bun test
+  pnpm typecheck && pnpm test
   ```
 **Format**: Ensure the code follows the formatting guidelines:
 ```bash

@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { test, expect, describe, beforeAll, afterAll, afterEach, mock } from "bun:test";
+import { test, expect, describe, beforeAll, afterAll, afterEach, vi } from "vitest";
 import { Conductor } from "../../src/conductor";
 import { Orchestrator } from "../../src/orchestrator";
 import { defineTask } from "../../src/task-definition";
@@ -50,7 +50,7 @@ describe("Field Selection - Type Safety & Runtime", () => {
 		});
 
 		const handled = new Deferred<void>();
-		const taskFn = mock(async (event) => {
+		const taskFn = vi.fn(async (event) => {
 			// Type-level: TypeScript should know these fields exist with correct types
 			const str: string = event.payload.stringField;
 			const num: number = event.payload.numberField;
@@ -137,7 +137,7 @@ describe("Field Selection - Type Safety & Runtime", () => {
 		});
 
 		const handled = new Deferred<void>();
-		const taskFn = mock(async (event) => {
+		const taskFn = vi.fn(async (event) => {
 			// Type-level: Selected fields with correct camelCase
 			const userId: string = event.payload.userId;
 			const emailAddress: string = event.payload.emailAddress;
@@ -205,7 +205,7 @@ describe("Field Selection - Type Safety & Runtime", () => {
 		});
 
 		const handled = new Deferred<void>();
-		const taskFn = mock(async (event) => {
+		const taskFn = vi.fn(async (event) => {
 			// Type-level: All fields should be available
 			const f1: string = event.payload.field1;
 			const f2: number = event.payload.field2;

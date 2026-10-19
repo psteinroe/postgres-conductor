@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, test, expect, jest } from "bun:test";
+import { afterAll, afterEach, beforeAll, test, expect, vi } from "vitest";
 import { TestDatabasePool } from "../fixtures/test-database";
 import type { TestDatabase } from "../fixtures/test-database";
 import { Conductor } from "../../src/conductor";
@@ -17,7 +17,7 @@ beforeAll(async () => {
 }, 60000);
 
 afterEach(async () => {
-	jest.useRealTimers();
+	vi.useRealTimers();
 	await Promise.all(databases.map((db) => db.destroy()));
 	databases.length = 0;
 });
@@ -316,13 +316,13 @@ test("a live orchestrator recovers executions locked by a crashed one", async ()
 
 	await db.client.setFakeTime({ date: new Date("2024-01-01T12:10:00Z") });
 
-	jest.useFakeTimers();
+	vi.useFakeTimers();
 	const orch = Orchestrator.create({ conductor, tasks: [task] });
 	await orch.start();
 
 	// recovery runs every 8th heartbeat, one heartbeat per 30s
 	for (let seconds = 0; runs === 0 && seconds < 600; seconds++) {
-		jest.advanceTimersByTime(1000);
+		vi.advanceTimersByTime(1000);
 		await db.sql`select 1`;
 	}
 	expect(runs).toBe(1);
@@ -361,7 +361,7 @@ test("the heartbeat releases a claim the orchestrator does not hold", async () =
 	});
 
 	await db.client.setFakeTime({ date: new Date("2024-01-01T12:00:00Z") });
-	jest.useFakeTimers();
+	vi.useFakeTimers();
 	const orch = Orchestrator.create({
 		conductor,
 		tasks: [heldTask, orphanedTask],
@@ -370,7 +370,7 @@ test("the heartbeat releases a claim the orchestrator does not hold", async () =
 	await orch.start();
 	await conductor.invoke(heldDefinition, {});
 	while (!heldStarted.isSettled) {
-		jest.advanceTimersByTime(1000);
+		vi.advanceTimersByTime(1000);
 		await db.sql`select 1`;
 	}
 
@@ -394,7 +394,7 @@ test("the heartbeat releases a claim the orchestrator does not hold", async () =
 	};
 	const advance = async (seconds: number) => {
 		for (let elapsed = 0; elapsed < seconds && orphanedRuns === 0; elapsed++) {
-			jest.advanceTimersByTime(1000);
+			vi.advanceTimersByTime(1000);
 			await db.sql`select 1`;
 		}
 	};
@@ -436,13 +436,13 @@ test("an orchestrator recovered as stale aborts its running handlers and stops",
 		handlerAborted.resolve();
 	});
 
-	jest.useFakeTimers();
+	vi.useFakeTimers();
 	const orch = Orchestrator.create({ conductor, tasks: [task] });
 	await orch.start();
 	await conductor.invoke(taskDefinition, {});
 
 	while (!handlerStarted.isSettled) {
-		jest.advanceTimersByTime(1000);
+		vi.advanceTimersByTime(1000);
 		await db.sql`select 1`;
 	}
 
@@ -454,7 +454,7 @@ test("an orchestrator recovered as stale aborts its running handlers and stops",
 	await db.client.recoverStaleOrchestrators({ maxAge: "5 minutes" });
 
 	for (let seconds = 0; !orch.isStopped && seconds < 60; seconds++) {
-		jest.advanceTimersByTime(1000);
+		vi.advanceTimersByTime(1000);
 		await db.sql`select 1`;
 	}
 	expect(handlerAborted.isSettled).toBe(true);
@@ -484,13 +484,13 @@ test.each(["stop()", "a shutdown signal"])(
 
 		await db.client.setFakeTime({ date: new Date("2024-01-01T12:00:00Z") });
 
-		jest.useFakeTimers();
+		vi.useFakeTimers();
 		const orch = Orchestrator.create({ conductor, tasks: [task] });
 		await orch.start();
 		await conductor.invoke(taskDefinition, {});
 
 		while (!handlerStarted.isSettled) {
-			jest.advanceTimersByTime(1000);
+			vi.advanceTimersByTime(1000);
 			await db.sql`select 1`;
 		}
 
@@ -503,14 +503,14 @@ test.each(["stop()", "a shutdown signal"])(
 			`;
 		}
 		for (let seconds = 0; seconds < 30; seconds++) {
-			jest.advanceTimersByTime(1000);
+			vi.advanceTimersByTime(1000);
 			await db.sql`select 1`;
 		}
 		expect(orch.isShuttingDown).toBe(true);
 
 		await db.client.setFakeTime({ date: new Date("2024-01-01T12:10:00Z") });
 		for (let seconds = 0; seconds < 60; seconds++) {
-			jest.advanceTimersByTime(1000);
+			vi.advanceTimersByTime(1000);
 			await db.sql`select 1`;
 		}
 
