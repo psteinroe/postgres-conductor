@@ -97,7 +97,6 @@ export type SaveStepArgs = {
 	claimToken: string;
 	key: string;
 	result: Payload | null;
-	runAtMs?: number;
 };
 
 export type StartExecutionArgs = {
@@ -1248,35 +1247,9 @@ export class QueryBuilder {
 		queue,
 		key,
 		result,
-		runAtMs,
 		orchestratorId,
 		claimToken,
 	}: SaveStepArgs): PendingQuery<RowList<Row[]>> {
-		if (runAtMs) {
-			return this.sql<RowList<Row[]>>`
-				with claimed_execution as materialized (
-					select e.id, e.queue
-					from pgconductor._private_executions e
-					where e.id = ${executionId}::uuid
-						and e.queue = ${queue}::text
-						and e.locked_by = ${orchestratorId}::uuid
-						and e.claim_token = ${claimToken}::uuid
-					for update
-				), inserted as (
-					insert into pgconductor._private_steps (execution_id, queue, key, result)
-					select e.id, e.queue, ${key}::text, ${this.sql.json(result)}::jsonb
-					from claimed_execution e
-					on conflict (execution_id, key) do nothing
-					returning 1
-				)
-				update pgconductor._private_executions e
-				set run_at = pgconductor._private_current_time() + (${runAtMs}::integer || ' milliseconds')::interval
-				from claimed_execution c
-				where e.id = c.id and e.queue = c.queue
-					and exists (select 1 from inserted)
-			`;
-		}
-
 		return this.sql<RowList<Row[]>>`
 			with claimed_execution as materialized (
 				select e.id, e.queue
