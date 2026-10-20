@@ -277,6 +277,11 @@ export class Conductor<
 		TaskContext<Tasks, Events, Metadata> & ExtraContext & MiddlewareContext,
 		TaskEventFromTriggers<TTriggers, ResolvedPayload<Tasks, TDef>, Events>
 	> {
+		const queue = definition.queue || "default";
+		const schemas = this.options.tasks?.definitions.find(
+			(task: TaskDefinition<string, unknown, unknown, string>) =>
+				task.name === definition.name && task.queue === queue,
+		);
 		return Task.create<
 			TDef["name"],
 			ResolvedQueue<TDef>,
@@ -298,6 +303,7 @@ export class Conductor<
 			>,
 			this.events,
 			this.options.metadata,
+			schemas,
 		);
 	}
 
