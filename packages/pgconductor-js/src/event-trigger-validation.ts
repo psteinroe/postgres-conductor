@@ -27,6 +27,7 @@ export type CompiledEventTrigger = CompiledEventFilter & {
 };
 
 function scalarTerm(
+	context: string,
 	field: string,
 	operator: "exact" | "anything_but",
 	value: EventFilterScalar,
@@ -36,12 +37,16 @@ function scalarTerm(
 		return { field_name: field, operator, scalar_type: "string", text_value: value };
 	}
 	if (typeof value === "number") {
+		if (!Number.isFinite(value)) throw new Error(`${context} requires finite numbers`);
 		return { field_name: field, operator, scalar_type: "number", number_value: value };
 	}
 	return { field_name: field, operator, scalar_type: "boolean", boolean_value: value };
 }
 
 function numericRangeTerm(context: string, field: string, numeric: NumericFilter): EventFilterTerm {
+	if (numeric.length !== 2 && numeric.length !== 4) {
+		throw new Error(`${context} requires one or two bounds`);
+	}
 	let lower: number | null = null;
 	let lowerInclusive = false;
 	let upper: number | null = null;
@@ -52,14 +57,17 @@ function numericRangeTerm(context: string, field: string, numeric: NumericFilter
 		[secondOperator, secondValue],
 	] as const) {
 		if (operator === undefined || value === undefined) continue;
+		if (!Number.isFinite(value)) throw new Error(`${context} requires finite numbers`);
 		if (operator === ">" || operator === ">=") {
 			if (lower !== null) throw new Error(`${context} has more than one lower bound`);
 			lower = value;
 			lowerInclusive = operator === ">=";
-		} else {
+		} else if (operator === "<" || operator === "<=") {
 			if (upper !== null) throw new Error(`${context} has more than one upper bound`);
 			upper = value;
 			upperInclusive = operator === "<=";
+		} else {
+			throw new Error(`${context} has invalid numeric operator "${operator}"`);
 		}
 	}
 	if (
@@ -86,7 +94,7 @@ function predicateTerm(
 	predicate: EventFilterPredicate,
 ): EventFilterTerm {
 	if (predicate === null || typeof predicate !== "object") {
-		return scalarTerm(field, "exact", predicate);
+		return scalarTerm(context, field, "exact", predicate);
 	}
 	if ("prefix" in predicate) {
 		return {
@@ -100,7 +108,7 @@ function predicateTerm(
 	if ("exists" in predicate) {
 		return { field_name: field, operator: "exists", boolean_value: predicate.exists };
 	}
-	return scalarTerm(field, "anything_but", predicate["anything-but"]);
+	return scalarTerm(context, field, "anything_but", predicate["anything-but"]);
 }
 
 export function compileEventFilter(

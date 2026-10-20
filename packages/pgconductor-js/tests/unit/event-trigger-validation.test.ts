@@ -123,6 +123,20 @@ describe("event trigger compilation", () => {
 		);
 	});
 
+	test("rejects non-finite numbers and malformed numeric filters", () => {
+		for (const value of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+			expect(() => compile({ score: [{ numeric: [">", value] }] })).toThrow(/finite/);
+			expect(() => compile({ score: [{ numeric: [">", 1, "<", value] }] })).toThrow(/finite/);
+			expect(() => compile({ score: [value] })).toThrow(/finite/);
+			expect(() => compile({ score: [{ "anything-but": value }] })).toThrow(/finite/);
+		}
+		expect(() => compile({ score: [{ numeric: ["=", 1] }] })).toThrow(
+			/invalid numeric operator "="/,
+		);
+		expect(() => compile({ score: [{ numeric: [">"] }] })).toThrow(/one or two bounds/);
+		expect(() => compile({ score: [{ numeric: [">", 1, "<"] }] })).toThrow(/one or two bounds/);
+	});
+
 	test("requires runtime definitions", () => {
 		expect(() => compileEventTriggers([{ event: "catalog.changed" }], [])).toThrow(
 			'Event "catalog.changed" is not defined in the conductor event catalog',
