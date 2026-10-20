@@ -731,7 +731,7 @@ describe("ctx.waitForResult and execution branches (Postgres integration)", () =
 		});
 	});
 
-	test("a pending child failed when its parent's wait times out resolves the wait", async () => {
+	test("a pending child cancelled when its parent's wait times out resolves the wait", async () => {
 		const database = await db();
 		const conductor = await setup(database, { waiter: async () => {} });
 		await stopOrchestrators();
@@ -764,7 +764,7 @@ describe("ctx.waitForResult and execution branches (Postgres integration)", () =
 		expect(await woken(database, waiterId)).toEqual({
 			result: {
 				status: "resolved",
-				outcome: { status: "failed", error: "Cancelled: parent timed out" },
+				outcome: { status: "cancelled", reason: "Cancelled: parent timed out" },
 			},
 			due: true,
 		});
