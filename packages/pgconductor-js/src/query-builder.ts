@@ -326,9 +326,9 @@ export class QueryBuilder {
 		`;
 	}
 
-	buildGetInstalledMigrationNumber(): PendingQuery<{ version: number | null }[]> {
-		return this.sql<{ version: number | null }[]>`
-			select max(version) as version
+	buildGetInstalledMigrationNumber(): PendingQuery<[{ version: number }]> {
+		return this.sql<[{ version: number }]>`
+			select coalesce(max(version), -1) as version
 			from pgconductor.schema_migrations
 		`;
 	}

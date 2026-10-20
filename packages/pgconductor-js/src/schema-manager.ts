@@ -23,10 +23,9 @@ export class SchemaManager {
 	}
 
 	/**
-	 * Ensure schema is at the latest version by:
-	 * 1. Installing the bootstrap schema if nothing exists yet
-	 * 2. Seeding the migration catalog via pgconductor.enqueue_migrations()
-	 * 3. Looping on pgconductor.apply_next_migration() until it reports "done"
+	 * Apply the migrations the database lacks, one transaction each under the migration lock.
+	 * A breaking migration first signals older orchestrators to shut down and waits for them to
+	 * exit. Reports `shouldShutdown` when the database is newer than this version.
 	 */
 	async ensureLatest(signal: AbortSignal): Promise<{
 		migrated: boolean;
@@ -51,6 +50,7 @@ export class SchemaManager {
 				return { migrated, shouldShutdown: false };
 			}
 
+			let fence = false;
 			if (nextMigration.breaking) {
 				await this.db.sweepOrchestrators(
 					{
@@ -58,10 +58,10 @@ export class SchemaManager {
 					},
 					{ signal },
 				);
-				await this.waitForOlderOrchestratorsToExit(nextMigration.version, signal);
+				fence = await this.waitForOlderOrchestratorsToExit(nextMigration.version, signal);
 			}
 
-			const status = await this.db.applyMigration(nextMigration, { signal });
+			const status = await this.db.applyMigration(nextMigration, { fence, signal });
 
 			if (status === "applied") {
 				migrated = true;
@@ -80,7 +80,7 @@ export class SchemaManager {
 		targetVersion: number,
 		signal: AbortSignal,
 		maxWaitMs: number = 4 * 60 * 60 * 1000,
-	): Promise<void> {
+	): Promise<boolean> {
 		const start = Date.now();
 
 		while (Date.now() - start < maxWaitMs) {
@@ -93,7 +93,7 @@ export class SchemaManager {
 			);
 
 			if (remaining === 0) {
-				return;
+				return true;
 			}
 
 			await waitFor(POLL_INTERVAL_MS, {
@@ -105,5 +105,6 @@ export class SchemaManager {
 		console.warn(
 			`Timed out waiting for older orchestrators to exit within ${maxWaitMs}ms, continuing with migrations`,
 		);
+		return false;
 	}
 }

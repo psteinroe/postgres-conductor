@@ -191,19 +191,7 @@ export class Orchestrator {
 			let error: Error | undefined;
 
 			try {
-				const ourVersion = this.migrationStore.getLatestMigrationNumber();
-				const installedVersion = await this.db.getInstalledMigrationNumber({
-					signal: this.signal,
-				});
-
-				// Step 1: Check if we're too old (should never happen, but safety check)
-				if (installedVersion > ourVersion) {
-					throw new Error(
-						`Orchestrator version ${ourVersion} is older than installed version ${installedVersion}`,
-					);
-				}
-
-				// Step 2: Ensure schema is at latest version
+				// Ensure schema is at latest version
 				// ensureLatest() will check if migrations needed and:
 				// - Try to acquire lock (non-blocking)
 				// - If can't get lock, wait and recheck or shutdown
@@ -213,7 +201,7 @@ export class Orchestrator {
 				const { shouldShutdown } = await this.schemaManager.ensureLatest(this.signal);
 
 				if (shouldShutdown) {
-					throw new Error("Could not acquire migration lock");
+					throw new Error("The database schema is newer than this version of Postgres Conductor");
 				}
 
 				const { shutdown_reason } = await this.db.registerOrchestrator(
