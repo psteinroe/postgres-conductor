@@ -1180,6 +1180,151 @@ begin
 end;
 $function$;
 
+-- settlement of completed children ([{execution_id, result}]) that have a parent: stores the result
+-- for the parents waiting on them and wakes those parents. returns the children no execution waits
+-- on any more. parents may be in any queue, so settlement calls this only when needed instead of
+-- planning these lookups on every call. they cannot be narrowed to a partition, so their plans are
+-- generic and made once per connection. the input is estimated at 100 rows, so lookups use arrays
+-- of ids to stay on indexes.
+create or replace function pgconductor._private_complete_children(p_children jsonb)
+returns setof uuid
+language plpgsql
+volatile
+set search_path to ''
+set plan_cache_mode to force_generic_plan
+as $function$
+declare
+  v_ids uuid[] := array(
+    select c.execution_id from jsonb_to_recordset(p_children) as c(execution_id uuid)
+  );
+  v_orphans uuid[];
+begin
+  v_orphans := array(
+    select unnest(v_ids)
+    except
+    select parent.waiting_on_execution_id
+    from pgconductor._private_executions parent
+    where parent.waiting_on_execution_id = any(v_ids)
+  );
+
+  -- a completed child may wake only a parent which is still waiting and is not
+  -- currently claimed. the row lock makes this check race-safe.
+  with parents as materialized (
+    select parent.id, parent.queue, parent.waiting_step_key, c.result
+    from pgconductor._private_executions parent
+    join jsonb_to_recordset(p_children) as c(execution_id uuid, result jsonb)
+      on c.execution_id = parent.waiting_on_execution_id
+    where parent.waiting_on_execution_id = any(v_ids)
+      and parent.completed_at is null
+      and parent.failed_at is null
+      and parent.locked_by is null
+    for update of parent
+  ),
+  parent_steps as (
+    insert into pgconductor._private_steps (execution_id, queue, key, result)
+    select p.id, p.queue, p.waiting_step_key,
+      jsonb_build_object('status', 'completed', 'result', p.result)
+    from parents p
+    where p.waiting_step_key is not null
+    on conflict (execution_id, key) do nothing
+  )
+  update pgconductor._private_executions e
+  set run_at = pgconductor._private_current_time(), waiting_on_execution_id = null,
+    waiting_step_key = null, locked_by = null, locked_at = null
+  where e.id = any(array(select p.id from parents p));
+
+  return query select unnest(v_orphans);
+end;
+$function$;
+
+-- settlement of terminally failed children ([{execution_id, error, cancelled}]) that have a parent:
+-- fails every execution still waiting on them, and the ones waiting on those, and returns them for
+-- dead-lettering, result waits and the cancel cascade. like _private_complete_children, settlement
+-- calls this only when needed.
+create or replace function pgconductor._private_fail_waiting_parents(p_children jsonb)
+returns table (
+  execution_id uuid, queue text, task_key text, execution_group text, payload jsonb,
+  failure_error text, failure_attempts integer, execution_cancelled boolean,
+  dead_letter_queue text, dead_letter_task_key text, trace_context jsonb, metadata jsonb,
+  result_waiters jsonb
+)
+language plpgsql
+volatile
+set search_path to ''
+set plan_cache_mode to force_generic_plan
+as $function$
+declare
+  v_ids uuid[] := array(
+    select c.execution_id from jsonb_to_recordset(p_children) as c(execution_id uuid)
+  );
+  v_ancestors uuid[] := '{}';
+begin
+  loop
+    v_ids := array(
+      select parent.id
+      from pgconductor._private_executions parent
+      where parent.waiting_on_execution_id = any(v_ids)
+        and parent.completed_at is null and parent.failed_at is null and parent.locked_by is null
+    );
+    exit when cardinality(v_ids) = 0;
+    v_ancestors := v_ancestors || v_ids;
+  end loop;
+
+  -- ancestors are locked child first, then the chain is followed again on the locked rows
+  return query
+  with recursive locked_ancestors as materialized (
+    select parent.id, parent.queue, parent.waiting_on_execution_id, parent.task_key,
+      parent."group", parent.payload, parent.attempts, parent.trace_context, parent.metadata,
+      parent.result_waiters,
+      t.remove_on_fail_days = 0 as should_remove,
+      t.dead_letter_queue, t.dead_letter_task_key
+    from pgconductor._private_executions parent
+    join pgconductor._private_tasks t on t.key = parent.task_key and t.queue = parent.queue
+    where parent.id = any(v_ancestors)
+      and parent.completed_at is null and parent.failed_at is null and parent.locked_by is null
+    order by array_position(v_ancestors, parent.id)
+    for update of parent
+  ),
+  targets as (
+    select c.error, c.cancelled, a.*
+    from jsonb_to_recordset(p_children) as c(execution_id uuid, error text, cancelled boolean)
+    join locked_ancestors a on a.waiting_on_execution_id = c.execution_id
+    union all
+    select t.error, t.cancelled, a.*
+    from targets t
+    join locked_ancestors a on a.waiting_on_execution_id = t.id
+  ),
+  removed as (
+    delete from pgconductor._private_executions e
+    using targets t
+    where e.id = any(v_ancestors) and e.id = t.id and e.queue = t.queue
+      and t.should_remove and e.locked_by is null
+  ),
+  failed as (
+    update pgconductor._private_executions e
+    set failed_at = pgconductor._private_current_time(),
+      last_error = 'Child execution failed: ' || t.error,
+      waiting_on_execution_id = null, waiting_step_key = null,
+      locked_by = null, locked_at = null
+    from targets t
+    where e.id = any(v_ancestors) and e.id = t.id and e.queue = t.queue
+      and t.should_remove is not true
+    returning e.id, e.queue
+  ),
+  deleted_waits as (
+    delete from pgconductor._private_custom_event_subscriptions subscription
+    using failed f
+    where subscription.kind = 'execution_wait'
+      and subscription.execution_id = f.id
+      and subscription.queue = f.queue
+  )
+  select t.id, t.queue, t.task_key, t."group", t.payload, 'Child execution failed: ' || t.error,
+    t.attempts, t.cancelled, t.dead_letter_queue, t.dead_letter_task_key, t.trace_context,
+    t.metadata, t.result_waiters
+  from targets t;
+end;
+$function$;
+
 -- cancel an execution
 create or replace function pgconductor.cancel_execution(
   p_execution_id uuid,

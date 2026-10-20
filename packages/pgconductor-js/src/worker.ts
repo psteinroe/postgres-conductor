@@ -485,7 +485,6 @@ export class Worker<
 					.map((exec) => ({
 						execution_id: exec.id,
 						claim_token: exec.claim_token,
-						queue: exec.queue,
 						task_key: taskKey,
 						status: "permanently_failed",
 						error: exec.last_error || "Execution was cancelled",
@@ -502,7 +501,6 @@ export class Worker<
 						...activeExecs.map((exec) => ({
 							execution_id: exec.id,
 							claim_token: exec.claim_token,
-							queue: exec.queue,
 							task_key: taskKey,
 							status: "released" as const,
 						})),
@@ -562,7 +560,6 @@ export class Worker<
 		const identity = {
 			execution_id: exec.id,
 			claim_token: exec.claim_token,
-			queue: exec.queue,
 			task_key: exec.task_key,
 		};
 		const signals = new SignalInbox({
@@ -786,7 +783,6 @@ export class Worker<
 				rejected.push({
 					execution_id: exec.id,
 					claim_token: exec.claim_token,
-					queue: exec.queue,
 					task_key: taskKey,
 					...payload,
 				});
@@ -877,7 +873,6 @@ export class Worker<
 					return executions.map((exec) => ({
 						execution_id: exec.id,
 						claim_token: exec.claim_token,
-						queue: exec.queue,
 						task_key: taskKey,
 						status: "released" as const,
 						reschedule_in_ms: result.reschedule_in_ms,
@@ -890,7 +885,6 @@ export class Worker<
 					return executions.map((exec) => ({
 						execution_id: exec.id,
 						claim_token: exec.claim_token,
-						queue: exec.queue,
 						task_key: taskKey,
 						status: "released" as const,
 					}));
@@ -900,7 +894,6 @@ export class Worker<
 				return executions.map((exec) => ({
 					execution_id: exec.id,
 					claim_token: exec.claim_token,
-					queue: exec.queue,
 					task_key: taskKey,
 					status: "failed" as const,
 					error:
@@ -915,7 +908,6 @@ export class Worker<
 					const identity = {
 						execution_id: exec.id,
 						claim_token: exec.claim_token,
-						queue: exec.queue,
 						task_key: taskKey,
 					};
 					const result = await parseResult(task, outcome.output?.[i]);
@@ -932,7 +924,6 @@ export class Worker<
 				return executions.map((exec) => ({
 					execution_id: exec.id,
 					claim_token: exec.claim_token,
-					queue: exec.queue,
 					task_key: taskKey,
 					status: "released" as const,
 				}));
@@ -943,7 +934,6 @@ export class Worker<
 			return executions.map((exec) => ({
 				execution_id: exec.id,
 				claim_token: exec.claim_token,
-				queue: exec.queue,
 				task_key: taskKey,
 				status: "failed" as const,
 				error,
@@ -1008,7 +998,11 @@ export class Worker<
 				await this.telemetry.settle({
 					queue: this.queueName,
 					batchMessageCount: results.length,
-					run: () => this.db.returnExecutions({ orchestratorId, results }, { signal }),
+					run: () =>
+						this.db.returnExecutions(
+							{ orchestratorId, queueName: this.queueName, results },
+							{ signal },
+						),
 				});
 			} catch (err) {
 				buffer = [...results, ...buffer];

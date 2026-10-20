@@ -179,6 +179,7 @@ Tables live in the `pgconductor` schema with a `_private_` prefix (`_private_exe
 **Important**: All core logic lives in Postgres. The TypeScript layer is intentionally thin - it validates input and orchestrates calls via `DatabaseClient`.
 
 - Claiming (`buildGetExecutions`) and settlement (`buildReturnExecutions`) are single statements in `query-builder.ts`
+- Settlement settles executions of one queue (`returnExecutions` takes the worker's `queueName`) and narrows every reference to the executions table to its partition. The queue is inlined as a literal, because a cached generic plan prunes partitions only by constants: each queue gets its own prepared statement, planned once per connection, whatever the number of queues. Reads of executions in other queues (waiting parents) run in functions called only when a settled execution has a parent: `_private_complete_children()` wakes the parents of completed children and returns the children no parent waits on, `_private_fail_waiting_parents()` fails waiting ancestors. Their statements reach every partition, so they force generic plans, made once per connection, and look rows up by arrays of ids to stay on indexes. They read with fresh snapshots, so they come first in `writes`. A new reference to executions in settlement must be narrowed to the queue or go into such a function
 - SQL functions in the migration: `invoke()`, `invoke_batch()`, `cancel_execution()`, `signal_execution()`, `signal_with_start()`, `emit_event()`, `drop_queue()`, `_private_register_worker()`, `_private_current_time()`, `_private_portable_uuidv7()`, ...
 
 ### Key Design Patterns
@@ -198,7 +199,7 @@ Tables live in the `pgconductor` schema with a `_private_` prefix (`_private_exe
 
 **Cascade Failures**
 - When a child fails permanently (attempts >= max_attempts), its parent fails too
-- Implemented in `buildReturnExecutions()` via the `permanently_failed_children` CTE
+- Implemented by `_private_fail_waiting_parents()`, which settlement calls for the `permanently_failed_children` that have a parent
 - Parent receives error like "Child execution failed: <child_error>"
 
 **Claims and Retries**
@@ -272,7 +273,7 @@ Tables live in the `pgconductor` schema with a `_private_` prefix (`_private_exe
 - Every path that ends an execution (settlement's `resolved_result_waits`, `cancel_execution()`, `invoke()` superseding a running execution, `clearWaitingState`, and removing pending schedule executions) reads `result_waiters` from the locked or deleted row, like `signal_count`, so a wait registered after its snapshot is not missed. It passes the waits with their outcomes to `_private_resolve_result_waits`, which stores `{status: 'resolved', outcome}` under each wait's step key and wakes a waiter suspended at a wait, like dispatch does. A new path that ends or removes executions must do the same; `drop_queue()` does not
 - `_private_resolve_result_waits` wakes suspended waiters with its own update, which runs before the data-modifying CTEs of the calling statement. A statement that also updates or deletes a suspended execution must exclude it from the waits it passes, or the later update of that row fails or is lost
 - A race that settles removes its entries from the `result_waiters` of awaited executions still running, so timeouts and lost races do not accumulate entries
-- The delivery is a plpgsql function called only when a settled execution has waiters: settlement is planned on every call, and each reference to the partitioned executions table adds planning cost per queue
+- The delivery is a plpgsql function called only when a settled execution has waiters, so settlement does not plan its references to executions of other queues
 - Waiting creates no parent link: a failed or cancelled execution never fails its waiter, and timeouts or cancelling the waiter leave it running. An unknown execution raises at registration
 
 **Signals**
@@ -343,7 +344,7 @@ Guidelines for SQL:
 
 Common issues:
 - **Timing issues**: Use fake time instead of waiting (backoff schedule is 15s, 30s, 60s...)
-- **Cascade failures**: Check `permanently_failed_children` CTE logic
+- **Cascade failures**: Check the `permanently_failed_children` CTE and `_private_fail_waiting_parents()`
 - **Infinity serialization**: postgres.js serializes infinity as null in JSON
 
 Inspect database state in tests:

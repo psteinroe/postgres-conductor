@@ -1121,9 +1121,10 @@ describe("Cancellation Support", () => {
 		expect(await db.client.cancelExecution(sleeping)).toBe(true);
 		expect(await db.client.cancelExecution(invoking)).toBe(true);
 
-		const execution = { queue: "default", task_key: "workflow-task", claim_token: claimToken };
+		const execution = { task_key: "workflow-task", claim_token: claimToken };
 		await db.client.returnExecutions({
 			orchestratorId: orchestrator.id,
+			queueName: "default",
 			results: [
 				{ ...execution, execution_id: sleeping, status: "released", reschedule_in_ms: "infinity" },
 				{
@@ -1182,11 +1183,11 @@ describe("Cancellation Support", () => {
 
 		await db.client.returnExecutions({
 			orchestratorId: orchestrator.id,
+			queueName: "default",
 			results: [
 				{
 					execution_id: child,
 					claim_token: claimToken,
-					queue: "default",
 					task_key: "workflow-task",
 					status: "permanently_failed",
 					error: "boom",

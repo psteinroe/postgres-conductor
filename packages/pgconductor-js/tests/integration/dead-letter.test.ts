@@ -189,17 +189,18 @@ describe("dead-letter queues (Postgres integration)", () => {
 		const result = {
 			execution_id: execution.id,
 			claim_token: execution.claim_token,
-			queue: execution.queue,
 			task_key: execution.task_key,
 			status: "permanently_failed" as const,
 			error: "settlement failure",
 		};
 		await db.client.returnExecutions({
 			orchestratorId,
+			queueName: "default",
 			results: [{ ...result }],
 		});
 		await db.client.returnExecutions({
 			orchestratorId,
+			queueName: "default",
 			results: [{ ...result }],
 		});
 		const rows = await db.sql<{ count: string; source: string | null }[]>`
@@ -211,6 +212,7 @@ describe("dead-letter queues (Postgres integration)", () => {
 		// A result from a different worker is fenced out as well.
 		await db.client.returnExecutions({
 			orchestratorId: crypto.randomUUID(),
+			queueName: "default",
 			results: [{ ...result }],
 		});
 		const count = await db.sql<{ count: string }[]>`
@@ -262,11 +264,11 @@ describe("dead-letter queues (Postgres integration)", () => {
 
 		await db.client.returnExecutions({
 			orchestratorId,
+			queueName: execution.queue,
 			results: [
 				{
 					execution_id: execution.id,
 					claim_token: execution.claim_token,
-					queue: execution.queue,
 					task_key: execution.task_key,
 					status: "permanently_failed",
 					error: "boom",
@@ -368,11 +370,11 @@ describe("dead-letter queues (Postgres integration)", () => {
 		expect(await db.client.cancelExecution(executionId)).toBe(true);
 		await db.client.returnExecutions({
 			orchestratorId,
+			queueName: execution.queue,
 			results: [
 				{
 					execution_id: execution.id,
 					claim_token: execution.claim_token,
-					queue: execution.queue,
 					task_key: execution.task_key,
 					status: "permanently_failed",
 					error: "Task was cancelled",
@@ -431,11 +433,11 @@ describe("dead-letter queues (Postgres integration)", () => {
 
 		await db.client.returnExecutions({
 			orchestratorId: parent.locked_by,
+			queueName: parent.queue,
 			results: [
 				{
 					execution_id: parent.id,
 					claim_token: parent.claim_token,
-					queue: parent.queue,
 					task_key: parent.task_key,
 					status: "invoke_child",
 					timeout_ms: "infinity",
@@ -460,11 +462,11 @@ describe("dead-letter queues (Postgres integration)", () => {
 		expect(await db.client.cancelExecution(child.id)).toBe(true);
 		await db.client.returnExecutions({
 			orchestratorId: childOrchestratorId,
+			queueName: child.queue,
 			results: [
 				{
 					execution_id: child.id,
 					claim_token: child.claim_token,
-					queue: child.queue,
 					task_key: child.task_key,
 					status: "permanently_failed",
 					error: "Task was cancelled",
@@ -480,6 +482,116 @@ describe("dead-letter queues (Postgres integration)", () => {
 			where id = ${parentId}::uuid or queue = 'dlq'
 		`;
 		expect(counts).toEqual({ source: "0", destination: "0" });
+	}, 15000);
+
+	test("fails the waiting ancestors of a failed child and delivers them to their DLQ", async () => {
+		const db = await pool.child();
+		databases.push(db);
+		const conductor = Conductor.create({ sql: db.sql, context: {} });
+		await conductor.ensureInstalled();
+		const queues = {
+			workflows: [{ key: "root", queue: "workflows" }],
+			default: [
+				{
+					key: "step-parent",
+					queue: "default",
+					deadLetterQueue: "dlq",
+					deadLetterTaskKey: "step-parent-failed",
+				},
+			],
+			children: [{ key: "leaf", queue: "children", maxAttempts: 1 }],
+		};
+		for (const [queueName, taskSpecs] of Object.entries(queues)) {
+			await db.client.registerWorker({
+				queueName,
+				taskSpecs,
+				cronSchedules: [],
+				eventSubscriptions: [],
+			});
+		}
+		const orchestratorId = await db.registerOrchestrator();
+		const claim = async (queueName: string, taskKey: string) => {
+			const [execution] = (
+				await db.client.getExecutions({
+					orchestratorId,
+					queueName,
+					batchSize: 1,
+					taskKeys: [taskKey],
+				})
+			).executions;
+			if (!execution) throw new Error(`expected claimed ${taskKey}`);
+			return execution;
+		};
+		const invokeChild = async (
+			parent: { id: string; queue: string; task_key: string; claim_token: string },
+			child: { key: string; queue: string },
+		) => {
+			await db.client.returnExecutions({
+				orchestratorId,
+				queueName: parent.queue,
+				results: [
+					{
+						execution_id: parent.id,
+						claim_token: parent.claim_token,
+						task_key: parent.task_key,
+						status: "invoke_child",
+						timeout_ms: "infinity",
+						step_key: "child",
+						child_task_name: child.key,
+						child_task_queue: child.queue,
+						child_payload: { from: parent.task_key },
+					},
+				],
+			});
+		};
+
+		await db.client.invoke({ task_key: "root", queue: "workflows" });
+		const root = await claim("workflows", "root");
+		await invokeChild(root, { key: "step-parent", queue: "default" });
+		const parent = await claim("default", "step-parent");
+		await invokeChild(parent, { key: "leaf", queue: "children" });
+		const leaf = await claim("children", "leaf");
+		await db.client.returnExecutions({
+			orchestratorId,
+			queueName: "children",
+			results: [
+				{
+					execution_id: leaf.id,
+					claim_token: leaf.claim_token,
+					task_key: leaf.task_key,
+					status: "permanently_failed",
+					error: "boom",
+				},
+			],
+		});
+
+		const failed = await db.sql<{ id: string; last_error: string | null; waiting: boolean }[]>`
+			select id, last_error, waiting_on_execution_id is not null as waiting
+			from pgconductor._private_executions
+			where id in (${root.id}::uuid, ${parent.id}::uuid, ${leaf.id}::uuid) and failed_at is not null
+			order by created_at
+		`;
+		expect(failed).toEqual([
+			{ id: root.id, last_error: "Child execution failed: boom", waiting: false },
+			{ id: parent.id, last_error: "Child execution failed: boom", waiting: false },
+			{ id: leaf.id, last_error: "boom", waiting: false },
+		]);
+		const delivered = await db.sql<{ task_key: string; payload: unknown; dead_letter: unknown }[]>`
+			select task_key, payload, dead_letter from pgconductor._private_executions where queue = 'dlq'
+		`;
+		expect(delivered).toEqual([
+			{
+				task_key: "step-parent-failed",
+				payload: { from: "root" },
+				dead_letter: expect.objectContaining({
+					sourceExecutionId: parent.id,
+					sourceQueue: "default",
+					sourceTaskKey: "step-parent",
+					error: "Child execution failed: boom",
+					attempts: 1,
+				}),
+			},
+		]);
 	}, 15000);
 
 	test("rejects direct self-targets in the database but permits cross-queue identity", async () => {
@@ -577,7 +689,6 @@ describe("dead-letter queues (Postgres integration)", () => {
 		const settlement = {
 			execution_id: execution.id,
 			claim_token: execution.claim_token,
-			queue: execution.queue,
 			task_key: execution.task_key,
 			status: "permanently_failed" as const,
 			error: "rollback failure",
@@ -585,6 +696,7 @@ describe("dead-letter queues (Postgres integration)", () => {
 		await expect(
 			db.client.returnExecutions({
 				orchestratorId: lockedBy,
+				queueName: "default",
 				results: [settlement],
 			}),
 		).rejects.toThrow("forced destination failure");
@@ -599,6 +711,7 @@ describe("dead-letter queues (Postgres integration)", () => {
 		);
 		await db.client.returnExecutions({
 			orchestratorId: lockedBy,
+			queueName: "default",
 			results: [settlement],
 		});
 		const finalRows = await db.sql<{ source: string | null; source_failed: string }[]>`
