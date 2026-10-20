@@ -763,7 +763,7 @@ declare
     v_singleton_on timestamptz;
     v_next_singleton_on timestamptz;
     v_run_at timestamptz;
-    v_resolved integer;
+    v_superseded_id uuid;
 begin
   perform pgconductor._private_check_metadata(p_metadata);
   v_now := pgconductor._private_current_time();
@@ -798,14 +798,25 @@ begin
               last_error = 'superseded by reinvoke'
             from superseded s
           where e.id = s.id and e.queue = s.queue and s.should_remove is not true
+      ),
+      resolved as (
+          select pgconductor._private_resolve_result_waits(jsonb_agg(w.value || jsonb_build_object(
+              'outcome', jsonb_build_object('status', 'failed', 'error', 'superseded by reinvoke')
+          )))
+          from superseded s
+          cross join lateral jsonb_array_elements(s.result_waiters) w
+          having count(*) > 0
       )
-      select pgconductor._private_resolve_result_waits(jsonb_agg(w.value || jsonb_build_object(
-          'outcome', jsonb_build_object('status', 'failed', 'error', 'superseded by reinvoke')
-      )))
-      into v_resolved
+      select s.id
+      into v_superseded_id
       from superseded s
-      cross join lateral jsonb_array_elements(s.result_waiters) w
-      having count(*) > 0;
+      left join resolved on true;
+
+      if v_superseded_id is not null then
+          perform pgconductor._private_cancel_linked_children(jsonb_build_array(jsonb_build_object(
+              'execution_id', v_superseded_id, 'reason', 'superseded by reinvoke'
+          )));
+      end if;
   end if;
 
   -- singleton throttle/debounce logic
@@ -1084,6 +1095,58 @@ begin
 end;
 $function$;
 
+-- locks the executions in p_ids all at once, or waits without holding any of them: waiting for
+-- one while holding another can deadlock with a statement that locks them the other way round
+create or replace function pgconductor._private_lock_executions(p_ids uuid[])
+returns void
+language plpgsql
+volatile
+set search_path to ''
+as $function$
+declare
+  v_id uuid;
+begin
+  loop
+    begin
+      perform 1
+      from pgconductor._private_executions e
+      where e.id = any(p_ids)
+      for update of e nowait;
+      return;
+    exception when lock_not_available then
+      -- wait for each one alone, rolling back to release it, then try them all again
+      foreach v_id in array p_ids loop
+        begin
+          perform 1 from pgconductor._private_executions e where e.id = v_id for update of e;
+          raise exception using errcode = 'PGC01';
+        exception when sqlstate 'PGC01' then
+          null;
+        end;
+      end loop;
+    end;
+  end loop;
+end;
+$function$;
+
+-- cancels the linked children of ended executions ([{execution_id, reason}]) with the reason
+-- their parent ended with. callers run it after their own writes, and it reads the children
+-- with a fresh snapshot, so it also finds the ones started while the caller waited for a lock.
+create or replace function pgconductor._private_cancel_linked_children(p_parents jsonb)
+returns void
+language plpgsql
+volatile
+set search_path to ''
+as $function$
+begin
+  perform pgconductor.cancel_execution(child.id, parent.reason)
+  from jsonb_to_recordset(p_parents) as parent(execution_id uuid, reason text)
+  join pgconductor._private_executions child on child.parent_execution_id = parent.execution_id
+  where child.cancel_with_parent
+    and child.completed_at is null
+    and child.failed_at is null;
+end;
+$function$;
+
 -- cancel an execution
 create or replace function pgconductor.cancel_execution(
   p_execution_id uuid,
@@ -1099,21 +1162,21 @@ declare
   v_queue text;
   v_descendant_ids uuid[];
   v_ancestor_ids uuid[];
+  v_linked_ids uuid[];
   v_locked_ids uuid[];
   v_rows_affected integer;
   v_resolved integer;
 begin
-  -- a waiting execution is cancelled with the executions it waits on, and
-  -- fails the executions waiting on it. the graph may change while we wait for
-  -- locks, so it is read again after locking. a changed graph releases the
-  -- stale locks by rolling back, then locks the new graph children first.
+  -- a waiting execution is cancelled with the executions it waits on and its
+  -- linked children, and fails the executions waiting on it. the graph may
+  -- change while we wait for locks, so it is read again after locking. a
+  -- changed graph releases the stale locks by rolling back, then locks the new
+  -- graph. the whole graph is locked at once, so a settlement that locks a
+  -- child before the parent waiting on it cannot deadlock with this, and the
+  -- calls for linked children find their locks held.
   loop
     begin
-      perform 1
-      from unnest(v_locked_ids) with ordinality as chain(id, position)
-      join pgconductor._private_executions e on e.id = chain.id
-      order by chain.position
-      for update of e;
+      perform pgconductor._private_lock_executions(v_locked_ids);
 
       with recursive descendants as (
         select e.waiting_on_execution_id as id, 1 as depth
@@ -1139,8 +1202,28 @@ begin
       )
       select array_agg(id order by depth) into v_ancestor_ids from ancestors;
 
-      exit when v_locked_ids = v_descendant_ids || p_execution_id || v_ancestor_ids;
-      v_locked_ids := v_descendant_ids || p_execution_id || v_ancestor_ids;
+      -- a running execution is only flagged; its settlement cancels its linked children
+      with recursive linked as (
+        select child.id, child.waiting_on_execution_id
+        from pgconductor._private_executions e
+        join pgconductor._private_executions child
+          on child.parent_execution_id = e.id and child.cancel_with_parent
+        where e.id = any(v_descendant_ids || p_execution_id || v_ancestor_ids)
+          and (e.id <> p_execution_id or e.locked_by is null)
+          and child.completed_at is null
+          and child.failed_at is null
+        union all
+        select child.id, child.waiting_on_execution_id
+        from linked l
+        join pgconductor._private_executions child
+          on child.parent_execution_id = l.id
+          and (child.cancel_with_parent or child.id = l.waiting_on_execution_id)
+        where child.completed_at is null and child.failed_at is null
+      )
+      select array_agg(id order by id) into v_linked_ids from linked;
+
+      exit when v_locked_ids = v_linked_ids || v_descendant_ids || p_execution_id || v_ancestor_ids;
+      v_locked_ids := v_linked_ids || v_descendant_ids || p_execution_id || v_ancestor_ids;
       raise exception using errcode = 'PGC01';
     exception when sqlstate 'PGC01' then
       null;
@@ -1235,17 +1318,12 @@ begin
   cross join lateral jsonb_array_elements(p.result_waiters) w
   having count(*) > 0;
 
-  -- linked children are cancelled with the reason their parent ended with
-  perform pgconductor.cancel_execution(
-    e.id,
-    case when e.parent_execution_id = any(v_ancestor_ids) then 'Child execution failed: ' || p_reason
+  perform pgconductor._private_cancel_linked_children(jsonb_agg(jsonb_build_object(
+    'execution_id', id,
+    'reason', case when id = any(v_ancestor_ids) then 'Child execution failed: ' || p_reason
       else p_reason end
-  )
-  from pgconductor._private_executions e
-  where e.parent_execution_id = any(v_descendant_ids || p_execution_id || v_ancestor_ids)
-    and e.cancel_with_parent
-    and e.completed_at is null
-    and e.failed_at is null;
+  )))
+  from unnest(v_descendant_ids || p_execution_id || v_ancestor_ids) id;
 
   return true;
 end;
@@ -1316,6 +1394,18 @@ create or replace function pgconductor.drop_queue(queue_name text)
  volatile
  set search_path to ''
 as $function$
+  -- registration locks a queue before its tasks, so this locks the queue and the queues whose
+  -- tasks dead-letter into it first, in the same order
+  select 1
+  from pgconductor._private_queues queue
+  where queue.name = drop_queue.queue_name
+    or queue.name in (
+      select task.queue from pgconductor._private_tasks task
+      where task.dead_letter_queue = drop_queue.queue_name
+    )
+  order by queue.name
+  for update;
+
   update pgconductor._private_tasks
   set dead_letter_queue = null, dead_letter_task_key = null
   where dead_letter_queue = drop_queue.queue_name;
@@ -1723,13 +1813,10 @@ declare
     v_expires_at timestamptz;
     v_now timestamptz := pgconductor._private_current_time();
 begin
-    -- Settlement locks an execution before its waiters, so awaited executions are locked first
+    -- Settlement locks an execution before its waiters, so awaited executions are locked first,
+    -- all at once: one of them may be waiting on another
     if cardinality(v_awaited_ids) > 0 then
-        perform 1
-        from pgconductor._private_executions awaited
-        where awaited.id = any(v_awaited_ids)
-        order by awaited.id
-        for update;
+        perform pgconductor._private_lock_executions(v_awaited_ids);
     end if;
 
     perform 1

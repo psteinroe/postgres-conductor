@@ -1378,7 +1378,7 @@ describe("Cancellation Support", () => {
 
 		expect(await executionState(db, child)).toEqual({
 			failed: true,
-			cancelled: false,
+			cancelled: true,
 			last_error: "Cancelled: parent timed out",
 			waiting_on_execution_id: null,
 		});

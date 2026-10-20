@@ -487,15 +487,11 @@ describe("flush", () => {
 		let failed = false;
 		const t = await setup(
 			(sql) =>
-				failStatements(
-					sql,
-					"select 1 as result from (select count(*) from resolved_result_waits)",
-					() => {
-						if (failed) return null;
-						failed = true;
-						return connectionError();
-					},
-				),
+				failStatements(sql, "from (select count(*) as writes from writes) w", () => {
+					if (failed) return null;
+					failed = true;
+					return connectionError();
+				}),
 			{ concurrency: 1, flushIntervalMs: 60_000 },
 		);
 		t.gates[0]?.resolve();

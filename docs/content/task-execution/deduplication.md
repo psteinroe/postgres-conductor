@@ -29,7 +29,7 @@ What a repeated invoke does depends on the execution that holds the key:
 | Existing execution | Result |
 |--------------------|--------|
 | Waiting to run | Its payload, `run_at`, `priority` and `group` are replaced. The same ID is returned. A sleeping execution resumes right away with the new payload. |
-| Running | It is superseded: marked failed with `superseded by reinvoke`, and a new execution is created with the new payload. The running handler is not stopped, but its result is discarded. |
+| Running | It is superseded: marked failed with `superseded by reinvoke`, and a new execution is created with the new payload. The running handler is not stopped, but its result is discarded. Executions it started with `cancelWithParent` are cancelled. |
 | Completed or failed | Nothing runs. Its stored payload is replaced and the same ID is returned. |
 
 A key stays taken as long as its execution is stored. Once [retention](../crafting-tasks/retention.md) removes a completed or failed execution, the next invoke with that key creates a new execution.

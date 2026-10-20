@@ -690,7 +690,6 @@ export class QueryBuilder {
 			from now_ts nt, signal_requeued q
 			where e.id = q.execution_id and e.queue = q.queue
 				and e.locked_by = ${orchestratorId}::uuid
-				and not exists (select 1 from cancelled_descendants d where d.id = e.id)
 			returning e.id
 		)`);
 		ctes.push(this.sql`failed_results as (
@@ -698,12 +697,10 @@ export class QueryBuilder {
 			where status in ('failed', 'permanently_failed') or execution_cancelled
 		)`);
 		ctes.push(this.sql`released_results as (
-			select * from valid_results r where status = 'released' and not execution_cancelled
-				and not exists (select 1 from cancelled_descendants d where d.id = r.execution_id)
+			select * from valid_results where status = 'released' and not execution_cancelled
 		)`);
 		ctes.push(this.sql`invoke_child_data as (
-			select * from valid_results r where status = 'invoke_child' and not execution_cancelled
-				and not exists (select 1 from cancelled_descendants d where d.id = r.execution_id)
+			select * from valid_results where status = 'invoke_child' and not execution_cancelled
 		)`);
 
 		// A completed child may wake only a parent which is still waiting and is not
@@ -717,7 +714,6 @@ export class QueryBuilder {
 				and parent.completed_at is null
 				and parent.failed_at is null
 				and parent.locked_by is null
-				and not exists (select 1 from cancelled_descendants d where d.id = parent.id)
 			for update of parent
 		)`);
 		ctes.push(this.sql`parent_steps_all as (
@@ -854,57 +850,6 @@ export class QueryBuilder {
 				p.parent_metadata
 			from failed_parent_targets p
 		)`);
-		// Linked children of a terminal failure are cancelled with its error, transitively, with the
-		// executions they wait on. A row settled by this statement keeps a terminal outcome.
-		ctes.push(this.sql`linked_descendants as (
-			select child.id, child.waiting_on_execution_id, t.failure_error as reason, 1 as depth
-			from terminal_failures t
-			join pgconductor._private_executions child
-				on child.parent_execution_id = t.execution_id and child.cancel_with_parent
-			where child.completed_at is null and child.failed_at is null
-			union all
-			select child.id, child.waiting_on_execution_id, d.reason, d.depth + 1
-			from linked_descendants d
-			join pgconductor._private_executions child
-				on child.parent_execution_id = d.id
-				and (child.cancel_with_parent or child.id = d.waiting_on_execution_id)
-			where child.completed_at is null and child.failed_at is null
-		)`);
-		ctes.push(this.sql`cancelled_descendants as materialized (
-			select e.id, e.queue, d.reason, e.result_waiters,
-				e.locked_by is not null and v.execution_id is null as running,
-				t.remove_on_fail_days = 0 as should_remove
-			from linked_descendants d
-			join pgconductor._private_executions e on e.id = d.id
-			left join pgconductor._private_tasks t on t.key = e.task_key and t.queue = e.queue
-			left join valid_results v on v.execution_id = e.id
-			where e.completed_at is null and e.failed_at is null
-				and not exists (select 1 from completed_results c where c.execution_id = e.id)
-				and not exists (select 1 from permanently_failed_children p where p.execution_id = e.id)
-				and not exists (select 1 from locked_ancestors a where a.parent_id = e.id)
-			order by d.depth
-			for update of e
-		)`);
-		// running ones are aborted by the workers running them on their next poll
-		ctes.push(this.sql`flagged_descendants as (
-			update pgconductor._private_executions e
-			set cancelled = true, last_error = d.reason
-			from cancelled_descendants d
-			where e.id = d.id and e.queue = d.queue and d.running and not e.cancelled
-		)`);
-		ctes.push(this.sql`deleted_descendants as (
-			delete from pgconductor._private_executions e
-			using cancelled_descendants d
-			where e.id = d.id and e.queue = d.queue and not d.running and d.should_remove
-		)`);
-		ctes.push(this.sql`updated_descendants as (
-			update pgconductor._private_executions e
-			set failed_at = nt.ts, cancelled = true, last_error = d.reason,
-				waiting_on_execution_id = null, waiting_step_key = null,
-				locked_by = null, locked_at = null
-			from now_ts nt, cancelled_descendants d
-			where e.id = d.id and e.queue = d.queue and not d.running and d.should_remove is not true
-		)`);
 		ctes.push(this.sql`dead_lettered as (
 			insert into pgconductor._private_executions (task_key, queue, payload, run_at, "group", trace_context, metadata, dead_letter)
 			select
@@ -925,6 +870,7 @@ export class QueryBuilder {
 				and not p.execution_cancelled
 			on conflict ((dead_letter->>'sourceExecutionId'), queue, task_key) where dead_letter is not null
 				do nothing
+			returning id
 		)`);
 		ctes.push(this.sql`failed_updates as (
 			select p.execution_id as target_id, p.queue, p.child_error, true as is_child
@@ -968,8 +914,6 @@ export class QueryBuilder {
 				select id, queue from updated_completed
 				union all
 				select id, queue from updated_failed
-				union all
-				select id, queue from cancelled_descendants where not running
 			) terminal
 			where subscription.kind = 'execution_wait'
 				and subscription.execution_id = terminal.id
@@ -977,8 +921,7 @@ export class QueryBuilder {
 			returning subscription.id
 		)`);
 		// Waits for a settled execution are read from its locked row, which also holds waits
-		// registered after this statement's snapshot. Descendants cancelled here are not woken:
-		// the function's update would precede the statement's own and lose it.
+		// registered after this statement's snapshot
 		ctes.push(this.sql`resolved_result_waits as (
 			select pgconductor._private_resolve_result_waits(jsonb_agg(w.value || jsonb_build_object('outcome', s.outcome)))
 			from (
@@ -1001,13 +944,8 @@ export class QueryBuilder {
 				select p.parent_result_waiters,
 					jsonb_build_object('status', 'failed', 'error', 'Child execution failed: ' || p.child_error)
 				from failed_parent_targets p
-				union all
-				select d.result_waiters, jsonb_build_object('status', 'cancelled', 'reason', d.reason)
-				from cancelled_descendants d
-				where not d.running
 			) s
 			cross join lateral jsonb_array_elements(s.result_waiters) w
-			where (w.value->>'execution_id')::uuid not in (select id from cancelled_descendants)
 			having count(*) > 0
 		)`);
 		ctes.push(this.sql`retried as (
@@ -1023,7 +961,6 @@ export class QueryBuilder {
 				and r.status <> 'permanently_failed'
 				and not r.execution_cancelled
 				and e.attempts < tc.max_attempts
-				and not exists (select 1 from cancelled_descendants d where d.id = e.id)
 			returning e.id
 		)`);
 
@@ -1032,6 +969,7 @@ export class QueryBuilder {
 			select execution_id, queue, step_key, null::jsonb from released_results
 			where step_key is not null
 			on conflict (execution_id, key) do nothing
+			returning execution_id
 		)`);
 		ctes.push(this.sql`updated_released as (
 			update pgconductor._private_executions e
@@ -1069,9 +1007,40 @@ export class QueryBuilder {
 			returning e.id
 		)`);
 
+		ctes.push(this.sql`writes as (
+			select 1 from updated_signal_requeued
+			union all select 1 from parent_steps_all
+			union all select 1 from orphaned_children
+			union all select 1 from updated_parents_all
+			union all select 1 from deleted_completed
+			union all select 1 from updated_completed
+			union all select 1 from dead_lettered
+			union all select 1 from deleted_failed
+			union all select 1 from updated_failed
+			union all select 1 from cleaned_terminal_event_waits
+			union all select 1 from resolved_result_waits
+			union all select 1 from retried
+			union all select 1 from released_steps
+			union all select 1 from updated_released
+			union all select 1 from inserted_children
+			union all select 1 from updated_invoke_parents
+		)`);
+
 		const combined = ctes.reduce((acc, cte, i) => (i === 0 ? cte : this.sql`${acc}, ${cte}`));
-		return this.sql<[{ result: number }]>`
-			with recursive ${combined} select 1 as result from (select count(*) from resolved_result_waits) r
+		// Linked children of a terminal failure are cancelled with its error. The cascade reads the
+		// graph with fresh snapshots, so it sees children and waits that changed while this
+		// statement waited for locks, and it writes rows this statement may write too. It runs
+		// last: filtering on the row count of every write runs them to completion first (the
+		// planner drops a count nothing reads).
+		return this.sql`
+			with recursive ${combined}
+			select pgconductor._private_cancel_linked_children(jsonb_agg(jsonb_build_object(
+				'execution_id', t.execution_id, 'reason', t.failure_error
+			)))
+			from (select count(*) as writes from writes) w
+			left join terminal_failures t on true
+			where w.writes >= 0
+			having count(t.execution_id) > 0
 		`;
 	}
 	buildRemoveExecutions({
@@ -1526,78 +1495,27 @@ export class QueryBuilder {
 		claimToken,
 	}: ClearWaitingStateArgs): PendingQuery<RowList<Row[]>> {
 		return this.sql<RowList<Row[]>>`
-			-- Lock the child before the parent, like cancellation and settlement do
-			with child_info as materialized (
-				select c.id as child_id, c.locked_by as child_locked_by
-				from pgconductor._private_executions p
-				join pgconductor._private_executions c on c.id = p.waiting_on_execution_id
-				where p.id = ${executionId}::uuid
-					and p.queue = ${queue}::text
-					and p.locked_by = ${orchestratorId}::uuid
-					and p.claim_token = ${claimToken}::uuid
-				for update of c
-			), claimed_parent as materialized (
-				select e.id, e.queue, ci.child_id, ci.child_locked_by
+			-- The child is cancelled like any other: cancel_execution locks it before this parent
+			with timed_out as materialized (
+				select e.waiting_on_execution_id as child_id
 				from pgconductor._private_executions e
-				left join child_info ci on ci.child_id = e.waiting_on_execution_id
 				where e.id = ${executionId}::uuid
 					and e.queue = ${queue}::text
 					and e.locked_by = ${orchestratorId}::uuid
 					and e.claim_token = ${claimToken}::uuid
-				for update of e
-			),
-			-- Fail pending (not locked) children immediately
-			failed_pending_child as (
-				update pgconductor._private_executions e
-				set
-					failed_at = pgconductor._private_current_time(),
-					last_error = 'Cancelled: parent timed out',
-					locked_by = null,
-					locked_at = null
-				from claimed_parent p
-				where e.id = p.child_id
-					and p.child_locked_by is null   -- not currently executing
-					and e.completed_at is null
-					and e.failed_at is null
-				returning e.id, e.result_waiters
-			),
-			resolved_result_waits as (
-				select pgconductor._private_resolve_result_waits(jsonb_agg(w.value || jsonb_build_object(
-					'outcome', jsonb_build_object('status', 'failed', 'error', 'Cancelled: parent timed out')
-				)))
-				from failed_pending_child c
-				cross join lateral jsonb_array_elements(c.result_waiters) w
-				having count(*) > 0
-			),
-			-- Signal executing (locked) children to cancel
-			signaled_executing_child as (
-				update pgconductor._private_executions e
-				set cancelled = true
-				from claimed_parent p
-				where e.id = p.child_id
-					and p.child_locked_by is not null  -- currently executing
-					and e.completed_at is null
-					and e.failed_at is null
-				returning e.id
-			),
-			-- Always clear parent's waiting state
-			cleared_parent as (
-				update pgconductor._private_executions e
-				set
-					waiting_on_execution_id = null,
-					waiting_step_key = null
-				from claimed_parent p
-				where e.id = p.id
-				and e.queue = p.queue
-				returning e.id
+					and e.waiting_on_execution_id is not null
+			), cancelled_child as materialized (
+				select pgconductor.cancel_execution(child_id, 'Cancelled: parent timed out')
+				from timed_out
 			)
-			select id from cleared_parent
-			union all
-			select id from failed_pending_child
-			union all
-			select id from signaled_executing_child
-			union all
-			select null from resolved_result_waits
+			update pgconductor._private_executions e
+			set waiting_on_execution_id = null, waiting_step_key = null
+			from (select count(*) from cancelled_child) c
+			where e.id = ${executionId}::uuid
+				and e.queue = ${queue}::text
+				and e.locked_by = ${orchestratorId}::uuid
+				and e.claim_token = ${claimToken}::uuid
+			returning e.id
 		`;
 	}
 

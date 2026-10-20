@@ -61,7 +61,7 @@ const result = await ctx.invokeAndWait(
 );
 ```
 
-If the child doesn't complete within the timeout, `ctx.invokeAndWait()` throws a timeout error and the child is cancelled.
+If the child doesn't complete within the timeout, `ctx.invokeAndWait()` throws a timeout error and the child is cancelled with `Cancelled: parent timed out`, together with the executions it started with `cancelWithParent` and the children it waits on.
 
 ## Error Handling
 
@@ -136,7 +136,7 @@ Retrying the invoking attempt never starts a second execution, even if it crashe
 
 ### Cancelling with the Parent
 
-Pass `cancelWithParent: true` to cancel the execution together with the caller: when the caller is cancelled or fails permanently, the execution is cancelled with the same reason, whatever state it is in (pending, running or suspended in a sleep, wait or child). This applies transitively to executions it started with `cancelWithParent` and to the children it waits on:
+Pass `cancelWithParent: true` to cancel the execution together with the caller: when the caller is cancelled, fails permanently or is [superseded](../task-execution/deduplication.md#duplicate-keys), the execution is cancelled with the same reason, whatever state it is in (pending, running or suspended in a sleep, wait or child). This applies transitively to executions it started with `cancelWithParent` and to the children it waits on:
 
 ```typescript
 const session = conductor.createTask(
