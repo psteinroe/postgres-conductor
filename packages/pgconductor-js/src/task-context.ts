@@ -133,6 +133,8 @@ export type TaskContextOptions = {
 	window?: [string, string];
 	telemetry: Telemetry;
 	signals: SignalInbox;
+	/** Step callbacks and their saves in flight */
+	steps: Set<Promise<unknown>>;
 };
 
 /** A signal sent to an execution with `conductor.signal()` or `signalWithStart()`. */
@@ -243,18 +245,23 @@ export class TaskContext<
 				"pgconductor.queue": this.opts.execution.queue,
 			},
 			run: async () => {
-				const result = await fn();
-				const saved = await this.opts.db.saveStep(
-					{
-						executionId: this.opts.execution.id,
-						queue: this.opts.execution.queue,
-						orchestratorId: this.opts.execution.locked_by,
-						claimToken: this.opts.execution.claim_token,
-						key: name,
-						result: { result: result as JsonValue },
-					},
-					{ signal: this.signal },
-				);
+				const running = (async () => {
+					const result = await fn();
+					const saved = await this.opts.db.saveStep(
+						{
+							executionId: this.opts.execution.id,
+							queue: this.opts.execution.queue,
+							orchestratorId: this.opts.execution.locked_by,
+							claimToken: this.opts.execution.claim_token,
+							key: name,
+							result: { result: result as JsonValue },
+						},
+						{ signal: this.signal },
+					);
+					return { result, saved };
+				})();
+				this.opts.steps.add(running);
+				const { result, saved } = await running.finally(() => this.opts.steps.delete(running));
 				return saved ? result : this.abortAndHangup({ reason: "suspended" });
 			},
 		});

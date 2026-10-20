@@ -4,6 +4,7 @@ import { mapConcurrent } from "../../../src/lib/map-concurrent";
 import { AsyncQueue, type PollableAsyncIterable } from "../../../src/lib/async-queue";
 import { BatchingAsyncQueue } from "../../../src/lib/batching-async-queue";
 import { Deferred } from "../../../src/lib/deferred";
+import { within } from "../../test-utils";
 
 class PollableGenerator<T> implements PollableAsyncIterable<T> {
 	private buffer: T[] = [];
@@ -199,6 +200,52 @@ describe("mapConcurrent", () => {
 			expect(err).toBeInstanceOf(Error);
 			expect((err as Error).message).toBe("test error");
 		}
+	});
+
+	test("waits for running mappers before rethrowing a mapper's error", async () => {
+		const source = new AsyncQueue<number>(2);
+		await source.push(0);
+		await source.push(1);
+		source.close();
+		const gate = new Deferred<void>();
+		let finished = false;
+		const consuming = (async () => {
+			for await (const _ of mapConcurrent(source, 2, async (n) => {
+				if (n === 0) throw new Error("test error");
+				await gate.promise;
+				finished = true;
+			})) {
+				// Should throw before yielding
+			}
+		})();
+
+		expect(await within(consuming, 20)).toBe("timeout");
+		gate.resolve();
+		await expect(consuming).rejects.toThrow("test error");
+		expect(finished).toBe(true);
+	});
+
+	test("waits for running mappers when the consumer exits early", async () => {
+		const source = new AsyncQueue<number>(2);
+		await source.push(0);
+		await source.push(1);
+		source.close();
+		const gate = new Deferred<void>();
+		let finished = false;
+		const consuming = (async () => {
+			for await (const _ of mapConcurrent(source, 2, async (n) => {
+				if (n === 0) return;
+				await gate.promise;
+				finished = true;
+			})) {
+				break;
+			}
+		})();
+
+		expect(await within(consuming, 20)).toBe("timeout");
+		gate.resolve();
+		await consuming;
+		expect(finished).toBe(true);
 	});
 
 	test("handles single concurrency", async () => {

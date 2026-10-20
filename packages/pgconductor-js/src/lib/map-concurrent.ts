@@ -89,5 +89,7 @@ export async function* mapConcurrent<T, R>(
 		}
 	} finally {
 		itemWait?.cancel();
+		// Also on an error or an early exit, the consumer continues once every mapper settled
+		await Promise.allSettled(Array.from(active.values(), (task) => task.promise));
 	}
 }
