@@ -94,10 +94,11 @@ test("resumes ctx.sleep when time advances", async () => {
 	await clock.advance("1h");
 	await orchestrator.drain();
 	expect(sent).toEqual(["ada@example.com"]);
-	expect(await conductor.getExecution(id)).toMatchObject({
-		status: "completed",
-		completedAt: new Date("2024-01-01T13:00:00Z"),
-	});
+	const execution = await conductor.getExecution(id);
+	expect(execution?.status).toBe("completed");
+	expect(execution?.completedAt?.getTime()).toBeGreaterThanOrEqual(
+		new Date("2024-01-01T13:00:00Z").getTime(),
+	);
 });
 
 test("retries after the backoff", async () => {
@@ -165,9 +166,21 @@ test("set keeps its own copy of the date", async () => {
 	await setting;
 	date.setUTCFullYear(2031);
 
-	const [row] = await sql<{ now: Date }[]>`
-		select current_setting('pgconductor.fake_now')::timestamptz as now
-	`;
-	expect(row?.now).toEqual(new Date("2024-06-01T00:00:00Z"));
-	expect(clock.now()).toEqual(new Date("2024-06-01T00:00:00Z"));
+	const [row] = await sql<{ now: Date }[]>`select pgconductor._private_current_time() as now`;
+	const start = new Date("2024-06-01T00:00:00Z").getTime();
+	expect(row?.now.getTime()).toBeGreaterThanOrEqual(start);
+	expect(row?.now.getTime()).toBeLessThan(start + 60_000);
+	expect(clock.now().getTime()).toBeGreaterThanOrEqual(start);
+	expect(clock.now().getTime()).toBeLessThan(start + 60_000);
+});
+
+test("fake time keeps running from the time it was set to", async () => {
+	const now = () => sql<{ now: Date }[]>`select pgconductor._private_current_time() as now`;
+	const [first] = await now();
+	await setTimeout(10);
+	const [second] = await now();
+	const start = new Date("2024-01-01T12:00:00Z").getTime();
+	expect(first?.now.getTime()).toBeGreaterThanOrEqual(start);
+	expect(second?.now.getTime()).toBeGreaterThan(first?.now.getTime() || 0);
+	expect(second?.now.getTime()).toBeLessThan(start + 60_000);
 });

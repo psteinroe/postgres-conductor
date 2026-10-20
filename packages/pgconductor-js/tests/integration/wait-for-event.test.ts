@@ -1341,4 +1341,127 @@ describe("waitForEvent", () => {
 		expect(result).toEqual(["order", "reply"]);
 		await waiting(database, 0);
 	});
+
+	describe.each(["fake", "real"])("with %s time", (time) => {
+		async function clockedDb() {
+			const database = await db();
+			if (time === "fake") await database.clock.set(new Date("2024-01-01T12:00:00Z"));
+			return database;
+		}
+
+		test("waitForEvent receives an event emitted after it", async () => {
+			const database = await clockedDb();
+			const result: string[] = [];
+			const { conductor } = await setup(
+				database,
+				async (id, ctx) => {
+					const value = await ctx.waitForEvent(`clock:${id}`, { event });
+					result.push(value.payload.id);
+				},
+				orchestrators,
+			);
+
+			await conductor.invoke({ name: "wait.task" }, { id: "run" });
+			await suspendedAt(database, "clock:run");
+			await conductor.emit("wait.order", { id: "after", kind: "match" });
+			await until(async () => result.length === 1);
+			expect(result).toEqual(["after"]);
+		});
+
+		test("waitForAny receives an event emitted after subscribe", async () => {
+			const database = await clockedDb();
+			const winners: unknown[] = [];
+			const { conductor } = await setup(
+				database,
+				async (_id, ctx) => {
+					const decision = await ctx.subscribe("decision", { event });
+					const replied = await ctx.subscribe("reply", { event: reply });
+					await ctx.step("post-card", () => ctx.emit("wait.reply", { id: "hello", thread: "t" }));
+					winners.push(await ctx.waitForAny("any", { decision, reply: replied }));
+				},
+				orchestrators,
+			);
+
+			await conductor.invoke({ name: "wait.task" }, { id: "run" });
+			await until(async () => winners.length === 1);
+			expect(winners).toEqual([
+				{ key: "reply", event: { name: "wait.reply", payload: { id: "hello", thread: "t" } } },
+			]);
+		});
+
+		test("waitForAny prefers the branch stored first", async () => {
+			const database = await clockedDb();
+			const winners: unknown[] = [];
+			const stored = async (key: string) => {
+				const [row] =
+					await database.sql`select 1 from pgconductor._private_steps where key = ${key}`;
+				return row !== undefined;
+			};
+			const { conductor } = await setup(
+				database,
+				async (_id, ctx) => {
+					const first = await ctx.subscribe("first", { event, filter: { code: ["first"] } });
+					const second = await ctx.subscribe("second", { event, filter: { code: ["second"] } });
+					await ctx.step("post-cards", async () => {
+						await ctx.emit("wait.order", { id: "earlier", kind: "match", code: "second" });
+						await until(() => stored("second"));
+						await ctx.emit("wait.order", { id: "later", kind: "match", code: "first" });
+						await until(() => stored("first"));
+					});
+					winners.push(await ctx.waitForAny("any", { first, second }));
+				},
+				orchestrators,
+			);
+
+			await conductor.invoke({ name: "wait.task" }, { id: "run" });
+			await until(async () => winners.length === 1);
+			expect(winners).toEqual([
+				{
+					key: "second",
+					event: { name: "wait.order", payload: { id: "earlier", kind: "match", code: "second" } },
+				},
+			]);
+		});
+
+		test("ignores an event emitted before the wait and dispatched after it", async () => {
+			const database = await clockedDb();
+			const result: string[] = [];
+			const earlier = await database.client.emitEvent({
+				eventKey: "wait.order",
+				payload: { id: "earlier", kind: "match" },
+			});
+			await database.sql`
+				update pgconductor._private_executions set run_at = 'infinity' where id = ${earlier}::uuid
+			`;
+			const { conductor } = await setup(
+				database,
+				async (id, ctx) => {
+					const value = await ctx.waitForEvent(`clock:${id}`, { event });
+					result.push(value.payload.id);
+				},
+				orchestrators,
+			);
+
+			const executionId = await conductor.invoke({ name: "wait.task" }, { id: "run" });
+			if (!executionId) throw new Error("invoke did not return an execution id");
+			await suspendedAt(database, "clock:run");
+			await database.sql`
+				update pgconductor._private_executions
+				set run_at = pgconductor._private_current_time()
+				where id = ${earlier}::uuid
+			`;
+			await until(async () => {
+				const [row] = await database.sql<{ completed: boolean }[]>`
+					select completed_at is not null as completed
+					from pgconductor._private_executions where id = ${earlier}::uuid
+				`;
+				return row?.completed === true;
+			});
+			expect(await step(database, executionId, "clock:run")).toBeUndefined();
+
+			await conductor.emit("wait.order", { id: "later", kind: "match" });
+			await until(async () => result.length === 1);
+			expect(result).toEqual(["later"]);
+		});
+	});
 });

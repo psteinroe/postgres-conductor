@@ -243,10 +243,10 @@ describe("Batch Processing", () => {
 		await drain();
 
 		await conductor.invoke({ name: "batch-sleep-mixed" }, { value: 2 });
-		await db.client.setFakeTime({ date: new Date("2024-01-01T12:00:01Z") });
+		await db.client.setFakeTime({ date: new Date("2024-01-01T12:00:02Z") });
 		await drain();
 
-		await db.client.setFakeTime({ date: new Date("2024-01-01T12:00:02Z") });
+		await db.client.setFakeTime({ date: new Date("2024-01-01T12:00:04Z") });
 		await drain();
 
 		await db.client.clearFakeTime();

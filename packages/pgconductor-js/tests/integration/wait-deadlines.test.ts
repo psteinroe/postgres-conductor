@@ -504,6 +504,8 @@ describe("durations", () => {
 		const [row] = await db.sql<{ run_at: Date }[]>`
 			select run_at from pgconductor._private_executions where id = ${id}::uuid
 		`;
-		expect(row?.run_at).toEqual(new Date("2024-01-01T00:01:00Z"));
+		const due = new Date("2024-01-01T00:01:00Z").getTime();
+		expect(row?.run_at.getTime()).toBeGreaterThanOrEqual(due);
+		expect(row?.run_at.getTime()).toBeLessThan(due + 10_000);
 	});
 });

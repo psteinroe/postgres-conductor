@@ -353,7 +353,7 @@ const rows = await db.sql`select * from pgconductor._private_executions`;
 
 ### Controlling Time in Tests
 
-`pgconductor._private_current_time()` returns `current_setting('pgconductor.fake_now')` when set. Test databases use a single connection (`max: 1`), so a session-level setting is seen by the test, conductor and workers alike:
+`pgconductor._private_current_time()` returns `clock_timestamp()` shifted by the `pgconductor.fake_offset` setting when set, so fake time keeps running from the time it was set to and rows written one after another get later times, as in production (event waits match only events created after their subscription). Test databases use a single connection (`max: 1`), so a session-level setting is seen by the test, conductor and workers alike:
 
 ```typescript
 await db.clock.set(new Date("2024-01-01T12:00:00Z"));
@@ -361,9 +361,9 @@ await db.clock.advance("1h");
 await db.clock.reset();
 ```
 
-Useful for sleeps, timeouts, backoff schedules and time windows. Each test database is dropped afterwards, so fake time needs no cleanup. `db.client.setFakeTime()` sets the same setting but does not move the workers' clock.
+Useful for sleeps, timeouts, backoff schedules and time windows. Fake time runs on, so assert timestamps with bounds, not exact values. Each test database is dropped afterwards, so fake time needs no cleanup. `db.client.setFakeTime()` sets the same setting but does not move the workers' clock.
 
-Cron scheduling and time windows (worker fetch filtering, `ctx.step()` and `ctx.checkpoint()`) use the worker's `Clock` (`src/lib/clock.ts`): local time corrected by an offset sampled from the database when the worker starts and every 10 minutes. `Conductor.create({ clock })` replaces the local time. `db.clock` (`createTestClock(sql)` from `src/testing.ts`) sets `fake_now` and returns the same time from `now()`, so the offset stays zero; pass `clock: db.clock` to the conductor and running workers follow `db.clock.set()` and `advance()`. Use `vi.setSystemTime()` only for code that reads `Date` directly. Without `vi.useFakeTimers()` it only fakes `Date` and timers keep running; `vi.useRealTimers()` restores it. `vi.useFakeTimers()` fakes timers and `Date` but not `setImmediate`, which postgres.js needs to send queries (`fakeTimers` in `vitest.config.ts`).
+Cron scheduling and time windows (worker fetch filtering, `ctx.step()` and `ctx.checkpoint()`) use the worker's `Clock` (`src/lib/clock.ts`): local time corrected by an offset sampled from the database when the worker starts and every 10 minutes. `Conductor.create({ clock })` replaces the local time. `db.clock` (`createTestClock(sql)` from `src/testing.ts`) sets `fake_offset` and applies the same offset in `now()`, so the sampled offset stays zero; pass `clock: db.clock` to the conductor and running workers follow `db.clock.set()` and `advance()`. Use `vi.setSystemTime()` only for code that reads `Date` directly. Without `vi.useFakeTimers()` it only fakes `Date` and timers keep running; `vi.useRealTimers()` restores it. `vi.useFakeTimers()` fakes timers and `Date` but not `setImmediate`, which postgres.js needs to send queries (`fakeTimers` in `vitest.config.ts`).
 
 ## Development Environment
 

@@ -66,12 +66,12 @@ test("sends the reminder an hour later", async () => {
 The clock moves two things together: database time, which decides when sleeps end and retries are due, and the time workers use for cron schedules and time windows. Pass it to `Conductor.create({ clock })` so workers use it:
 
 ```typescript
-await clock.set(new Date("2024-01-01T12:00:00Z")); // Freeze time
+await clock.set(new Date("2024-01-01T12:00:00Z")); // 12:00:00
 await clock.advance("15m");                         // 12:15:00
 await clock.reset();                                // Back to real time
 ```
 
-Fake time stands still until you move it. Without `set()`, `advance()` starts from the current real time.
+Fake time keeps running from where you set it, like real time, so things that happen one after another get later times. Assert timestamps with bounds, such as `toBeGreaterThanOrEqual()`, rather than exact values. Without `set()`, `advance()` starts from the current real time.
 
 **Cron:** a worker schedules the next occurrence when it starts and after each run.
 
@@ -99,7 +99,7 @@ await orchestrator.drain();   // Attempt 2
 
 ## How Time Works
 
-Postgres Conductor reads time from `pgconductor._private_current_time()`, which returns the `pgconductor.fake_now` session setting when it is set. Because the setting belongs to one connection, the `sql` you pass to `createTestClock()` must have exactly one connection (`max: 1`), and everything that should see fake time must use it: the conductor, the orchestrator and your assertions.
+Postgres Conductor reads time from `pgconductor._private_current_time()`, which adds the `pgconductor.fake_offset` session setting to the real time when it is set. Because the setting belongs to one connection, the `sql` you pass to `createTestClock()` must have exactly one connection (`max: 1`), and everything that should see fake time must use it: the conductor, the orchestrator and your assertions.
 
 A single connection runs one query at a time. A transaction on `sql` holds the connection until it ends, so do not wait inside it for a query that runs on `sql` outside the transaction. A second connection to the same database sees real time.
 

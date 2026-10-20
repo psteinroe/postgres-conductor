@@ -435,7 +435,9 @@ test.each(["stop()", "a shutdown signal"])(
 		const [row] = await db.sql<{ last_heartbeat_at: Date }[]>`
 			select last_heartbeat_at from pgconductor._private_orchestrators where id = ${orch.info.id}::uuid
 		`;
-		expect(row?.last_heartbeat_at).toEqual(new Date("2024-01-01T12:10:00Z"));
+		expect(row?.last_heartbeat_at.getTime()).toBeGreaterThanOrEqual(
+			new Date("2024-01-01T12:10:00Z").getTime(),
+		);
 
 		await db.client.recoverStaleOrchestrators({ maxAge: "5 minutes" });
 		const locked = await db.sql`
