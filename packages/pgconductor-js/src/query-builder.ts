@@ -611,7 +611,7 @@ export class QueryBuilder {
 		ctes.push(this.sql`valid_results as materialized (
 			select r.*,
 				e.cancelled as execution_cancelled, e.last_error as execution_last_error,
-				e.subscription_id, e.signal_count as execution_signal_count
+				e.subscription_id, e.signal_count as execution_signal_count, e.result_waiters
 			from result_data r
 			join pgconductor._private_executions e
 				on e.id = r.execution_id
@@ -764,6 +764,7 @@ export class QueryBuilder {
 				e.subscription_id,
 				e.trace_context,
 				e.metadata,
+				r.result_waiters,
 				tc.remove_on_fail_days = 0 as should_remove,
 				tc.dead_letter_queue, tc.dead_letter_task_key
 			from failed_results r
@@ -796,6 +797,7 @@ export class QueryBuilder {
 				parent.payload as parent_payload, parent.attempts as parent_attempts,
 				parent.trace_context as parent_trace_context,
 				parent.metadata as parent_metadata,
+				parent.result_waiters as parent_result_waiters,
 				pt.remove_on_fail_days = 0 as parent_should_remove,
 				pt.dead_letter_queue as parent_dead_letter_queue,
 				pt.dead_letter_task_key as parent_dead_letter_task_key
@@ -847,7 +849,7 @@ export class QueryBuilder {
 			where child.completed_at is null and child.failed_at is null
 		)`);
 		ctes.push(this.sql`cancelled_descendants as materialized (
-			select e.id, e.queue, d.reason,
+			select e.id, e.queue, d.reason, e.result_waiters,
 				e.locked_by is not null and v.execution_id is null as running,
 				t.remove_on_fail_days = 0 as should_remove
 			from linked_descendants d
@@ -952,6 +954,40 @@ export class QueryBuilder {
 				and subscription.queue = terminal.queue
 			returning subscription.id
 		)`);
+		// Waits for a settled execution are read from its locked row, which also holds waits
+		// registered after this statement's snapshot. Descendants cancelled here are not woken:
+		// the function's update would precede the statement's own and lose it.
+		ctes.push(this.sql`resolved_result_waits as (
+			select pgconductor._private_resolve_result_waits(jsonb_agg(w.value || jsonb_build_object('outcome', s.outcome)))
+			from (
+				select r.result_waiters,
+					case when oc.id is null
+						then jsonb_build_object('status', 'completed', 'result', r.result)
+						else jsonb_build_object('status', 'failed',
+							'error', 'Parent timed out before child completed')
+					end as outcome
+				from completed_results r
+				left join orphaned_children oc on oc.id = r.execution_id
+				union all
+				select p.result_waiters,
+					case when p.execution_cancelled
+						then jsonb_build_object('status', 'cancelled', 'reason', p.child_error)
+						else jsonb_build_object('status', 'failed', 'error', p.child_error)
+					end
+				from permanently_failed_children p
+				union all
+				select p.parent_result_waiters,
+					jsonb_build_object('status', 'failed', 'error', 'Child execution failed: ' || p.child_error)
+				from failed_parent_targets p
+				union all
+				select d.result_waiters, jsonb_build_object('status', 'cancelled', 'reason', d.reason)
+				from cancelled_descendants d
+				where not d.running
+			) s
+			cross join lateral jsonb_array_elements(s.result_waiters) w
+			where (w.value->>'execution_id')::uuid not in (select id from cancelled_descendants)
+			having count(*) > 0
+		)`);
 		ctes.push(this.sql`retried as (
 			update pgconductor._private_executions e
 			set last_error = coalesce(r.error, 'unknown error'),
@@ -1012,7 +1048,9 @@ export class QueryBuilder {
 		)`);
 
 		const combined = ctes.reduce((acc, cte, i) => (i === 0 ? cte : this.sql`${acc}, ${cte}`));
-		return this.sql<[{ result: number }]>`with recursive ${combined} select 1 as result`;
+		return this.sql<[{ result: number }]>`
+			with recursive ${combined} select 1 as result from (select count(*) from resolved_result_waits) r
+		`;
 	}
 	buildRemoveExecutions({
 		queueName,
@@ -1173,8 +1211,9 @@ export class QueryBuilder {
 					and split_part(dedupe_key, '::', 2) = ${scheduleName}::text
 					and cron_expression is not null
 					and is_available
-			)
-			select id from pgconductor.invoke(
+				returning result_waiters
+			), ${this.removedScheduleWaits()}
+			select id from (select count(*) from resolved_result_waits) r, pgconductor.invoke(
 				p_task_key := ${spec.task_key}::text,
 				p_queue := ${spec.queue}::text,
 				p_payload := ${spec.payload ? this.sql.json(spec.payload) : null}::jsonb,
@@ -1194,11 +1233,11 @@ export class QueryBuilder {
 		taskKey,
 		queue,
 		scheduleName,
-	}: UnscheduleCronExecutionArgs): PendingQuery<[]> {
-		return this.sql<[]>`
+	}: UnscheduleCronExecutionArgs): PendingQuery<[{ resolved: number }]> {
+		return this.sql<[{ resolved: number }]>`
 			with
 			-- Delete pending executions
-			deleted_pending as (
+			removed as (
 				delete from pgconductor._private_executions
 				where task_key = ${taskKey}::text
 					and queue = ${queue}::text
@@ -1206,8 +1245,8 @@ export class QueryBuilder {
 					and split_part(dedupe_key, '::', 2) = ${scheduleName}::text
 					and cron_expression is not null
 					and is_available
-				returning 1
-			),
+				returning result_waiters
+			), ${this.removedScheduleWaits()},
 			-- Mark running executions as cancelled (no signal needed, they'll fail naturally)
 			cancelled_running as (
 				update pgconductor._private_executions e
@@ -1223,8 +1262,20 @@ export class QueryBuilder {
 					and e.cancelled = false
 				returning 1
 			)
-			select where false
+			select count(*)::int as resolved from resolved_result_waits
 		`;
+	}
+
+	// Waits for pending schedule executions removed by the statement's `removed` CTE
+	private removedScheduleWaits(): PendingQuery<Row[]> {
+		return this.sql`resolved_result_waits as (
+			select pgconductor._private_resolve_result_waits(jsonb_agg(w.value || jsonb_build_object(
+				'outcome', jsonb_build_object('status', 'cancelled', 'reason', 'Schedule removed')
+			)))
+			from removed r
+			cross join lateral jsonb_array_elements(r.result_waiters) w
+			having count(*) > 0
+		)`;
 	}
 
 	buildInvokeBatch(specs: ExecutionSpec[]): PendingQuery<{ id: string }[]> {
@@ -1466,7 +1517,15 @@ export class QueryBuilder {
 					and p.child_locked_by is null   -- not currently executing
 					and e.completed_at is null
 					and e.failed_at is null
-				returning e.id
+				returning e.id, e.result_waiters
+			),
+			resolved_result_waits as (
+				select pgconductor._private_resolve_result_waits(jsonb_agg(w.value || jsonb_build_object(
+					'outcome', jsonb_build_object('status', 'failed', 'error', 'Cancelled: parent timed out')
+				)))
+				from failed_pending_child c
+				cross join lateral jsonb_array_elements(c.result_waiters) w
+				having count(*) > 0
 			),
 			-- Signal executing (locked) children to cancel
 			signaled_executing_child as (
@@ -1495,6 +1554,8 @@ export class QueryBuilder {
 			select id from failed_pending_child
 			union all
 			select id from signaled_executing_child
+			union all
+			select null from resolved_result_waits
 		`;
 	}
 

@@ -5,7 +5,11 @@ import { Conductor } from "../../src/conductor";
 import { defineEvent } from "../../src/event-definition";
 import { defineTask } from "../../src/task-definition";
 import { EventSchemas, TaskSchemas } from "../../src/schemas";
-import { WaitForEventTimeoutError, type EventSubscription } from "../../src/index";
+import {
+	WaitForEventTimeoutError,
+	type EventSubscription,
+	type ExecutionOutcome,
+} from "../../src/index";
 
 describe("waitForEvent API", () => {
 	test("returns the declared event and payload and constrains filters", () => {
@@ -20,9 +24,10 @@ describe("waitForEvent API", () => {
 			filterable: ["thread"],
 		});
 		const task = defineTask({ name: "api.wait", payload: z.object({}) });
+		const work = defineTask({ name: "api.work", returns: z.object({ doubled: z.number() }) });
 		const conductor = Conductor.create({
 			sql: {} as any,
-			tasks: TaskSchemas.fromSchema([task]),
+			tasks: TaskSchemas.fromSchema([task, work]),
 			events: EventSchemas.fromSchema([event, reply]),
 			context: {},
 		});
@@ -72,6 +77,33 @@ describe("waitForEvent API", () => {
 			ctx.waitForAny("bad", { reply: { event: reply } });
 			// @ts-expect-error timeout is the result key of the timeout
 			ctx.waitForAny("bad", { timeout: subscription });
+
+			const toolOrReply = await ctx.waitForAny("tool-or-reply", {
+				tool: { execution: "id" },
+				reply: replied,
+			});
+			expectTypeOf(toolOrReply).toEqualTypeOf<
+				| { key: "tool"; outcome: ExecutionOutcome }
+				| { key: "reply"; event: { name: "api.reply"; payload: { thread: string; text: string } } }
+				| { key: "timeout" }
+			>();
+			expectTypeOf(
+				await ctx.waitForResult<{ doubled: number }>("result", "id", { timeout: "1h" }),
+			).toEqualTypeOf<ExecutionOutcome<{ doubled: number }> | { status: "timeout" }>();
+			expectTypeOf(
+				await ctx.waitForResult("typed", { name: "api.work" }, "id", { timeout: "1h" }),
+			).toEqualTypeOf<ExecutionOutcome<{ doubled: number }> | { status: "timeout" }>();
+			// @ts-expect-error unknown task
+			ctx.waitForResult("bad", { name: "api.missing" }, "id");
+			expectTypeOf(
+				await ctx.waitForAny("typed-any", {
+					tool: { execution: "id", task: { name: "api.work" } },
+				}),
+			).toEqualTypeOf<
+				{ key: "tool"; outcome: ExecutionOutcome<{ doubled: number }> } | { key: "timeout" }
+			>();
+			expectTypeOf(ctx.executionId).toEqualTypeOf<string>();
+			expectTypeOf(ctx.queue).toEqualTypeOf<string>();
 		});
 		expect(WaitForEventTimeoutError).toBeDefined();
 	});

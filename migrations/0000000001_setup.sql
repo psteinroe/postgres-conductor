@@ -116,6 +116,9 @@ create table pgconductor._private_executions (
     -- signals ever stored for this execution; settlement reads it from the locked row to see
     -- signals committed after its snapshot was taken
     signal_count integer default 0 not null,
+    -- waits for this execution's outcome, as {execution_id, queue, step_key}. registration appends
+    -- under the row lock, so settlement sees waits registered after its snapshot was taken
+    result_waiters jsonb,
 
     -- source execution metadata of a dead-letter delivery, copied so the source row may be removed
     dead_letter jsonb,
@@ -437,6 +440,8 @@ language plpgsql
 volatile
 set search_path to ''
 as $function$
+declare
+  v_resolved integer;
 begin
   -- Upsert every required queue in a stable order (triggers partition
   -- creation).  Registrations may reference one another as dead-letter queues,
@@ -514,16 +519,26 @@ begin
     "group" = excluded."group";
 
   -- Clean up stale schedules for this queue.
-  delete from pgconductor._private_executions
-  where queue = p_queue_name
-    and cron_expression is not null
-    and is_available
-    and dedupe_key like 'scheduled::%'
-    and (task_key, split_part(dedupe_key, '::', 2), cron_expression) not in (
-      select spec.task_key, split_part(spec.dedupe_key, '::', 2), spec.cron_expression
-      from unnest(p_cron_schedules) as spec
-      where spec.dedupe_key is not null and spec.dedupe_key like 'scheduled::%'
-    );
+  with removed as (
+    delete from pgconductor._private_executions
+    where queue = p_queue_name
+      and cron_expression is not null
+      and is_available
+      and dedupe_key like 'scheduled::%'
+      and (task_key, split_part(dedupe_key, '::', 2), cron_expression) not in (
+        select spec.task_key, split_part(spec.dedupe_key, '::', 2), spec.cron_expression
+        from unnest(p_cron_schedules) as spec
+        where spec.dedupe_key is not null and spec.dedupe_key like 'scheduled::%'
+      )
+    returning result_waiters
+  )
+  select pgconductor._private_resolve_result_waits(jsonb_agg(w.value || jsonb_build_object(
+    'outcome', jsonb_build_object('status', 'cancelled', 'reason', 'Schedule removed')
+  )))
+  into v_resolved
+  from removed r
+  cross join lateral jsonb_array_elements(r.result_waiters) w
+  having count(*) > 0;
 
   update pgconductor._private_executions
   set cancelled = true
@@ -602,6 +617,7 @@ declare
     v_singleton_on timestamptz;
     v_next_singleton_on timestamptz;
     v_run_at timestamptz;
+    v_resolved integer;
 begin
   perform pgconductor._private_check_metadata(p_metadata);
   v_now := pgconductor._private_current_time();
@@ -610,7 +626,7 @@ begin
   -- clear locked dedupe key before insert (supersede pattern)
   if p_dedupe_key is not null then
       with superseded as (
-          select e.id, e.queue, t.remove_on_fail_days = 0 as should_remove
+          select e.id, e.queue, e.result_waiters, t.remove_on_fail_days = 0 as should_remove
           from pgconductor._private_executions e
           left join pgconductor._private_tasks t on t.key = e.task_key and t.queue = e.queue
           where e.dedupe_key = p_dedupe_key
@@ -623,16 +639,25 @@ begin
           delete from pgconductor._private_executions e
           using superseded s
           where e.id = s.id and e.queue = s.queue and s.should_remove
+      ),
+      failed as (
+          update pgconductor._private_executions e
+          set
+              dedupe_key = null,
+              locked_by = null,
+              locked_at = null,
+              failed_at = v_now,
+              last_error = 'superseded by reinvoke'
+            from superseded s
+          where e.id = s.id and e.queue = s.queue and s.should_remove is not true
       )
-      update pgconductor._private_executions e
-      set
-          dedupe_key = null,
-          locked_by = null,
-          locked_at = null,
-          failed_at = v_now,
-          last_error = 'superseded by reinvoke'
-        from superseded s
-      where e.id = s.id and e.queue = s.queue and s.should_remove is not true;
+      select pgconductor._private_resolve_result_waits(jsonb_agg(w.value || jsonb_build_object(
+          'outcome', jsonb_build_object('status', 'failed', 'error', 'superseded by reinvoke')
+      )))
+      into v_resolved
+      from superseded s
+      cross join lateral jsonb_array_elements(s.result_waiters) w
+      having count(*) > 0;
   end if;
 
   -- singleton throttle/debounce logic
@@ -928,6 +953,7 @@ declare
   v_ancestor_ids uuid[];
   v_locked_ids uuid[];
   v_rows_affected integer;
+  v_resolved integer;
 begin
   -- a waiting execution is cancelled with the executions it waits on, and
   -- fails the executions waiting on it. the graph may change while we wait for
@@ -1020,7 +1046,8 @@ begin
       case when e.id = any(v_ancestor_ids) then 'Child execution failed: ' || p_reason
         else p_reason end as error,
       e.id = any(v_ancestor_ids) is not true as cancelled,
-      t.remove_on_fail_days = 0 as should_remove
+      t.remove_on_fail_days = 0 as should_remove,
+      e.result_waiters
     from pgconductor._private_executions e
     left join pgconductor._private_tasks t on t.key = e.task_key and t.queue = e.queue
     where e.id = any(v_descendant_ids || p_execution_id || v_ancestor_ids)
@@ -1043,11 +1070,22 @@ begin
       waiting_step_key = null
     from pending p
     where e.id = p.id and e.queue = p.queue and p.should_remove is not true
+  ),
+  deleted_waits as (
+    delete from pgconductor._private_custom_event_subscriptions s
+    using pending p
+    where s.kind = 'execution_wait'
+      and s.execution_id = p.id
   )
-  delete from pgconductor._private_custom_event_subscriptions s
-  using pending p
-  where s.kind = 'execution_wait'
-    and s.execution_id = p.id;
+  select pgconductor._private_resolve_result_waits(jsonb_agg(
+    w.value || jsonb_build_object('outcome', case when p.cancelled
+      then jsonb_build_object('status', 'cancelled', 'reason', p.error)
+      else jsonb_build_object('status', 'failed', 'error', p.error) end)
+  ))
+  into v_resolved
+  from pending p
+  cross join lateral jsonb_array_elements(p.result_waiters) w
+  having count(*) > 0;
 
   -- linked children are cancelled with the reason their parent ended with
   perform pgconductor.cancel_execution(
@@ -1073,7 +1111,8 @@ create unique index idx_executions_event_destination
 
 create table pgconductor._private_custom_event_subscriptions (
     id uuid primary key default pgconductor._private_portable_uuidv7(),
-    event_key text not null,
+    -- null for a wait on the outcome of another execution
+    event_key text,
     task_key text not null,
     queue text not null,
     payload_fields text[],
@@ -1083,6 +1122,7 @@ create table pgconductor._private_custom_event_subscriptions (
     execution_id uuid,
     step_key text,
     expires_at timestamptz,
+    awaited_execution_id uuid,
     constraint chk_custom_event_subscription_event_key check (
         btrim(event_key) <> '' and octet_length(event_key) between 1 and 255
     ),
@@ -1091,14 +1131,17 @@ create table pgconductor._private_custom_event_subscriptions (
     ),
     constraint chk_custom_event_subscription_shape check (
         (kind = 'task_trigger'
+            and event_key is not null
             and execution_id is null
             and step_key is null
-            and expires_at is null)
+            and expires_at is null
+            and awaited_execution_id is null)
         or
         (kind = 'execution_wait'
             and execution_id is not null
             and step_key is not null
-            and payload_fields is null)
+            and payload_fields is null
+            and (event_key is null) = (awaited_execution_id is not null))
     ),
     constraint fk_custom_event_subscription_execution
         foreign key (execution_id, queue)
@@ -1439,9 +1482,69 @@ begin
 end;
 $function$;
 
+-- Stores the outcomes of settled executions for the waits in p_waits, read from their
+-- result_waiters ([{execution_id, queue, step_key, outcome}]), and wakes waiters suspended
+-- at a wait, like dispatch does. Every path that ends an execution calls it with the
+-- result_waiters of its locked or deleted row, and only when there are waiters, so
+-- settlement stays cheap to plan.
+create or replace function pgconductor._private_resolve_result_waits(p_waits jsonb)
+returns integer
+language plpgsql
+volatile
+set search_path to ''
+as $function$
+declare
+    v_resolved integer;
+begin
+    with waits as materialized (
+        select *
+        from jsonb_to_recordset(p_waits)
+            as w(execution_id uuid, queue text, step_key text, outcome jsonb)
+    ), locked_waiters as materialized (
+        select e.id, e.queue,
+            e.locked_by is null
+                and e.waiting_on_execution_id is null
+                and e.waiting_step_key is not null as suspended
+        from pgconductor._private_executions e
+        where (e.id, e.queue) in (select w.execution_id, w.queue from waits w)
+            and e.completed_at is null
+            and e.failed_at is null
+            and not e.cancelled
+        order by e.id
+        for update of e
+    ), stored_steps as (
+        insert into pgconductor._private_steps (execution_id, queue, key, result)
+        select w.execution_id, w.queue, w.step_key,
+            jsonb_build_object('status', 'resolved', 'outcome', w.outcome)
+        from waits w
+        join locked_waiters l on l.id = w.execution_id and l.queue = w.queue
+        on conflict (execution_id, key) do nothing
+        returning execution_id, queue, key
+    ), deleted_waits as (
+        delete from pgconductor._private_custom_event_subscriptions subscription
+        using stored_steps step
+        where subscription.kind = 'execution_wait'
+            and subscription.execution_id = step.execution_id
+            and subscription.step_key = step.key
+    ), woken as (
+        update pgconductor._private_executions e
+        set run_at = pgconductor._private_current_time(), waiting_step_key = null
+        from locked_waiters l
+        where e.id = l.id and e.queue = l.queue and l.suspended
+            and exists (select 1 from stored_steps step where step.execution_id = l.id)
+    )
+    select count(*) into v_resolved from stored_steps;
+
+    return v_resolved;
+end;
+$function$;
+
 -- Registers a waitForAny step over subscriptions created by
 -- _private_register_event_wait, referenced by their step keys. The branch whose
--- event was stored first wins (then branch order). Otherwise the timeout is set
+-- event was stored first wins (then branch order). An { execution } branch is
+-- registered here: the outcome of a settled execution is stored at once, otherwise
+-- the wait gets a subscription and is added to the execution's result_waiters, from
+-- which settlement and cancel_execution store the outcome. Otherwise the timeout is set
 -- on all branch subscriptions and the execution is released until dispatch wakes
 -- it or the timeout passes. Settling removes the branch subscriptions and closes
 -- the branches, so subscribing again on a resume is a no-op.
@@ -1462,10 +1565,25 @@ set search_path to ''
 as $function$
 declare
     v_step_keys text[] := array(select jsonb_array_elements(p_branches)->>'stepKey');
+    v_awaited_ids uuid[] := array(
+        select (branch->>'executionId')::uuid
+        from jsonb_array_elements(p_branches) branch
+        where branch ? 'executionId'
+    );
+    v_unknown_id uuid;
     v_result jsonb;
     v_expires_at timestamptz;
     v_now timestamptz := pgconductor._private_current_time();
 begin
+    -- Settlement locks an execution before its waiters, so awaited executions are locked first
+    if cardinality(v_awaited_ids) > 0 then
+        perform 1
+        from pgconductor._private_executions awaited
+        where awaited.id = any(v_awaited_ids)
+        order by awaited.id
+        for update;
+    end if;
+
     perform 1
     from pgconductor._private_executions execution
     where execution.id = p_execution_id
@@ -1492,7 +1610,77 @@ begin
         return v_result;
     end if;
 
-    select jsonb_build_object('key', branch.value->>'key', 'event', step.result->'event')
+    if cardinality(v_awaited_ids) > 0 then
+        -- A branch with a stored step already received its outcome
+        select (branch->>'executionId')::uuid
+        into v_unknown_id
+        from jsonb_array_elements(p_branches) branch
+        where branch ? 'executionId'
+          and not exists (
+              select 1 from pgconductor._private_steps step
+              where step.execution_id = p_execution_id and step.key = branch->>'stepKey'
+          )
+          and not exists (
+              select 1 from pgconductor._private_executions awaited
+              where awaited.id = (branch->>'executionId')::uuid
+                and (branch->>'taskKey' is null
+                    or (awaited.task_key = branch->>'taskKey' and awaited.queue = branch->>'queue'))
+          )
+        limit 1;
+
+        if found then
+            raise exception 'Execution % not found', v_unknown_id;
+        end if;
+
+        with branches as materialized (
+            select branch->>'stepKey' as step_key, awaited.id,
+                case
+                    when awaited.completed_at is not null
+                        then jsonb_build_object('status', 'completed', 'result', awaited.result)
+                    when awaited.failed_at is null then null
+                    when awaited.cancelled
+                        then jsonb_build_object('status', 'cancelled', 'reason', awaited.last_error)
+                    else jsonb_build_object('status', 'failed', 'error', awaited.last_error)
+                end as outcome
+            from jsonb_array_elements(p_branches) branch
+            join pgconductor._private_executions awaited
+                on awaited.id = (branch->>'executionId')::uuid
+                and (branch->>'taskKey' is null
+                    or (awaited.task_key = branch->>'taskKey' and awaited.queue = branch->>'queue'))
+            where not exists (
+                select 1 from pgconductor._private_steps step
+                where step.execution_id = p_execution_id and step.key = branch->>'stepKey'
+            )
+        ), settled as (
+            insert into pgconductor._private_steps (execution_id, queue, key, result)
+            select p_execution_id, p_queue, b.step_key,
+                jsonb_build_object('status', 'resolved', 'outcome', b.outcome)
+            from branches b
+            where b.outcome is not null
+        ), registered as (
+            insert into pgconductor._private_custom_event_subscriptions (
+                task_key, queue, required_field_count, kind, execution_id, step_key,
+                awaited_execution_id
+            )
+            select p_task_key, p_queue, 0, 'execution_wait', p_execution_id, b.step_key, b.id
+            from branches b
+            where b.outcome is null
+            on conflict (execution_id, step_key) do nothing
+            returning step_key, awaited_execution_id
+        )
+        update pgconductor._private_executions awaited
+        set result_waiters = coalesce(awaited.result_waiters, '[]'::jsonb) || r.waiters
+        from (
+            select awaited_execution_id, jsonb_agg(jsonb_build_object(
+                'execution_id', p_execution_id, 'queue', p_queue, 'step_key', step_key
+            )) as waiters
+            from registered
+            group by awaited_execution_id
+        ) r
+        where awaited.id = r.awaited_execution_id;
+    end if;
+
+    select jsonb_build_object('key', branch.value->>'key') || (step.result - 'status')
     into v_result
     from jsonb_array_elements(p_branches) with ordinality branch
     join pgconductor._private_steps step
@@ -1547,6 +1735,20 @@ begin
     where subscription.kind = 'execution_wait'
       and subscription.execution_id = p_execution_id
       and subscription.step_key = any(v_step_keys);
+
+    -- Executions still running no longer need to resolve this race
+    if cardinality(v_awaited_ids) > 0 then
+        update pgconductor._private_executions awaited
+        set result_waiters = (
+            select jsonb_agg(w)
+            from jsonb_array_elements(awaited.result_waiters) w
+            where not (w->>'execution_id' = p_execution_id::text and w->>'step_key' = any(v_step_keys))
+        )
+        where awaited.id = any(v_awaited_ids)
+          and awaited.completed_at is null
+          and awaited.failed_at is null
+          and awaited.result_waiters is not null;
+    end if;
 
     return v_result;
 end;

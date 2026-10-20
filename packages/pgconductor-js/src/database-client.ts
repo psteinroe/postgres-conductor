@@ -91,6 +91,12 @@ export type ExecutionInfo<TResult = unknown> = {
 	failedAt: Date | null;
 };
 
+/** How an execution settled, as `ctx.waitForResult()` and `ctx.waitForAny()` return it. */
+export type ExecutionOutcome<TResult = unknown> =
+	| { status: "completed"; result: TResult }
+	| { status: "failed"; error: string }
+	| { status: "cancelled"; reason: string };
+
 export interface Execution {
 	id: string;
 	task_key: string;
@@ -217,9 +223,19 @@ export type EventWaitResult =
 	| { status: "timed_out" }
 	| { status: "closed" };
 
-export type EventRaceBranch = { key: string; stepKey: string };
+export type EventRaceBranch = {
+	key: string;
+	stepKey: string;
+	executionId?: string;
+	taskKey?: string;
+	queue?: string;
+};
 
-export type EventRaceResult = { key: string; event?: { name: string; payload: Payload } };
+export type EventRaceResult = {
+	key: string;
+	event?: { name: string; payload: Payload };
+	outcome?: ExecutionOutcome;
+};
 
 export interface EventSubscriptionSpec {
 	task_key: string;
