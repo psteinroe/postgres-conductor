@@ -269,12 +269,18 @@ describe("ctx.invoke with cancelWithParent (Postgres integration)", () => {
 				]),
 				context: {},
 			});
+			const linkedRunning = new Deferred<void>();
 			const work = conductor.createTask(
 				{ name: "work", maxAttempts: 1 },
 				{ invocable: true },
 				async (e, ctx) => {
-					if (e.payload.mode === "block") return release.promise;
+					if (e.payload.mode === "block") {
+						linkedRunning.resolve();
+						return release.promise;
+					}
 					if (e.payload.mode === "sleep") return ctx.sleep("nap", 60 * 60 * 1000);
+					// The linked child is cancelled as soon as this fails, so it must be running first
+					await linkedRunning.promise;
 					throw new Error("boom");
 				},
 			);
@@ -306,21 +312,17 @@ describe("ctx.invoke with cancelWithParent (Postgres integration)", () => {
 					from pgconductor._private_executions where task_key = 'work'
 				`;
 			const reason = awaited === "sleep" ? "stop" : "boom";
-			await waitForCondition(async () => {
-				const all = await rows();
-				const linked = all.find((row) => row.mode === "block");
-				const child = all.find((row) => row.mode === awaited);
-				return (
-					!!linked?.locked_by &&
-					!!child &&
-					!child.locked_by &&
-					!!child.last_error === (awaited === "throw")
-				);
-			});
 			if (awaited === "sleep") {
+				await waitForCondition(async () => {
+					const all = await rows();
+					const linked = all.find((row) => row.mode === "block");
+					const child = all.find((row) => row.mode === "sleep");
+					return !!linked?.locked_by && !!child && !child.locked_by;
+				});
 				const child = (await rows()).find((row) => row.mode === "sleep");
 				expect(await conductor.cancel(child?.id || "", { reason })).toBe(true);
 			}
+			await linkedRunning.promise;
 			const linkedId = (await rows()).find((row) => row.mode === "block")?.id || "";
 			await waitForCondition(
 				async () => (await conductor.getExecution(linkedId))?.status === "cancelled",
