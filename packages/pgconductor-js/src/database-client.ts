@@ -1,4 +1,5 @@
 import postgres, { type Sql } from "postgres";
+import type { DatabaseTime } from "./lib/clock.js";
 import { waitFor } from "./lib/wait-for.js";
 import type { Migration } from "./migration-store.js";
 import {
@@ -289,7 +290,7 @@ export type SetFakeTimeArgs = {
 };
 
 export class DatabaseClient {
-	private readonly sql: Sql;
+	readonly sql: Sql;
 	private readonly builder: QueryBuilder;
 	private readonly ownsSql: boolean;
 	private readonly logger: Logger;
@@ -426,11 +427,13 @@ export class DatabaseClient {
 		return result[0]?.cancel_execution || false;
 	}
 
-	async getDatabaseTime(options?: QueryMethodOptions): Promise<Date> {
+	async getDatabaseTime(options?: QueryMethodOptions): Promise<DatabaseTime> {
 		const result = await this.query(
 			(sql) =>
-				sql<{ now: Date }[]>`
-				select pgconductor._private_current_time() as now
+				sql<DatabaseTime[]>`
+				select
+					pgconductor._private_current_time() as now,
+					trim(coalesce(current_setting('pgconductor.fake_now', true), '')) <> '' as frozen
 			`,
 			{ label: "getDatabaseTime", ...options },
 		);
@@ -438,7 +441,7 @@ export class DatabaseClient {
 		if (!row) {
 			throw new Error("getDatabaseTime returned no rows");
 		}
-		return row.now;
+		return row;
 	}
 
 	async recoverStaleOrchestrators(

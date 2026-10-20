@@ -441,7 +441,7 @@ test("stop() leaves a conductor with an owned connection usable until close()", 
 });
 
 test("stop() while another session holds the migration lock does not migrate", async () => {
-	const db = await pool.child();
+	const db = await pool.child({ migrate: false });
 	databases.push(db);
 
 	const holder = postgres(db.url, { max: 1 });

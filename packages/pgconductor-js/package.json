@@ -11,6 +11,10 @@
 			"types": "./dist/src/index.d.ts",
 			"import": "./dist/src/index.js"
 		},
+		"./testing": {
+			"types": "./dist/src/testing.d.ts",
+			"import": "./dist/src/testing.js"
+		},
 		"./package.json": "./package.json"
 	},
 	"bin": {
@@ -65,7 +69,13 @@
 		"zod": "catalog:"
 	},
 	"peerDependencies": {
-		"@opentelemetry/api": ">=1.4 <2"
+		"@opentelemetry/api": ">=1.4 <2",
+		"@testcontainers/postgresql": ">=11 <12"
+	},
+	"peerDependenciesMeta": {
+		"@testcontainers/postgresql": {
+			"optional": true
+		}
 	},
 	"dependencies": {
 		"@standard-schema/spec": "^1.0.0",

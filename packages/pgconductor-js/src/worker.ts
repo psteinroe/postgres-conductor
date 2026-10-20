@@ -139,6 +139,7 @@ export class Worker<
 		this.clock = new Clock({
 			sampleDatabaseTime: (signal) => this.db.getDatabaseTime({ signal }),
 			logger: this.logger,
+			source: this.db.sql,
 		});
 	}
 

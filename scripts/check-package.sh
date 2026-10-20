@@ -2,7 +2,8 @@
 
 # Packs pgconductor-js, installs the tarball with npm into a temporary project
 # and checks that it works for a plain Node consumer: ESM imports, TypeScript
-# types and the CLI.
+# types, the CLI and the pgconductor-js/testing example test, which runs on
+# DATABASE_URL or a testcontainers Postgres.
 
 set -euo pipefail
 
@@ -19,7 +20,8 @@ cat > package.json <<'EOF'
 { "name": "consumer", "private": true, "type": "module" }
 EOF
 
-npm install --no-audit --no-fund ./pgconductor-js-*.tgz @opentelemetry/api typescript@5 @types/node
+npm install --no-audit --no-fund ./pgconductor-js-*.tgz @opentelemetry/api typescript@5 @types/node \
+	vitest@5 @testcontainers/postgresql@11
 
 if grep -q '"catalog:\|"workspace:' node_modules/pgconductor-js/package.json; then
 	echo "Packed package.json contains unresolved catalog: or workspace: specifiers"
@@ -53,6 +55,8 @@ EOF
 
 node exports.mjs
 
+cp "$JS_DIR/tests/integration/testing.test.ts" testing.test.ts
+
 cat > tsconfig.json <<'EOF'
 {
 	"compilerOptions": {
@@ -64,7 +68,7 @@ cat > tsconfig.json <<'EOF'
 		"skipLibCheck": true,
 		"types": ["node"]
 	},
-	"files": ["consumer.ts"]
+	"files": ["consumer.ts", "testing.test.ts"]
 }
 EOF
 
@@ -134,3 +138,5 @@ EOF
 npx tsc -p tsconfig.json
 
 npx pgconductor --help
+
+npx vitest run testing.test.ts --hookTimeout 120000

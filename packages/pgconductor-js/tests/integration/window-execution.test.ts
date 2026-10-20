@@ -16,7 +16,6 @@ describe("Window Execution", () => {
 	}, 60000);
 
 	afterEach(async () => {
-		vi.useRealTimers();
 		await Promise.all(databases.map((db) => db.destroy()));
 		databases.length = 0;
 	});
@@ -31,7 +30,7 @@ describe("Window Execution", () => {
 
 		// Start inside window so task gets fetched
 		const insideTime = new Date("2024-01-01T10:00:00Z");
-		await db.client.setFakeTime({ date: insideTime });
+		await db.clock.set(insideTime);
 
 		const taskDefinitions = defineTask({
 			name: "window-task",
@@ -44,8 +43,8 @@ describe("Window Execution", () => {
 		const conductor = Conductor.create({
 			sql: db.sql,
 			tasks: TaskSchemas.fromSchema([taskDefinitions]),
-			// Pass db client so task can advance time
-			context: { dbClient: db.client },
+			// Pass the clock so the task can advance time
+			context: { clock: db.clock },
 		});
 
 		const windowTask = conductor.createTask(
@@ -53,10 +52,8 @@ describe("Window Execution", () => {
 			{ invocable: true },
 			async (event, ctx) => {
 				if (event.name === "pgconductor.invoke") {
-					// Advance time to outside window BEFORE calling ctx.step(). The worker
-					// clock follows local time between database samples, so move both.
-					await ctx.dbClient.setFakeTime({ date: new Date("2024-01-01T18:00:00Z") });
-					vi.setSystemTime(new Date(Date.now() + 8 * 60 * 60 * 1000));
+					// Advance time to outside window BEFORE calling ctx.step()
+					await ctx.clock.set(new Date("2024-01-01T18:00:00Z"));
 
 					// This step will trigger release (we're now outside window)
 					const result = await ctx.step("step1", () => {
@@ -95,10 +92,8 @@ describe("Window Execution", () => {
 		if (!execution) throw new Error("execution not found");
 		expect(execution.completed_at).toBeNull();
 
-		// run_at should be scheduled for next day at 09:00. The worker clock keeps
-		// ticking while the database fake time is frozen, so allow for elapsed time.
-		const nextDay9AM = new Date("2024-01-02T09:00:00Z");
-		expect(Math.abs(execution.run_at.getTime() - nextDay9AM.getTime())).toBeLessThan(1000);
+		// run_at should be scheduled for next day at 09:00
+		expect(execution.run_at).toEqual(new Date("2024-01-02T09:00:00Z"));
 
 		await orchestrator.stop();
 	}, 30000);
@@ -109,7 +104,7 @@ describe("Window Execution", () => {
 
 		// Start inside window so task gets fetched
 		const insideTime = new Date("2024-01-01T10:00:00Z");
-		await db.client.setFakeTime({ date: insideTime });
+		await db.clock.set(insideTime);
 
 		const taskDefinitions = defineTask({
 			name: "checkpoint-task",
@@ -123,8 +118,8 @@ describe("Window Execution", () => {
 		const conductor = Conductor.create({
 			sql: db.sql,
 			tasks: TaskSchemas.fromSchema([taskDefinitions]),
-			// Pass db client so task can advance time
-			context: { dbClient: db.client },
+			// Pass the clock so the task can advance time
+			context: { clock: db.clock },
 		});
 
 		const checkpointTask = conductor.createTask(
@@ -135,8 +130,7 @@ describe("Window Execution", () => {
 					beforeCheckpoint();
 
 					// Advance time to outside window BEFORE calling ctx.checkpoint()
-					await ctx.dbClient.setFakeTime({ date: new Date("2024-01-01T17:30:00Z") });
-					vi.setSystemTime(new Date(Date.now() + 7.5 * 60 * 60 * 1000));
+					await ctx.clock.set(new Date("2024-01-01T17:30:00Z"));
 
 					// Checkpoint should trigger release (we're now outside window)
 					await ctx.checkpoint();
@@ -185,7 +179,7 @@ describe("Window Execution", () => {
 
 		// Set time inside window (10:00, window is 09:00-17:00)
 		const insideTime = new Date("2024-01-01T10:00:00Z");
-		await db.client.setFakeTime({ date: insideTime });
+		await db.clock.set(insideTime);
 
 		const taskDefinitions = defineTask({
 			name: "inside-window-task",
@@ -259,7 +253,7 @@ describe("Window Execution", () => {
 
 		// Start outside window
 		const outsideTime = new Date("2024-01-01T18:00:00Z");
-		await db.client.setFakeTime({ date: outsideTime });
+		await db.clock.set(outsideTime);
 
 		const taskDefinitions = defineTask({
 			name: "resume-task",
@@ -306,16 +300,8 @@ describe("Window Execution", () => {
 		// Task should not execute yet (outside window)
 		expect(stepFn).not.toHaveBeenCalled();
 
-		// Move back inside window (next day at 10:00). Workers sample the database
-		// clock on start, so restart to observe the new fake time.
-		await orchestrator.stop();
-		await db.client.setFakeTime({ date: new Date("2024-01-02T10:00:00Z") });
-		const restarted = Orchestrator.create({
-			conductor,
-			tasks: [resumeTask],
-			defaultWorker: { pollIntervalMs: 50, flushIntervalMs: 50 },
-		});
-		await restarted.start();
+		// Move back inside window (next day at 10:00)
+		await db.clock.set(new Date("2024-01-02T10:00:00Z"));
 
 		// Wait for task to resume and complete
 		await new Promise((r) => setTimeout(r, 500));
@@ -334,6 +320,6 @@ describe("Window Execution", () => {
 		if (!execution3) throw new Error("execution not found");
 		expect(execution3.completed_at).not.toBeNull();
 
-		await restarted.stop();
+		await orchestrator.stop();
 	}, 30000);
 });

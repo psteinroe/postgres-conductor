@@ -5,9 +5,10 @@ type PublicMethodsOf<T> = {
 	[K in keyof T as T[K] extends Function ? K : never]: T[K];
 };
 
-type IDatabaseClient = PublicMethodsOf<DatabaseClient>;
+type IDatabaseClient = Omit<PublicMethodsOf<DatabaseClient>, "sql">;
 
 export class MockDatabaseClient implements IDatabaseClient {
+	sql = vi.fn();
 	close = vi.fn(async () => {});
 	orchestratorHeartbeat = vi.fn(async () => []);
 	recoverStaleOrchestrators = vi.fn(async () => {});
@@ -38,7 +39,7 @@ export class MockDatabaseClient implements IDatabaseClient {
 	ackSignals = vi.fn(async () => {});
 	signalExecution = vi.fn(async () => true);
 	signalWithStart = vi.fn(async () => "mock-execution-id");
-	getDatabaseTime = vi.fn(async () => new Date());
+	getDatabaseTime = vi.fn(async () => ({ now: new Date(), frozen: false }));
 	setFakeTime = vi.fn(async () => {});
 	clearFakeTime = vi.fn(async () => {});
 	emitEvent = vi.fn(async () => "mock-event-id");

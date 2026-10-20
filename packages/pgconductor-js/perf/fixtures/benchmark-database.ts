@@ -1,7 +1,8 @@
 import { Conductor } from "../../src/conductor";
 import { defineTask } from "../../src/task-definition";
 import { TaskSchemas } from "../../src/schemas";
-import { TestDatabasePool, startPostgres } from "../../tests/fixtures/test-database";
+import { startPostgres } from "../../src/testing";
+import { TestDatabasePool } from "../../tests/fixtures/test-database";
 
 const taskDefinitions = [
 	defineTask({ name: "simple" }),
@@ -17,7 +18,7 @@ const taskDefinitions = [
 
 export class BenchmarkDatabase {
 	static async create() {
-		const postgres = await startPostgres();
+		const postgres = await startPostgres({ image: "postgres:15" });
 		const pool = await TestDatabasePool.create(postgres.url);
 		const db = await pool.child();
 
