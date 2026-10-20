@@ -134,7 +134,7 @@ Retrying the invoking attempt never starts a second execution, even if it crashe
 
 ### Cancelling with the Parent
 
-Pass `cancelWithParent: true` to tie the execution to the caller without waiting for it. The caller keeps running, and when it is cancelled or fails permanently, the execution is cancelled with the caller's reason, wherever it is: pending, running or suspended in a sleep, wait or child. This applies transitively to executions it started with `cancelWithParent` and to the children it waits on:
+Pass `cancelWithParent: true` to cancel the execution together with the caller: when the caller is cancelled or fails permanently, the execution is cancelled with the same reason, whatever state it is in (pending, running or suspended in a sleep, wait or child). This applies transitively to executions it started with `cancelWithParent` and to the children it waits on:
 
 ```typescript
 const session = conductor.createTask(
