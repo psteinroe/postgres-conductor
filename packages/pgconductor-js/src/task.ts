@@ -77,6 +77,12 @@ export type ValidateDeadLetterConfiguration<T, TPayload extends object> = T exte
 
 export type RetentionSettings = boolean | { days: number };
 
+/** Standard Schemas the worker validates the payload and return value of every execution with. */
+export type TaskRuntimeSchemas = {
+	readonly payload?: StandardSchemaV1;
+	readonly returns?: StandardSchemaV1;
+};
+
 export type TaskEvent<P extends object = object> =
 	| { name: "pgconductor.cron" }
 	| { name: "pgconductor.invoke"; payload: P };
@@ -174,6 +180,7 @@ export class Task<
 		public readonly execute: ExecuteFunction<EventType, Returns, Context>,
 		public readonly eventDefinitions: readonly EventDefinition<string, any, any>[] = [],
 		public readonly metadataSchema?: StandardSchemaV1<unknown, object>,
+		public readonly schemas: TaskRuntimeSchemas = {},
 	) {
 		const { name, queue, ...config } = definition;
 		this.name = name;
@@ -212,6 +219,7 @@ export class Task<
 		execute: ExecuteFunction<EventType, Returns, Context>,
 		eventDefinitions: readonly EventDefinition<string, any, any>[] = [],
 		metadataSchema?: StandardSchemaV1<unknown, object>,
+		schemas: TaskRuntimeSchemas = {},
 	): Task<Key, Queue, Payload, Returns, Context, EventType> {
 		return new Task<Key, Queue, Payload, Returns, Context, EventType>(
 			definition,
@@ -219,6 +227,7 @@ export class Task<
 			execute,
 			eventDefinitions,
 			metadataSchema,
+			schemas,
 		);
 	}
 }

@@ -745,7 +745,7 @@ export class TaskContext<
 					queue: options.queue || "default",
 					key: options.key,
 					signal: options.signal,
-					input: (options.input || null) as Payload | null,
+					input: (options.input || {}) as Payload,
 					priority: options.priority,
 					traceContext: this.opts.telemetry.traceContext(),
 					metadata: this.opts.execution.metadata,

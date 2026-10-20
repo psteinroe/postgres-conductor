@@ -140,6 +140,7 @@ Tables live in the `pgconductor` schema with a `_private_` prefix (`_private_exe
 - Claiming returns each execution's undelivered signals, which prime its `SignalInbox` before the handler runs
 - The claim statement also reads the cancellation flag and newer undelivered signals of the worker's running executions (`running` in `getExecutions`), aborts cancelled ones and hands signals to their `SignalInbox`. While all slots are busy the worker still runs it every `pollIntervalMs`, with a batch size of 0, as long as an execution runs. Batch members are polled too and share the batch's controller; cancelling one releases the others without spending their attempt. After a drain's last empty claim the worker keeps these zero-sized polls until its pipeline ends, then joins the fetch loop before resetting
 - Handles graceful shutdown via AbortController; a stop during registration retries ends them and settles `stopped`
+- Validates the payload of every invocation (any origin, including SQL and dead letters) and the return value against the task's Standard Schemas (`Task.schemas`, resolved from `TaskSchemas` in `createTask`) and passes their output on. Issues fail the execution as `permanently_failed`; a throwing validator fails the attempt. Batches validate per member
 
 **TaskContext** (`task-context.ts`)
 - Provides API to task functions: `step()`, `sleep()`, `invoke()`, `invokeAndWait()`, `waitForResult()`, `waitForEvent()`, `subscribe()`, `waitForAny()`, `onSignal()`, `sendSignal()`, `signalWithStart()`, plus `executionId` and `queue`

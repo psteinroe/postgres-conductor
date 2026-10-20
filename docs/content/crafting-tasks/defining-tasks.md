@@ -8,7 +8,7 @@ Schema definitions give you:
 
 - **Type safety** - TypeScript infers payload and return types automatically
 - **Shared schemas** - One source of truth for worker and client
-- **Runtime validation** - Optional validation with StandardSchema (Zod, Valibot, etc.)
+- **Runtime validation** - Workers validate payloads and return values with StandardSchema (Zod, Valibot, etc.)
 - **Better DX** - Autocomplete for payloads and return values
 
 ## Task Definitions
@@ -78,6 +78,20 @@ const conductor = Conductor.create({
 });
 ```
 
+## Runtime Validation
+
+Workers validate every execution of a task defined with `defineTask()` against its schemas, whichever way it was invoked: `conductor.invoke()`, `ctx.invoke()`, `signalWithStart()`, `pgconductor.invoke()` from SQL, or a dead-letter delivery.
+
+- The payload is validated before middleware and the handler run. The handler receives the schema's output, so transforms, defaults and stripped keys apply.
+- The return value is validated before the execution completes. The schema's output is stored as the result, serialized as JSON.
+- A payload or return value that does not match fails the execution without retries, with the issues as its error, for example `Invalid payload for task "send-email": to: Invalid email address`. Like any permanent failure it fails waiting parents and is delivered to a dead-letter queue.
+- A validator that throws instead of returning issues fails the attempt, which is retried.
+- Async validators are awaited.
+- Batch tasks validate each execution on its own: members with an invalid payload fail without reaching the handler, and the others run as the batch. Return values are validated per item.
+- Invoking does not validate, so the stored payload is the one you passed. Cron and custom event triggers carry no task payload.
+
+Type-only definitions (`DefineTask` with `TaskSchemas.fromUnion()`) have no runtime schema and are never validated.
+
 ## Event Definitions
 
 Events enable reactive, event-driven patterns.
@@ -140,7 +154,7 @@ const task = conductor.createTask(
   { name: "process-data" },
   { invocable: true },
   async (event, ctx) => {
-    // Return value must match schema
+    // The return value is validated against the schema
     return {
       processed: event.payload.items.length,
       errors: [],

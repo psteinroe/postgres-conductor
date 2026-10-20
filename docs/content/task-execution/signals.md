@@ -53,7 +53,7 @@ const executionId = await conductor.signalWithStart({
   task: "session",
   key: "slack:T1:C1:1712345678.000100",
   signal: { name: "input", id: requestId, payload },
-  input: {}, // payload of the execution, used only when it starts one
+  input: {}, // payload of the execution, used only when it starts one (default: {})
 });
 ```
 

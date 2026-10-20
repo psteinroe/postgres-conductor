@@ -73,7 +73,7 @@ const processBatch = conductor.createTask(
 - `size` - Maximum number of events to batch together
 - `timeoutMs` - Maximum time to wait for a full batch before processing what's available
 
-Each batch event has `{ name, payload?, execution }`. The read-only `execution` object contains `id`, `queue`, `task_key`, and `locked_by`; the event payload remains unchanged. Batch handlers can use `event.execution.id` for their own idempotency keys.
+Each batch event has `{ name, payload?, execution }`. The read-only `execution` object contains `id`, `queue`, `task_key`, and `locked_by`. With a task schema, payloads and return values are validated per execution: one with an invalid payload fails on its own and the batch runs without it (see [Runtime Validation](../crafting-tasks/defining-tasks.md#runtime-validation)). Batch handlers can use `event.execution.id` for their own idempotency keys.
 
 ### Batch Tasks with Returns
 

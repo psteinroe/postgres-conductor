@@ -4,7 +4,9 @@ import type {
 	Execution,
 	ExecutionResult,
 	ExecutionSpec,
+	Payload,
 } from "./database-client.js";
+import type { StandardSchemaV1 } from "@standard-schema/spec";
 import type { AnyTask, BatchConfig } from "./task.js";
 import type { TaskDefinition } from "./task-definition.js";
 import { waitFor } from "./lib/wait-for.js";
@@ -25,6 +27,7 @@ import { Telemetry } from "./telemetry.js";
 import { noop } from "./lib/noop.js";
 import type { Middleware, MiddlewareResult } from "./middleware.js";
 import { SignalInbox } from "./signal-inbox.js";
+import { parseSchema } from "./lib/validate-schema.js";
 
 /**
  * The configuration options for the Worker.
@@ -67,6 +70,30 @@ function taskEventFor(execution: Execution): { name: string; payload?: unknown }
 		};
 	}
 	return { name: "pgconductor.invoke", payload: execution.payload };
+}
+
+// A value the schema rejects fails the execution without retries; a validator that throws fails the attempt
+async function parseOrFail(
+	schema: StandardSchemaV1 | undefined,
+	value: unknown,
+	label: string,
+): Promise<{ value: unknown } | { status: "failed" | "permanently_failed"; error: string }> {
+	try {
+		const parsed = await parseSchema(schema, value, label);
+		return "error" in parsed ? { status: "permanently_failed", error: parsed.error } : parsed;
+	} catch (err) {
+		return { status: "failed", error: coerceError(err).message };
+	}
+}
+
+// Invocations carry the payload of the task's schema, events and cron occurrences do not
+async function parsePayload(task: AnyTask, event: { name: string; payload?: unknown }) {
+	if (event.name !== "pgconductor.invoke") return { value: event.payload };
+	return parseOrFail(task.schemas.payload, event.payload, `payload for task "${task.name}"`);
+}
+
+function parseResult(task: AnyTask, result: unknown) {
+	return parseOrFail(task.schemas.returns, result, `return value of task "${task.name}"`);
 }
 
 /**
@@ -603,6 +630,10 @@ export class Worker<
 		);
 
 		try {
+			const payload = await parsePayload(task, taskEvent);
+			if ("error" in payload) return { ...identity, ...payload };
+			taskEvent.payload = payload.value;
+
 			await this.scheduleNextExecution(exec);
 
 			const outcome = await this.telemetry.process({
@@ -681,10 +712,13 @@ export class Worker<
 				} as const;
 			}
 
+			const result = await parseResult(task, outcome.output);
+			if ("error" in result) return { ...identity, ...result };
+
 			return {
 				...identity,
 				status: "completed",
-				result: outcome.output,
+				result: result.value as Payload | undefined,
 				signal_names: signals.names,
 			} as const;
 		} catch (err) {
@@ -718,20 +752,52 @@ export class Worker<
 	private async executeBatchTask(
 		task: AnyTask,
 		taskKey: string,
-		executions: Execution[],
+		claimed: Execution[],
 	): Promise<ExecutionResult[]> {
-		const events = executions.map((exec) => {
-			return {
-				...taskEventFor(exec),
+		const parsed = await Promise.all(
+			claimed.map(async (exec) => {
+				const event = taskEventFor(exec);
+				return { exec, event, payload: await parsePayload(task, event) };
+			}),
+		);
+
+		// Members with an invalid payload settle on their own, the others run as the batch
+		const rejected: ExecutionResult[] = [];
+		const executions: Execution[] = [];
+		const events: object[] = [];
+		for (const { exec, event, payload } of parsed) {
+			if ("error" in payload) {
+				rejected.push({
+					execution_id: exec.id,
+					claim_token: exec.claim_token,
+					queue: exec.queue,
+					task_key: taskKey,
+					...payload,
+				});
+				continue;
+			}
+			executions.push(exec);
+			events.push({
+				...event,
+				payload: payload.value,
 				execution: {
 					id: exec.id,
 					queue: exec.queue,
 					task_key: exec.task_key,
 					locked_by: exec.locked_by,
 				},
-			};
-		});
+			});
+		}
+		if (executions.length === 0) return rejected;
+		return [...rejected, ...(await this.executeBatch(task, taskKey, executions, events))];
+	}
 
+	private async executeBatch(
+		task: AnyTask,
+		taskKey: string,
+		executions: Execution[],
+		events: object[],
+	): Promise<ExecutionResult[]> {
 		const taskAbortController = new TypedAbortController<TaskAbortReasons>();
 		const timeout = task.timeoutMs
 			? setTimeout(() => taskAbortController.abort({ reason: "timed-out" }), task.timeoutMs)
@@ -828,14 +894,23 @@ export class Worker<
 				}));
 			}
 
-			return executions.map((exec, i) => ({
-				execution_id: exec.id,
-				claim_token: exec.claim_token,
-				queue: exec.queue,
-				task_key: taskKey,
-				status: "completed" as const,
-				result: outcome.output?.[i],
-			}));
+			return Promise.all(
+				executions.map(async (exec, i) => {
+					const identity = {
+						execution_id: exec.id,
+						claim_token: exec.claim_token,
+						queue: exec.queue,
+						task_key: taskKey,
+					};
+					const result = await parseResult(task, outcome.output?.[i]);
+					if ("error" in result) return { ...identity, ...result };
+					return {
+						...identity,
+						status: "completed" as const,
+						result: result.value as Payload | undefined,
+					};
+				}),
+			);
 		} catch (err) {
 			if (this.signal.aborted) {
 				return executions.map((exec) => ({

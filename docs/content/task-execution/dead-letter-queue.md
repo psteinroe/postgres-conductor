@@ -21,4 +21,4 @@ const chargeCard = conductor.createTask(
 
 The destination is a new execution with the original payload. Its execution row contains machine-readable source execution ID, source queue and task, final error, attempt count, and failure timestamp. The source remains a normal failed execution unless its retention policy removes it.
 
-Retries and cancellation do not deliver to a dead-letter queue. Delivery is transactional, claim-fenced, and idempotent. A destination may have its own retry, retention, and concurrency settings. Chains are supported, but a task cannot target itself directly. The destination task must accept the source payload.
+Retries and cancellation do not deliver to a dead-letter queue. Delivery is transactional, claim-fenced, and idempotent. A destination may have its own retry, retention, and concurrency settings. Chains are supported, but a task cannot target itself directly. The destination task must accept the source payload. A destination defined with a payload schema validates it like any execution, so a source that failed on an invalid payload also fails there; give such a destination a schema that accepts it, or a type-only definition.
