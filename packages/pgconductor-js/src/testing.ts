@@ -20,8 +20,9 @@ export function createTestClock(sql: Sql): TestClock {
 	let fakeNow: Date | null = null;
 
 	const setFakeNow = async (date: Date | null) => {
-		await sql`select set_config('pgconductor.fake_now', ${date?.toISOString() || ""}, false)`;
-		fakeNow = date;
+		const copy = date && new Date(date);
+		await sql`select set_config('pgconductor.fake_now', ${copy?.toISOString() || ""}, false)`;
+		fakeNow = copy;
 	};
 
 	return {

@@ -157,3 +157,17 @@ test("running workers follow clock changes", async () => {
 
 	await orchestrator.stop();
 });
+
+test("set keeps its own copy of the date", async () => {
+	const date = new Date("2024-06-01T00:00:00Z");
+	const setting = clock.set(date);
+	date.setUTCFullYear(2030);
+	await setting;
+	date.setUTCFullYear(2031);
+
+	const [row] = await sql<{ now: Date }[]>`
+		select current_setting('pgconductor.fake_now')::timestamptz as now
+	`;
+	expect(row?.now).toEqual(new Date("2024-06-01T00:00:00Z"));
+	expect(clock.now()).toEqual(new Date("2024-06-01T00:00:00Z"));
+});
