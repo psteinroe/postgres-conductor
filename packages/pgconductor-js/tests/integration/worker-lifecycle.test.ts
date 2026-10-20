@@ -6,6 +6,7 @@ import { Conductor } from "../../src/conductor";
 import type { JsonValue } from "../../src/database-client";
 import { Orchestrator } from "../../src/orchestrator";
 import { defineTask } from "../../src/task-definition";
+import type { TaskContext } from "../../src/task-context";
 import { TaskSchemas } from "../../src/schemas";
 import { Deferred } from "../../src/lib/deferred";
 import { TestDatabasePool, type TestDatabase } from "../fixtures/test-database";
@@ -384,6 +385,149 @@ describe("drain()", () => {
 		await started.promise;
 		expect(await within(orchestrator.stop(), 5000)).toBe("done");
 		expect(await within(drained, 1000)).toBe("done");
+	});
+});
+
+describe("a step callback still running when a sibling ends the attempt", () => {
+	async function setup(
+		handler: (ctx: TaskContext, blocked: () => Promise<string>) => Promise<unknown>,
+		{
+			sql = (s: Sql) => s,
+			timeoutMs,
+			running = new Deferred<void>(),
+		}: { sql?: (s: Sql) => Sql; timeoutMs?: number; running?: Deferred<void> } = {},
+	) {
+		const db = await child();
+		const conductor = Conductor.create({
+			sql: sql(db.sql),
+			tasks: TaskSchemas.fromSchema([sessionDefinition]),
+			context: {},
+		});
+		const aborted = new Deferred<void>();
+		const gate = new Deferred<void>();
+		const task = conductor.createTask(
+			{ name: "session", maxAttempts: 1, timeoutMs },
+			{ invocable: true },
+			async (_e, ctx) => {
+				ctx.signal.addEventListener("abort", () => aborted.resolve());
+				await handler(ctx, () =>
+					ctx.step("blocked", async () => {
+						running.resolve();
+						await gate.promise;
+						return "done";
+					}),
+				);
+			},
+		);
+		await conductor.ensureInstalled();
+		const orchestrator = Orchestrator.create({
+			conductor,
+			tasks: [task],
+			defaultWorker: { pollIntervalMs: 50, flushIntervalMs: 50 },
+		});
+		const id = await conductor.invoke({ name: "session" }, {});
+		await orchestrator.start();
+		await running.promise;
+		const steps = async () =>
+			(
+				await db.sql<{ key: string }[]>`select key from pgconductor._private_steps order by key`
+			).map((r) => r.key);
+		return { db, id, orchestrator, gate, aborted, steps };
+	}
+
+	test("stop() waits for it when the sibling's checkpoint releases the attempt", async () => {
+		const release = new Deferred<void>();
+		const delivered = new Deferred<void>();
+		const { db, id, orchestrator, gate, aborted, steps } = await setup(
+			(ctx, blocked) => Promise.allSettled([ctx.step("sibling", () => "done"), blocked()]),
+			{ sql: (sql) => delayLoadStep(sql, "sibling", release.promise, delivered) },
+		);
+		try {
+			const stopped = orchestrator.stop();
+			await aborted.promise;
+			release.resolve();
+			await delivered.promise;
+			expect(await within(stopped, 300)).toBe("timeout");
+			gate.resolve();
+			await stopped;
+			expect(await row(db, id)).toMatchObject({
+				completed: false,
+				failed: false,
+				locked: false,
+				attempts: 0,
+			});
+			expect(await steps()).toEqual(["blocked"]);
+		} finally {
+			release.resolve();
+			gate.resolve();
+			await orchestrator.stop();
+		}
+	});
+
+	test("a sibling sleep settles the attempt once it returns", async () => {
+		const running = new Deferred<void>();
+		const delivered = new Deferred<void>();
+		const { db, id, orchestrator, gate, steps } = await setup(
+			(ctx, blocked) => Promise.allSettled([ctx.sleep("nap", 60_000), blocked()]),
+			{ running, sql: (sql) => delayLoadStep(sql, "nap", running.promise, delivered) },
+		);
+		try {
+			await delivered.promise;
+			await sleep(300);
+			expect(await row(db, id)).toMatchObject({ locked: true });
+			gate.resolve();
+			await waitForCondition(async () => (await row(db, id))?.locked === false);
+			expect(await row(db, id)).toMatchObject({ completed: false, failed: false });
+			expect(await steps()).toEqual(["blocked", "nap"]);
+		} finally {
+			gate.resolve();
+			await orchestrator.stop();
+		}
+	});
+
+	test("a sibling that throws fails the attempt once it returns", async () => {
+		const running = new Deferred<void>();
+		const { db, id, orchestrator, gate, steps } = await setup(
+			(ctx, blocked) =>
+				Promise.all([
+					blocked(),
+					ctx.step("sibling", async () => {
+						await running.promise;
+						throw new Error("sibling failed");
+					}),
+				]),
+			{ running },
+		);
+		try {
+			await sleep(300);
+			expect(await row(db, id)).toMatchObject({ locked: true });
+			gate.resolve();
+			await waitForCondition(async () => (await row(db, id))?.locked === false);
+			expect(await row(db, id)).toMatchObject({ failed: true, last_error: "sibling failed" });
+			expect(await steps()).toEqual(["blocked"]);
+		} finally {
+			gate.resolve();
+			await orchestrator.stop();
+		}
+	});
+
+	test("timeoutMs bounds the wait", async () => {
+		const running = new Deferred<void>();
+		const { db, id, orchestrator, gate } = await setup(
+			(ctx, blocked) => Promise.allSettled([ctx.sleep("nap", 60_000), blocked()]),
+			{
+				timeoutMs: 500,
+				running,
+				sql: (sql) => delayLoadStep(sql, "nap", running.promise, new Deferred<void>()),
+			},
+		);
+		try {
+			await waitForCondition(async () => (await row(db, id))?.locked === false, 5000);
+			expect(await row(db, id)).toMatchObject({ completed: false, failed: false });
+		} finally {
+			gate.resolve();
+			await orchestrator.stop();
+		}
 	});
 });
 

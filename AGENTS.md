@@ -147,6 +147,7 @@ Tables live in the `pgconductor` schema with a `_private_` prefix (`_private_exe
 - `invoke()` inserts an independent execution and memoizes its id as a step in one statement. Only with `cancelWithParent` does it set `parent_execution_id`, together with `cancel_with_parent`; settlement fails a completed child that has a parent but neither a waiter nor that flag
 - Memoized by step key, so a replay returns the stored result: `step()`, `sleep()`, `invoke()`, `invokeAndWait()`, `waitForResult()`, `waitForEvent()`, `subscribe()`, `waitForAny()` and `signalWithStart()`. `emit()` (deduplicated only with a `dedupe_key`), `sendSignal()` (deduplicated by signal id), `schedule()` (replaces the pending occurrence), `unschedule()` and `cancel()` are not memoized and run again on every replay
 - `checkpoint()` hangs up when the abort signal fired or the time window closed; it persists nothing
+- Each attempt tracks its step callbacks and their saves (`TaskContextOptions.steps`). Before it reports a result, the worker waits for those still running, bounded by `timeoutMs`, so a sibling's hangup or error (or `stop()`) does not end an attempt while a concurrent step runs. A timeout, cancellation or signal failure ends it at once
 - `step()` checkpoints after reading the step, so `fn` never starts once the attempt aborted, and hangs up as suspended when the claim fence rejects its save
 - Hangup pattern: abort execution and return never-resolving promise
 - Resume happens automatically when database wakes execution

@@ -543,9 +543,14 @@ export class Worker<
 	): Promise<ExecutionResult | ExecutionResult[]> {
 		const taskAbortController = new TypedAbortController<TaskAbortReasons>();
 		const signal = AbortSignal.any([taskAbortController.signal, this.signal]);
+		const timedOut = new Deferred<void>();
 		const timeout = task.timeoutMs
-			? setTimeout(() => taskAbortController.abort({ reason: "timed-out" }), task.timeoutMs)
+			? setTimeout(() => {
+					timedOut.resolve();
+					taskAbortController.abort({ reason: "timed-out" });
+				}, task.timeoutMs)
 			: undefined;
+		const steps = new Set<Promise<unknown>>();
 
 		// Wrapped, so no handler output can be mistaken for an abort
 		const aborted = new Promise<{ abort: TaskAbortReasons }>((resolve) => {
@@ -610,6 +615,7 @@ export class Worker<
 				window: task.window,
 				telemetry: this.telemetry,
 				signals,
+				steps,
 			},
 			extraContext,
 		);
@@ -739,6 +745,12 @@ export class Worker<
 				error: coerceError(err).message,
 			} as const;
 		} finally {
+			// Steps still running when a sibling hung up or threw end with the attempt, unless the
+			// worker aborted it. They save their results before the attempt settles.
+			const reason = taskAbortController.signal.reason?.reason;
+			if (reason !== "timed-out" && reason !== "cancelled" && reason !== "signal-failed") {
+				await Promise.race([Promise.allSettled(steps), timedOut.promise]);
+			}
 			clearTimeout(timeout);
 			this._running.delete(exec.id);
 			// A hung-up or failed attempt leaves undelivered signals for the next one

@@ -85,6 +85,8 @@ Steps are therefore at-least-once around their callback. For side effects outsid
 
 The handler always runs from the start: on every retry and every resume after `ctx.sleep()` or a wait, code outside steps runs again.
 
+Steps can run concurrently, for example with `Promise.all()`. When one of them throws or the handler hangs up in another (`ctx.sleep()`, a wait, or `orchestrator.stop()`), the attempt ends only after the callbacks still running return and save their results, or once `timeoutMs` elapses. A timeout or cancellation ends the attempt at once.
+
 ## Working with Loops
 
 Loops without steps re-process all items on retry:
