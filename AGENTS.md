@@ -241,6 +241,10 @@ Tables live in the `pgconductor` schema with a `_private_` prefix (`_private_exe
 - Used when `ctx.invokeAndWait()` is called without timeout
 - Parent waits forever until child completes
 
+**Durations and Child Timeouts**
+- Every duration argument (`ctx.sleep()`, wait and child timeouts, `conductor.waitForResult()`) is a `DurationInput` read with `parseDuration()`: numbers are milliseconds, and `0` means zero, never infinity. Config fields named `...Ms` stay numbers
+- An `invokeAndWait` step stores `{status: 'completed', result}` (settlement) or `{status: 'timed_out'}` (`clearWaitingState`, which memoizes the timeout when the parent resumes at the step's `waiting_step_key` without a result), so a replay after a caught timeout throws it again
+
 **Dedupe Keys**
 - The unique index on `(task_key, dedupe_key, queue)` covers only rows with `singleton_on is null`, so its conflict targets and lookups by `dedupe_key` need `singleton_on is null` to use it
 - Throttled and debounced rows set `singleton_on` to their slot and are unique per `(task_key, singleton_on, dedupe_key, queue)` while non-terminal. Ordinary invokes never update or supersede them, and throttle and debounce never supersede
@@ -262,7 +266,9 @@ Tables live in the `pgconductor` schema with a `_private_` prefix (`_private_exe
 
 **Result Waits**
 - `{ execution: id }` branches of `ctx.waitForAny()` are `execution_wait` subscriptions with `awaited_execution_id` set and no event key, so race, timeout and cleanup work as for event waits. `ctx.waitForResult()` is a `waitForAny()` with one such branch
-- `_private_register_event_race` locks awaited executions, all at once, before the waiter (the order settlement uses), stores the outcome of a settled one at once, and otherwise appends `{execution_id, queue, step_key}` to the awaited row's `result_waiters`
+- `_private_register_event_race` locks awaited executions, all at once, before the waiter (the order settlement uses), stores the outcome of a settled one at once, and otherwise appends `{execution_id, queue, step_key}` to the awaited row's `result_waiters`. Only the first call registers a branch: one with a subscription gets its outcome from the path that ends the execution
+- Deadlines compare against the time the outcome settles: `_private_resolve_result_waits` stores no outcome after its subscription's `expires_at`, so a wait whose waiter resumes late still times out
+- A race keeps its deadline on its branch subscriptions, so `_private_register_event_race` raises when it has neither a winner nor an open subscription (no branches, or only branches closed by an earlier race)
 - Every path that ends an execution (settlement's `resolved_result_waits`, `cancel_execution()`, `invoke()` superseding a running execution, `clearWaitingState`, and removing pending schedule executions) reads `result_waiters` from the locked or deleted row, like `signal_count`, so a wait registered after its snapshot is not missed. It passes the waits with their outcomes to `_private_resolve_result_waits`, which stores `{status: 'resolved', outcome}` under each wait's step key and wakes a waiter suspended at a wait, like dispatch does. A new path that ends or removes executions must do the same; `drop_queue()` does not
 - `_private_resolve_result_waits` wakes suspended waiters with its own update, which runs before the data-modifying CTEs of the calling statement. A statement that also updates or deletes a suspended execution must exclude it from the waits it passes, or the later update of that row fails or is lost
 - A race that settles removes its entries from the `result_waiters` of awaited executions still running, so timeouts and lost races do not accumulate entries

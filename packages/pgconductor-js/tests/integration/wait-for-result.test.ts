@@ -749,7 +749,8 @@ describe("ctx.waitForResult and execution branches (Postgres integration)", () =
 			taskKeys: ["work"],
 		});
 		await database.sql`
-			update pgconductor._private_executions set waiting_on_execution_id = ${childId}::uuid
+			update pgconductor._private_executions
+			set waiting_on_execution_id = ${childId}::uuid, waiting_step_key = 'child'
 			where id = ${parentId}::uuid
 		`;
 		const waiterId = await suspendWaiter(database, conductor, childId);

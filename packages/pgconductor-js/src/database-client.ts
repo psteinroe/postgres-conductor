@@ -635,14 +635,24 @@ export class DatabaseClient {
 		return result;
 	}
 
+	/** Cancels the read when the signal aborts, so a read blocked on a lock does not outlive it */
 	async getExecution(
 		args: GetExecutionArgs,
 		opts?: QueryMethodOptions,
 	): Promise<ExecutionInfo | null> {
-		const rows = await this.query(() => this.builder.buildGetExecution(args), {
-			label: "getExecution",
-			...opts,
-		});
+		const rows = await this.query(
+			async () => {
+				const query = this.builder.buildGetExecution(args);
+				const cancel = () => query.cancel();
+				opts?.signal?.addEventListener("abort", cancel);
+				try {
+					return await query;
+				} finally {
+					opts?.signal?.removeEventListener("abort", cancel);
+				}
+			},
+			{ label: "getExecution", ...opts },
+		);
 		return rows[0] || null;
 	}
 
@@ -760,11 +770,16 @@ export class DatabaseClient {
 		});
 	}
 
-	async clearWaitingState(args: ClearWaitingStateArgs, opts?: QueryMethodOptions): Promise<void> {
-		await this.query(() => this.builder.buildClearWaitingState(args), {
+	/** Returns false when the claim no longer holds the execution */
+	async clearWaitingState(
+		args: ClearWaitingStateArgs,
+		opts?: QueryMethodOptions,
+	): Promise<boolean> {
+		const rows = await this.query(() => this.builder.buildClearWaitingState(args), {
 			label: "clearWaitingState",
 			...opts,
 		});
+		return rows.length > 0;
 	}
 
 	async registerEventWait(

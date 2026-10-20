@@ -719,7 +719,8 @@ export class QueryBuilder {
 		)`);
 		ctes.push(this.sql`parent_steps_all as (
 			insert into pgconductor._private_steps (execution_id, queue, key, result)
-			select parent_id, queue, waiting_step_key, result
+			select parent_id, queue, waiting_step_key,
+				jsonb_build_object('status', 'completed', 'result', result)
 			from completed_parents
 			where waiting_step_key is not null
 			on conflict (execution_id, key) do nothing
@@ -1500,7 +1501,7 @@ export class QueryBuilder {
 		return this.sql<RowList<Row[]>>`
 			-- The child is cancelled like any other: cancel_execution locks it before this parent
 			with timed_out as materialized (
-				select e.waiting_on_execution_id as child_id
+				select e.waiting_on_execution_id as child_id, e.waiting_step_key
 				from pgconductor._private_executions e
 				where e.id = ${executionId}::uuid
 					and e.queue = ${queue}::text
@@ -1510,6 +1511,12 @@ export class QueryBuilder {
 			), cancelled_child as materialized (
 				select pgconductor.cancel_execution(child_id, 'Cancelled: parent timed out')
 				from timed_out
+			), stored_timeout as (
+				insert into pgconductor._private_steps (execution_id, queue, key, result)
+				select ${executionId}::uuid, ${queue}::text, waiting_step_key,
+					jsonb_build_object('status', 'timed_out')
+				from timed_out
+				on conflict (execution_id, key) do nothing
 			)
 			update pgconductor._private_executions e
 			set waiting_on_execution_id = null, waiting_step_key = null

@@ -302,7 +302,8 @@ export class TaskContext<
 		}
 	}
 
-	async sleep(id: string, ms: number): Promise<void> {
+	/** Suspend for `duration`; numbers are milliseconds. Memoized by `id`. */
+	async sleep(id: string, duration: DurationInput): Promise<void> {
 		// Check if we already slept
 		const cached = await this.opts.db.loadStep(
 			{
@@ -319,7 +320,7 @@ export class TaskContext<
 
 		return this.abortAndHangup({
 			reason: "released",
-			reschedule_in_ms: ms,
+			reschedule_in_ms: parseDuration(duration),
 			step_key: id,
 		});
 	}
@@ -494,31 +495,46 @@ export class TaskContext<
 			group,
 			metadata,
 		}: {
-			timeout?: number;
+			/** Throw and cancel the child when it has not completed after this long; numbers are milliseconds */
+			timeout?: DurationInput;
 			group?: string;
 			/** Metadata for this child only. Defaults to the metadata of this execution. */
 			metadata?: Metadata | ((metadata: Readonly<Metadata> | undefined) => Metadata);
 		} = {},
 	): Promise<InferReturns<TDef>> {
-		const cached = await this.opts.db.loadStep(
+		const timeoutMs = timeout === undefined ? undefined : parseDuration(timeout);
+		const cached = (await this.opts.db.loadStep(
 			{
 				executionId: this.opts.execution.id,
 				queue: this.opts.execution.queue,
 				key,
 			},
 			{ signal: this.signal },
-		);
+		)) as { status: "completed"; result: InferReturns<TDef> } | { status: "timed_out" } | undefined;
 
-		if (cached !== undefined) {
-			return cached as InferReturns<TDef>;
+		if (cached?.status === "completed") {
+			return cached.result;
 		}
 
-		// Check if we're already waiting (distinguishes first invoke from timeout)
-		if (this.opts.execution.waiting_on_execution_id !== null) {
-			// we resumed but no step exists → timeout occurred
-			// clear waiting state before throwing
+		// A claim keeps waiting_step_key only while the execution waits on a child
+		if (cached === undefined && this.opts.execution.waiting_step_key !== key) {
+			const childMetadata = await this.childMetadata(metadata);
+			return this.abortAndHangup({
+				reason: "child-invocation",
+				timeout_ms: timeoutMs === undefined ? "infinity" : timeoutMs,
+				task,
+				step_key: key,
+				payload,
+				group,
+				trace_context: this.opts.telemetry.traceContext(),
+				metadata: childMetadata,
+			});
+		}
 
-			await this.opts.db.clearWaitingState(
+		// Resumed at this key without the child's result: the timeout passed. Clearing the wait
+		// memoizes the timeout, so a replay throws it again.
+		if (cached === undefined) {
+			const cleared = await this.opts.db.clearWaitingState(
 				{
 					executionId: this.opts.execution.id,
 					queue: this.opts.execution.queue,
@@ -527,23 +543,14 @@ export class TaskContext<
 				},
 				{ signal: this.signal },
 			);
-
-			throw new Error(
-				timeout ? `Child execution timed out after ${timeout}ms` : "Child execution timeout",
-			);
+			if (!cleared) return this.abortAndHangup({ reason: "suspended" });
 		}
 
-		const childMetadata = await this.childMetadata(metadata);
-		return this.abortAndHangup({
-			reason: "child-invocation",
-			timeout_ms: timeout || "infinity",
-			task,
-			step_key: key,
-			payload,
-			group,
-			trace_context: this.opts.telemetry.traceContext(),
-			metadata: childMetadata,
-		});
+		throw new Error(
+			timeoutMs === undefined
+				? "Child execution timeout"
+				: `Child execution timed out after ${timeoutMs}ms`,
+		);
 	}
 
 	/**
@@ -899,7 +906,7 @@ export class BatchTaskContext {
 	 * After sleep, executions may batch with different peers, so it only
 	 * returns once every execution in the current batch has slept at `id`.
 	 */
-	async sleep(id: string, ms: number): Promise<void> {
+	async sleep(id: string, duration: DurationInput): Promise<void> {
 		const slept = await this.db.countSteps(
 			{
 				executionIds: this.executions.map((exec) => exec.id),
@@ -912,7 +919,11 @@ export class BatchTaskContext {
 			return;
 		}
 
-		this.abortController.abort({ reason: "released", reschedule_in_ms: ms, step_key: id });
+		this.abortController.abort({
+			reason: "released",
+			reschedule_in_ms: parseDuration(duration),
+			step_key: id,
+		});
 		return new Promise(() => {});
 	}
 }

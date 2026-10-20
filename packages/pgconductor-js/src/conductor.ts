@@ -39,6 +39,7 @@ import { Worker, type WorkerConfig } from "./worker.js";
 import { DefaultLogger, type Logger } from "./lib/logger.js";
 import type { AddedContext, Middleware } from "./middleware.js";
 import { waitFor } from "./lib/wait-for.js";
+import { parseDuration, type DurationInput } from "./lib/duration.js";
 import { SchemaManager } from "./schema-manager.js";
 import { Telemetry } from "./telemetry.js";
 import { validateSchema } from "./lib/validate-schema.js";
@@ -58,8 +59,8 @@ import {
 } from "./schemas.js";
 
 export type WaitForResultOptions = {
-	/** Reject with a `TimeoutError` after this many milliseconds */
-	timeout?: number;
+	/** Reject with a `TimeoutError` after this long; numbers are milliseconds */
+	timeout?: DurationInput;
 	/** Delay between polls (default: 1000) */
 	pollIntervalMs?: number;
 	signal?: AbortSignal;
@@ -544,18 +545,25 @@ export class Conductor<
 				: [taskOrId, idOrOptions as string, options];
 		const stop = AbortSignal.any([
 			...(signal ? [signal] : []),
-			...(timeout ? [AbortSignal.timeout(timeout)] : []),
+			...(timeout === undefined ? [] : [AbortSignal.timeout(parseDuration(timeout))]),
 		]);
 
 		while (true) {
 			stop.throwIfAborted();
-			const execution = await this.db.getExecution(
-				{
-					executionId,
-					task: task && { key: task.name, queue: task.queue || "default" },
-				},
-				{ signal: stop },
-			);
+			// The read is cancelled when stop fires, and a result read after that is not returned
+			const execution = await this.db
+				.getExecution(
+					{
+						executionId,
+						task: task && { key: task.name, queue: task.queue || "default" },
+					},
+					{ signal: stop },
+				)
+				.catch((error: unknown) => {
+					stop.throwIfAborted();
+					throw error;
+				});
+			stop.throwIfAborted();
 			if (!execution) {
 				throw new Error(`Execution ${executionId} not found`);
 			}
