@@ -67,6 +67,22 @@ await conductor.invoke(
 
 A redelivery after the webhook was processed is ignored. A redelivery that arrives while it is still running starts a new execution, so the handler can still run twice. Steps do not help here, because each execution has its own steps. Make the side effects idempotent, for example with an idempotency key derived from `event.id`.
 
+## Throttle and Debounce
+
+`throttle` and `debounce` deduplicate per time slot: fixed windows of `seconds` length, aligned to the Unix epoch. With a `dedupe_key`, each key has its own slots; without one, all invokes of the task share them.
+
+```typescript
+await conductor.invoke({ name: "sync-customer" }, { customerId }, {
+  dedupe_key: customerId,
+  throttle: { seconds: 60 },
+});
+```
+
+- `throttle`: the first invoke in a slot creates an execution. Later invokes in that slot return `null` while it is pending or running; it is never superseded.
+- `debounce`: the execution runs at the start of the next slot. Later invokes before then replace its payload and return the same ID.
+
+A slot is free again once its execution completed, failed or was cancelled. Keys of throttled and debounced invokes are separate from the same key used without them: an ordinary invoke never updates or supersedes a throttled or debounced execution, and a throttled or debounced execution that is still stored does not block its key in a later slot.
+
 ## Events
 
 `conductor.emit()` and `ctx.emit()` take the same `dedupe_key` option:
@@ -93,6 +109,5 @@ await conductor.invoke(
 
 ## What's Next?
 
-- [Conductor API](../api/conductor.md#conductorinvoke) - Throttle and debounce task execution
 - [Batching](batching.md) - Bulk task invocation
 - [Priority](priority.md) - Control execution order

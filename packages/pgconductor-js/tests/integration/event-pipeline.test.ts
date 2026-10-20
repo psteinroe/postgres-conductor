@@ -322,6 +322,20 @@ describe("event pipeline", () => {
 		]);
 	});
 
+	test("emit dedupe keys stay distinct when event names or keys contain colons", async () => {
+		const db = await database();
+		const first = await db.client.emitEvent({ eventKey: "a:b", payload: {}, dedupeKey: "c" });
+		const second = await db.client.emitEvent({ eventKey: "a", payload: {}, dedupeKey: "b:c" });
+
+		expect(second).not.toBe(first);
+		const sources = await db.sql<{ event_key: string }[]>`
+			select payload->>'eventKey' as event_key from pgconductor._private_executions
+			where task_key = ${DISPATCH_TASK}
+			order by event_key
+		`;
+		expect(sources.map((source) => source.event_key)).toEqual(["a", "a:b"]);
+	});
+
 	test("concurrent emits with the same dedupe key store one event", async () => {
 		const db = await database();
 		const firstSql = postgres(db.url, { max: 1 });

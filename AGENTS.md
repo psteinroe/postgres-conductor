@@ -231,6 +231,10 @@ Tables live in the `pgconductor` schema with a `_private_` prefix (`_private_exe
 - Used when `ctx.invokeAndWait()` is called without timeout
 - Parent waits forever until child completes
 
+**Dedupe Keys**
+- The unique index on `(task_key, dedupe_key, queue)` covers only rows with `singleton_on is null`, so its conflict targets and lookups by `dedupe_key` need `singleton_on is null` to use it
+- Throttled and debounced rows set `singleton_on` to their slot and are unique per `(task_key, singleton_on, dedupe_key, queue)` while non-terminal. Ordinary invokes never update or supersede them, and throttle and debounce never supersede
+
 **Execution Metadata**
 - `metadata jsonb` on `_private_executions` follows the same paths as `trace_context`: event → triggered executions, parent → child, terminal failure → dead-letter delivery, cron occurrence → next occurrence
 - `TaskContext` passes its metadata explicitly to `ctx.invokeAndWait` children, `ctx.emit` and `ctx.schedule`
@@ -239,7 +243,7 @@ Tables live in the `pgconductor` schema with a `_private_` prefix (`_private_exe
 **Custom Events**
 - An emitted event is an execution of the internal `pgconductor.event-dispatch` task on the `pgconductor.internal` queue; its id is the event id and there is no separate event table
 - `DatabaseClient.emitEvent` generates the event id once per call, so a retry after a lost response finds the stored event instead of emitting it twice
-- `emit(..., { dedupe_key })` stores `'<event name>:<dedupe_key>'` as the dispatch execution's `dedupe_key`; a repeated key emits nothing and returns the original event id. Completed dispatches are kept for one day (`removeOnComplete: { days: 1 }`), so keys are remembered until maintenance of the internal queue removes them
+- `emit(..., { dedupe_key })` stores the json array text `["<event name>", "<dedupe_key>"]` as the dispatch execution's `dedupe_key`, so no colon in a name or key can make two pairs collide; a repeated key emits nothing and returns the original event id. Completed dispatches are kept for one day (`removeOnComplete: { days: 1 }`), so keys are remembered until maintenance of the internal queue removes them
 - The dispatcher matches subscriptions and inserts one delivery execution per matching subscription in a single statement; deliveries carry `subscription_id` and `parent_execution_id` (the event)
 - Worker registration syncs a queue's trigger subscriptions; ids derive from the definition, so unchanged subscriptions keep their identity. Each trigger filter is compiled once into typed rows in `_private_event_filter_terms` (fields are ANDed, alternatives within a field are ORed)
 - Fan-out is at-least-once: a retried dispatch re-evaluates current subscriptions, and a unique index deduplicates existing deliveries
