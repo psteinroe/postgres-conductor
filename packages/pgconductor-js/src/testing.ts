@@ -1,38 +1,34 @@
 import type { Sql } from "postgres";
-import { refreshClocks } from "./lib/clock.js";
 import { parseDuration, type DurationInput } from "./lib/duration.js";
 
 export type TestClock = {
+	/** Current time: the faked time, or the system time */
+	now(): Date;
 	/** Fake database time */
 	set(date: Date): Promise<void>;
-	/** Move database time forward, starting from real time if it is not faked */
+	/** Move time forward, starting from the system time if it is not faked */
 	advance(duration: DurationInput): Promise<void>;
 	/** Return to real time */
 	reset(): Promise<void>;
 };
 
 /**
- * Control database time for everything that uses `sql`, including running workers of conductors created with it.
+ * Control time for everything that uses `sql`; pass the clock to `Conductor.create({ clock })` so workers follow it.
  * Fake time is a session setting, so `sql` must have a single connection (`max: 1`).
  */
 export function createTestClock(sql: Sql): TestClock {
-	const setFakeTime = async (value: string) => {
-		await sql`select set_config('pgconductor.fake_now', ${value}, false)`;
-		await refreshClocks(sql);
+	let fakeNow: Date | null = null;
+
+	const setFakeNow = async (date: Date | null) => {
+		await sql`select set_config('pgconductor.fake_now', ${date?.toISOString() || ""}, false)`;
+		fakeNow = date;
 	};
 
 	return {
-		set: (date) => setFakeTime(date.toISOString()),
-		advance: async (duration) => {
-			await sql`
-				select set_config(
-					'pgconductor.fake_now',
-					(pgconductor._private_current_time() + interval '1 millisecond' * ${parseDuration(duration)}::float8)::text,
-					false
-				)
-			`;
-			await refreshClocks(sql);
-		},
-		reset: () => setFakeTime(""),
+		now: () => new Date(fakeNow || Date.now()),
+		set: (date) => setFakeNow(date),
+		advance: (duration) =>
+			setFakeNow(new Date((fakeNow || new Date()).getTime() + parseDuration(duration))),
+		reset: () => setFakeNow(null),
 	};
 }

@@ -1,6 +1,6 @@
 # Testing
 
-Test tasks end-to-end against a real Postgres: `orchestrator.drain()` runs everything that is due, and `createTestClock()` from `pgconductor-js/testing` controls database time, so sleeps, retries and cron schedules don't need real waiting.
+Test tasks end-to-end against a real Postgres: `orchestrator.drain()` runs everything that is due, and `createTestClock()` from `pgconductor-js/testing` controls time, so sleeps, retries and cron schedules don't need real waiting.
 
 ## Basic Example
 
@@ -40,6 +40,7 @@ test("sends the reminder an hour later", async () => {
     sql,
     tasks: TaskSchemas.fromUnion<Tasks>(),
     context: {},
+    clock,
   });
 
   const sent: string[] = [];
@@ -62,7 +63,7 @@ test("sends the reminder an hour later", async () => {
 
 ## Controlling Time
 
-The clock moves database time, which decides when sleeps end, retries are due and cron schedules fire:
+The clock moves two things together: database time, which decides when sleeps end and retries are due, and the time workers use for cron schedules and time windows. Pass it to `Conductor.create({ clock })` so workers use it:
 
 ```typescript
 await clock.set(new Date("2024-01-01T12:00:00Z")); // Freeze time
@@ -94,7 +95,7 @@ await clock.advance("15s");
 await orchestrator.drain();   // Attempt 2
 ```
 
-**Running orchestrators:** `clock.set()` and `clock.advance()` also reach orchestrators started with `start()` on the same `sql`, so time windows and cron schedules follow the new time without a restart.
+**Running orchestrators:** workers read the time from the clock, so `clock.set()` and `clock.advance()` also reach orchestrators started with `start()`.
 
 ## How Time Works
 
@@ -116,6 +117,7 @@ test("sends email via mocked service", async () => {
     sql,
     tasks: TaskSchemas.fromUnion<DefineTask<{ name: "send-email"; payload: { to: string } }>>(),
     context: { email },
+    clock,
   });
 
   const task = conductor.createTask({ name: "send-email" }, { invocable: true }, async (event, ctx) => {

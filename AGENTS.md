@@ -30,7 +30,7 @@ pgconductor/
         │   ├── telemetry.ts          # OpenTelemetry tracing
         │   ├── database-client.ts    # Postgres client wrapper
         │   ├── query-builder.ts      # SQL for claiming, settlement, registration
-        │   ├── testing.ts            # pgconductor-js/testing: createTestClock (fake database time)
+        │   ├── testing.ts            # pgconductor-js/testing: createTestClock (fake time)
         │   ├── lib/                  # Utilities (deferred, async-queue, etc.)
         │   └── generated/
         │       └── sql.ts            # Auto-generated from migrations
@@ -311,9 +311,9 @@ await db.clock.advance("1h");
 await db.clock.reset();
 ```
 
-Useful for sleeps, timeouts, backoff schedules and time windows. Each test database is dropped afterwards, so fake time needs no cleanup. `db.client.setFakeTime()` sets the same setting but does not reach running workers.
+Useful for sleeps, timeouts, backoff schedules and time windows. Each test database is dropped afterwards, so fake time needs no cleanup. `db.client.setFakeTime()` sets the same setting but does not move the workers' clock.
 
-Cron scheduling and time windows (worker fetch filtering, `ctx.step()` and `ctx.checkpoint()`) use the worker's `Clock` (`src/lib/clock.ts`): local time corrected by an offset sampled from the database when the worker starts and every 10 minutes. While fake time is set, the clock stands still at the sampled time. `db.clock` (`createTestClock(sql)` from `src/testing.ts`) calls `refreshClocks(sql)`, which re-samples the running clocks of workers whose conductor uses that `sql`, so they follow the change without a restart. Use `vi.setSystemTime()` only for code that reads `Date` directly. Without `vi.useFakeTimers()` it only fakes `Date` and timers keep running; `vi.useRealTimers()` restores it. `vi.useFakeTimers()` fakes timers and `Date` but not `setImmediate`, which postgres.js needs to send queries (`fakeTimers` in `vitest.config.ts`).
+Cron scheduling and time windows (worker fetch filtering, `ctx.step()` and `ctx.checkpoint()`) use the worker's `Clock` (`src/lib/clock.ts`): local time corrected by an offset sampled from the database when the worker starts and every 10 minutes. `Conductor.create({ clock })` replaces the local time. `db.clock` (`createTestClock(sql)` from `src/testing.ts`) sets `fake_now` and returns the same time from `now()`, so the offset stays zero; pass `clock: db.clock` to the conductor and running workers follow `db.clock.set()` and `advance()`. Use `vi.setSystemTime()` only for code that reads `Date` directly. Without `vi.useFakeTimers()` it only fakes `Date` and timers keep running; `vi.useRealTimers()` restores it. `vi.useFakeTimers()` fakes timers and `Date` but not `setImmediate`, which postgres.js needs to send queries (`fakeTimers` in `vitest.config.ts`).
 
 ## Development Environment
 

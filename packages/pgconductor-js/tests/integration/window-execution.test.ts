@@ -42,6 +42,7 @@ describe("Window Execution", () => {
 
 		const conductor = Conductor.create({
 			sql: db.sql,
+			clock: db.clock,
 			tasks: TaskSchemas.fromSchema([taskDefinitions]),
 			// Pass the clock so the task can advance time
 			context: { clock: db.clock },
@@ -117,6 +118,7 @@ describe("Window Execution", () => {
 
 		const conductor = Conductor.create({
 			sql: db.sql,
+			clock: db.clock,
 			tasks: TaskSchemas.fromSchema([taskDefinitions]),
 			// Pass the clock so the task can advance time
 			context: { clock: db.clock },
@@ -191,6 +193,7 @@ describe("Window Execution", () => {
 
 		const conductor = Conductor.create({
 			sql: db.sql,
+			clock: db.clock,
 			tasks: TaskSchemas.fromSchema([taskDefinitions]),
 			context: {},
 		});
@@ -265,6 +268,7 @@ describe("Window Execution", () => {
 
 		const conductor = Conductor.create({
 			sql: db.sql,
+			clock: db.clock,
 			tasks: TaskSchemas.fromSchema([taskDefinitions]),
 			context: {},
 		});

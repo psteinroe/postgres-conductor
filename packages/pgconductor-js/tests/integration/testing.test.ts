@@ -26,8 +26,8 @@ beforeEach(async () => {
 	url.pathname = `/${database}`;
 	// Fake time is a session setting, so everything shares one connection
 	sql = postgres(url.toString(), { max: 1 });
-	await createConductor().ensureInstalled();
 	clock = createTestClock(sql);
+	await createConductor().ensureInstalled();
 	await clock.set(new Date("2024-01-01T12:00:00Z"));
 });
 
@@ -45,6 +45,7 @@ function createConductor() {
 		sql,
 		tasks: TaskSchemas.fromUnion<Tasks>(),
 		context: {},
+		clock,
 	});
 }
 

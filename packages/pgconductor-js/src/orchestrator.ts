@@ -74,6 +74,7 @@ export class Orchestrator {
 				options.conductor.options.context,
 				options.conductor.telemetry,
 				options.conductor.options.middleware,
+				options.conductor.options.clock,
 			);
 			this.workers.push(worker);
 		}
