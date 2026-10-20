@@ -6,10 +6,8 @@ import { defineTask } from "../../src/task-definition";
 import { TestDatabasePool, type TestDatabase } from "../fixtures/test-database";
 import { waitFor } from "../../src/lib/wait-for";
 import { TaskSchemas } from "../../src/schemas";
-import { DatabaseClient } from "../../src/database-client";
-import { DefaultLogger } from "../../src/lib/logger";
-import { loseFirstResponse, waitForCondition } from "../test-utils";
 import { Deferred } from "../../src/lib/deferred";
+import { loseFirstResponse, waitForCondition } from "../test-utils";
 
 describe("Cron Scheduling", () => {
 	let pool: TestDatabasePool;
@@ -649,29 +647,50 @@ describe("Cron Scheduling", () => {
 		await db.destroy();
 	}, 30000);
 
-	test("a retried next-occurrence invoke keeps one schedule", async () => {
+	test("a retried next-occurrence scheduling does not supersede the running occurrence", async () => {
 		const db = await pool.child();
-		await Conductor.create({ sql: db.sql, context: {} }).ensureInstalled();
-		const client = new DatabaseClient({
-			sql: loseFirstResponse(db.sql, "pgconductor.invoke"),
-			logger: new DefaultLogger(),
+		const started: string[] = [];
+		const nextStarted = new Deferred<void>();
+		const release = new Deferred<void>();
+		const conductor = Conductor.create({
+			// the first scheduling commits, and its response is lost once the occurrence it started runs
+			sql: loseFirstResponse(db.sql, "scheduled::every-second::", {
+				beforeLoss: () => nextStarted.promise,
+			}),
+			tasks: TaskSchemas.fromSchema([defineTask({ name: "every-second" })]),
+			context: {},
+		});
+		const task = conductor.createTask(
+			{ name: "every-second" },
+			[{ invocable: true }, { cron: "* * * * * *", name: "every-second" }],
+			async (_e, ctx) => {
+				started.push(ctx.executionId);
+				nextStarted.resolve();
+				await release.promise;
+			},
+		);
+		const orchestrator = Orchestrator.create({
+			conductor,
+			tasks: [task],
+			defaultWorker: { concurrency: 2, pollIntervalMs: 20, flushIntervalMs: 10 },
 		});
 
-		const id = await client.invoke(
-			{
-				task_key: "retried-cron",
-				queue: "default",
-				run_at: new Date("2030-01-01T00:00:00Z"),
-				dedupe_key: "scheduled::nightly::1893456000",
-				cron_expression: "0 0 0 * * *",
-			},
-			{ signal: new AbortController().signal },
-		);
-
-		const schedules = await db.sql<{ id: string | null }[]>`
-			select id from pgconductor._private_executions where task_key = 'retried-cron'
+		await conductor.ensureInstalled();
+		await orchestrator.start();
+		// the scheduling occurrence starts once its scheduling returned
+		await waitForCondition(() => started.length === 2);
+		const rows = await db.sql<{ id: string; failed: boolean; last_error: string | null }[]>`
+			select id, failed_at is not null as failed, last_error
+			from pgconductor._private_executions
+			where id = any(${db.sql.array(started, 2951)}::uuid[]) or last_error is not null
 		`;
-		expect(schedules.map((schedule) => schedule.id)).toEqual([id]);
+		release.resolve();
+		await orchestrator.stop();
+
+		expect(rows.map(({ failed, last_error }) => ({ failed, last_error }))).toEqual([
+			{ failed: false, last_error: null },
+			{ failed: false, last_error: null },
+		]);
 
 		await db.destroy();
 	});
@@ -748,6 +767,35 @@ describe("Cron Scheduling", () => {
 			scheduleName: "reporting",
 		});
 		expect((await occurrences()).map((execution) => execution.run_at)).toEqual([next]);
+
+		await db.destroy();
+	});
+
+	test("scheduling the occurrence that is running keeps it", async () => {
+		const db = await pool.child();
+		await Conductor.create({ sql: db.sql, context: {} }).ensureInstalled();
+
+		const schedule = {
+			spec: {
+				task_key: "running-dynamic",
+				queue: "default",
+				run_at: new Date("2030-01-01T00:00:00Z"),
+				cron_expression: "0 0 0 * * *",
+			},
+			scheduleName: "nightly",
+		};
+		await db.client.scheduleCronExecution(schedule);
+		await db.sql`
+			update pgconductor._private_executions
+			set locked_at = now(), locked_by = gen_random_uuid(), claim_token = gen_random_uuid()
+		`;
+		await db.client.scheduleCronExecution(schedule);
+
+		const occurrences = await db.sql`
+			select failed_at, last_error, locked_at is not null as running
+			from pgconductor._private_executions
+		`;
+		expect(occurrences).toEqual([{ failed_at: null, last_error: null, running: true }]);
 
 		await db.destroy();
 	});

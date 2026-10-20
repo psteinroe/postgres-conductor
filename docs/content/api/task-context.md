@@ -386,7 +386,7 @@ await ctx.sendSignal(executionId, { name: "input", id: "report-1", payload });
 
 ## ctx.signalWithStart()
 
-Like `conductor.signalWithStart()`, memoized by the step key. An execution it starts inherits this execution's metadata.
+Like `conductor.signalWithStart()`. Sends the signal and memoizes the execution ID under the step key in one statement, so retries and resumes return that ID, also after the execution completed. An execution it starts inherits this execution's metadata.
 
 ```typescript
 const sessionId = await ctx.signalWithStart("start-session", {

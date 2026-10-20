@@ -298,11 +298,11 @@ describe("OpenTelemetry instrumentation", () => {
 			cron_expression: "* * * * *",
 			dedupe_key: "scheduled::boundary::1",
 		});
-		const originalInvoke = db.invoke.bind(db);
+		const originalSchedule = db.scheduleNextCronExecution.bind(db);
 		let schedulingSpanId: string | undefined;
-		(db as any).invoke = async (spec: any, options?: any) => {
+		(db as any).scheduleNextCronExecution = async (args: any, options?: any) => {
 			schedulingSpanId = trace.getSpan(context.active())?.spanContext().spanId;
-			return originalInvoke(spec, options);
+			return originalSchedule(args, options);
 		};
 		let handlerSpanId: string | undefined;
 		await makeWorker(

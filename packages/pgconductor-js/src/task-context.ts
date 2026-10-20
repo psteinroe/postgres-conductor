@@ -630,22 +630,19 @@ export class TaskContext<
 		const nextTimestamp = nextCronOccurrence(options.cron, this.opts.clock.now());
 		const queue = task.queue || "default";
 
-		await this.opts.db.scheduleCronExecution(
-			{
-				spec: {
-					task_key: task.name,
-					queue,
-					payload,
-					run_at: nextTimestamp,
-					cron_expression: options.cron,
-					priority: options.priority || null,
-					group: options.group || null,
-					metadata: this.opts.execution.metadata,
-				},
-				scheduleName,
+		await this.opts.db.scheduleCronExecution({
+			spec: {
+				task_key: task.name,
+				queue,
+				payload,
+				run_at: nextTimestamp,
+				cron_expression: options.cron,
+				priority: options.priority || null,
+				group: options.group || null,
+				metadata: this.opts.execution.metadata,
 			},
-			{ signal: this.signal },
-		);
+			scheduleName,
+		});
 	}
 
 	async unschedule<TName extends TaskName<Tasks>, TQueue extends string = "default">(
@@ -734,9 +731,16 @@ export class TaskContext<
 			priority?: number;
 		},
 	): Promise<string> {
-		return this.step(stepKey, () =>
-			this.opts.db.signalWithStart(
-				{
+		await this.checkpoint();
+
+		const id = await this.opts.db.signalWithStartStep(
+			{
+				executionId: this.opts.execution.id,
+				queue: this.opts.execution.queue,
+				orchestratorId: this.opts.execution.locked_by,
+				claimToken: this.opts.execution.claim_token,
+				key: stepKey,
+				target: {
 					taskKey: options.task,
 					queue: options.queue || "default",
 					key: options.key,
@@ -746,9 +750,10 @@ export class TaskContext<
 					traceContext: this.opts.telemetry.traceContext(),
 					metadata: this.opts.execution.metadata,
 				},
-				{ signal: this.signal },
-			),
+			},
+			{ signal: this.signal },
 		);
+		return id || this.abortAndHangup({ reason: "suspended" });
 	}
 
 	/**

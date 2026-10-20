@@ -27,6 +27,7 @@ import {
 	type AckSignalsArgs,
 	type SignalExecutionArgs,
 	type SignalWithStartArgs,
+	type SignalWithStartStepArgs,
 	type RegisterEventRaceArgs,
 } from "./query-builder.js";
 import { makeChildLogger, type Logger } from "./lib/logger.js";
@@ -298,6 +299,8 @@ type QueryOptions = {
 	signal?: AbortSignal;
 };
 
+// A connection error is ambiguous: the statement may have committed. Only methods whose
+// statement can run again without a second effect take a signal, which enables retries.
 type QueryMethodOptions = Pick<QueryOptions, "signal">;
 
 type ErrorWithOptionalCode = Error & { code?: string };
@@ -425,12 +428,23 @@ export class DatabaseClient {
 		return row.stored;
 	}
 
-	async signalWithStart(args: SignalWithStartArgs, opts?: QueryMethodOptions): Promise<string> {
+	async signalWithStart(args: SignalWithStartArgs): Promise<string> {
 		const [row] = await this.query(() => this.builder.buildSignalWithStart(args), {
 			label: "signalWithStart",
-			...opts,
 		});
 		return row.id;
+	}
+
+	/** Returns null when this worker no longer holds the signalling execution. */
+	async signalWithStartStep(
+		args: SignalWithStartStepArgs,
+		opts?: QueryMethodOptions,
+	): Promise<string | null> {
+		const rows = await this.query(() => this.builder.buildSignalWithStartStep(args), {
+			label: "signalWithStartStep",
+			...opts,
+		});
+		return rows[0]?.id || null;
 	}
 
 	async cancelExecution(
@@ -655,15 +669,10 @@ export class DatabaseClient {
 		});
 	}
 
-	async scheduleCronExecution(
-		args: ScheduleCronExecutionArgs,
-		opts?: QueryMethodOptions,
-	): Promise<string> {
-		const result = await this.query(() => this.builder.buildScheduleCronExecution(args), {
+	async scheduleCronExecution(args: ScheduleCronExecutionArgs): Promise<void> {
+		await this.query(() => this.builder.buildScheduleCronExecution(args), {
 			label: "scheduleCronExecution",
-			...opts,
 		});
-		return result[0]!.id;
 	}
 
 	async unscheduleCronExecution(
@@ -686,18 +695,14 @@ export class DatabaseClient {
 		});
 	}
 
-	async invoke(spec: ExecutionSpec, opts?: QueryMethodOptions): Promise<string | null> {
-		const result = await this.query(() => this.builder.buildInvoke(spec), {
-			label: "invoke",
-			...opts,
-		});
+	async invoke(spec: ExecutionSpec): Promise<string | null> {
+		const result = await this.query(() => this.builder.buildInvoke(spec), { label: "invoke" });
 		return result[0]?.id || null;
 	}
 
-	async invokeBatch(specs: ExecutionSpec[], opts?: QueryMethodOptions): Promise<string[]> {
+	async invokeBatch(specs: ExecutionSpec[]): Promise<string[]> {
 		const result = await this.query(() => this.builder.buildInvokeBatch(specs), {
 			label: "invokeBatch",
-			...opts,
 		});
 		return result.map((r) => r.id);
 	}

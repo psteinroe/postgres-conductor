@@ -19,7 +19,7 @@ const dailyReport = conductor.createTask(
 
 Cron expressions are evaluated in UTC, regardless of the timezone of the worker process.
 
-The orchestrator schedules the next execution when an execution starts, before its handler runs, so a failing or retrying execution does not stop the schedule.
+The orchestrator schedules the next execution when an execution starts, before its handler runs, so a failing or retrying execution does not stop the schedule. It does so once per execution: a retried attempt keeps the next execution the first attempt scheduled, and a running execution is never superseded.
 
 When a worker starts, it replaces its queue's static schedules with the ones its tasks declare: a changed expression replaces the pending execution, and removed triggers and tasks are unscheduled. Every orchestrator polling a queue must therefore run the same task set (see [One Queue, One Codebase](../scaling/horizontal.md#one-queue-one-codebase)). During a rolling deploy, an old replica that restarts removes the new version's schedules until a new replica starts again.
 
@@ -121,6 +121,8 @@ await ctx.schedule({ name: "task" }, "schedule-2", { cron: "..." }, {});
 await ctx.schedule({ name: "task" }, "schedule-1", { cron: "0 9 * * *" }, {});
 await ctx.schedule({ name: "task" }, "schedule-1", { cron: "0 17 * * *" }, {}); // Overwrites
 ```
+
+Overwriting replaces the pending execution of the schedule. One that is already running is not interrupted.
 
 ## Deduplication
 
