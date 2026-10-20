@@ -178,6 +178,18 @@ export type ValidateEventTriggers<
 	? { [K in keyof TTriggers]: ValidateCustomEventTrigger<Events, TTriggers[K]> }
 	: ValidateCustomEventTrigger<Events, TTriggers>;
 
+type UnknownTriggerKey<T> = Exclude<
+	keyof T,
+	keyof InvocableTrigger | keyof CronTrigger | keyof CustomEventTrigger
+>;
+
+// Task options such as removeOnComplete belong in the task definition, not in a trigger
+type ValidateTriggerKeys<TTriggers> = TTriggers extends readonly any[]
+	? { [K in keyof TTriggers]: ValidateTriggerKeys<TTriggers[K]> }
+	: [UnknownTriggerKey<TTriggers>] extends [never]
+		? TTriggers
+		: `Unknown trigger option "${UnknownTriggerKey<TTriggers> & string}". Task options belong in the first argument of createTask.`;
+
 // Check if triggers include invocable
 export type HasInvocable<TTriggers> = TTriggers extends readonly any[]
 	? Extract<TTriggers[number], InvocableTrigger> extends never
@@ -232,15 +244,15 @@ export type ValidateTriggers<
 		TTriggers extends NonEmptyReadonlyArray<Trigger>
 		? HasInvocable<TTriggers> extends true
 			? TaskIdentifierIsDefined<Tasks, TName, TQueue> extends true
-				? TTriggers
+				? ValidateTriggerKeys<TTriggers>
 				: `Task "${TName}" of queue "${TQueue}" is not defined in the conductor catalog. Either remove { invocable: true } from triggers, or add a task definition to the conductor's tasks array.`
-			: TTriggers
+			: ValidateTriggerKeys<TTriggers>
 		: `Triggers array cannot be empty. Provide at least one trigger.`
 	: // Single trigger case
 		TTriggers extends Trigger
 		? TTriggers extends InvocableTrigger
 			? TaskIdentifierIsDefined<Tasks, TName, TQueue> extends true
-				? TTriggers
+				? ValidateTriggerKeys<TTriggers>
 				: `Task "${TName}" of queue "${TQueue}" is not defined in the conductor catalog. Remove { invocable: true } from triggers, or add a task definition to the conductor's tasks array.`
-			: TTriggers
+			: ValidateTriggerKeys<TTriggers>
 		: "Invalid trigger. Use an invocable, cron, or custom event trigger.";

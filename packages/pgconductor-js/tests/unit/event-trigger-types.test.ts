@@ -326,13 +326,14 @@ describe("event triggers", () => {
 		const conductor = Conductor.create({
 			sql: {} as any,
 			tasks: TaskSchemas.fromSchema([taskDef]),
-			events: EventSchemas.fromSchema([orderPlaced]),
+			events: [orderPlaced],
 			context: {},
 		});
 
 		expect(() =>
 			conductor.createTask(
 				{ name: "on-large-order" },
+				// @ts-expect-error Custom event triggers have no when clause.
 				{ event: "order.placed", when: "new.payload->>'total'::numeric > 1000" },
 				async (event) => {
 					expectTypeOf(event.payload).toEqualTypeOf<{
@@ -358,6 +359,33 @@ describe("event triggers", () => {
 			{ name: "database-change" },
 			// @ts-expect-error Applications own database triggers and emit custom events from them.
 			{ schema: "public", table: "contact", operation: "insert", columns: "id" },
+			async () => {},
+		);
+	});
+
+	test("task options are rejected in triggers", () => {
+		const taskDef = defineTask({ name: "cleanup", payload: z.object({}) });
+		const conductor = Conductor.create({
+			sql: {} as any,
+			tasks: TaskSchemas.fromSchema([taskDef]),
+			context: {},
+		});
+
+		conductor.createTask(
+			{ name: "cleanup" },
+			// @ts-expect-error Retention belongs in the task definition.
+			{ invocable: true, removeOnComplete: true },
+			async () => {},
+		);
+		conductor.createTask(
+			{ name: "cleanup" },
+			// @ts-expect-error Retention belongs in the task definition.
+			[{ invocable: true }, { cron: "0 * * * *", name: "hourly", maxAttempts: 1 }],
+			async () => {},
+		);
+		conductor.createTask(
+			{ name: "cleanup", removeOnComplete: true },
+			[{ invocable: true }, { cron: "0 * * * *", name: "hourly", group: "hourly" }],
 			async () => {},
 		);
 	});
