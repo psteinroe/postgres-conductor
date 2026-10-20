@@ -26,6 +26,7 @@ import {
 	type SignalExecutionArgs,
 	type SignalWithStartArgs,
 	type RegisterEventRaceArgs,
+	type RegisterResultWaitArgs,
 } from "./query-builder.js";
 import { makeChildLogger, type Logger } from "./lib/logger.js";
 import { uuidv7 } from "./lib/uuidv7.js";
@@ -90,6 +91,12 @@ export type ExecutionInfo<TResult = unknown> = {
 	completedAt: Date | null;
 	failedAt: Date | null;
 };
+
+/** How an execution settled, as `ctx.waitForResult()` and `ctx.waitForAny()` return it. */
+export type ExecutionOutcome<TResult = unknown> =
+	| { status: "completed"; result: TResult }
+	| { status: "failed"; error: string }
+	| { status: "cancelled"; reason: string };
 
 export interface Execution {
 	id: string;
@@ -217,9 +224,17 @@ export type EventWaitResult =
 	| { status: "timed_out" }
 	| { status: "closed" };
 
-export type EventRaceBranch = { key: string; stepKey: string };
+export type ResultWaitResult =
+	| { status: "resolved"; outcome: ExecutionOutcome }
+	| { status: "timed_out" };
 
-export type EventRaceResult = { key: string; event?: { name: string; payload: Payload } };
+export type EventRaceBranch = { key: string; stepKey: string; executionId?: string };
+
+export type EventRaceResult = {
+	key: string;
+	event?: { name: string; payload: Payload };
+	outcome?: ExecutionOutcome;
+};
 
 export interface EventSubscriptionSpec {
 	task_key: string;
@@ -707,6 +722,17 @@ export class DatabaseClient {
 	): Promise<EventWaitResult | null> {
 		const rows = await this.query(() => this.builder.buildRegisterEventWait(args), {
 			label: "registerEventWait",
+			...opts,
+		});
+		return rows[0]?.result || null;
+	}
+
+	async registerResultWait(
+		args: RegisterResultWaitArgs,
+		opts?: QueryMethodOptions,
+	): Promise<ResultWaitResult | null> {
+		const rows = await this.query(() => this.builder.buildRegisterResultWait(args), {
+			label: "registerResultWait",
 			...opts,
 		});
 		return rows[0]?.result || null;

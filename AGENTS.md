@@ -21,7 +21,7 @@ pgconductor/
         │   ├── worker.ts             # Fetch→execute→flush pipeline
         │   ├── task.ts               # Task wrapper with execute method
         │   ├── task-definition.ts    # Standard Schema / type-only task definitions
-        │   ├── task-context.ts       # Context API (step, sleep, invoke, invokeAndWait, waitForEvent, onSignal)
+        │   ├── task-context.ts       # Context API (step, sleep, invoke, invokeAndWait, waitForResult, waitForEvent, waitForAny, onSignal)
         │   ├── signal-inbox.ts       # In-process delivery of signals to ctx.onSignal handlers
         │   ├── middleware.ts         # Per-attempt middleware types
         │   ├── event-definition.ts   # Custom event definitions
@@ -140,7 +140,7 @@ Tables live in the `pgconductor` schema with a `_private_` prefix (`_private_exe
 - Handles graceful shutdown via AbortController
 
 **TaskContext** (`task-context.ts`)
-- Provides API to task functions: `step()`, `sleep()`, `invoke()`, `invokeAndWait()`, `waitForEvent()`, `subscribe()`, `onSignal()`, `sendSignal()`, `signalWithStart()`
+- Provides API to task functions: `step()`, `sleep()`, `invoke()`, `invokeAndWait()`, `waitForResult()`, `waitForEvent()`, `subscribe()`, `waitForAny()`, `onSignal()`, `sendSignal()`, `signalWithStart()`, plus `executionId` and `queue`
 - `invoke()` inserts an independent execution and memoizes its id as a step in one statement. Only with `cancelWithParent` does it set `parent_execution_id`, together with `cancel_with_parent`; settlement fails a completed child that has a parent but neither a waiter nor that flag
 - All operations are idempotent (use steps as memoization)
 - Hangup pattern: abort execution and return never-resolving promise
@@ -226,6 +226,12 @@ Tables live in the `pgconductor` schema with a `_private_` prefix (`_private_exe
 - Fan-out is at-least-once: a retried dispatch re-evaluates current subscriptions, and a unique index deduplicates existing deliveries
 - Event waits are `execution_wait` subscriptions keyed by `(execution_id, step_key)`. Dispatch stores the first matching event as the step result and wakes the execution only if it is suspended at an event wait (`waiting_step_key`), which may be at another of its subscriptions; `ctx.subscribe()` registers without suspending, so events matched while the execution runs are kept for the later wait
 - `ctx.waitForAny()` suspends at its own step key over existing `ctx.subscribe()` subscriptions; dispatch stores branch events under their own keys as usual. `_private_register_event_race` picks the winner (earliest stored, then branch order), caches it under the waitForAny key and removes and closes all branch subscriptions
+
+**Result Waits**
+- `ctx.waitForResult()` and `{ execution: id }` branches of `ctx.waitForAny()` are `execution_wait` subscriptions with `awaited_execution_id` set and no event key, so race, timeout and cleanup work as for event waits
+- `_private_register_result_wait` locks the awaited execution before the waiter (the order settlement uses), stores the outcome at once if it settled, and otherwise appends `{execution_id, queue, step_key}` to the awaited row's `result_waiters`
+- Settlement (`outcome_waits` in `buildReturnExecutions`) and `cancel_execution()` read `result_waiters` from the locked row, like `signal_count`, so a wait registered after their snapshot is not missed. They store `{status: 'resolved', outcome}` under the wait's step key and wake a waiter suspended at a wait, like dispatch does
+- Waiting creates no parent link: a failed or cancelled execution never fails its waiter, and timeouts or cancelling the waiter leave it running. An unknown execution raises at registration
 
 **Signals**
 - `_private_execution_signals` stores one row per `(execution_id, id)`; `seq` orders delivery and `delivered_at` is set when a `ctx.onSignal` handler returned (at least once per id)

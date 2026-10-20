@@ -132,14 +132,14 @@ const decision = await subscription.wait({ timeout: "24h" });
 
 ## ctx.waitForAny()
 
-Wait for whichever of several subscriptions receives an event first, or a timeout:
+Wait for whichever of several subscriptions receives an event first, an execution settles first, or a timeout:
 
 ```typescript
 const winner = await ctx.waitForAny(
   stepKey: string,
-  subscriptions: Record<string, EventSubscription>,
+  branches: Record<string, EventSubscription | { execution: string }>,
   options?: { timeout?: DurationInput }
-): Promise<{ key: string, event } | { key: "timeout" }>
+): Promise<{ key: string, event } | { key: string, outcome: ExecutionOutcome } | { key: "timeout" }>
 ```
 
 **Example:**
@@ -166,12 +166,28 @@ if (winner.key === "decision") {
 }
 ```
 
+An `{ execution: id }` branch wins when that execution settles, with the same outcome as
+[`ctx.waitForResult()`](#ctxwaitforresult):
+
+```typescript
+const toolId = await ctx.invoke("start-tool", { name: "run-tool" }, input);
+const click = await ctx.subscribe("click", { event: buttonClicked, filter: { toolId: [toolId] } });
+
+const winner = await ctx.waitForAny("tool-or-click", { tool: { execution: toolId }, click }, { timeout: "1h" });
+if (winner.key === "tool") {
+  // winner.outcome: { status: "completed", result } | { status: "failed", error } | { status: "cancelled", reason }
+}
+```
+
 **Behavior:**
-- Each value is a subscription from `ctx.subscribe()`, and `winner.key` is the name you gave it
-  in the object.
-- Exactly one subscription wins. One that already holds an event wins without suspending. If
-  several do, the one whose event was dispatched first wins, and ties go to the one listed
-  first. Otherwise the execution suspends until the first matching event.
+- Each value is a subscription from `ctx.subscribe()` or an `{ execution: id }` branch, and
+  `winner.key` is the name you gave it in the object. An execution branch is registered by
+  `waitForAny()` itself and memoized under the step key `<stepKey>:<name>`.
+- Exactly one branch wins. One that already holds an event or outcome wins without suspending,
+  including an execution that settled before the call. If several do, the one stored first
+  wins, and ties go to the one listed first. Otherwise the execution suspends until the first
+  matching event or settlement.
+- Losing executions keep running; the wait never cancels them.
 - The timeout starts when `waitForAny()` is first called. When it wins, the result is
   `{ key: "timeout" }` instead of an error, so `timeout` cannot be used as a name.
 - When the wait settles, all of the subscriptions are removed. Calling `wait()` on one that did
@@ -287,7 +303,55 @@ const result = await conductor.waitForResult({ name: "support-flow" }, handoffId
   reconnect to an execution: if one of the task already holds the key, its ID is returned and
   nothing is started, superseded or updated
 - The execution inherits `ctx.metadata` unless `metadata` overrides it
-- Read or await it by ID with `conductor.getExecution()` or `conductor.waitForResult()`
+- Wait for it with [`ctx.waitForResult()`](#ctxwaitforresult) or an `{ execution: id }` branch of
+  `ctx.waitForAny()`, or read it by ID with `conductor.getExecution()`
+
+## ctx.waitForResult()
+
+Wait until an execution settles and return its outcome as a value:
+
+```typescript
+const outcome = await ctx.waitForResult<TResult>(
+  stepKey: string,
+  executionId: string,
+  options?: { timeout?: DurationInput }
+): Promise<
+  | { status: "completed", result: TResult }
+  | { status: "failed", error: string }
+  | { status: "cancelled", reason: string }
+  | { status: "timeout" }
+>
+```
+
+**Example:**
+
+```typescript
+const id = await ctx.invoke("start-tool", { name: "run-tool" }, input);
+await ctx.step("announce", () => postMessage("Tool started"));
+
+const outcome = await ctx.waitForResult("tool-result", id, { timeout: "24h" });
+if (outcome.status === "completed") {
+  // outcome.result
+} else if (outcome.status === "timeout") {
+  // the tool is still running
+}
+```
+
+**Behavior:**
+- Works for any execution ID, typically one started with `ctx.invoke()` or `conductor.invoke()`.
+- The task suspends until the execution settles. Settling wakes it in the same transaction: a
+  completion, a failure after the last retry, and a cancellation while pending or running each
+  resolve with the matching outcome.
+- A failed or cancelled execution never fails the waiting task; the outcome is the value.
+  `failed` carries the last error and `cancelled` the cancellation reason.
+- An execution that already settled returns at once without suspending.
+- The timeout starts at the first call and resolves to `{ status: "timeout" }`. The execution
+  keeps running.
+- The outcome is memoized by the step key, so retries and resumes return it even after the
+  execution has been removed by retention.
+- Throws if the execution does not exist when the wait starts, including one already removed by
+  retention. A wait that started before the removal still receives the outcome.
+- `TResult` only types the result; it is not validated.
 
 ## ctx.onSignal()
 
@@ -463,6 +527,17 @@ ctx.executionId: string
 ```typescript
 ctx.logger.info(`Execution ID: ${ctx.executionId}`);
 ```
+
+## ctx.queue
+
+Queue of the current execution:
+
+```typescript
+ctx.queue: string
+```
+
+Batch handlers have no `ctx.executionId` or `ctx.queue`; each event carries `event.execution.id`
+and `event.execution.queue`.
 
 ## Custom Context
 

@@ -22,6 +22,7 @@ export { TaskContext, BatchTaskContext, WaitForEventTimeoutError } from "./task-
 export type {
 	BatchTaskEvent,
 	EventSubscription,
+	ExecutionBranch,
 	SignalMessage,
 	WaitForAnyResult,
 } from "./task-context.js";
@@ -46,7 +47,13 @@ export type {
 	InferEventPayload,
 } from "./event-definition.js";
 export { defineEvent } from "./event-definition.js";
-export type { ExecutionInfo, ExecutionStatus, JsonValue, Payload } from "./database-client.js";
+export type {
+	ExecutionInfo,
+	ExecutionOutcome,
+	ExecutionStatus,
+	JsonValue,
+	Payload,
+} from "./database-client.js";
 export type { Logger, LogArg } from "./lib/logger.js";
 export { parseDuration } from "./lib/duration.js";
 export type { DurationInput, DurationUnit } from "./lib/duration.js";

@@ -1,0 +1,595 @@
+import { afterAll, afterEach, beforeAll, describe, expect, test } from "vitest";
+import postgres from "postgres";
+import { z } from "zod";
+import { Conductor } from "../../src/conductor";
+import { Orchestrator } from "../../src/orchestrator";
+import { defineEvent } from "../../src/event-definition";
+import { defineTask } from "../../src/task-definition";
+import { EventSchemas, TaskSchemas } from "../../src/schemas";
+import { Deferred } from "../../src/lib/deferred";
+import { TestDatabasePool, type TestDatabase } from "../fixtures/test-database";
+import { waitForCondition } from "../test-utils";
+
+const click = defineEvent({
+	name: "result.click",
+	payload: z.object({ id: z.string() }),
+	filterable: ["id"],
+});
+const waiterDefinition = defineTask({ name: "waiter", payload: z.object({ id: z.string() }) });
+const workDefinition = defineTask({
+	name: "work",
+	payload: z.object({ value: z.number() }),
+	returns: z.object({ doubled: z.number() }),
+});
+const leafDefinition = defineTask({ name: "leaf" });
+
+type Handler = (id: string, ctx: any) => Promise<void>;
+
+describe("ctx.waitForResult and execution branches (Postgres integration)", () => {
+	let pool: TestDatabasePool;
+	const databases: TestDatabase[] = [];
+	const orchestrators: Orchestrator[] = [];
+
+	beforeAll(async () => {
+		pool = await TestDatabasePool.create();
+	}, 60000);
+
+	afterEach(async () => {
+		await Promise.allSettled(orchestrators.map((orchestrator) => orchestrator.stop()));
+		orchestrators.length = 0;
+		await Promise.all(databases.map((database) => database.destroy()));
+		databases.length = 0;
+	});
+
+	afterAll(async () => {
+		await pool?.destroy();
+	});
+
+	async function db() {
+		const database = await pool.child();
+		databases.push(database);
+		await Conductor.create({ sql: database.sql, context: {} }).ensureInstalled();
+		return database;
+	}
+
+	async function setup(
+		database: TestDatabase,
+		{
+			waiter,
+			work = async () => {},
+			workOptions = {},
+			orchestratorCount = 1,
+		}: {
+			waiter: Handler;
+			work?: (value: number, ctx: any) => Promise<unknown>;
+			workOptions?: { maxAttempts?: number; removeOnComplete?: { days: number } };
+			orchestratorCount?: number;
+		},
+	) {
+		const conductor = Conductor.create({
+			sql: database.sql,
+			tasks: TaskSchemas.fromSchema([waiterDefinition, workDefinition, leafDefinition]),
+			events: EventSchemas.fromSchema([click]),
+			context: {},
+		});
+		const tasks = [
+			conductor.createTask({ name: "waiter" }, { invocable: true }, async (event, ctx) =>
+				waiter(event.payload.id, ctx),
+			),
+			conductor.createTask(
+				{ name: "work", ...workOptions },
+				{ invocable: true },
+				async (event, ctx) => {
+					await work(event.payload.value, ctx);
+					return { doubled: event.payload.value * 2 };
+				},
+			),
+			conductor.createTask({ name: "leaf", maxAttempts: 1 }, { invocable: true }, async () => {
+				throw new Error("leaf failed");
+			}),
+		];
+		for (let i = 0; i < orchestratorCount; i++) {
+			const orchestrator = Orchestrator.create({
+				conductor,
+				tasks,
+				defaultWorker: { pollIntervalMs: 10, flushIntervalMs: 10, concurrency: 4 },
+			});
+			orchestrators.push(orchestrator);
+			await orchestrator.start();
+		}
+		return conductor;
+	}
+
+	async function step(database: TestDatabase, executionId: string, key: string) {
+		const [row] = await database.sql<{ result: unknown }[]>`
+			select result from pgconductor._private_steps
+			where execution_id = ${executionId}::uuid and key = ${key}
+		`;
+		return row?.result;
+	}
+
+	async function suspendedAt(database: TestDatabase, executionId: string, stepKey: string) {
+		await waitForCondition(async () => {
+			const [row] = await database.sql`
+				select 1 from pgconductor._private_executions
+				where id = ${executionId}::uuid and locked_by is null and waiting_step_key = ${stepKey}
+			`;
+			return row !== undefined;
+		});
+	}
+
+	async function completed(database: TestDatabase, executionId: string) {
+		await waitForCondition(async () => {
+			const [row] = await database.sql`
+				select 1 from pgconductor._private_executions
+				where id = ${executionId}::uuid and completed_at is not null
+			`;
+			return row !== undefined;
+		});
+	}
+
+	async function waits(database: TestDatabase) {
+		const [row] = await database.sql<{ n: number }[]>`
+			select count(*)::int as n from pgconductor._private_custom_event_subscriptions
+			where kind = 'execution_wait'
+		`;
+		return row?.n;
+	}
+
+	test("a completed execution wakes its waiter, and replays return the memoized outcome", async () => {
+		const database = await db();
+		const release = new Deferred<void>();
+		const outcomes: unknown[] = [];
+		const ids: string[] = [];
+		const conductor = await setup(database, {
+			waiter: async (_id, ctx) => {
+				const id = await ctx.invoke("start", { name: "work" }, { value: 2 });
+				ids.push(id);
+				outcomes.push(await ctx.waitForResult("result", id));
+				await ctx.sleep("pause", 0);
+			},
+			work: () => release.promise,
+		});
+
+		const waiterId = await conductor.invoke({ name: "waiter" }, { id: "completed" });
+		await suspendedAt(database, waiterId, "result");
+		expect(outcomes).toEqual([]);
+		release.resolve();
+		await conductor.waitForResult(waiterId, { pollIntervalMs: 10 });
+
+		const outcome = { status: "completed", result: { doubled: 4 } };
+		expect(outcomes).toEqual([outcome, outcome]);
+		expect(await step(database, waiterId, "result")).toEqual({ status: "resolved", outcome });
+		expect(await waits(database)).toBe(0);
+	});
+
+	test("an execution that fails after its retries resolves the wait with the failure", async () => {
+		const database = await db();
+		const outcomes: unknown[] = [];
+		const conductor = await setup(database, {
+			waiter: async (_id, ctx) => {
+				const id = await ctx.invoke("start", { name: "work" }, { value: 1 });
+				outcomes.push(await ctx.waitForResult("result", id));
+			},
+			work: async () => {
+				throw new Error("boom");
+			},
+			workOptions: { maxAttempts: 2 },
+		});
+
+		const waiterId = await conductor.invoke({ name: "waiter" }, { id: "failed" });
+		await suspendedAt(database, waiterId, "result");
+		await waitForCondition(async () => {
+			const rows = await database.sql`
+				update pgconductor._private_executions
+				set run_at = pgconductor._private_current_time()
+				where task_key = 'work' and attempts = 1 and last_error is not null and locked_by is null
+				returning id
+			`;
+			return rows.length === 1;
+		});
+		await conductor.waitForResult(waiterId, { pollIntervalMs: 10 });
+
+		expect(outcomes).toEqual([{ status: "failed", error: "boom" }]);
+	});
+
+	test("a failure cascading from a child of the awaited execution resolves the wait", async () => {
+		const database = await db();
+		const outcomes: unknown[] = [];
+		const conductor = await setup(database, {
+			waiter: async (_id, ctx) => {
+				const id = await ctx.invoke("start", { name: "work" }, { value: 1 });
+				outcomes.push(await ctx.waitForResult("result", id));
+			},
+			work: (_value, ctx) => ctx.invokeAndWait("leaf", { name: "leaf" }),
+		});
+
+		const waiterId = await conductor.invoke({ name: "waiter" }, { id: "cascade" });
+		await conductor.waitForResult(waiterId, { pollIntervalMs: 10 });
+
+		expect(outcomes).toEqual([{ status: "failed", error: "Child execution failed: leaf failed" }]);
+	});
+
+	test("a wait registered while the awaited execution settles is not missed", async () => {
+		const database = await db();
+		const conductor = await setup(database, { waiter: async () => {} });
+		await Promise.all(orchestrators.map((orchestrator) => orchestrator.stop()));
+		const workId = await conductor.invoke({ name: "work" }, { value: 1 });
+		const waiterId = await conductor.invoke({ name: "waiter" }, { id: "race" });
+		const orchestratorId = crypto.randomUUID();
+		const { executions } = await database.client.getExecutions({
+			orchestratorId,
+			queueName: "default",
+			batchSize: 10,
+			taskKeys: ["work", "waiter"],
+		});
+		const claimToken = (id: string) =>
+			executions.find((execution) => execution.id === id)?.claim_token || "";
+		const registration = postgres(database.url, { max: 1 });
+		const observer = postgres(database.url, { max: 1 });
+		const registered = new Deferred<void>();
+		const commit = new Deferred<void>();
+
+		try {
+			// The registration holds the awaited row until the settlement statement has taken its snapshot
+			const registering = registration.begin(async (sql) => {
+				await sql`
+					select pgconductor._private_register_result_wait(
+						${waiterId}::uuid, 'default', 'waiter', ${orchestratorId}::uuid,
+						${claimToken(waiterId)}::uuid, 'result', ${workId}::uuid, null, true
+					)
+				`;
+				registered.resolve();
+				await commit.promise;
+			});
+			await registered.promise;
+			const settling = database.client.returnExecutions({
+				orchestratorId,
+				results: [
+					{
+						execution_id: workId,
+						queue: "default",
+						task_key: "work",
+						claim_token: claimToken(workId),
+						status: "completed",
+						result: { doubled: 2 },
+					},
+				],
+			});
+			await waitForCondition(async () => {
+				const rows = await observer`
+					select 1 from pg_stat_activity
+					where datname = current_database() and wait_event_type = 'Lock'
+				`;
+				return rows.length === 1;
+			});
+			commit.resolve();
+			await registering;
+			await settling;
+		} finally {
+			await registration.end();
+			await observer.end();
+		}
+
+		expect(await step(database, waiterId, "result")).toEqual({
+			status: "resolved",
+			outcome: { status: "completed", result: { doubled: 2 } },
+		});
+		const [waiter] = await database.sql<{ waiting_step_key: string | null; due: boolean }[]>`
+			select waiting_step_key, run_at <= pgconductor._private_current_time() as due
+			from pgconductor._private_executions where id = ${waiterId}::uuid
+		`;
+		expect(waiter).toEqual({ waiting_step_key: null, due: true });
+	});
+
+	test("an execution cancelled while pending resolves the wait as cancelled", async () => {
+		const database = await db();
+		const outcomes: unknown[] = [];
+		const ids: string[] = [];
+		const conductor = await setup(database, {
+			waiter: async (_id, ctx) => {
+				const id = await ctx.invoke(
+					"start",
+					{ name: "work" },
+					{ value: 1 },
+					{ run_at: new Date(Date.now() + 3_600_000) },
+				);
+				ids.push(id);
+				outcomes.push(await ctx.waitForResult("result", id));
+			},
+		});
+
+		const waiterId = await conductor.invoke({ name: "waiter" }, { id: "pending" });
+		await suspendedAt(database, waiterId, "result");
+		expect(await conductor.cancel(ids[0] || "", { reason: "no longer needed" })).toBe(true);
+		await conductor.waitForResult(waiterId, { pollIntervalMs: 10 });
+
+		expect(outcomes).toEqual([{ status: "cancelled", reason: "no longer needed" }]);
+	});
+
+	test("an execution cancelled while running resolves the wait as cancelled", async () => {
+		const database = await db();
+		const started = new Deferred<void>();
+		const outcomes: unknown[] = [];
+		const ids: string[] = [];
+		const conductor = await setup(database, {
+			waiter: async (_id, ctx) => {
+				const id = await ctx.invoke("start", { name: "work" }, { value: 1 });
+				ids.push(id);
+				outcomes.push(await ctx.waitForResult("result", id));
+			},
+			work: async (_value, ctx) => {
+				started.resolve();
+				await new Promise((resolve) => ctx.signal.addEventListener("abort", resolve));
+			},
+		});
+
+		const waiterId = await conductor.invoke({ name: "waiter" }, { id: "running" });
+		await started.promise;
+		await suspendedAt(database, waiterId, "result");
+		expect(await conductor.cancel(ids[0] || "", { reason: "stop" })).toBe(true);
+		await conductor.waitForResult(waiterId, { pollIntervalMs: 10 });
+
+		expect(outcomes).toEqual([{ status: "cancelled", reason: "stop" }]);
+	});
+
+	test("an execution settled before the wait returns at once", async () => {
+		const database = await db();
+		let entered = 0;
+		const outcomes: unknown[] = [];
+		const conductor = await setup(database, {
+			waiter: async (_id, ctx) => {
+				entered++;
+				const id = await ctx.invoke("start", { name: "work" }, { value: 3 });
+				await ctx.step("await-work", () => completed(database, id));
+				outcomes.push(await ctx.waitForResult("result", id));
+			},
+		});
+
+		const waiterId = await conductor.invoke({ name: "waiter" }, { id: "settled" });
+		await conductor.waitForResult(waiterId, { pollIntervalMs: 10 });
+
+		expect(entered).toBe(1);
+		expect(outcomes).toEqual([{ status: "completed", result: { doubled: 6 } }]);
+		expect(await waits(database)).toBe(0);
+	});
+
+	test("an execution removed when it completes still resolves the wait", async () => {
+		const database = await db();
+		const release = new Deferred<void>();
+		const outcomes: unknown[] = [];
+		const ids: string[] = [];
+		const conductor = await setup(database, {
+			waiter: async (_id, ctx) => {
+				const id = await ctx.invoke("start", { name: "work" }, { value: 5 });
+				ids.push(id);
+				outcomes.push(await ctx.waitForResult("result", id));
+			},
+			work: () => release.promise,
+			workOptions: { removeOnComplete: { days: 0 } },
+		});
+
+		const waiterId = await conductor.invoke({ name: "waiter" }, { id: "removed" });
+		await suspendedAt(database, waiterId, "result");
+		release.resolve();
+		await conductor.waitForResult(waiterId, { pollIntervalMs: 10 });
+
+		expect(outcomes).toEqual([{ status: "completed", result: { doubled: 10 } }]);
+		expect(await conductor.getExecution(ids[0] || "")).toBeNull();
+	});
+
+	test("an unknown execution fails the wait", async () => {
+		const database = await db();
+		const errors: string[] = [];
+		const unknown = crypto.randomUUID();
+		const conductor = await setup(database, {
+			waiter: async (_id, ctx) => {
+				await ctx.waitForResult("result", unknown).catch((error: Error) => {
+					errors.push(error.message);
+				});
+			},
+		});
+
+		const waiterId = await conductor.invoke({ name: "waiter" }, { id: "unknown" });
+		await conductor.waitForResult(waiterId, { pollIntervalMs: 10 });
+
+		expect(errors).toEqual([`Execution ${unknown} not found`]);
+	});
+
+	test("a timeout resolves the wait and leaves the execution running", async () => {
+		const database = await db();
+		const release = new Deferred<void>();
+		const outcomes: unknown[] = [];
+		const ids: string[] = [];
+		const conductor = await setup(database, {
+			waiter: async (_id, ctx) => {
+				const id = await ctx.invoke("start", { name: "work" }, { value: 1 });
+				ids.push(id);
+				outcomes.push(await ctx.waitForResult("result", id, { timeout: "1s" }));
+			},
+			work: () => release.promise,
+		});
+
+		const waiterId = await conductor.invoke({ name: "waiter" }, { id: "timeout" });
+		await conductor.waitForResult(waiterId, { pollIntervalMs: 10 });
+		const workId = ids[0] || "";
+
+		expect(outcomes).toEqual([{ status: "timeout" }]);
+		expect((await conductor.getExecution(workId))?.status).toBe("running");
+		release.resolve();
+		expect(await conductor.waitForResult(workId, { pollIntervalMs: 10 })).toEqual({ doubled: 2 });
+		expect(await step(database, waiterId, "result")).toEqual({ status: "timed_out" });
+	});
+
+	test("waitForAny resolves with an execution branch that settles first", async () => {
+		const database = await db();
+		const release = new Deferred<void>();
+		const winners: unknown[] = [];
+		const handles: string[] = [];
+		const ids: string[] = [];
+		const conductor = await setup(database, {
+			waiter: async (_id, ctx) => {
+				const id = await ctx.invoke("start", { name: "work" }, { value: 4 });
+				ids.push(id);
+				const clicked = await ctx.subscribe("click", { event: click, filter: { id: [id] } });
+				winners.push(await ctx.waitForAny("any", { work: { execution: id }, click: clicked }));
+				handles.push(
+					await clicked.wait().then(
+						() => "resolved",
+						(error: Error) => error.message,
+					),
+				);
+			},
+			work: () => release.promise,
+		});
+
+		const waiterId = await conductor.invoke({ name: "waiter" }, { id: "execution-wins" });
+		await suspendedAt(database, waiterId, "any");
+		release.resolve();
+		await conductor.waitForResult(waiterId, { pollIntervalMs: 10 });
+		await conductor.emit("result.click", { id: ids[0] || "" });
+
+		const winner = { key: "work", outcome: { status: "completed", result: { doubled: 8 } } };
+		expect(winners).toEqual([winner]);
+		expect(await step(database, waiterId, "any")).toEqual(winner);
+		expect(handles).toEqual(['Event subscription "click" was closed by ctx.waitForAny()']);
+		expect(await waits(database)).toBe(0);
+	});
+
+	test("waitForAny keeps an event winner when the execution branch settles later", async () => {
+		const database = await db();
+		const release = new Deferred<void>();
+		const winners: unknown[] = [];
+		const ids: string[] = [];
+		const conductor = await setup(database, {
+			waiter: async (_id, ctx) => {
+				const id = await ctx.invoke("start", { name: "work" }, { value: 4 });
+				ids.push(id);
+				const clicked = await ctx.subscribe("click", { event: click, filter: { id: [id] } });
+				winners.push(await ctx.waitForAny("any", { work: { execution: id }, click: clicked }));
+			},
+			work: () => release.promise,
+		});
+
+		const waiterId = await conductor.invoke({ name: "waiter" }, { id: "event-wins" });
+		await suspendedAt(database, waiterId, "any");
+		const workId = ids[0] || "";
+		await conductor.emit("result.click", { id: workId });
+		await conductor.waitForResult(waiterId, { pollIntervalMs: 10 });
+		release.resolve();
+		await conductor.waitForResult(workId, { pollIntervalMs: 10 });
+
+		const winner = { key: "click", event: { name: "result.click", payload: { id: workId } } };
+		expect(winners).toEqual([winner]);
+		expect(await step(database, waiterId, "any")).toEqual(winner);
+		expect(await step(database, waiterId, "any:work")).toEqual({ status: "closed" });
+	});
+
+	test("waitForAny picks one winner when an execution and an event settle at once", async () => {
+		const database = await db();
+		const release = new Deferred<void>();
+		const winners: Record<string, unknown[]> = {};
+		const works = new Map<string, string>();
+		const conductor = await setup(database, {
+			waiter: async (id, ctx) => {
+				const workId = await ctx.invoke("start", { name: "work" }, { value: 1 });
+				works.set(id, workId);
+				const clicked = await ctx.subscribe("click", { event: click, filter: { id: [workId] } });
+				const winner = await ctx.waitForAny("any", { work: { execution: workId }, click: clicked });
+				winners[id] = [...(winners[id] || []), winner];
+			},
+			work: () => release.promise,
+			orchestratorCount: 2,
+		});
+
+		const ids = Array.from({ length: 10 }, (_, index) => String(index));
+		const waiters = new Map<string, string>();
+		for (const id of ids) {
+			waiters.set(id, await conductor.invoke({ name: "waiter" }, { id }));
+		}
+		for (const [id, waiterId] of waiters) {
+			await waitForCondition(() => works.has(id));
+			await suspendedAt(database, waiterId, "any");
+		}
+		release.resolve();
+		await Promise.all(ids.map((id) => conductor.emit("result.click", { id: works.get(id) || "" })));
+		for (const waiterId of waiters.values()) {
+			await conductor.waitForResult(waiterId, { pollIntervalMs: 10 });
+		}
+
+		for (const [id, waiterId] of waiters) {
+			expect(winners[id]).toEqual([await step(database, waiterId, "any")]);
+		}
+		expect(await waits(database)).toBe(0);
+	});
+
+	test("waitForAny returns a settled execution branch without suspending", async () => {
+		const database = await db();
+		let entered = 0;
+		const winners: unknown[] = [];
+		const conductor = await setup(database, {
+			waiter: async (_id, ctx) => {
+				entered++;
+				const id = await ctx.invoke("start", { name: "work" }, { value: 3 });
+				const clicked = await ctx.subscribe("click", { event: click, filter: { id: [id] } });
+				await ctx.step("await-work", () => completed(database, id));
+				winners.push(
+					await ctx.waitForAny(
+						"any",
+						{ work: { execution: id }, click: clicked },
+						{ timeout: "1h" },
+					),
+				);
+			},
+		});
+
+		const waiterId = await conductor.invoke({ name: "waiter" }, { id: "settled-branch" });
+		await conductor.waitForResult(waiterId, { pollIntervalMs: 10 });
+
+		expect(entered).toBe(1);
+		expect(winners).toEqual([
+			{ key: "work", outcome: { status: "completed", result: { doubled: 6 } } },
+		]);
+	});
+
+	test("waitForAny over an execution branch times out and leaves the execution running", async () => {
+		const database = await db();
+		const release = new Deferred<void>();
+		const winners: unknown[] = [];
+		const ids: string[] = [];
+		const conductor = await setup(database, {
+			waiter: async (_id, ctx) => {
+				const id = await ctx.invoke("start", { name: "work" }, { value: 1 });
+				ids.push(id);
+				winners.push(await ctx.waitForAny("any", { work: { execution: id } }, { timeout: "1s" }));
+			},
+			work: () => release.promise,
+		});
+
+		const waiterId = await conductor.invoke({ name: "waiter" }, { id: "any-timeout" });
+		await conductor.waitForResult(waiterId, { pollIntervalMs: 10 });
+		const workId = ids[0] || "";
+
+		expect(winners).toEqual([{ key: "timeout" }]);
+		expect(await waits(database)).toBe(0);
+		expect((await conductor.getExecution(workId))?.status).toBe("running");
+		release.resolve();
+		await conductor.waitForResult(workId, { pollIntervalMs: 10 });
+		expect(await step(database, waiterId, "any:work")).toEqual({ status: "closed" });
+	});
+
+	test("ctx.executionId and ctx.queue identify the execution", async () => {
+		const database = await db();
+		const seen: unknown[] = [];
+		const conductor = await setup(database, {
+			waiter: async (_id, ctx) => {
+				seen.push({ executionId: ctx.executionId, queue: ctx.queue });
+			},
+		});
+
+		const waiterId = await conductor.invoke({ name: "waiter" }, { id: "identity" });
+		await conductor.waitForResult(waiterId, { pollIntervalMs: 10 });
+
+		expect(seen).toEqual([{ executionId: waiterId, queue: "default" }]);
+	});
+});

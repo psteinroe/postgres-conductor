@@ -151,7 +151,29 @@ const session = conductor.createTask(
 
 An execution that completed before the caller ended stays completed, and a caller retry or completion leaves it running. The link is set only when the call starts the execution: an execution returned for an existing `dedupe_key` keeps its own.
 
-Await the invoked execution elsewhere with [`conductor.waitForResult()`](../api/conductor.md) or read it with `conductor.getExecution()`.
+## Waiting for a Started Execution
+
+Use `ctx.waitForResult()` to wait for an execution started earlier, for example after other work or with a timeout that should not cancel it:
+
+```typescript
+const workflow = conductor.createTask(
+  { name: "review" },
+  { invocable: true },
+  async (event, ctx) => {
+    const checkId = await ctx.invoke("start-checks", { name: "run-checks" }, event.payload);
+    await ctx.step("notify", () => notifyReviewers(event.payload));
+
+    const outcome = await ctx.waitForResult("checks", checkId, { timeout: "1h" });
+    if (outcome.status === "completed") return { checks: outcome.result };
+    if (outcome.status === "timeout") return { checks: "still running" };
+    return { checks: `not passed: ${outcome.status}` };
+  }
+);
+```
+
+Unlike `ctx.invokeAndWait()`, the outcome is a value: a failed or cancelled execution resolves the wait instead of failing the caller, and a timeout leaves the execution running. To race the execution against events, pass it as an `{ execution: id }` branch to [`ctx.waitForAny()`](../api/task-context.md#ctxwaitforany).
+
+Outside a task, await an execution with [`conductor.waitForResult()`](../api/conductor.md) or read it with `conductor.getExecution()`.
 
 ## What's Next?
 

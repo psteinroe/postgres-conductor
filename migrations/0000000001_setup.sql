@@ -116,6 +116,9 @@ create table pgconductor._private_executions (
     -- signals ever stored for this execution; settlement reads it from the locked row to see
     -- signals committed after its snapshot was taken
     signal_count integer default 0 not null,
+    -- waits for this execution's outcome, as {execution_id, queue, step_key}. registration appends
+    -- under the row lock, so settlement sees waits registered after its snapshot was taken
+    result_waiters jsonb,
 
     -- source execution metadata of a dead-letter delivery, copied so the source row may be removed
     dead_letter jsonb,
@@ -1020,7 +1023,8 @@ begin
       case when e.id = any(v_ancestor_ids) then 'Child execution failed: ' || p_reason
         else p_reason end as error,
       e.id = any(v_ancestor_ids) is not true as cancelled,
-      t.remove_on_fail_days = 0 as should_remove
+      t.remove_on_fail_days = 0 as should_remove,
+      e.result_waiters
     from pgconductor._private_executions e
     left join pgconductor._private_tasks t on t.key = e.task_key and t.queue = e.queue
     where e.id = any(v_descendant_ids || p_execution_id || v_ancestor_ids)
@@ -1043,11 +1047,56 @@ begin
       waiting_step_key = null
     from pending p
     where e.id = p.id and e.queue = p.queue and p.should_remove is not true
+  ),
+  deleted_waits as (
+    delete from pgconductor._private_custom_event_subscriptions s
+    using pending p
+    where s.kind = 'execution_wait'
+      and s.execution_id = p.id
+  ),
+  outcome_waits as materialized (
+    select w.execution_id, w.queue, w.step_key,
+      case when p.cancelled then jsonb_build_object('status', 'cancelled', 'reason', p.error)
+        else jsonb_build_object('status', 'failed', 'error', p.error) end as outcome
+    from pending p
+    cross join lateral jsonb_to_recordset(p.result_waiters)
+      as w(execution_id uuid, queue text, step_key text)
+  ),
+  -- like settlement: store the outcome under the wait's step key and wake a suspended waiter
+  locked_outcome_waiters as materialized (
+    select e.id, e.queue,
+      e.locked_by is null
+        and e.waiting_on_execution_id is null
+        and e.waiting_step_key is not null as suspended
+    from pgconductor._private_executions e
+    where (e.id, e.queue) in (select w.execution_id, w.queue from outcome_waits w)
+      and e.completed_at is null
+      and e.failed_at is null
+      and not e.cancelled
+    order by e.id
+    for update of e
+  ),
+  outcome_steps as (
+    insert into pgconductor._private_steps (execution_id, queue, key, result)
+    select w.execution_id, w.queue, w.step_key,
+      jsonb_build_object('status', 'resolved', 'outcome', w.outcome)
+    from outcome_waits w
+    join locked_outcome_waiters l on l.id = w.execution_id and l.queue = w.queue
+    on conflict (execution_id, key) do nothing
+    returning execution_id, queue, key
+  ),
+  deleted_outcome_waits as (
+    delete from pgconductor._private_custom_event_subscriptions s
+    using outcome_steps step
+    where s.kind = 'execution_wait'
+      and s.execution_id = step.execution_id
+      and s.step_key = step.key
   )
-  delete from pgconductor._private_custom_event_subscriptions s
-  using pending p
-  where s.kind = 'execution_wait'
-    and s.execution_id = p.id;
+  update pgconductor._private_executions e
+  set run_at = pgconductor._private_current_time(), waiting_step_key = null
+  from locked_outcome_waiters l
+  where e.id = l.id and e.queue = l.queue and l.suspended
+    and exists (select 1 from outcome_steps step where step.execution_id = l.id);
 
   -- linked children are cancelled with the reason their parent ended with
   perform pgconductor.cancel_execution(
@@ -1073,7 +1122,8 @@ create unique index idx_executions_event_destination
 
 create table pgconductor._private_custom_event_subscriptions (
     id uuid primary key default pgconductor._private_portable_uuidv7(),
-    event_key text not null,
+    -- null for a wait on the outcome of another execution
+    event_key text,
     task_key text not null,
     queue text not null,
     payload_fields text[],
@@ -1083,6 +1133,7 @@ create table pgconductor._private_custom_event_subscriptions (
     execution_id uuid,
     step_key text,
     expires_at timestamptz,
+    awaited_execution_id uuid,
     constraint chk_custom_event_subscription_event_key check (
         btrim(event_key) <> '' and octet_length(event_key) between 1 and 255
     ),
@@ -1091,14 +1142,17 @@ create table pgconductor._private_custom_event_subscriptions (
     ),
     constraint chk_custom_event_subscription_shape check (
         (kind = 'task_trigger'
+            and event_key is not null
             and execution_id is null
             and step_key is null
-            and expires_at is null)
+            and expires_at is null
+            and awaited_execution_id is null)
         or
         (kind = 'execution_wait'
             and execution_id is not null
             and step_key is not null
-            and payload_fields is null)
+            and payload_fields is null
+            and (event_key is null) = (awaited_execution_id is not null))
     ),
     constraint fk_custom_event_subscription_execution
         foreign key (execution_id, queue)
@@ -1439,21 +1493,21 @@ begin
 end;
 $function$;
 
--- Registers a waitForAny step over subscriptions created by
--- _private_register_event_wait, referenced by their step keys. The branch whose
--- event was stored first wins (then branch order). Otherwise the timeout is set
--- on all branch subscriptions and the execution is released until dispatch wakes
--- it or the timeout passes. Settling removes the branch subscriptions and closes
--- the branches, so subscribing again on a resume is a no-op.
-create or replace function pgconductor._private_register_event_race(
+-- Registers a wait for the outcome of another execution, like _private_register_event_wait.
+-- Settlement locks an execution before its waiters, so the awaited execution is locked
+-- first. A wait is added to its result_waiters, which settlement and cancel_execution read
+-- from the locked row to store the outcome as the step result. The outcome of an execution
+-- that already settled is stored at once; an unknown execution raises.
+create or replace function pgconductor._private_register_result_wait(
     p_execution_id uuid,
     p_queue text,
     p_task_key text,
     p_orchestrator_id uuid,
     p_claim_token uuid,
     p_step_key text,
-    p_branches jsonb,
-    p_timeout_ms bigint
+    p_awaited_execution_id uuid,
+    p_timeout_ms bigint,
+    p_suspend boolean
 )
 returns jsonb
 language plpgsql
@@ -1461,11 +1515,17 @@ volatile
 set search_path to ''
 as $function$
 declare
-    v_step_keys text[] := array(select jsonb_array_elements(p_branches)->>'stepKey');
-    v_result jsonb;
+    v_awaited pgconductor._private_executions;
     v_expires_at timestamptz;
+    v_result jsonb;
     v_now timestamptz := pgconductor._private_current_time();
 begin
+    select *
+    into v_awaited
+    from pgconductor._private_executions awaited
+    where awaited.id = p_awaited_execution_id
+    for update;
+
     perform 1
     from pgconductor._private_executions execution
     where execution.id = p_execution_id
@@ -1492,7 +1552,168 @@ begin
         return v_result;
     end if;
 
-    select jsonb_build_object('key', branch.value->>'key', 'event', step.result->'event')
+    if v_awaited.id is null then
+        raise exception 'Execution % not found', p_awaited_execution_id;
+    end if;
+
+    if v_awaited.completed_at is not null or v_awaited.failed_at is not null then
+        v_result := jsonb_build_object('status', 'resolved', 'outcome', case
+            when v_awaited.completed_at is not null
+                then jsonb_build_object('status', 'completed', 'result', v_awaited.result)
+            when v_awaited.cancelled
+                then jsonb_build_object('status', 'cancelled', 'reason', v_awaited.last_error)
+            else jsonb_build_object('status', 'failed', 'error', v_awaited.last_error)
+        end);
+
+        insert into pgconductor._private_steps (execution_id, queue, key, result)
+        values (p_execution_id, p_queue, p_step_key, v_result);
+
+        return v_result;
+    end if;
+
+    select subscription.expires_at
+    into v_expires_at
+    from pgconductor._private_custom_event_subscriptions subscription
+    where subscription.kind = 'execution_wait'
+      and subscription.execution_id = p_execution_id
+      and subscription.step_key = p_step_key
+    for update;
+
+    if not found then
+        v_expires_at := v_now + p_timeout_ms * interval '1 millisecond';
+
+        insert into pgconductor._private_custom_event_subscriptions (
+            task_key,
+            queue,
+            required_field_count,
+            kind,
+            execution_id,
+            step_key,
+            expires_at,
+            awaited_execution_id
+        ) values (
+            p_task_key,
+            p_queue,
+            0,
+            'execution_wait',
+            p_execution_id,
+            p_step_key,
+            v_expires_at,
+            p_awaited_execution_id
+        );
+
+        update pgconductor._private_executions
+        set result_waiters = coalesce(result_waiters, '[]'::jsonb) || jsonb_build_array(
+            jsonb_build_object('execution_id', p_execution_id, 'queue', p_queue, 'step_key', p_step_key)
+        )
+        where id = v_awaited.id and queue = v_awaited.queue;
+    elsif not p_suspend then
+        return null;
+    elsif v_expires_at <= v_now then
+        delete from pgconductor._private_custom_event_subscriptions subscription
+        where subscription.kind = 'execution_wait'
+          and subscription.execution_id = p_execution_id
+          and subscription.step_key = p_step_key;
+
+        insert into pgconductor._private_steps (execution_id, queue, key, result)
+        values (p_execution_id, p_queue, p_step_key, jsonb_build_object('status', 'timed_out'));
+
+        return jsonb_build_object('status', 'timed_out');
+    elsif v_expires_at is null then
+        v_expires_at := v_now + p_timeout_ms * interval '1 millisecond';
+
+        update pgconductor._private_custom_event_subscriptions subscription
+        set expires_at = v_expires_at
+        where subscription.kind = 'execution_wait'
+          and subscription.execution_id = p_execution_id
+          and subscription.step_key = p_step_key;
+    end if;
+
+    if p_suspend then
+        update pgconductor._private_executions
+        set attempts = greatest(attempts - 1, 0),
+            run_at = coalesce(v_expires_at, 'infinity'),
+            waiting_step_key = p_step_key,
+            locked_by = null,
+            locked_at = null
+        where id = p_execution_id and queue = p_queue;
+    end if;
+
+    return null;
+end;
+$function$;
+
+-- Registers a waitForAny step over subscriptions created by
+-- _private_register_event_wait, referenced by their step keys. The branch whose
+-- event was stored first wins (then branch order). An { execution } branch is
+-- registered here with _private_register_result_wait, after locking every awaited
+-- execution in id order, and wins once its outcome is stored. Otherwise the timeout is set
+-- on all branch subscriptions and the execution is released until dispatch wakes
+-- it or the timeout passes. Settling removes the branch subscriptions and closes
+-- the branches, so subscribing again on a resume is a no-op.
+create or replace function pgconductor._private_register_event_race(
+    p_execution_id uuid,
+    p_queue text,
+    p_task_key text,
+    p_orchestrator_id uuid,
+    p_claim_token uuid,
+    p_step_key text,
+    p_branches jsonb,
+    p_timeout_ms bigint
+)
+returns jsonb
+language plpgsql
+volatile
+set search_path to ''
+as $function$
+declare
+    v_step_keys text[] := array(select jsonb_array_elements(p_branches)->>'stepKey');
+    v_result jsonb;
+    v_expires_at timestamptz;
+    v_now timestamptz := pgconductor._private_current_time();
+begin
+    perform 1
+    from pgconductor._private_executions awaited
+    where awaited.id in (
+        select (branch->>'executionId')::uuid from jsonb_array_elements(p_branches) branch
+    )
+    order by awaited.id
+    for update;
+
+    perform pgconductor._private_register_result_wait(
+        p_execution_id, p_queue, p_task_key, p_orchestrator_id, p_claim_token,
+        branch->>'stepKey', (branch->>'executionId')::uuid, null, false
+    )
+    from jsonb_array_elements(p_branches) branch
+    where branch ? 'executionId';
+
+    perform 1
+    from pgconductor._private_executions execution
+    where execution.id = p_execution_id
+      and execution.queue = p_queue
+      and execution.task_key = p_task_key
+      and execution.locked_by = p_orchestrator_id
+      and execution.claim_token = p_claim_token
+      and execution.completed_at is null
+      and execution.failed_at is null
+      and not execution.cancelled
+    for update;
+
+    if not found then
+        raise exception 'execution % is not claimed by orchestrator %', p_execution_id, p_orchestrator_id;
+    end if;
+
+    select step.result
+    into v_result
+    from pgconductor._private_steps step
+    where step.execution_id = p_execution_id
+      and step.key = p_step_key;
+
+    if found then
+        return v_result;
+    end if;
+
+    select jsonb_build_object('key', branch.value->>'key') || (step.result - 'status')
     into v_result
     from jsonb_array_elements(p_branches) with ordinality branch
     join pgconductor._private_steps step

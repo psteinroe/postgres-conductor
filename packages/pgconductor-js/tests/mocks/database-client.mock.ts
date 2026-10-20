@@ -34,6 +34,7 @@ export class MockDatabaseClient implements IDatabaseClient {
 	clearWaitingState = vi.fn(async () => {});
 	registerEventWait = vi.fn(async () => null);
 	registerEventRace = vi.fn(async () => null);
+	registerResultWait = vi.fn(async () => null);
 	cancelExecution = vi.fn(async () => true);
 	ackSignals = vi.fn(async () => {});
 	signalExecution = vi.fn(async () => true);

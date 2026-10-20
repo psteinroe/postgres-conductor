@@ -5,7 +5,9 @@ import type {
 	Payload,
 	DeadLetterMetadata,
 	EventWaitResult,
+	ExecutionOutcome,
 	JsonValue,
+	ResultWaitResult,
 } from "./database-client.js";
 import { nextCronOccurrence } from "./lib/cron.js";
 import type { Clock } from "./lib/clock.js";
@@ -94,12 +96,17 @@ export type EventSubscription<TEvent> = {
 	wait(options?: { timeout?: DurationInput }): Promise<TEvent>;
 };
 
-/** The branch of a `ctx.waitForAny()` that won, with its event, or the timeout. */
+/** A `ctx.waitForAny()` branch that waits for an execution to settle. */
+export type ExecutionBranch = { execution: string };
+
+/** The branch of a `ctx.waitForAny()` that won, with its event or outcome, or the timeout. */
 export type WaitForAnyResult<TBranches> =
 	| {
 			[K in keyof TBranches & string]: TBranches[K] extends EventSubscription<infer TEvent>
 				? { key: K; event: TEvent }
-				: never;
+				: TBranches[K] extends ExecutionBranch
+					? { key: K; outcome: ExecutionOutcome }
+					: never;
 	  }[keyof TBranches & string]
 	| { key: "timeout" };
 
@@ -165,6 +172,16 @@ export class TaskContext<
 
 	get logger(): Logger {
 		return this.opts.logger;
+	}
+
+	/** ID of this execution. */
+	get executionId(): string {
+		return this.opts.execution.id;
+	}
+
+	/** Queue of this execution. */
+	get queue(): string {
+		return this.opts.execution.queue;
 	}
 
 	get signal(): AbortSignal {
@@ -322,12 +339,14 @@ export class TaskContext<
 	}
 
 	/**
-	 * Wait for the first event among several `ctx.subscribe()` subscriptions, or
-	 * the timeout. An event a subscription kept before this call wins at once;
-	 * when several did, the one dispatched first wins. All subscriptions are
-	 * removed when the wait settles, and the winner is memoized by the step key.
+	 * Wait for the first of several branches, or the timeout: a `ctx.subscribe()`
+	 * subscription receives an event, or an `{ execution: id }` branch settles. A
+	 * branch that already holds its event or outcome wins at once; when several do,
+	 * the one stored first wins. An execution branch is stored under
+	 * `<stepKey>:<branch>`. All subscriptions are removed when the wait settles, and
+	 * the winner is memoized by the step key.
 	 */
-	async waitForAny<TBranches extends Record<string, EventSubscription<unknown>>>(
+	async waitForAny<TBranches extends Record<string, EventSubscription<unknown> | ExecutionBranch>>(
 		stepKey: string,
 		branches: TBranches & { timeout?: never },
 		options: { timeout?: DurationInput } = {},
@@ -338,10 +357,11 @@ export class TaskContext<
 				queue: this.opts.execution.queue,
 				taskKey: this.opts.execution.task_key,
 				stepKey,
-				branches: Object.entries(branches).map(([key, subscription]) => ({
-					key,
-					stepKey: subscription.key,
-				})),
+				branches: Object.entries(branches).map(([key, branch]) =>
+					"execution" in branch
+						? { key, stepKey: `${stepKey}:${key}`, executionId: branch.execution }
+						: { key, stepKey: branch.key },
+				),
 				timeoutMs: options.timeout === undefined ? null : parseDuration(options.timeout),
 				orchestratorId: this.opts.execution.locked_by,
 				claimToken: this.opts.execution.claim_token,
@@ -350,6 +370,46 @@ export class TaskContext<
 		);
 		if (!result) return this.abortAndHangup({ reason: "suspended" });
 		return result as WaitForAnyResult<TBranches>;
+	}
+
+	/**
+	 * Wait until an execution settles and resolve with its outcome. A failed or
+	 * cancelled execution does not fail this one, and a timeout resolves to
+	 * `{ status: "timeout" }` without cancelling it. The outcome is memoized by the
+	 * step key. Throws if the execution does not exist, including one removed by
+	 * retention before the wait started.
+	 */
+	async waitForResult<TResult = unknown>(
+		stepKey: string,
+		executionId: string,
+		options: { timeout?: DurationInput } = {},
+	): Promise<ExecutionOutcome<TResult> | { status: "timeout" }> {
+		const cached = (await this.opts.db.loadStep(
+			{
+				executionId: this.opts.execution.id,
+				queue: this.opts.execution.queue,
+				key: stepKey,
+			},
+			{ signal: this.signal },
+		)) as ResultWaitResult | undefined;
+		const result =
+			cached ||
+			(await this.opts.db.registerResultWait(
+				{
+					executionId: this.opts.execution.id,
+					queue: this.opts.execution.queue,
+					taskKey: this.opts.execution.task_key,
+					stepKey,
+					awaitedExecutionId: executionId,
+					timeoutMs: options.timeout === undefined ? null : parseDuration(options.timeout),
+					orchestratorId: this.opts.execution.locked_by,
+					claimToken: this.opts.execution.claim_token,
+				},
+				{ signal: this.signal },
+			));
+		if (!result) return this.abortAndHangup({ reason: "suspended" });
+		if (result.status === "timed_out") return { status: "timeout" };
+		return result.outcome as ExecutionOutcome<TResult>;
 	}
 
 	async invokeAndWait<

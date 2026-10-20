@@ -11,6 +11,7 @@ import type {
 	JsonValue,
 	EventRaceBranch,
 	EventRaceResult,
+	ResultWaitResult,
 	Payload,
 	ClaimResult,
 	TaskSpec,
@@ -167,6 +168,17 @@ export type RegisterEventWaitArgs = {
 	timeoutMs: number | null;
 	orchestratorId: string;
 	suspend: boolean;
+	claimToken: string;
+};
+
+export type RegisterResultWaitArgs = {
+	executionId: string;
+	queue: string;
+	taskKey: string;
+	stepKey: string;
+	awaitedExecutionId: string;
+	timeoutMs: number | null;
+	orchestratorId: string;
 	claimToken: string;
 };
 
@@ -611,7 +623,7 @@ export class QueryBuilder {
 		ctes.push(this.sql`valid_results as materialized (
 			select r.*,
 				e.cancelled as execution_cancelled, e.last_error as execution_last_error,
-				e.subscription_id, e.signal_count as execution_signal_count
+				e.subscription_id, e.signal_count as execution_signal_count, e.result_waiters
 			from result_data r
 			join pgconductor._private_executions e
 				on e.id = r.execution_id
@@ -764,6 +776,7 @@ export class QueryBuilder {
 				e.subscription_id,
 				e.trace_context,
 				e.metadata,
+				r.result_waiters,
 				tc.remove_on_fail_days = 0 as should_remove,
 				tc.dead_letter_queue, tc.dead_letter_task_key
 			from failed_results r
@@ -796,6 +809,7 @@ export class QueryBuilder {
 				parent.payload as parent_payload, parent.attempts as parent_attempts,
 				parent.trace_context as parent_trace_context,
 				parent.metadata as parent_metadata,
+				parent.result_waiters as parent_result_waiters,
 				pt.remove_on_fail_days = 0 as parent_should_remove,
 				pt.dead_letter_queue as parent_dead_letter_queue,
 				pt.dead_letter_task_key as parent_dead_letter_task_key
@@ -951,6 +965,72 @@ export class QueryBuilder {
 				and subscription.execution_id = terminal.id
 				and subscription.queue = terminal.queue
 			returning subscription.id
+		)`);
+		// Waits for a settled execution are read from its locked row, which also holds waits
+		// registered after this statement's snapshot. A waiter suspended at a wait is woken.
+		ctes.push(this.sql`outcome_waits as materialized (
+			select w.execution_id, w.queue, w.step_key, s.outcome
+			from (
+				select r.result_waiters,
+					case when oc.id is null
+						then jsonb_build_object('status', 'completed', 'result', r.result)
+						else jsonb_build_object('status', 'failed',
+							'error', 'Parent timed out before child completed')
+					end as outcome
+				from completed_results r
+				left join orphaned_children oc on oc.id = r.execution_id
+				union all
+				select p.result_waiters,
+					case when p.execution_cancelled
+						then jsonb_build_object('status', 'cancelled', 'reason', p.child_error)
+						else jsonb_build_object('status', 'failed', 'error', p.child_error)
+					end
+				from permanently_failed_children p
+				union all
+				select p.parent_result_waiters,
+					jsonb_build_object('status', 'failed', 'error', 'Child execution failed: ' || p.child_error)
+				from failed_parent_targets p
+			) s
+			cross join lateral jsonb_to_recordset(s.result_waiters)
+				as w(execution_id uuid, queue text, step_key text)
+		)`);
+		// A waiter removed by this statement gets no step, which would reference a deleted row
+		ctes.push(this.sql`locked_outcome_waiters as materialized (
+			select e.id, e.queue,
+				e.locked_by is null
+					and e.waiting_on_execution_id is null
+					and e.waiting_step_key is not null as suspended
+			from pgconductor._private_executions e
+			where (e.id, e.queue) in (select w.execution_id, w.queue from outcome_waits w)
+				and e.completed_at is null
+				and e.failed_at is null
+				and not e.cancelled
+				and e.id not in (select id from deleted_completed union all select id from deleted_failed)
+			order by e.id
+			for update of e
+		)`);
+		ctes.push(this.sql`outcome_steps as (
+			insert into pgconductor._private_steps (execution_id, queue, key, result)
+			select w.execution_id, w.queue, w.step_key,
+				jsonb_build_object('status', 'resolved', 'outcome', w.outcome)
+			from outcome_waits w
+			join locked_outcome_waiters l on l.id = w.execution_id and l.queue = w.queue
+			on conflict (execution_id, key) do nothing
+			returning execution_id, queue, key
+		)`);
+		ctes.push(this.sql`deleted_outcome_waits as (
+			delete from pgconductor._private_custom_event_subscriptions subscription
+			using outcome_steps step
+			where subscription.kind = 'execution_wait'
+				and subscription.execution_id = step.execution_id
+				and subscription.step_key = step.key
+		)`);
+		ctes.push(this.sql`woken_outcome_waiters as (
+			update pgconductor._private_executions e
+			set run_at = nt.ts, waiting_step_key = null
+			from now_ts nt, locked_outcome_waiters l
+			where e.id = l.id and e.queue = l.queue and l.suspended
+				and exists (select 1 from outcome_steps step where step.execution_id = l.id)
 		)`);
 		ctes.push(this.sql`retried as (
 			update pgconductor._private_executions e
@@ -1398,6 +1478,31 @@ export class QueryBuilder {
 				${this.sql.json(terms)}::jsonb,
 				${timeoutMs}::bigint,
 				${suspend}::boolean
+			) as result
+		`;
+	}
+
+	buildRegisterResultWait({
+		executionId,
+		queue,
+		taskKey,
+		stepKey,
+		awaitedExecutionId,
+		timeoutMs,
+		orchestratorId,
+		claimToken,
+	}: RegisterResultWaitArgs): PendingQuery<{ result: ResultWaitResult | null }[]> {
+		return this.sql<{ result: ResultWaitResult | null }[]>`
+			select pgconductor._private_register_result_wait(
+				${executionId}::uuid,
+				${queue}::text,
+				${taskKey}::text,
+				${orchestratorId}::uuid,
+				${claimToken}::uuid,
+				${stepKey}::text,
+				${awaitedExecutionId}::uuid,
+				${timeoutMs}::bigint,
+				true
 			) as result
 		`;
 	}

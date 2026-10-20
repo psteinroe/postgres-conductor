@@ -292,6 +292,8 @@ const result = await conductor.waitForResult(
 
 Resolves with the return value of a completed execution. Rejects with the error message if the execution failed or was cancelled, and rejects if the execution does not exist. The result is only available while the execution exists: with `removeOnComplete: true` the execution is removed when it completes, so `waitForResult` rejects with a not found error.
 
+Inside a task, use [`ctx.waitForResult()`](task-context.md#ctxwaitforresult) instead: it suspends the task rather than polling and returns failures and cancellations as values.
+
 ## conductor.close()
 
 Close the connection pool created from `connectionString`:
