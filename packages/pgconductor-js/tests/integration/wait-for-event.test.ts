@@ -5,7 +5,7 @@ import { Conductor } from "../../src/conductor";
 import { Orchestrator } from "../../src/orchestrator";
 import { defineEvent } from "../../src/event-definition";
 import { defineTask } from "../../src/task-definition";
-import { EventSchemas, TaskSchemas } from "../../src/schemas";
+import { TaskSchemas } from "../../src/schemas";
 import { WaitForEventTimeoutError } from "../../src/index";
 import { TestDatabasePool, type TestDatabase } from "../fixtures/test-database";
 
@@ -46,7 +46,7 @@ async function setup(
 	const conductor = Conductor.create({
 		sql: db.sql,
 		tasks: TaskSchemas.fromSchema([taskDefinition]),
-		events: EventSchemas.fromSchema([event, reply]),
+		events: [event, reply],
 		context: {},
 	});
 	const task = conductor.createTask(

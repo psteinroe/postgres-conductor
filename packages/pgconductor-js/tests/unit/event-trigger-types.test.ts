@@ -3,10 +3,61 @@ import { expectTypeOf } from "expect-type";
 import { Conductor } from "../../src/conductor";
 import { defineTask } from "../../src/task-definition";
 import { defineEvent } from "../../src/event-definition";
-import { TaskSchemas, EventSchemas } from "../../src/schemas";
+import { EventSchemas, TaskSchemas } from "../../src/schemas";
 import { z } from "zod";
 
 describe("event triggers", () => {
+	test("plain event arrays and the deprecated EventSchemas give the same catalog", () => {
+		const userCreated = defineEvent({
+			name: "user.created",
+			payload: z.object({ userId: z.string() }),
+		});
+		const userDeleted = defineEvent({
+			name: "user.deleted",
+			payload: z.object({ userId: z.string(), reason: z.string() }),
+		});
+
+		const plain = Conductor.create({
+			sql: {} as any,
+			events: [userCreated, userDeleted],
+			context: {},
+		});
+		const legacy = Conductor.create({
+			sql: {} as any,
+			events: EventSchemas.fromSchema([userCreated]).fromSchema([userDeleted]),
+			context: {},
+		});
+
+		expect(plain.events).toEqual([userCreated, userDeleted]);
+		expect(legacy.events).toEqual([userCreated, userDeleted]);
+		expectTypeOf(plain.emit<"user.deleted">)
+			.parameter(1)
+			.toEqualTypeOf<{ userId: string; reason: string }>();
+		expectTypeOf(legacy.emit<"user.deleted">)
+			.parameter(1)
+			.toEqualTypeOf<{ userId: string; reason: string }>();
+		if (false) {
+			// @ts-expect-error - not in the catalog
+			plain.emit("user.updated", { userId: "1" });
+		}
+	});
+
+	test("event definitions created inline keep their names", () => {
+		const conductor = Conductor.create({
+			sql: {} as any,
+			events: [defineEvent({ name: "inline.created", payload: z.object({ id: z.string() }) })],
+			context: {},
+		});
+
+		expectTypeOf(conductor.emit<"inline.created">)
+			.parameter(1)
+			.toEqualTypeOf<{ id: string }>();
+		if (false) {
+			// @ts-expect-error - not in the catalog
+			conductor.emit("inline.deleted", { id: "1" });
+		}
+	});
+
 	test("task with custom event trigger receives typed event", () => {
 		const userCreated = defineEvent({
 			name: "user.created",
@@ -21,7 +72,7 @@ describe("event triggers", () => {
 		const conductor = Conductor.create({
 			sql: {} as any,
 			tasks: TaskSchemas.fromSchema([taskDef]),
-			events: EventSchemas.fromSchema([userCreated]),
+			events: [userCreated],
 			context: {},
 		});
 
@@ -49,7 +100,7 @@ describe("event triggers", () => {
 		const conductor = Conductor.create({
 			sql: {} as any,
 			tasks: TaskSchemas.fromSchema([taskDef]),
-			events: EventSchemas.fromSchema([userCreated]),
+			events: [userCreated],
 			context: {},
 		});
 
@@ -87,7 +138,7 @@ describe("event triggers", () => {
 		const conductor = Conductor.create({
 			sql: {} as any,
 			tasks: TaskSchemas.fromSchema([taskDef]),
-			events: EventSchemas.fromSchema([userCreated]),
+			events: [userCreated],
 			context: {},
 		});
 
@@ -128,7 +179,7 @@ describe("event triggers", () => {
 		const conductor = Conductor.create({
 			sql: {} as any,
 			tasks: TaskSchemas.fromSchema([taskDef]),
-			events: EventSchemas.fromSchema([userCreated]),
+			events: [userCreated],
 			context: {},
 		});
 
@@ -168,7 +219,7 @@ describe("event triggers", () => {
 		).toThrow('Event "user.typo" is not defined in the conductor event catalog');
 	});
 
-	test("runtime event schema collections can be chained", () => {
+	test("runtime event definitions can be combined", () => {
 		const runtimeEvent = defineEvent({
 			name: "user.created",
 			payload: z.object({ userId: z.string() }),
@@ -182,7 +233,7 @@ describe("event triggers", () => {
 		const conductor = Conductor.create({
 			sql: {} as any,
 			tasks: TaskSchemas.fromSchema([taskDef]),
-			events: EventSchemas.fromSchema([runtimeEvent]).fromSchema([externalEvent]),
+			events: [runtimeEvent, externalEvent],
 			context: {},
 		});
 
@@ -210,7 +261,7 @@ describe("event triggers", () => {
 		const conductor = Conductor.create({
 			sql: {} as any,
 			tasks: TaskSchemas.fromSchema([taskDef]),
-			events: EventSchemas.fromSchema([changed]),
+			events: [changed],
 			context: {},
 		});
 
@@ -275,13 +326,14 @@ describe("event triggers", () => {
 		const conductor = Conductor.create({
 			sql: {} as any,
 			tasks: TaskSchemas.fromSchema([taskDef]),
-			events: EventSchemas.fromSchema([orderPlaced]),
+			events: [orderPlaced],
 			context: {},
 		});
 
 		expect(() =>
 			conductor.createTask(
 				{ name: "on-large-order" },
+				// @ts-expect-error Custom event triggers have no when clause.
 				{ event: "order.placed", when: "new.payload->>'total'::numeric > 1000" },
 				async (event) => {
 					expectTypeOf(event.payload).toEqualTypeOf<{
@@ -307,6 +359,33 @@ describe("event triggers", () => {
 			{ name: "database-change" },
 			// @ts-expect-error Applications own database triggers and emit custom events from them.
 			{ schema: "public", table: "contact", operation: "insert", columns: "id" },
+			async () => {},
+		);
+	});
+
+	test("task options are rejected in triggers", () => {
+		const taskDef = defineTask({ name: "cleanup", payload: z.object({}) });
+		const conductor = Conductor.create({
+			sql: {} as any,
+			tasks: TaskSchemas.fromSchema([taskDef]),
+			context: {},
+		});
+
+		conductor.createTask(
+			{ name: "cleanup" },
+			// @ts-expect-error Retention belongs in the task definition.
+			{ invocable: true, removeOnComplete: true },
+			async () => {},
+		);
+		conductor.createTask(
+			{ name: "cleanup" },
+			// @ts-expect-error Retention belongs in the task definition.
+			[{ invocable: true }, { cron: "0 * * * *", name: "hourly", maxAttempts: 1 }],
+			async () => {},
+		);
+		conductor.createTask(
+			{ name: "cleanup", removeOnComplete: true },
+			[{ invocable: true }, { cron: "0 * * * *", name: "hourly", group: "hourly" }],
 			async () => {},
 		);
 	});

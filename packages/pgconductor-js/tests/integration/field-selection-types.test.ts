@@ -4,7 +4,7 @@ import { Conductor } from "../../src/conductor";
 import { Orchestrator } from "../../src/orchestrator";
 import { defineTask } from "../../src/task-definition";
 import { defineEvent } from "../../src/event-definition";
-import { TaskSchemas, EventSchemas } from "../../src/schemas";
+import { TaskSchemas } from "../../src/schemas";
 import { TestDatabasePool } from "../fixtures/test-database";
 import type { TestDatabase } from "../fixtures/test-database";
 import { Deferred } from "../../src/lib/deferred";
@@ -78,7 +78,7 @@ describe("Field Selection - Type Safety & Runtime", () => {
 		const conductor = Conductor.create({
 			sql: db.sql,
 			tasks: TaskSchemas.fromSchema([taskDef]),
-			events: EventSchemas.fromSchema([dataEvent]),
+			events: [dataEvent],
 			context: {},
 		});
 
@@ -154,7 +154,7 @@ describe("Field Selection - Type Safety & Runtime", () => {
 		const conductor = Conductor.create({
 			sql: db.sql,
 			tasks: TaskSchemas.fromSchema([taskDef]),
-			events: EventSchemas.fromSchema([userEvent]),
+			events: [userEvent],
 			context: {},
 		});
 
@@ -221,7 +221,7 @@ describe("Field Selection - Type Safety & Runtime", () => {
 		const conductor = Conductor.create({
 			sql: db.sql,
 			tasks: TaskSchemas.fromSchema([taskDef]),
-			events: EventSchemas.fromSchema([fullEvent]),
+			events: [fullEvent],
 			context: {},
 		});
 

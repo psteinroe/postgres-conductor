@@ -3,7 +3,7 @@ import { z } from "zod";
 import { Conductor } from "../../src/conductor";
 import { Orchestrator } from "../../src/orchestrator";
 import { defineEvent } from "../../src/event-definition";
-import { EventSchemas, TaskSchemas } from "../../src/schemas";
+import { TaskSchemas } from "../../src/schemas";
 import { defineTask } from "../../src/task-definition";
 import { Deferred } from "../../src/lib/deferred";
 import { TestDatabasePool, type TestDatabase } from "../fixtures/test-database";
@@ -49,7 +49,7 @@ describe("ctx.invoke with cancelWithParent (Postgres integration)", () => {
 				defineTask({ name: "parent", payload: z.object({ end: z.string() }) }),
 				defineTask({ name: "child", payload: z.object({ label: z.string(), mode }) }),
 			]),
-			events: EventSchemas.fromSchema([event]),
+			events: [event],
 			context: {},
 		});
 		const end = new Deferred<void>();

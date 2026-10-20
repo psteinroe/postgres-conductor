@@ -7,7 +7,7 @@ import { defineEvent } from "../../src/event-definition";
 import { compileEventFilter, type EventFilter } from "../../src/event-trigger-validation";
 import { DefaultLogger } from "../../src/lib/logger";
 import { Orchestrator } from "../../src/orchestrator";
-import { EventSchemas, TaskSchemas } from "../../src/schemas";
+import { TaskSchemas } from "../../src/schemas";
 import { defineTask } from "../../src/task-definition";
 import { TestDatabasePool, type TestDatabase } from "../fixtures/test-database";
 import { loseFirstResponse, waitForCondition } from "../test-utils";
@@ -390,7 +390,7 @@ describe("event pipeline", () => {
 				defineTask({ name: "pipeline.redelivered-listener", payload: z.object({}) }),
 				defineTask({ name: "pipeline.redelivered-waiter" }),
 			]),
-			events: EventSchemas.fromSchema([event]),
+			events: [event],
 			context: {},
 		});
 		const received: string[] = [];
@@ -454,7 +454,7 @@ describe("event pipeline", () => {
 		const conductor = Conductor.create({
 			sql: db.sql,
 			tasks: TaskSchemas.fromSchema([defineTask({ name: "pipeline.retried-emitter" })]),
-			events: EventSchemas.fromSchema([event]),
+			events: [event],
 			context: {},
 		});
 		const eventIds: string[] = [];
@@ -495,7 +495,7 @@ describe("event pipeline", () => {
 		const event = defineEvent({ name: "pipeline.remembered", payload: z.object({}) });
 		const conductor = Conductor.create({
 			sql: db.sql,
-			events: EventSchemas.fromSchema([event]),
+			events: [event],
 			context: {},
 		});
 		const orchestrator = Orchestrator.create({
@@ -549,7 +549,7 @@ describe("event pipeline", () => {
 		const conductor = Conductor.create({
 			sql: db.sql,
 			tasks: TaskSchemas.fromSchema([definition]),
-			events: EventSchemas.fromSchema([event]),
+			events: [event],
 			context: {},
 		});
 		let received = 0;
@@ -617,7 +617,7 @@ describe("event pipeline", () => {
 		});
 		const conductor = Conductor.create({
 			sql: db.sql,
-			events: EventSchemas.fromSchema([event]),
+			events: [event],
 			context: {},
 		});
 
@@ -652,7 +652,7 @@ describe("event pipeline", () => {
 		const conductor = Conductor.create({
 			sql: db.sql,
 			tasks: TaskSchemas.fromSchema([defineTask({ name: "pipeline.context-emitter" })]),
-			events: EventSchemas.fromSchema([event]),
+			events: [event],
 			context: {},
 		});
 		let error: unknown;
@@ -741,7 +741,7 @@ describe("event pipeline", () => {
 		const conductor = Conductor.create({
 			sql: db.sql,
 			tasks: TaskSchemas.fromSchema([filteredDefinition, nullDefinition, allDefinition]),
-			events: EventSchemas.fromSchema([event]),
+			events: [event],
 			context: {},
 		});
 		const received: { task: string; payload: Record<string, unknown> }[] = [];
@@ -1461,7 +1461,7 @@ describe("event pipeline", () => {
 		const conductor = Conductor.create({
 			sql: db.sql,
 			tasks: TaskSchemas.fromSchema([sourceDefinition, destinationDefinition]),
-			events: EventSchemas.fromSchema([event]),
+			events: [event],
 			context: {},
 		});
 		const received: string[] = [];

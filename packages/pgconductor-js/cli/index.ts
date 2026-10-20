@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 
 import postgres from "postgres";
-import * as assert from "./lib/assert.js";
 
 interface Column {
 	table_schema: string;
@@ -68,19 +67,19 @@ async function generateTypes(dbUrl: string, schemas: string[]): Promise<string> 
     `;
 
 		// Group columns by schema and table
-		const schemaMap: Record<string, Record<string, Column[]>> = {};
+		const schemaMap = new Map<string, Map<string, Column[]>>();
 
 		for (const col of columns) {
-			if (!schemaMap[col.table_schema]) {
-				schemaMap[col.table_schema] = {};
+			let schemaEntry = schemaMap.get(col.table_schema);
+			if (!schemaEntry) {
+				schemaEntry = new Map();
+				schemaMap.set(col.table_schema, schemaEntry);
 			}
-			const schemaEntry = schemaMap[col.table_schema];
-			assert.ok(schemaEntry, `Schema entry for ${col.table_schema} should exist`);
-			if (!schemaEntry[col.table_name]) {
-				schemaEntry[col.table_name] = [];
+			let tableEntry = schemaEntry.get(col.table_name);
+			if (!tableEntry) {
+				tableEntry = [];
+				schemaEntry.set(col.table_name, tableEntry);
 			}
-			const tableEntry = schemaEntry[col.table_name];
-			assert.ok(tableEntry, `Table entry for ${col.table_name} should exist`);
 			tableEntry.push(col);
 		}
 
@@ -97,12 +96,12 @@ export type Database = {
 `;
 
 		for (const schema of schemas) {
-			const tables = schemaMap[schema] || {};
+			const tables = schemaMap.get(schema) || new Map<string, Column[]>();
 			output += `  ${JSON.stringify(schema)}: {\n`;
 
-			const tableNames = Object.keys(tables).sort();
+			const tableNames = [...tables.keys()].sort();
 			for (const tableName of tableNames) {
-				const cols = tables[tableName] || [];
+				const cols = tables.get(tableName) || [];
 				output += `    ${JSON.stringify(tableName)}: {\n`;
 
 				for (const col of cols) {

@@ -111,12 +111,10 @@ Custom events require runtime Standard Schema definitions so pgconductor can val
 ### Registering Events
 
 ```typescript
-import { EventSchemas } from "pgconductor-js";
-
 const conductor = Conductor.create({
   connectionString: "postgres://localhost/mydb",
   tasks: TaskSchemas.fromSchema([...]),
-  events: EventSchemas.fromSchema([userCreated, orderPlaced]),
+  events: [userCreated, orderPlaced],
   context: {},
 });
 ```
@@ -244,14 +242,14 @@ export const userCreated = defineEvent({
 `worker/src/index.ts`:
 
 ```typescript
-import { Conductor, Orchestrator, TaskSchemas, EventSchemas } from "pgconductor-js";
+import { Conductor, Orchestrator, TaskSchemas } from "pgconductor-js";
 import { sendEmailTask, processOrderTask } from "@myapp/schemas/tasks";
 import { userCreated } from "@myapp/schemas/events";
 
 const conductor = Conductor.create({
   connectionString: process.env.DATABASE_URL,
   tasks: TaskSchemas.fromSchema([sendEmailTask, processOrderTask]),
-  events: EventSchemas.fromSchema([userCreated]),
+  events: [userCreated],
   context: {},
 });
 
@@ -284,14 +282,14 @@ await orchestrator.start();
 `api/src/index.ts`:
 
 ```typescript
-import { Conductor, TaskSchemas, EventSchemas } from "pgconductor-js";
+import { Conductor, TaskSchemas } from "pgconductor-js";
 import { sendEmailTask, processOrderTask } from "@myapp/schemas/tasks";
 import { userCreated } from "@myapp/schemas/events";
 
 const conductor = Conductor.create({
   connectionString: process.env.DATABASE_URL,
   tasks: TaskSchemas.fromSchema([sendEmailTask, processOrderTask]),
-  events: EventSchemas.fromSchema([userCreated]),
+  events: [userCreated],
   context: {},
 });
 

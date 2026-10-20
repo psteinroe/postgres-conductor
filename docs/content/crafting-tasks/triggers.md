@@ -71,12 +71,10 @@ export const userCreated = defineEvent({
 Register the event in your conductor and create a task to handle it:
 
 ```typescript
-import { EventSchemas } from "pgconductor-js";
-
 const conductor = Conductor.create({
   connectionString: "postgres://localhost/mydb",
   tasks: TaskSchemas.fromSchema([taskDef]),
-  events: EventSchemas.fromSchema([userCreated]),
+  events: [userCreated],
   context: {},
 });
 

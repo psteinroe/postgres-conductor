@@ -98,7 +98,7 @@ export class Orchestrator {
 			queues.add(worker.queueName);
 		}
 
-		if (options.conductor.options.events?.definitions.length) {
+		if (options.conductor.events.length) {
 			const { pollIntervalMs, flushIntervalMs } = {
 				...DEFAULT_WORKER_CONFIG,
 				...options.defaultWorker,

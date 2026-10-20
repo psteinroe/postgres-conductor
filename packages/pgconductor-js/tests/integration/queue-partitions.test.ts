@@ -3,7 +3,7 @@ import { z } from "zod";
 import { Conductor } from "../../src/conductor";
 import { defineEvent } from "../../src/event-definition";
 import { Orchestrator } from "../../src/orchestrator";
-import { EventSchemas, TaskSchemas } from "../../src/schemas";
+import { TaskSchemas } from "../../src/schemas";
 import { defineTask } from "../../src/task-definition";
 import { TestDatabasePool, type TestDatabase } from "../fixtures/test-database";
 import { waitForCondition } from "../test-utils";
@@ -97,7 +97,7 @@ describe("queue partitions", () => {
 				defineTask({ name: "on-thing", queue: "doomed", payload: z.object({}) }),
 				defineTask({ name: "on-thing", payload: z.object({}) }),
 			]),
-			events: EventSchemas.fromSchema([event]),
+			events: [event],
 			context: {},
 		});
 		const handler = vi.fn(async () => {});

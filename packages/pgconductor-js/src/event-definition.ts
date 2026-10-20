@@ -78,13 +78,13 @@ export type DefineEvent<
 	T extends { filterable: readonly (infer K extends string)[] } ? K : never
 >;
 
-export function defineEvent<Name extends string, Payload extends ObjectSchema>(def: {
+export function defineEvent<const Name extends string, Payload extends ObjectSchema>(def: {
 	name: Name;
 	payload?: Payload;
 	filterable?: undefined;
 }): EventDefinition<Name, Payload>;
 export function defineEvent<
-	Name extends string,
+	const Name extends string,
 	Payload extends ObjectSchema,
 	const Filterable extends readonly FilterableKeys<Payload>[],
 >(def: {

@@ -3,7 +3,7 @@ import { z } from "zod";
 import { Conductor } from "../../src/conductor";
 import { defineEvent } from "../../src/event-definition";
 import { Orchestrator } from "../../src/orchestrator";
-import { EventSchemas, TaskSchemas } from "../../src/schemas";
+import { TaskSchemas } from "../../src/schemas";
 import { defineTask } from "../../src/task-definition";
 import { TestDatabasePool, type TestDatabase } from "../fixtures/test-database";
 import { waitForCondition } from "../test-utils";
@@ -44,7 +44,7 @@ describe("event subscription lifecycle", () => {
 		const conductor = Conductor.create({
 			sql: db.sql,
 			tasks: TaskSchemas.fromSchema([definition]),
-			events: EventSchemas.fromSchema([event]),
+			events: [event],
 			context: {},
 		});
 		const handler = vi.fn(async () => {});
@@ -112,7 +112,7 @@ describe("event subscription lifecycle", () => {
 		const conductor = Conductor.create({
 			sql: db.sql,
 			tasks: TaskSchemas.fromSchema([definition]),
-			events: EventSchemas.fromSchema([event]),
+			events: [event],
 			context: {},
 		});
 		const task = conductor.createTask(
@@ -198,7 +198,7 @@ describe("event subscription lifecycle", () => {
 		const firstConductor = Conductor.create({
 			sql: db.sql,
 			tasks: TaskSchemas.fromSchema([firstDefinition]),
-			events: EventSchemas.fromSchema([event]),
+			events: [event],
 			context: {},
 		});
 		const first = Orchestrator.create({
@@ -218,7 +218,7 @@ describe("event subscription lifecycle", () => {
 		const secondConductor = Conductor.create({
 			sql: db.sql,
 			tasks: TaskSchemas.fromSchema([secondDefinition]),
-			events: EventSchemas.fromSchema([event]),
+			events: [event],
 			context: {},
 		});
 		const second = Orchestrator.create({
@@ -264,7 +264,7 @@ describe("event subscription lifecycle", () => {
 		const conductor = Conductor.create({
 			sql: db.sql,
 			tasks: TaskSchemas.fromSchema([firstDefinition, secondDefinition]),
-			events: EventSchemas.fromSchema([event]),
+			events: [event],
 			context: {},
 		});
 		const orchestrator = Orchestrator.create({

@@ -5,7 +5,7 @@ import { Conductor } from "../../src/conductor";
 import { Orchestrator } from "../../src/orchestrator";
 import { defineEvent } from "../../src/event-definition";
 import { defineTask } from "../../src/task-definition";
-import { EventSchemas, TaskSchemas } from "../../src/schemas";
+import { TaskSchemas } from "../../src/schemas";
 import { Deferred } from "../../src/lib/deferred";
 import { TestDatabasePool, type TestDatabase } from "../fixtures/test-database";
 import { waitForCondition } from "../test-utils";
@@ -69,7 +69,7 @@ describe("ctx.waitForResult and execution branches (Postgres integration)", () =
 		const conductor = Conductor.create({
 			sql: database.sql,
 			tasks: TaskSchemas.fromSchema([waiterDefinition, workDefinition, leafDefinition]),
-			events: EventSchemas.fromSchema([click]),
+			events: [click],
 			context: {},
 		});
 		const tasks = [

@@ -52,6 +52,7 @@ import {
 import {
 	TaskSchemas,
 	EventSchemas,
+	type EventCatalog,
 	type InferTasksFromSchema,
 	type InferEventsFromSchema,
 } from "./schemas.js";
@@ -113,7 +114,7 @@ type ResolvedBatchTaskEvent<
 
 export type ConductorOptions<
 	TTaskSchemas extends TaskSchemas<any> | undefined,
-	TEventSchemas extends EventSchemas<any> | undefined,
+	TEventSchemas extends EventCatalog | undefined,
 	ExtraContext extends object,
 > = ConnectionOptions & {
 	tasks?: TTaskSchemas;
@@ -142,7 +143,7 @@ export type ConductorOptions<
 // exposes the main createTask methods and handles types
 export class Conductor<
 	TTaskSchemas extends TaskSchemas<any> | undefined = undefined,
-	TEventSchemas extends EventSchemas<any> | undefined = undefined,
+	TEventSchemas extends EventCatalog | undefined = undefined,
 	ExtraContext extends object = {},
 	// Inferred types from schemas
 	Tasks extends readonly TaskDefinition<string, any, any, string>[] =
@@ -167,18 +168,23 @@ export class Conductor<
 	/** @internal */
 	readonly telemetry: Telemetry;
 
+	/** @internal */
+	readonly events: readonly EventDefinition<string, any, any>[];
+
 	private constructor(
 		public readonly options: ConductorOptions<TTaskSchemas, TEventSchemas, ExtraContext>,
 	) {
 		this.logger = options.logger || new DefaultLogger();
 		this.telemetry = new Telemetry(options.telemetry !== false);
+		this.events =
+			options.events instanceof EventSchemas ? options.events.definitions : options.events || [];
 
 		this.db = new DatabaseClient({ ...options, logger: this.logger });
 	}
 
 	static create<
 		TTaskSchemas extends TaskSchemas<any> | undefined = undefined,
-		TEventSchemas extends EventSchemas<any> | undefined = undefined,
+		const TEventSchemas extends EventCatalog | undefined = undefined,
 		TExtraContext extends object = {},
 		TMetadataSchema extends MetadataSchema | undefined = undefined,
 		TAdded extends readonly object[] = readonly object[],
@@ -290,7 +296,7 @@ export class Conductor<
 				ResolvedReturns<Tasks, TDef>,
 				TaskContext<Tasks, Events, Metadata> & ExtraContext & MiddlewareContext
 			>,
-			this.options.events?.definitions ?? [],
+			this.events,
 			this.options.metadata,
 		);
 	}
@@ -417,7 +423,7 @@ export class Conductor<
 		payload: InferEventPayload<TDef>,
 		opts?: { metadata?: Metadata; dedupe_key?: string },
 	): Promise<string> {
-		payload = await validateEventPayload(this.options.events?.definitions || [], event, payload);
+		payload = await validateEventPayload(this.events, event, payload);
 		const metadata = await this.validateMetadata(opts?.metadata);
 
 		return this.telemetry.send({

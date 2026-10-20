@@ -5,7 +5,7 @@ import { Conductor } from "../../src/conductor";
 import { Orchestrator } from "../../src/orchestrator";
 import { defineEvent } from "../../src/event-definition";
 import { defineTask } from "../../src/task-definition";
-import { EventSchemas, TaskSchemas } from "../../src/schemas";
+import { TaskSchemas } from "../../src/schemas";
 import { Deferred } from "../../src/lib/deferred";
 import type { MiddlewareExecution } from "../../src/middleware";
 import { TestDatabasePool, type TestDatabase } from "../fixtures/test-database";
@@ -62,7 +62,7 @@ describe("Middleware", () => {
 		const conductor = Conductor.create({
 			sql: db.sql,
 			tasks: TaskSchemas.fromSchema([parentDefinition, childDefinition]),
-			events: EventSchemas.fromSchema([approval]),
+			events: [approval],
 			context: {},
 			middleware: [
 				async ({ execution, ctx }, next) => {
@@ -318,7 +318,7 @@ describe("Middleware", () => {
 		const conductor = Conductor.create({
 			sql: db.sql,
 			tasks: TaskSchemas.fromSchema([batchDefinition]),
-			events: EventSchemas.fromSchema([approval]),
+			events: [approval],
 			context: {},
 			middleware: [
 				async ({ execution, ctx }, next) => {

@@ -4,7 +4,7 @@ import { z } from "zod";
 import { Conductor } from "../../src/conductor";
 import { defineEvent } from "../../src/event-definition";
 import { defineTask } from "../../src/task-definition";
-import { EventSchemas, TaskSchemas } from "../../src/schemas";
+import { TaskSchemas } from "../../src/schemas";
 import {
 	WaitForEventTimeoutError,
 	type EventSubscription,
@@ -28,7 +28,7 @@ describe("waitForEvent API", () => {
 		const conductor = Conductor.create({
 			sql: {} as any,
 			tasks: TaskSchemas.fromSchema([task, work]),
-			events: EventSchemas.fromSchema([event, reply]),
+			events: [event, reply],
 			context: {},
 		});
 		conductor.createTask({ name: "api.wait" }, { invocable: true }, async (_event, ctx) => {

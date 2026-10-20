@@ -16,7 +16,7 @@ const conductor = Conductor.create({
   context,              // Custom context object
   middleware?,          // Optional per-attempt middleware
   logger?,              // Optional custom logger
-  events?,              // Optional EventSchemas
+  events?,              // Optional event definitions
   metadata?,            // Optional Standard Schema for execution metadata
   clock?,               // Optional time source, for tests
   telemetry?,           // Set to false to disable OpenTelemetry tracing
@@ -31,7 +31,7 @@ const conductor = Conductor.create({
 - `context`: Object passed to task handlers as `ctx.{property}` (see [Custom Context](../crafting-tasks/custom-context.md))
 - `middleware`: (optional) Functions that run around every attempt of a non-batch task and can add to `ctx` (see [Middleware](../crafting-tasks/custom-context.md#middleware))
 - `logger`: (optional) Custom logger implementation
-- `events`: (optional) `EventSchemas.fromSchema([...])` for typed custom events
+- `events`: (optional) Array of event definitions from `defineEvent()` for typed custom events
 - `metadata`: (optional) Standard Schema that types and validates execution metadata (see [Execution Metadata](../crafting-tasks/execution-metadata.md))
 - `clock`: (optional) Object with `now(): Date` that workers use instead of the system clock for cron schedules and time windows, still corrected to database time. Tests pass `createTestClock(sql)` (see [Testing](../crafting-tasks/testing.md))
 - `telemetry`: (optional) `false` disables OpenTelemetry spans and trace context propagation. Enabled by default, using the globally registered provider

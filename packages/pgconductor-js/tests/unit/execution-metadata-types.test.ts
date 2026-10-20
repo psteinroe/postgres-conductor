@@ -4,7 +4,7 @@ import { z } from "zod";
 import { Conductor } from "../../src/conductor";
 import { defineTask } from "../../src/task-definition";
 import { defineEvent } from "../../src/event-definition";
-import { TaskSchemas, EventSchemas } from "../../src/schemas";
+import { TaskSchemas } from "../../src/schemas";
 import type { Payload } from "../../src/database-client";
 
 // Mock SQL instance for type-only tests
@@ -21,7 +21,7 @@ describe("execution metadata types", () => {
 		const conductor = Conductor.create({
 			sql: mockSql,
 			tasks: TaskSchemas.fromSchema([worker]),
-			events: EventSchemas.fromSchema([ping]),
+			events: [ping],
 			metadata: z.object({ tenant: z.string(), replyTo: z.string().optional() }),
 			context: {},
 		});
