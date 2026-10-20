@@ -826,22 +826,28 @@ export class DatabaseClient {
 
 	/**
 	 * Set fake time for testing purposes.
-	 * All calls to pgconductor._private_current_time() will return this value.
+	 * pgconductor._private_current_time() returns this value and keeps running from it.
 	 *
 	 * IMPORTANT: Test database connection pool must have max: 1 for this to work.
 	 */
 	async setFakeTime({ date }: SetFakeTimeArgs, opts?: QueryMethodOptions): Promise<void> {
-		await this.query((sql) => sql.unsafe(`set pgconductor.fake_now = '${date.toISOString()}'`), {
-			label: "setFakeTime",
-			...opts,
-		});
+		await this.query(
+			(sql) => sql`
+				select set_config(
+					'pgconductor.fake_offset',
+					(${date.toISOString()}::timestamptz - clock_timestamp())::text,
+					false
+				)
+			`,
+			{ label: "setFakeTime", ...opts },
+		);
 	}
 
 	/**
 	 * Clear fake time, returning to real clock_timestamp().
 	 */
 	async clearFakeTime(opts?: QueryMethodOptions): Promise<void> {
-		await this.query((sql) => sql.unsafe(`set pgconductor.fake_now = ''`), {
+		await this.query((sql) => sql.unsafe(`set pgconductor.fake_offset = ''`), {
 			label: "clearFakeTime",
 			...opts,
 		});

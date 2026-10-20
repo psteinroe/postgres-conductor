@@ -94,7 +94,9 @@ describe("Window Execution", () => {
 		expect(execution.completed_at).toBeNull();
 
 		// run_at should be scheduled for next day at 09:00
-		expect(execution.run_at).toEqual(new Date("2024-01-02T09:00:00Z"));
+		const opens = new Date("2024-01-02T09:00:00Z").getTime();
+		expect(execution.run_at.getTime()).toBeGreaterThanOrEqual(opens);
+		expect(execution.run_at.getTime()).toBeLessThan(opens + 1000);
 
 		await orchestrator.stop();
 	}, 30000);

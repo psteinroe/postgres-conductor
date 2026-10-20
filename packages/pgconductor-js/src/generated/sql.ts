@@ -15,19 +15,19 @@ create table if not exists pgconductor.schema_migrations (
 
 create extension if not exists btree_gist;
 
--- Returns either the actual current timestamp or a fake one for tests.
--- Uses session variable (current_setting) for test time control.
+-- Returns the current timestamp, shifted by the pgconductor.fake_offset session setting
+-- in tests. Fake time keeps running, so rows written one after another get later times.
 create function pgconductor._private_current_time ()
   returns timestamptz
   language plpgsql
   volatile
 as $$
 declare
-  v_fake text;
+  v_offset text;
 begin
-  v_fake := current_setting('pgconductor.fake_now', true);
-  if v_fake is not null and length(trim(v_fake)) > 0 then
-    return v_fake::timestamptz;
+  v_offset := current_setting('pgconductor.fake_offset', true);
+  if v_offset is not null and length(trim(v_offset)) > 0 then
+    return clock_timestamp() + v_offset::interval;
   end if;
 
   return clock_timestamp();

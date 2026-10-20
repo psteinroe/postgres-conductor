@@ -26,7 +26,7 @@ The faked time, or the system time when time is not faked.
 
 ## clock.set(date)
 
-Fake the time. It stands still until it is moved again.
+Fake the time. It keeps running from `date`, like real time.
 
 ```typescript
 await clock.set(new Date("2024-01-01T12:00:00Z"));

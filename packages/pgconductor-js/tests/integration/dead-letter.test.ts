@@ -134,9 +134,10 @@ describe("dead-letter queues (Postgres integration)", () => {
 				sourceTask: "charge",
 				attempts: 2,
 				error: "card declined",
-				failedAt,
+				failedAt: expect.any(Date),
 			},
 		]);
+		expect(seen[0]?.failedAt.getTime()).toBeGreaterThanOrEqual(failedAt.getTime());
 	}, 60_000);
 
 	test("ignores duplicate settlements and wrong worker identity", async () => {
