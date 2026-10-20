@@ -30,6 +30,8 @@ type InternalOrchestratorOptions = {
 
 const HEARTBEAT_INTERVAL_MS = 30000; // 30 seconds
 const STALE_ORCHESTRATOR_MAX_AGE_MS = HEARTBEAT_INTERVAL_MS * 10;
+// How long shutdown retries removing the orchestrator; stale recovery releases what it leaves behind
+const CLEANUP_TIMEOUT_MS = 10_000;
 
 /**
  * Orchestrator manages the worker pool and handles:
@@ -230,6 +232,7 @@ export class Orchestrator {
 				this.heartbeatController = new AbortController();
 				this.heartbeats = this.runHeartbeats(this.heartbeatController.signal);
 
+				const shutdown = this.waitForShutdownSignal();
 				const workerLifecycles: Promise<void>[] = [];
 				for (const worker of this.workers) {
 					const lifecycle = runOnce
@@ -238,22 +241,21 @@ export class Orchestrator {
 					// Mark each lifecycle as observed before awaiting registration.
 					lifecycle.catch(noop);
 					workerLifecycles.push(lifecycle);
-					await worker.started;
+					// Registration retries until the worker stops, which happens in the catch below
+					await Promise.race([worker.started, shutdown]);
+					if (this.signal.aborted) throw new Error("Orchestrator was stopped during startup");
 				}
 				const allWorkers = Promise.all(workerLifecycles);
 
 				// NOW signal that orchestrator has started
 				this.startDeferred.resolve();
 
-				if (runOnce) {
-					await allWorkers;
-				} else {
-					// Wait for shutdown signal or all workers to complete
-					await Promise.race([allWorkers, this.waitForShutdownSignal()]);
-				}
+				// Wait for shutdown signal or all workers to complete
+				await Promise.race([allWorkers, shutdown]);
 
-				// Stop gracefully
+				// Stop gracefully, and fail if a worker could not settle its results
 				await this.stopWorkers();
+				await allWorkers;
 			} catch (err) {
 				error = coerceError(err);
 				this.logger.error(err);
@@ -445,25 +447,28 @@ export class Orchestrator {
 	 * - Remove orchestrator from database and release locked executions
 	 */
 	private async cleanup(): Promise<void> {
-		// Stop heartbeat and wait for one in flight
-		this.heartbeatController?.abort();
-		await this.heartbeats;
-		this.heartbeats = null;
-		this.heartbeatController = null;
+		try {
+			// Stop heartbeat and wait for one in flight
+			this.heartbeatController?.abort();
+			await this.heartbeats;
 
-		// Remove ourselves from orchestrators table and release locked executions
-		const cleanupSignal = new AbortController().signal;
-		await this.db.orchestratorShutdown(
-			{
-				orchestratorId: this.orchestratorId,
-			},
-			{ signal: cleanupSignal },
-		);
-
-		this._stopDeferred = null;
-		this._startDeferred = null;
-		this._abortController = null;
-		this.releaseSignalHandlers?.();
+			// Remove ourselves from orchestrators table and release locked executions, retrying until the
+			// deadline, which also ends a statement still waiting for a response
+			const deadline = AbortSignal.timeout(CLEANUP_TIMEOUT_MS);
+			await Promise.race([
+				this.db.orchestratorShutdown({ orchestratorId: this.orchestratorId }, { signal: deadline }),
+				new Promise<never>((_, reject) => {
+					deadline.addEventListener("abort", () => reject(deadline.reason));
+				}),
+			]);
+		} finally {
+			this.heartbeats = null;
+			this.heartbeatController = null;
+			this._stopDeferred = null;
+			this._startDeferred = null;
+			this._abortController = null;
+			this.releaseSignalHandlers?.();
+		}
 	}
 
 	get info() {

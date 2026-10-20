@@ -14,12 +14,7 @@ import { BatchingAsyncQueue } from "./lib/batching-async-queue.js";
 import { nextCronOccurrence } from "./lib/cron.js";
 import { Clock } from "./lib/clock.js";
 import { WindowChecker } from "./lib/window-checker.js";
-import {
-	isTaskAbortReason,
-	TaskContext,
-	BatchTaskContext,
-	type TaskAbortReasons,
-} from "./task-context.js";
+import { TaskContext, BatchTaskContext, type TaskAbortReasons } from "./task-context.js";
 import * as assert from "./lib/assert.js";
 import { createMaintenanceTask } from "./maintenance-task.js";
 import { makeChildLogger, type Logger } from "./lib/logger.js";
@@ -52,6 +47,9 @@ export const DEFAULT_WORKER_CONFIG: WorkerConfig = {
 	pollIntervalMs: 1000,
 	flushIntervalMs: 2000,
 };
+
+// How long the final flush retries settling results the worker still holds
+const FINAL_FLUSH_TIMEOUT_MS = 10_000;
 
 function taskEventFor(execution: Execution): { name: string; payload?: unknown } {
 	if (execution.cron_expression) {
@@ -104,9 +102,10 @@ export class Worker<
 	private _startDeferred: Deferred<void> | null = null;
 	private _stopDeferred: Deferred<void> | null = null;
 	private _abortController: AbortController | null = null;
+	// Executions polled for cancellation; members of a batch share its controller and have no inbox
 	private _running = new Map<
 		string,
-		{ controller: TypedAbortController<TaskAbortReasons>; claimToken: string; inbox: SignalInbox }
+		{ controller: TypedAbortController<TaskAbortReasons>; claimToken: string; inbox?: SignalInbox }
 	>();
 	// Claim token of each execution claimed and not yet settled, including results buffered for flush
 	private readonly held = new Map<string, string>();
@@ -205,8 +204,12 @@ export class Worker<
 
 		this.orchestratorId = orchestratorId;
 		this._startDeferred = new Deferred<void>();
-		this._stopDeferred = new Deferred<void>();
-		this._abortController = new AbortController();
+		const stopDeferred = new Deferred<void>();
+		// A failed final flush rejects it; callers that never await it must not see an unhandled rejection
+		stopDeferred.promise.catch(noop);
+		this._stopDeferred = stopDeferred;
+		const abortController = new AbortController();
+		this._abortController = abortController;
 
 		try {
 			// Sample before calculating cron schedules
@@ -215,6 +218,8 @@ export class Worker<
 		} catch (error) {
 			this._startDeferred.promise.catch(noop);
 			this._startDeferred.reject(error);
+			// stop() waits for this while registration retries
+			stopDeferred.resolve();
 			this.resetLifecycle();
 			throw error;
 		}
@@ -232,16 +237,22 @@ export class Worker<
 		}
 
 		const queue = new BatchingAsyncQueue<Execution>(this.fetchBatchSize * 2, batchConfigs);
-		void this.fetchExecutions(queue, { runOnce });
+		const fetching = this.fetchExecutions(queue, { runOnce });
 		void (async () => {
+			let failure: unknown = null;
 			try {
 				await this.flushResults(this.executeTasks(queue));
 			} catch (error) {
 				this.logger.error("Worker pipeline error:", error);
+				failure = error;
 			} finally {
 				queue.close();
-				this._stopDeferred?.resolve();
+				// Ends the polling of running executions that a drain keeps up after its last claim
+				abortController.abort();
+				await fetching;
 				this.resetLifecycle();
+				if (failure) stopDeferred.reject(failure);
+				else stopDeferred.resolve();
 			}
 		})();
 
@@ -357,7 +368,7 @@ export class Worker<
 			const running = [...this._running].map(([id, { claimToken, inbox }]) => ({
 				execution_id: id,
 				claim_token: claimToken,
-				after_seq: inbox.afterSeq,
+				after_seq: inbox ? inbox.afterSeq : null,
 			}));
 			if (batchSize === 0 && running.length === 0) return [];
 			const { executions, signals, cancelled } = await this.db.getExecutions({
@@ -368,18 +379,22 @@ export class Worker<
 				running,
 				held: [...this.held.keys()],
 			});
-			for (const id of cancelled) {
-				this._running
-					.get(id)
-					?.controller.abort({ reason: "cancelled", __pgconductorTaskAborted: true });
-			}
-			for (const stored of signals) this._running.get(stored.execution_id)?.inbox.push(stored);
+			for (const id of cancelled) this._running.get(id)?.controller.abort({ reason: "cancelled" });
+			for (const stored of signals) this._running.get(stored.execution_id)?.inbox?.push(stored);
 			for (const exec of executions) this.held.set(exec.id, exec.claim_token);
 			return executions;
 		};
 
-		while (!this.signal?.aborted) {
+		// A drain stops claiming once a claim finds nothing, but keeps polling running executions
+		let intake = true;
+		while (!this.signal.aborted) {
 			try {
+				if (!intake) {
+					await claim(0, []);
+					await waitFor(this.pollIntervalMs, { signal: this.signal });
+					continue;
+				}
+
 				// Claim only what free slots can run so other workers get the rest
 				const freeSlots = this.concurrency - queue.pending;
 				if (freeSlots <= 0) {
@@ -406,7 +421,8 @@ export class Worker<
 				if (executions.length === 0) {
 					if (runOnce) {
 						queue.close();
-						break;
+						intake = false;
+						continue;
 					}
 					await waitFor(this.pollIntervalMs, { signal: this.signal });
 					continue;
@@ -501,14 +517,13 @@ export class Worker<
 		const taskAbortController = new TypedAbortController<TaskAbortReasons>();
 		const signal = AbortSignal.any([taskAbortController.signal, this.signal]);
 		const timeout = task.timeoutMs
-			? setTimeout(() => {
-					taskAbortController.abort({ reason: "timed-out", __pgconductorTaskAborted: true });
-				}, task.timeoutMs)
+			? setTimeout(() => taskAbortController.abort({ reason: "timed-out" }), task.timeoutMs)
 			: undefined;
 
-		const abortPromise = new Promise<TaskAbortReasons>((resolve) => {
+		// Wrapped, so no handler output can be mistaken for an abort
+		const aborted = new Promise<{ abort: TaskAbortReasons }>((resolve) => {
 			taskAbortController.signal.addEventListener("abort", () => {
-				resolve(taskAbortController.signal.reason);
+				resolve({ abort: taskAbortController.signal.reason });
 			});
 		});
 		const taskEvent = taskEventFor(exec);
@@ -531,11 +546,7 @@ export class Worker<
 					{ signal: this.signal },
 				),
 			onError: (error) => {
-				taskAbortController.abort({
-					reason: "signal-failed",
-					error: error.message,
-					__pgconductorTaskAborted: true,
-				});
+				taskAbortController.abort({ reason: "signal-failed", error: error.message });
 			},
 		});
 		// Signals stored before the claim are ready when the handler registers its listener
@@ -588,21 +599,33 @@ export class Worker<
 					Object.assign(context, added);
 					return next() as Promise<MiddlewareResult<TNext>>;
 				}),
-			() => Promise.race([task.execute(taskEvent, context), abortPromise]),
+			() => Promise.race([task.execute(taskEvent, context), aborted]),
 		);
 
 		try {
 			await this.scheduleNextExecution(exec);
 
-			const output = await this.telemetry.process({
+			const outcome = await this.telemetry.process({
 				taskKey: exec.task_key,
 				queue: exec.queue,
 				messageId: exec.id,
 				traceContexts: [exec.trace_context],
-				run: () => Promise.race([run(), abortPromise]),
+				run: () =>
+					Promise.race([
+						run().then(async (output) => ({
+							output,
+							// Deliver the signals already read, still racing the abort. Ones stored later
+							// re-queue the execution.
+							signalFailure: taskAbortController.signal.aborted
+								? null
+								: await signals.close({ drain: true }),
+						})),
+						aborted,
+					]),
 			});
 
-			if (isTaskAbortReason(output)) {
+			if ("abort" in outcome) {
+				const output = outcome.abort;
 				switch (output.reason) {
 					case "child-invocation":
 						return {
@@ -650,20 +673,18 @@ export class Worker<
 				}
 			}
 
-			// Deliver the signals already received; ones stored later re-queue the execution
-			const signalFailure = await signals.close({ drain: true });
-			if (signalFailure) {
+			if (outcome.signalFailure) {
 				return {
 					...identity,
 					status: "failed",
-					error: signalFailure.message,
+					error: outcome.signalFailure.message,
 				} as const;
 			}
 
 			return {
 				...identity,
 				status: "completed",
-				result: output,
+				result: outcome.output,
 				signal_names: signals.names,
 			} as const;
 		} catch (err) {
@@ -713,10 +734,11 @@ export class Worker<
 
 		const taskAbortController = new TypedAbortController<TaskAbortReasons>();
 		const timeout = task.timeoutMs
-			? setTimeout(() => {
-					taskAbortController.abort({ reason: "timed-out", __pgconductorTaskAborted: true });
-				}, task.timeoutMs)
+			? setTimeout(() => taskAbortController.abort({ reason: "timed-out" }), task.timeoutMs)
 			: undefined;
+		for (const exec of executions) {
+			this._running.set(exec.id, { controller: taskAbortController, claimToken: exec.claim_token });
+		}
 
 		// Create batch context
 		const batchContext = new BatchTaskContext(
@@ -731,9 +753,9 @@ export class Worker<
 			executions,
 		);
 
-		const abortPromise = new Promise<TaskAbortReasons>((resolve) => {
+		const aborted = new Promise<{ abort: TaskAbortReasons }>((resolve) => {
 			taskAbortController.signal.addEventListener("abort", () => {
-				resolve(taskAbortController.signal.reason);
+				resolve({ abort: taskAbortController.signal.reason });
 			});
 		});
 
@@ -741,29 +763,33 @@ export class Worker<
 			// Schedule next executions for cron tasks
 			await Promise.all(executions.map((exec) => this.scheduleNextExecution(exec)));
 
-			const result = await this.telemetry.process({
+			const outcome = await this.telemetry.process({
 				taskKey,
 				queue: this.queueName,
 				batchMessageCount: executions.length,
 				traceContexts: executions.map((exec) => exec.trace_context),
-				run: async () => {
-					const result = await Promise.race([task.execute(events, batchContext), abortPromise]);
-					if (!isTaskAbortReason(result) && result !== undefined) {
-						if (!Array.isArray(result)) {
-							throw new Error("Batch handler must return array matching input length");
-						}
-						if (result.length !== executions.length) {
-							throw new Error(
-								`Batch handler returned ${result.length} results but received ${executions.length} executions`,
-							);
-						}
-					}
-					return result;
-				},
+				run: () =>
+					Promise.race([
+						task.execute(events, batchContext).then((output) => {
+							if (output !== undefined) {
+								if (!Array.isArray(output)) {
+									throw new Error("Batch handler must return array matching input length");
+								}
+								if (output.length !== executions.length) {
+									throw new Error(
+										`Batch handler returned ${output.length} results but received ${executions.length} executions`,
+									);
+								}
+							}
+							return { output };
+						}),
+						aborted,
+					]),
 			});
 
 			// Handle abort reasons
-			if (isTaskAbortReason(result)) {
+			if ("abort" in outcome) {
+				const result = outcome.abort;
 				if (result.reason === "released") {
 					// Batch sleep - reschedule all
 					return executions.map((exec) => ({
@@ -774,6 +800,17 @@ export class Worker<
 						status: "released" as const,
 						reschedule_in_ms: result.reschedule_in_ms,
 						step_key: result.step_key,
+					}));
+				}
+
+				// Settlement fails the cancelled members; the others run again without spending an attempt
+				if (result.reason === "cancelled") {
+					return executions.map((exec) => ({
+						execution_id: exec.id,
+						claim_token: exec.claim_token,
+						queue: exec.queue,
+						task_key: taskKey,
+						status: "released" as const,
 					}));
 				}
 
@@ -797,7 +834,7 @@ export class Worker<
 				queue: exec.queue,
 				task_key: taskKey,
 				status: "completed" as const,
-				result: result?.[i],
+				result: outcome.output?.[i],
 			}));
 		} catch (err) {
 			if (this.signal.aborted) {
@@ -822,6 +859,7 @@ export class Worker<
 			}));
 		} finally {
 			clearTimeout(timeout);
+			for (const exec of executions) this._running.delete(exec.id);
 		}
 	}
 
@@ -860,9 +898,11 @@ export class Worker<
 
 		let buffer: ExecutionResult[] = [];
 		let flushTimer: ReturnType<typeof setTimeout> | null = null;
-		let timerFlush: Promise<void> = Promise.resolve();
+		// Flushes run one at a time, so the final flush follows every earlier one
+		let flushing = Promise.resolve();
+		let closed = false;
 
-		const flushNow = async (isCleanup = false) => {
+		const send = async (signal: AbortSignal) => {
 			if (flushTimer) {
 				clearTimeout(flushTimer);
 				flushTimer = null;
@@ -877,25 +917,32 @@ export class Worker<
 				await this.telemetry.settle({
 					queue: this.queueName,
 					batchMessageCount: results.length,
-					run: () => this.db.returnExecutions({ orchestratorId, results }, { signal: this.signal }),
+					run: () => this.db.returnExecutions({ orchestratorId, results }, { signal }),
 				});
-				for (const result of results) {
-					this.release(result.execution_id, result.claim_token);
-				}
 			} catch (err) {
-				this.logger.error("Error flushing results:", err);
-				if (!isCleanup) {
-					buffer.push(...results);
-					scheduleFlush();
-				}
+				buffer = [...results, ...buffer];
+				throw err;
+			}
+			for (const result of results) {
+				this.release(result.execution_id, result.claim_token);
 			}
 		};
 
+		const flush = () => {
+			if (closed) return flushing;
+			flushing = flushing
+				.then(() => send(this.signal))
+				.catch((err) => {
+					this.logger.error("Error flushing results:", err);
+					scheduleFlush();
+				});
+			return flushing;
+		};
+
 		const scheduleFlush = () => {
+			if (closed) return;
 			if (flushTimer) clearTimeout(flushTimer);
-			flushTimer = setTimeout(() => {
-				timerFlush = flushNow();
-			}, this.flushIntervalMs);
+			flushTimer = setTimeout(flush, this.flushIntervalMs);
 		};
 
 		try {
@@ -905,15 +952,15 @@ export class Worker<
 				// Start timer only after first result arrives
 				if (!flushTimer) scheduleFlush();
 
-				if (buffer.length >= this.flushBatchSize) {
-					await flushNow();
-					scheduleFlush();
-				}
+				if (buffer.length >= this.flushBatchSize) await flush();
 			}
 		} finally {
+			closed = true;
 			if (flushTimer) clearTimeout(flushTimer);
-			await timerFlush;
-			await flushNow(true);
+			await flushing;
+			// The worker signal is aborted on stop, so retries get their own deadline. Results that
+			// still cannot be settled fail the worker's stop.
+			await send(AbortSignal.timeout(FINAL_FLUSH_TIMEOUT_MS));
 		}
 	}
 

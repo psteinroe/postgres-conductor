@@ -703,11 +703,13 @@ export class DatabaseClient {
 		return rows[0].count;
 	}
 
-	async saveStep(args: SaveStepArgs, opts?: QueryMethodOptions): Promise<void> {
-		await this.query(() => this.builder.buildSaveStep(args), {
+	/** Returns false when this worker no longer holds the execution. */
+	async saveStep(args: SaveStepArgs, opts?: QueryMethodOptions): Promise<boolean> {
+		const [row] = await this.query(() => this.builder.buildSaveStep(args), {
 			label: "saveStep",
 			...opts,
 		});
+		return row.claimed;
 	}
 
 	/** Returns null when this worker no longer holds the starting execution. */

@@ -69,6 +69,7 @@ await orchestrator.stop();
 - Releases locked executions
 - Cleans up database records
 - Shuts down workers
+- Gives up saving results or releasing executions when the database stays unreachable for about 10 seconds; `stopped` then rejects, and stale orchestrator recovery releases the executions it still held
 - Leaves the database connection open, so the conductor stays usable and the orchestrator can be started again (see [`conductor.close()`](conductor.md#conductorclose))
 
 ## orchestrator.drain()
@@ -81,7 +82,8 @@ await orchestrator.drain();
 
 - Starts the orchestrator
 - Gives each worker one run-once pass
-- Automatically stops after those passes finish
+- Automatically stops after those passes finish; executions still running receive signals and cancellation until they do
+- `stop()` interrupts it like a running orchestrator
 - May leave work created after another queue's pass, such as event fan-out; call `drain()` again to process another pass
 
 **Use case:** Testing
