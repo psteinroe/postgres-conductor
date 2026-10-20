@@ -489,12 +489,15 @@ export class DatabaseClient {
 	 */
 	async getInstalledMigrationNumber(opts?: QueryMethodOptions): Promise<number> {
 		try {
-			const result = await this.query(() => this.builder.buildGetInstalledMigrationNumber(), {
-				label: "buildGetInstalledMigrationNumber",
-				expectError: true,
-				...opts,
-			});
-			return result[0]?.version || -1;
+			const [{ version }] = await this.query(
+				() => this.builder.buildGetInstalledMigrationNumber(),
+				{
+					label: "buildGetInstalledMigrationNumber",
+					expectError: true,
+					...opts,
+				},
+			);
+			return version;
 		} catch (err) {
 			const pgErr = err as { code?: string };
 			if (pgErr?.code === "42P01" || pgErr?.code === "3F000") {
@@ -504,9 +507,12 @@ export class DatabaseClient {
 		}
 	}
 
+	// With `fence`, a breaking migration is admitted only while no older orchestrator is
+	// registered. Locking the table makes an older orchestrator that registers concurrently wait
+	// for the commit, so its registration sees the new version and it stops.
 	async applyMigration(
 		migration: Migration,
-		opts?: QueryMethodOptions,
+		opts?: { fence?: boolean } & QueryMethodOptions,
 	): Promise<"applied" | "busy"> {
 		return this.query(
 			async (sql) => {
@@ -536,10 +542,26 @@ export class DatabaseClient {
 						return "applied" as const;
 					}
 
+					if (opts?.fence) {
+						await tx`lock table pgconductor._private_orchestrators in share mode`;
+						const [{ registered }] = await tx<[{ registered: boolean }]>`
+							select exists (
+								select 1
+								from pgconductor._private_orchestrators
+								where migration_number < ${migration.version}::integer
+							) as registered
+						`;
+						if (registered) {
+							return "busy" as const;
+						}
+					}
+
 					await tx.unsafe(migration.sql);
+					// Migration 0 creates the ledger, so it is not checked above and may already be recorded
 					await tx`
 						insert into pgconductor.schema_migrations (version, name, breaking)
 						values (${migration.version}, ${migration.name}, ${migration.breaking})
+						on conflict (version) do nothing
 					`;
 
 					return "applied" as const;

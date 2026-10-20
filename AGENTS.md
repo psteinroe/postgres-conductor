@@ -220,6 +220,11 @@ Tables live in the `pgconductor` schema with a `_private_` prefix (`_private_exe
 - A claimed occurrence inserts its successor before the handler runs, through `_private_schedule_next_occurrence()`: it takes a share lock on the queue row, then inserts only if the occurrence is still claimed and not cancelled
 - Removing schedules (registration, `_private_unschedule()`) holds the queue row lock and deletes pending occurrences, then cancels running ones in a separate statement, which sees occurrences claimed while the delete ran
 
+**Migrations**
+- `SchemaManager.ensureLatest()` applies each missing migration in its own transaction under the `pgconductor:migrations` advisory lock. Migration 0 creates the ledger (`schema_migrations`), so it is repeatable and its ledger row is inserted `on conflict do nothing`; later migrations check the ledger under the lock
+- A database newer than the code makes `conductor.ensureInstalled()` throw and an orchestrator refuse to start
+- A breaking migration (`--!breaking`) signals older orchestrators to shut down and waits until none is registered (at most 4h). Its transaction then locks `_private_orchestrators` in share mode and is admitted only if still none is registered, so an older orchestrator registering concurrently waits for the commit, and `registerOrchestrator` then reports `newer_migration_detected`
+
 **Infinity Pattern**
 - Postgres `'infinity'::timestamptz` for indefinite waiting
 - Used when `ctx.invokeAndWait()` is called without timeout

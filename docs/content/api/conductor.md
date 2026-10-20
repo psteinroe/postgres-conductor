@@ -182,7 +182,7 @@ Initialize database schema:
 await conductor.ensureInstalled();
 ```
 
-Called automatically by Orchestrator.start(), but useful for manual schema setup.
+Called automatically by Orchestrator.start(), but useful for manual schema setup. Safe to call from several processes at once. Throws if the database schema is newer than this version of Postgres Conductor.
 
 ## conductor.emit()
 

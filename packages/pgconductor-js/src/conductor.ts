@@ -223,7 +223,10 @@ export class Conductor<
 	async ensureInstalled(): Promise<void> {
 		const schemaManager = new SchemaManager(this.db, {});
 		const signal = new AbortController().signal;
-		await schemaManager.ensureLatest(signal);
+		const { shouldShutdown } = await schemaManager.ensureLatest(signal);
+		if (shouldShutdown) {
+			throw new Error("The database schema is newer than this version of Postgres Conductor");
+		}
 	}
 
 	/**
