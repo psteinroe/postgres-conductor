@@ -23,6 +23,7 @@ export class MockDatabaseClient implements IDatabaseClient {
 	registerWorker = vi.fn(async () => {});
 	scheduleCronExecution = vi.fn(async () => "mock-cron-id");
 	unscheduleCronExecution = vi.fn(async () => {});
+	scheduleNextCronExecution = vi.fn(async () => {});
 	invoke = vi.fn(async () => "mock-id");
 	invokeChild = vi.fn(async () => "mock-child-id");
 	invokeBatch = vi.fn(async () => ["mock-id"]);

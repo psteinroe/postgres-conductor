@@ -576,6 +576,96 @@ begin
 end;
 $function$;
 
+-- Removes the dynamic cron schedule p_schedule_name: deletes its pending
+-- occurrences and cancels running ones. Holding the queue row lock, like
+-- registration, keeps running occurrences from inserting a successor until
+-- this commits; each statement then sees the successors inserted before.
+create or replace function pgconductor._private_unschedule(
+    p_task_key text,
+    p_queue text,
+    p_schedule_name text
+)
+returns void
+language plpgsql
+volatile
+set search_path to ''
+as $function$
+declare
+  v_resolved integer;
+begin
+  perform 1 from pgconductor._private_queues queue where queue.name = p_queue for update;
+
+  with removed as (
+    delete from pgconductor._private_executions
+    where task_key = p_task_key
+      and queue = p_queue
+      and dedupe_key like 'dynamic::%'
+      and split_part(dedupe_key, '::', 2) = p_schedule_name
+      and cron_expression is not null
+      and is_available
+    returning result_waiters
+  )
+  select pgconductor._private_resolve_result_waits(jsonb_agg(w.value || jsonb_build_object(
+    'outcome', jsonb_build_object('status', 'cancelled', 'reason', 'Schedule removed')
+  )))
+  into v_resolved
+  from removed r
+  cross join lateral jsonb_array_elements(r.result_waiters) w
+  having count(*) > 0;
+
+  -- A separate statement, so it also sees occurrences claimed while the delete ran
+  update pgconductor._private_executions
+  set cancelled = true
+  where task_key = p_task_key
+    and queue = p_queue
+    and dedupe_key like 'dynamic::%'
+    and split_part(dedupe_key, '::', 2) = p_schedule_name
+    and cron_expression is not null
+    and locked_by is not null
+    and completed_at is null
+    and failed_at is null
+    and cancelled = false;
+end;
+$function$;
+
+-- Inserts the next occurrence of the cron schedule of the claimed occurrence
+-- p_execution_id unless it was cancelled. Removing a schedule holds the queue
+-- row lock and cancels running occurrences, so a removal that commits first
+-- leaves no successor and one that commits later sees and removes it.
+create or replace function pgconductor._private_schedule_next_occurrence(
+    p_execution_id uuid,
+    p_queue text,
+    p_orchestrator_id uuid,
+    p_claim_token uuid,
+    p_run_at timestamptz,
+    p_dedupe_key text
+)
+returns void
+language plpgsql
+volatile
+set search_path to ''
+as $function$
+begin
+  perform 1 from pgconductor._private_queues queue where queue.name = p_queue for share;
+
+  perform pgconductor.invoke(
+    p_task_key := execution.task_key,
+    p_queue := execution.queue,
+    p_run_at := p_run_at,
+    p_dedupe_key := p_dedupe_key,
+    p_cron_expression := execution.cron_expression,
+    p_group := execution."group",
+    p_metadata := execution.metadata
+  )
+  from pgconductor._private_executions execution
+  where execution.id = p_execution_id
+    and execution.queue = p_queue
+    and execution.locked_by = p_orchestrator_id
+    and execution.claim_token = p_claim_token
+    and not execution.cancelled;
+end;
+$function$;
+
 create or replace function pgconductor.invoke_batch(
     specs pgconductor.execution_spec[]
 )

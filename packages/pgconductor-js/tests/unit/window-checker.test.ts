@@ -49,4 +49,32 @@ describe("WindowChecker", () => {
 
 		expect(nextRun.toISOString()).toBe("2024-01-01T09:00:00.000Z");
 	});
+	test("overnight window wraps midnight with an exclusive end", () => {
+		const checker = new WindowChecker(["22:00", "06:00"]);
+		const inside = (time: string) => checker.isWithinWindow(new Date(`2024-01-01T${time}:00Z`));
+
+		expect({
+			"21:59": inside("21:59"),
+			"22:00": inside("22:00"),
+			"00:00": inside("00:00"),
+			"05:59": inside("05:59"),
+			"06:00": inside("06:00"),
+			"12:00": inside("12:00"),
+		}).toEqual({
+			"21:59": false,
+			"22:00": true,
+			"00:00": true,
+			"05:59": true,
+			"06:00": false,
+			"12:00": false,
+		});
+	});
+
+	test("getNextValidRunAt returns the same evening after an overnight window ends", () => {
+		const checker = new WindowChecker(["22:00", "06:00"]);
+
+		const nextRun = checker.getNextValidRunAt(new Date("2024-01-01T06:00:00Z"));
+
+		expect(nextRun.toISOString()).toBe("2024-01-01T22:00:00.000Z");
+	});
 });

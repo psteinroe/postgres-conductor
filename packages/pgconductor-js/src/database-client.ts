@@ -14,6 +14,7 @@ import {
 	type RegisterWorkerArgs,
 	type ScheduleCronExecutionArgs,
 	type UnscheduleCronExecutionArgs,
+	type ScheduleNextCronExecutionArgs,
 	type GetExecutionArgs,
 	type LoadStepArgs,
 	type CountStepsArgs,
@@ -641,6 +642,16 @@ export class DatabaseClient {
 	): Promise<void> {
 		await this.query(() => this.builder.buildUnscheduleCronExecution(args), {
 			label: "unscheduleCronExecution",
+			...opts,
+		});
+	}
+
+	async scheduleNextCronExecution(
+		args: ScheduleNextCronExecutionArgs,
+		opts?: QueryMethodOptions,
+	): Promise<void> {
+		await this.query(() => this.builder.buildScheduleNextCronExecution(args), {
+			label: "scheduleNextCronExecution",
 			...opts,
 		});
 	}

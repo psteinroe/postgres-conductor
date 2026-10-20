@@ -132,7 +132,8 @@ Tables live in the `pgconductor` schema with a `_private_` prefix (`_private_exe
 
 **Worker** (`worker.ts`)
 - Implements async pipeline: fetch → execute → flush
-- Polls the database for ready executions of one queue, claiming only the tasks it registers
+- Polls the database for ready executions of one queue, claiming only the tasks it registers; it throws at construction for a task of another queue
+- Claims only tasks inside their time window (`WindowChecker`, also used by checkpoints); a window whose start is after its end spans midnight
 - Executes tasks with concurrency control (via `mapConcurrent`)
 - Batches and flushes results back to the database
 - Claiming returns each execution's undelivered signals, which prime its `SignalInbox` before the handler runs
@@ -208,6 +209,10 @@ Tables live in the `pgconductor` schema with a `_private_` prefix (`_private_exe
 - `cancel_with_parent` on a child row links it to `parent_execution_id` without a waiting edge
 - `cancel_execution()` on a pending execution cancels the linked children of every row it failed by calling itself, with that row's reason. A running execution only gets the flag; its settlement cascades
 - Settlement cascades from `terminal_failures` (permanent failures, cancellations and failed waiting ancestors) in the same statement: `linked_descendants` follows linked children and, below the first level, the children they wait on. Running ones get the cancelled flag; pending ones fail as cancelled. A row in the same batch whose outcome would keep it alive (retry, sleep, child, signal re-queue) is cancelled instead, so those CTEs exclude `cancelled_descendants`
+
+**Cron Schedules**
+- A claimed occurrence inserts its successor before the handler runs, through `_private_schedule_next_occurrence()`: it takes a share lock on the queue row, then inserts only if the occurrence is still claimed and not cancelled
+- Removing schedules (registration, `_private_unschedule()`) holds the queue row lock and deletes pending occurrences, then cancels running ones in a separate statement, which sees occurrences claimed while the delete ran
 
 **Infinity Pattern**
 - Postgres `'infinity'::timestamptz` for indefinite waiting

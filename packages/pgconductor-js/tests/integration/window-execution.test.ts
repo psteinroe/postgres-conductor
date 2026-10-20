@@ -326,4 +326,74 @@ describe("Window Execution", () => {
 
 		await orchestrator.stop();
 	}, 30000);
+	async function runOvernightTaskAt(time: string): Promise<boolean> {
+		const db = await pool.child();
+		databases.push(db);
+		await db.clock.set(new Date(`2024-01-01T${time}Z`));
+
+		const conductor = Conductor.create({
+			sql: db.sql,
+			clock: db.clock,
+			tasks: TaskSchemas.fromSchema([defineTask({ name: "nightly", payload: z.object({}) })]),
+			context: {},
+		});
+		const nightly = conductor.createTask(
+			{ name: "nightly", window: ["22:00", "06:00"] },
+			{ invocable: true },
+			async () => {},
+		);
+		await conductor.ensureInstalled();
+		const id = await conductor.invoke({ name: "nightly" }, {});
+
+		await Orchestrator.create({
+			conductor,
+			tasks: [nightly],
+			defaultWorker: { pollIntervalMs: 50, flushIntervalMs: 50 },
+		}).drain();
+
+		const [row] = await db.sql<{ completed_at: Date | null }[]>`
+			select completed_at from pgconductor._private_executions where id = ${id}
+		`;
+		return row?.completed_at !== null;
+	}
+
+	test("overnight window runs tasks on both sides of midnight", async () => {
+		expect(await runOvernightTaskAt("23:00:00")).toBe(true);
+		expect(await runOvernightTaskAt("01:00:00")).toBe(true);
+		expect(await runOvernightTaskAt("12:00:00")).toBe(false);
+	}, 30000);
+
+	test("checkpoint past midnight stays inside an overnight window", async () => {
+		const db = await pool.child();
+		databases.push(db);
+		await db.clock.set(new Date("2024-01-01T23:59:00Z"));
+
+		const conductor = Conductor.create({
+			sql: db.sql,
+			clock: db.clock,
+			tasks: TaskSchemas.fromSchema([defineTask({ name: "nightly", payload: z.object({}) })]),
+			context: {},
+		});
+		const nightly = conductor.createTask(
+			{ name: "nightly", window: ["22:00", "06:00"] },
+			{ invocable: true },
+			async (_event, ctx) => {
+				await db.clock.set(new Date("2024-01-02T00:30:00Z"));
+				await ctx.checkpoint();
+			},
+		);
+		await conductor.ensureInstalled();
+		const id = await conductor.invoke({ name: "nightly" }, {});
+
+		await Orchestrator.create({
+			conductor,
+			tasks: [nightly],
+			defaultWorker: { pollIntervalMs: 50, flushIntervalMs: 50 },
+		}).drain();
+
+		const [row] = await db.sql<{ completed_at: Date | null }[]>`
+			select completed_at from pgconductor._private_executions where id = ${id}
+		`;
+		expect(row?.completed_at).not.toBeNull();
+	}, 30000);
 });

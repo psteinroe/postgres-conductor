@@ -13,6 +13,7 @@ import { Deferred } from "./lib/deferred.js";
 import { BatchingAsyncQueue } from "./lib/batching-async-queue.js";
 import { nextCronOccurrence } from "./lib/cron.js";
 import { Clock } from "./lib/clock.js";
+import { WindowChecker } from "./lib/window-checker.js";
 import {
 	isTaskAbortReason,
 	TaskContext,
@@ -124,6 +125,11 @@ export class Worker<
 		const maintenanceTask = createMaintenanceTask(this.queueName);
 		this.tasks = tasks.reduce(
 			(registered, task) => {
+				if (task.queue !== this.queueName) {
+					throw new Error(
+						`Task "${task.name}" belongs to queue "${task.queue}", not "${this.queueName}"`,
+					);
+				}
 				registered.set(task.name, task);
 				return registered;
 			},
@@ -345,6 +351,10 @@ export class Worker<
 		const allTasks = Array.from(this.tasks.values());
 		// A slot runs one execution, or one batch of a batched task
 		const executionsPerSlot = Math.max(...allTasks.map((task) => task.batch?.size || 1));
+		const windows = allTasks.map((task) => ({
+			name: task.name,
+			window: task.window && new WindowChecker(task.window),
+		}));
 
 		// Claim executions, abort cancelled running ones and hand new signals to their handlers
 		const claim = async (batchSize: number, taskKeys: string[]) => {
@@ -386,13 +396,10 @@ export class Worker<
 				}
 
 				// Claim only registered tasks that are within their time window
-				const currentTime = this.clock.now().toISOString().slice(11, 19);
-				const taskKeys = allTasks
-					.filter(
-						(task) =>
-							!task.window || (currentTime >= task.window[0] && currentTime < task.window[1]),
-					)
-					.map((task) => task.name);
+				const now = this.clock.now();
+				const taskKeys = windows
+					.filter(({ window }) => !window || window.isWithinWindow(now))
+					.map(({ name }) => name);
 
 				const executions = await claim(
 					Math.min(this.fetchBatchSize, freeSlots * executionsPerSlot),
@@ -836,15 +843,14 @@ export class Worker<
 		const timestampSeconds = Math.floor(nextTimestamp.getTime() / 1000);
 		const nextDedupeKey = `${prefix}::${scheduleName}::${timestampSeconds}`;
 
-		await this.db.invoke(
+		await this.db.scheduleNextCronExecution(
 			{
-				task_key: execution.task_key,
+				executionId: execution.id,
 				queue: execution.queue,
-				run_at: nextTimestamp,
-				dedupe_key: nextDedupeKey,
-				cron_expression: execution.cron_expression,
-				group: execution.group || null,
-				metadata: execution.metadata,
+				orchestratorId: execution.locked_by,
+				claimToken: execution.claim_token,
+				runAt: nextTimestamp,
+				dedupeKey: nextDedupeKey,
 			},
 			{ signal: this.signal },
 		);
