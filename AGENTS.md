@@ -16,6 +16,7 @@ pgconductor/
     └── pgconductor-js/
         ├── cli/                      # pgconductor CLI (database type generation)
         ├── src/
+        │   ├── index.ts              # pgconductor-js: the application API
         │   ├── conductor.ts          # Task registry, invoke and emit entry point
         │   ├── orchestrator.ts       # Worker lifecycle manager
         │   ├── worker.ts             # Fetch→execute→flush pipeline
@@ -31,6 +32,7 @@ pgconductor/
         │   ├── database-client.ts    # Postgres client wrapper
         │   ├── query-builder.ts      # SQL for claiming, settlement, registration
         │   ├── testing.ts            # pgconductor-js/testing: createTestClock (fake time)
+        │   ├── advanced.ts           # pgconductor-js/advanced: Worker, SchemaManager, MigrationStore
         │   ├── lib/                  # Utilities (deferred, async-queue, etc.)
         │   └── generated/
         │       └── sql.ts            # Auto-generated from migrations

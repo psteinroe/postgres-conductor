@@ -15,6 +15,10 @@
 			"types": "./dist/src/testing.d.ts",
 			"import": "./dist/src/testing.js"
 		},
+		"./advanced": {
+			"types": "./dist/src/advanced.d.ts",
+			"import": "./dist/src/advanced.js"
+		},
 		"./package.json": "./package.json"
 	},
 	"bin": {

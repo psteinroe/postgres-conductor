@@ -2,7 +2,6 @@ export { Conductor } from "./conductor.js";
 export type { ConductorOptions, WaitForResultOptions } from "./conductor.js";
 export { Orchestrator } from "./orchestrator.js";
 export type { OrchestratorOptions } from "./orchestrator.js";
-export { Worker } from "./worker.js";
 export type { WorkerConfig } from "./worker.js";
 export { Task } from "./task.js";
 export type {
@@ -16,8 +15,6 @@ export type {
 	TaskIdentifier,
 } from "./task.js";
 export { TaskSchemas, EventSchemas } from "./schemas.js";
-export { SchemaManager } from "./schema-manager.js";
-export { MigrationStore } from "./migration-store.js";
 export { TaskContext, BatchTaskContext, WaitForEventTimeoutError } from "./task-context.js";
 export type {
 	BatchTaskEvent,

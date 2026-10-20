@@ -20,7 +20,7 @@ cat > package.json <<'EOF'
 { "name": "consumer", "private": true, "type": "module" }
 EOF
 
-npm install --no-audit --no-fund ./pgconductor-js-*.tgz @opentelemetry/api typescript@5 @types/node postgres vitest@5
+npm install --no-audit --no-fund ./pgconductor-js-*.tgz @opentelemetry/api typescript@5 @types/node postgres vitest@5 zod
 
 if grep -q '"catalog:\|"workspace:' node_modules/pgconductor-js/package.json; then
 	echo "Packed package.json contains unresolved catalog: or workspace: specifiers"
@@ -29,26 +29,36 @@ fi
 
 cat > exports.mjs <<'EOF'
 import * as pgconductor from "pgconductor-js";
+import * as advanced from "pgconductor-js/advanced";
+import * as testing from "pgconductor-js/testing";
 
-const expected = [
-	"Conductor",
-	"Orchestrator",
-	"Worker",
-	"Task",
-	"TaskSchemas",
-	"EventSchemas",
-	"defineTask",
-	"defineEvent",
-	"parseDuration",
-	"SchemaManager",
-	"MigrationStore",
-	"WaitForEventTimeoutError",
-];
+const expected = {
+	"pgconductor-js": [
+		pgconductor,
+		[
+			"BatchTaskContext",
+			"Conductor",
+			"EventSchemas",
+			"Orchestrator",
+			"Task",
+			"TaskContext",
+			"TaskSchemas",
+			"WaitForEventTimeoutError",
+			"defineEvent",
+			"defineTask",
+			"parseDuration",
+		],
+	],
+	"pgconductor-js/advanced": [advanced, ["MigrationStore", "SchemaManager", "Worker"]],
+	"pgconductor-js/testing": [testing, ["createTestClock"]],
+};
 
-const missing = expected.filter((name) => pgconductor[name] === undefined);
-if (missing.length > 0) {
-	console.error(`Missing exports: ${missing.join(", ")}`);
-	process.exit(1);
+for (const [entry, [module, names]] of Object.entries(expected)) {
+	const actual = Object.keys(module).sort().join(", ");
+	if (actual !== names.join(", ")) {
+		console.error(`${entry} exports ${actual}, expected ${names.join(", ")}`);
+		process.exit(1);
+	}
 }
 EOF
 
@@ -76,13 +86,16 @@ import {
 	Conductor,
 	Orchestrator,
 	TaskSchemas,
-	EventSchemas,
 	defineEvent,
 	WaitForEventTimeoutError,
 	type DefineTask,
 	type Logger,
 	type TaskContext,
 } from "pgconductor-js";
+import { SchemaManager, Worker } from "pgconductor-js/advanced";
+import { z } from "zod";
+
+const greeted = defineEvent({ name: "greeted", payload: z.object({ name: z.string() }) });
 
 type Greet = DefineTask<{
 	name: "greet";
@@ -108,7 +121,7 @@ class ConsoleLogger implements Logger {
 const conductor = Conductor.create({
 	connectionString: "postgres://localhost:5432/postgres",
 	tasks: TaskSchemas.fromUnion<Greet>(),
-	events: EventSchemas.fromSchema([]),
+	events: [greeted],
 	context: {},
 	logger: new ConsoleLogger(),
 });
@@ -120,10 +133,16 @@ const greet = conductor.createTask({ name: "greet" }, { invocable: true }, async
 
 Orchestrator.create({ conductor, tasks: [greet] });
 
+export const workers: Worker[] = [conductor.createWorker({ queue: "default", tasks: [greet] })];
+export const schemaManager = new SchemaManager(conductor.db);
+
 export async function invokeGreet() {
 	await conductor.invoke({ name: "greet" }, { name: "Ada" });
 	// @ts-expect-error payload must match the task definition
 	await conductor.invoke({ name: "greet" }, { name: 1 });
+	await conductor.emit("greeted", { name: "Ada" });
+	// @ts-expect-error payload must match the event definition
+	await conductor.emit("greeted", { name: 1 });
 }
 
 export function isTimeout(err: unknown): err is WaitForEventTimeoutError {
@@ -131,7 +150,6 @@ export function isTimeout(err: unknown): err is WaitForEventTimeoutError {
 }
 
 export type Context = TaskContext;
-export const unused = defineEvent;
 EOF
 
 npx tsc -p tsconfig.json
