@@ -29,7 +29,6 @@ fi
 
 cat > exports.mjs <<'EOF'
 import * as pgconductor from "pgconductor-js";
-import * as advanced from "pgconductor-js/advanced";
 import * as testing from "pgconductor-js/testing";
 
 const expected = {
@@ -49,7 +48,6 @@ const expected = {
 			"parseDuration",
 		],
 	],
-	"pgconductor-js/advanced": [advanced, ["MigrationStore", "SchemaManager", "Worker"]],
 	"pgconductor-js/testing": [testing, ["createTestClock"]],
 };
 
@@ -92,7 +90,6 @@ import {
 	type Logger,
 	type TaskContext,
 } from "pgconductor-js";
-import { SchemaManager, Worker } from "pgconductor-js/advanced";
 import { z } from "zod";
 
 const greeted = defineEvent({ name: "greeted", payload: z.object({ name: z.string() }) });
@@ -132,9 +129,6 @@ const greet = conductor.createTask({ name: "greet" }, { invocable: true }, async
 });
 
 Orchestrator.create({ conductor, tasks: [greet] });
-
-export const workers: Worker[] = [conductor.createWorker({ queue: "default", tasks: [greet] })];
-export const schemaManager = new SchemaManager(conductor.db);
 
 export async function invokeGreet() {
 	await conductor.invoke({ name: "greet" }, { name: "Ada" });

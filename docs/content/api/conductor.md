@@ -174,8 +174,6 @@ const worker = conductor.createWorker({
 });
 ```
 
-The `Worker` class it returns is exported from `pgconductor-js/advanced`, together with the schema machinery `SchemaManager` and `MigrationStore`. Applications rarely need them; the root `pgconductor-js` export covers the ordinary API.
-
 ## conductor.ensureInstalled()
 
 Initialize database schema:
