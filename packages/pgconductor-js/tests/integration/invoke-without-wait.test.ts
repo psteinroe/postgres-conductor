@@ -182,6 +182,62 @@ describe("ctx.invoke without waiting (Postgres integration)", () => {
 		});
 	});
 
+	test("a lost response is retried without starting a second execution after the first was removed", async () => {
+		const db = await child();
+		const runs: string[] = [];
+		const conductor = Conductor.create({
+			sql: loseFirstResponse(db.sql, "started_execution", {
+				// the started execution runs on its own queue and is removed on completion
+				beforeLoss: () =>
+					waitForCondition(async () => {
+						const rows = await db.sql`
+							select 1 from pgconductor._private_executions where task_key = 'work'
+						`;
+						return runs.length === 1 && rows.length === 0;
+					}),
+			}),
+			tasks: TaskSchemas.fromSchema([
+				defineTask({ name: "starter", returns: z.object({ id: z.string() }) }),
+				defineTask({ name: "work", queue: "children" }),
+			]),
+			context: {},
+		});
+		const work = conductor.createTask(
+			{ name: "work", queue: "children", removeOnComplete: true },
+			{ invocable: true },
+			async (_e, ctx) => {
+				runs.push(ctx.executionId);
+			},
+		);
+		const starter = conductor.createTask(
+			{ name: "starter" },
+			{ invocable: true },
+			async (_e, ctx) => {
+				return { id: await ctx.invoke("start-work", { name: "work", queue: "children" }, {}) };
+			},
+		);
+		const orchestrator = Orchestrator.create({
+			conductor,
+			tasks: [starter],
+			defaultWorker: config,
+			workers: [conductor.createWorker({ queue: "children", tasks: [work], config })],
+		});
+
+		await conductor.ensureInstalled();
+		await orchestrator.start();
+		const starterId = await conductor.invoke({ name: "starter" }, {});
+		const result = await conductor.waitForResult(starterId, { pollIntervalMs: 10 });
+		await orchestrator.stop();
+
+		const works =
+			await db.sql`select id from pgconductor._private_executions where task_key = 'work'`;
+		expect({ result, runs, works }).toEqual({
+			result: { id: runs[0] },
+			runs: [runs[0]],
+			works: [],
+		});
+	});
+
 	test("cancelling the starter does not cancel the started execution", async () => {
 		const db = await child();
 		const conductor = Conductor.create({

@@ -25,6 +25,17 @@ function createMockSql(handler: () => Promise<any[]> | any[]): Sql & { json: (va
 	return sqlFn as Sql & { json: (val: any) => any };
 }
 
+// A statement that can run again without a second effect, so it takes a signal
+const start = {
+	executionId: "execution-id",
+	queue: "default",
+	orchestratorId: "orchestrator-id",
+	claimToken: "claim-token",
+	key: "start",
+	spec: { task_key: "test-task", queue: "default", payload: {}, dedupe_key: "dedupe-key" },
+	cancelWithParent: false,
+};
+
 describe("DatabaseClient retry behavior", () => {
 	test("retries on retryable errors when signal provided", async () => {
 		let attemptCount = 0;
@@ -49,14 +60,7 @@ describe("DatabaseClient retry behavior", () => {
 		});
 
 		const signal = new AbortController().signal;
-		const result = await db.invoke(
-			{
-				task_key: "test-task",
-				queue: "default",
-				payload: {},
-			},
-			{ signal },
-		);
+		const result = await db.startExecution(start, { signal });
 
 		expect(result).toBe("test-id");
 		expect(attemptCount).toBe(3);
@@ -119,14 +123,7 @@ describe("DatabaseClient retry behavior", () => {
 		setTimeout(() => controller.abort(), 20);
 
 		try {
-			await db.invoke(
-				{
-					task_key: "test-task",
-					queue: "default",
-					payload: {},
-				},
-				{ signal: controller.signal },
-			);
+			await db.startExecution(start, { signal: controller.signal });
 			expect.unreachable("Should have thrown");
 		} catch (err) {
 			expect((err as Error).message).toBe("Deadlock detected");
@@ -156,14 +153,7 @@ describe("DatabaseClient retry behavior", () => {
 		const signal = new AbortController().signal;
 
 		try {
-			await db.invoke(
-				{
-					task_key: "test-task",
-					queue: "default",
-					payload: {},
-				},
-				{ signal },
-			);
+			await db.startExecution(start, { signal });
 			expect.unreachable("Should have thrown");
 		} catch (err) {
 			expect((err as Error).message).toBe("Syntax error");
@@ -221,14 +211,9 @@ describe("DatabaseClient retry behavior", () => {
 		});
 
 		// Test with signal
-		const resultWithSignal = await db.invoke(
-			{
-				task_key: "test-task",
-				queue: "default",
-				payload: {},
-			},
-			{ signal: new AbortController().signal },
-		);
+		const resultWithSignal = await db.startExecution(start, {
+			signal: new AbortController().signal,
+		});
 		expect(resultWithSignal).toBe("success-id");
 		expect(attemptCount).toBe(1);
 
@@ -270,14 +255,7 @@ describe("DatabaseClient retry behavior", () => {
 		});
 
 		const signal = new AbortController().signal;
-		const result = await db.invoke(
-			{
-				task_key: "test-task",
-				queue: "default",
-				payload: {},
-			},
-			{ signal },
-		);
+		const result = await db.startExecution(start, { signal });
 
 		expect(result).toBe("success-after-retry");
 		expect(attemptCount).toBe(2);
@@ -306,14 +284,7 @@ describe("DatabaseClient retry behavior", () => {
 		});
 
 		const signal = new AbortController().signal;
-		const result = await db.invoke(
-			{
-				task_key: "test-task",
-				queue: "default",
-				payload: {},
-			},
-			{ signal },
-		);
+		const result = await db.startExecution(start, { signal });
 
 		expect(result).toBe("success-after-lock");
 		expect(attemptCount).toBe(2);

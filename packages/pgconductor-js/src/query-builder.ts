@@ -170,6 +170,15 @@ export type SignalWithStartArgs = {
 	metadata?: Payload | null;
 };
 
+export type SignalWithStartStepArgs = {
+	executionId: string;
+	queue: string;
+	orchestratorId: string;
+	claimToken: string;
+	key: string;
+	target: SignalWithStartArgs;
+};
+
 export type RegisterEventWaitArgs = {
 	executionId: string;
 	queue: string;
@@ -305,6 +314,56 @@ export class QueryBuilder {
 				p_metadata := ${metadata ? this.sql.json(metadata) : null}::jsonb,
 				p_priority := ${priority || null}::integer
 			) as id
+		`;
+	}
+
+	// Memoizes the id as a step of the claimed execution in the same statement, so a replay
+	// returns the id stored by the first call
+	buildSignalWithStartStep({
+		executionId,
+		queue,
+		orchestratorId,
+		claimToken,
+		key,
+		target,
+	}: SignalWithStartStepArgs): PendingQuery<{ id: string }[]> {
+		const { signal, input, priority, traceContext, metadata } = target;
+		return this.sql<{ id: string }[]>`
+			with claimed_execution as materialized (
+				select e.id, e.queue
+				from pgconductor._private_executions e
+				where e.id = ${executionId}::uuid
+					and e.queue = ${queue}::text
+					and e.locked_by = ${orchestratorId}::uuid
+					and e.claim_token = ${claimToken}::uuid
+				for update
+			), stored_step as (
+				select (s.result->>'result')::uuid as id
+				from pgconductor._private_steps s, claimed_execution c
+				where s.execution_id = c.id and s.key = ${key}::text
+			), signalled as materialized (
+				select pgconductor.signal_with_start(
+					p_task_key := ${target.taskKey}::text,
+					p_queue := ${target.queue}::text,
+					p_key := ${target.key}::text,
+					p_name := ${signal.name}::text,
+					p_id := ${signal.id}::text,
+					p_payload := ${signal.payload === undefined ? null : this.sql.json(signal.payload)}::jsonb,
+					p_input := ${input ? this.sql.json(input) : null}::jsonb,
+					p_trace_context := ${traceContext ? this.sql.json(traceContext) : null}::jsonb,
+					p_metadata := ${metadata ? this.sql.json(metadata) : null}::jsonb,
+					p_priority := ${priority || null}::integer
+				) as id
+				from claimed_execution
+				where not exists (select from stored_step)
+			), saved_step as (
+				insert into pgconductor._private_steps (execution_id, queue, key, result)
+				select c.id, c.queue, ${key}::text, jsonb_build_object('result', s.id)
+				from claimed_execution c, signalled s
+			)
+			select id from stored_step
+			union all
+			select id from signalled
 		`;
 	}
 
@@ -1156,7 +1215,7 @@ export class QueryBuilder {
 	buildScheduleCronExecution({
 		spec,
 		scheduleName,
-	}: ScheduleCronExecutionArgs): PendingQuery<[{ id: string }]> {
+	}: ScheduleCronExecutionArgs): PendingQuery<[{ resolved: number }]> {
 		assert.ok(spec.run_at, "scheduleCronExecution requires run_at");
 		assert.ok(spec.cron_expression, "scheduleCronExecution requires cron_expression");
 
@@ -1165,30 +1224,42 @@ export class QueryBuilder {
 		const timestampSeconds = Math.floor(runAt.getTime() / 1000);
 		const dedupeKey = `dynamic::${scheduleName}::${timestampSeconds}`;
 
-		return this.sql<[{ id: string }]>`
+		return this.sql<[{ resolved: number }]>`
 			with removed as (
 				delete from pgconductor._private_executions
 				where task_key = ${spec.task_key}::text
 					and queue = ${spec.queue}::text
 					and dedupe_key like 'dynamic::%'
 					and split_part(dedupe_key, '::', 2) = ${scheduleName}::text
+					and dedupe_key <> ${dedupeKey}::text
 					and cron_expression is not null
 					and is_available
 				returning result_waiters
-			), ${this.removedScheduleWaits()}
-			select id from (select count(*) from resolved_result_waits) r, pgconductor.invoke(
-				p_task_key := ${spec.task_key}::text,
-				p_queue := ${spec.queue}::text,
-				p_payload := ${spec.payload ? this.sql.json(spec.payload) : null}::jsonb,
-				p_run_at := ${runAt.toISOString()}::timestamptz,
-				p_dedupe_key := ${dedupeKey}::text,
-				p_dedupe_seconds := null::integer,
-				p_dedupe_next_slot := false::boolean,
-				p_cron_expression := ${cronExpression}::text,
-				p_priority := ${spec.priority || 0}::integer,
-				p_group := ${spec.group || null}::text,
-				p_metadata := ${spec.metadata ? this.sql.json(spec.metadata) : null}::jsonb
+			), ${this.removedScheduleWaits()},
+			-- a running or settled occurrence is kept
+			scheduled as (
+				insert into pgconductor._private_executions as e (
+					task_key, queue, payload, metadata, run_at, dedupe_key, cron_expression, priority, "group"
+				) values (
+					${spec.task_key}::text,
+					${spec.queue}::text,
+					${spec.payload ? this.sql.json(spec.payload) : null}::jsonb,
+					${spec.metadata ? this.sql.json(spec.metadata) : null}::jsonb,
+					${runAt.toISOString()}::timestamptz,
+					${dedupeKey}::text,
+					${cronExpression}::text,
+					${spec.priority || 0}::integer,
+					${spec.group || null}::text
+				)
+				on conflict (task_key, dedupe_key, queue) do update set
+					payload = excluded.payload,
+					metadata = excluded.metadata,
+					cron_expression = excluded.cron_expression,
+					priority = excluded.priority,
+					"group" = excluded."group"
+				where e.is_available
 			)
+			select count(*)::int as resolved from resolved_result_waits
 		`;
 	}
 
@@ -1355,6 +1426,10 @@ export class QueryBuilder {
 					and e.locked_by = ${orchestratorId}::uuid
 					and e.claim_token = ${claimToken}::uuid
 				for update
+			), stored_step as (
+				select (s.result->>'id')::uuid as id
+				from pgconductor._private_steps s, claimed_execution c
+				where s.execution_id = c.id and s.key = ${key}::text
 			), started_execution as (
 				insert into pgconductor._private_executions as e (
 					id, task_key, queue, payload, trace_context, metadata, run_at, dedupe_key, priority, "group",
@@ -1374,6 +1449,7 @@ export class QueryBuilder {
 					case when ${cancelWithParent}::boolean then claimed_execution.id end,
 					${cancelWithParent}::boolean
 				from claimed_execution
+				where not exists (select from stored_step)
 				on conflict (task_key, dedupe_key, queue) do update set dedupe_key = excluded.dedupe_key
 				returning e.id
 			), saved_step as (
@@ -1382,6 +1458,8 @@ export class QueryBuilder {
 				from claimed_execution c, started_execution s
 				on conflict (execution_id, key) do nothing
 			)
+			select id from stored_step
+			union all
 			select id from started_execution
 		`;
 	}

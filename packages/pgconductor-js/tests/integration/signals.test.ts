@@ -9,7 +9,7 @@ import { TaskSchemas } from "../../src/schemas";
 import { Deferred } from "../../src/lib/deferred";
 import type { JsonValue } from "../../src/database-client";
 import { TestDatabasePool, type TestDatabase } from "../fixtures/test-database";
-import { waitForCondition } from "../test-utils";
+import { loseFirstResponse, waitForCondition } from "../test-utils";
 
 const sessionDefinition = defineTask({
 	name: "session",
@@ -524,6 +524,90 @@ describe("Signals", () => {
 		const signals = await db.sql`select id from pgconductor._private_execution_signals`;
 		expect(signals.map((s) => s.id)).toEqual(["s1"]);
 	});
+
+	// The started execution completes before the sender learns about it, so signaling the key again
+	// would start a second one
+	test.each([
+		{ name: "the client retries", code: "ECONNRESET" },
+		{ name: "the attempt fails", code: "XX000" },
+	])(
+		"ctx.signalWithStart returns the completed execution when its response is lost and $name",
+		async ({ code }) => {
+			const db = await pool.child();
+			databases.push(db);
+			const sessions = () =>
+				db.sql<{ id: string; completed: boolean }[]>`
+					select id, completed_at is not null as completed from pgconductor._private_executions
+					where task_key = 'session'
+				`;
+			const conductor = Conductor.create({
+				sql: loseFirstResponse(db.sql, "pgconductor.signal_with_start(", {
+					code,
+					beforeLoss: () =>
+						waitForCondition(async () => (await sessions()).some((s) => s.completed)),
+				}),
+				tasks,
+				context: {},
+				clock: db.clock,
+			});
+			const received: string[] = [];
+			const targets: string[] = [];
+			const session = conductor.createTask(
+				{ name: "session" },
+				{ invocable: true },
+				async (_event, ctx) => {
+					ctx.onSignal("input", (_payload, { id }) => {
+						received.push(id);
+					});
+				},
+			);
+			const sender = conductor.createTask(
+				{ name: "sender", queue: "senders", maxAttempts: 2 },
+				{ invocable: true },
+				async (_event, ctx) => {
+					targets.push(
+						await ctx.signalWithStart("start", {
+							task: "session",
+							key: "k",
+							signal: { name: "input", id: "s1" },
+						}),
+					);
+				},
+			);
+			await conductor.ensureInstalled();
+			const orchestrator = Orchestrator.create({
+				conductor,
+				tasks: [session],
+				defaultWorker: { pollIntervalMs: 20, flushIntervalMs: 20 },
+				workers: [
+					conductor.createWorker({
+						queue: "senders",
+						tasks: [sender],
+						config: { pollIntervalMs: 20, flushIntervalMs: 20 },
+					}),
+				],
+			});
+			cleanups.push(() => orchestrator.stop());
+
+			await db.clock.set(new Date("2024-01-01T12:00:00Z"));
+			await orchestrator.start();
+			const senderId = await conductor.invoke({ name: "sender", queue: "senders" }, { target: "" });
+			await waitForCondition(async () => {
+				const row = await executionRow(db, senderId);
+				if (row?.completed_at) return true;
+				// the failed attempt is retried after its backoff
+				if (!row?.locked_by) await db.clock.advance("1m");
+				return false;
+			});
+
+			const started = await sessions();
+			expect({ started: started.length, targets, received }).toEqual({
+				started: 1,
+				targets: [started[0]?.id],
+				received: ["s1"],
+			});
+		},
+	);
 
 	test("a stale claim neither reads nor acknowledges signals", async () => {
 		const db = await pool.child();

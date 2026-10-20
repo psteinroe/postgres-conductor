@@ -636,7 +636,9 @@ $function$;
 -- Inserts the next occurrence of the cron schedule of the claimed occurrence
 -- p_execution_id unless it was cancelled. Removing a schedule holds the queue
 -- row lock and cancels running occurrences, so a removal that commits first
--- leaves no successor and one that commits later sees and removes it.
+-- leaves no successor and one that commits later sees and removes it. The
+-- successor is stored as a step, so retries and later attempts of the
+-- occurrence insert it once, and an existing one is never superseded.
 create or replace function pgconductor._private_schedule_next_occurrence(
     p_execution_id uuid,
     p_queue text,
@@ -650,24 +652,40 @@ language plpgsql
 volatile
 set search_path to ''
 as $function$
+declare
+  v_next_id uuid;
 begin
   perform 1 from pgconductor._private_queues queue where queue.name = p_queue for share;
 
-  perform pgconductor.invoke(
-    p_task_key := execution.task_key,
-    p_queue := execution.queue,
-    p_run_at := p_run_at,
-    p_dedupe_key := p_dedupe_key,
-    p_cron_expression := execution.cron_expression,
-    p_group := execution."group",
-    p_metadata := execution.metadata
-  )
+  perform 1
   from pgconductor._private_executions execution
   where execution.id = p_execution_id
     and execution.queue = p_queue
     and execution.locked_by = p_orchestrator_id
     and execution.claim_token = p_claim_token
-    and not execution.cancelled;
+    and not execution.cancelled
+    and not exists (
+      select 1 from pgconductor._private_steps step
+      where step.execution_id = p_execution_id and step.key = 'pgconductor.next-occurrence'
+    )
+  for update of execution;
+
+  if not found then
+    return;
+  end if;
+
+  insert into pgconductor._private_executions as e (
+    task_key, queue, run_at, dedupe_key, cron_expression, "group", metadata
+  )
+  select execution.task_key, execution.queue, p_run_at, p_dedupe_key, execution.cron_expression,
+    execution."group", execution.metadata
+  from pgconductor._private_executions execution
+  where execution.id = p_execution_id and execution.queue = p_queue
+  on conflict (task_key, dedupe_key, queue) do update set dedupe_key = excluded.dedupe_key
+  returning e.id into v_next_id;
+
+  insert into pgconductor._private_steps (execution_id, queue, key, result)
+  values (p_execution_id, p_queue, 'pgconductor.next-occurrence', jsonb_build_object('id', v_next_id));
 end;
 $function$;
 

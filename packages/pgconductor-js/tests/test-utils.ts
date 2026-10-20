@@ -14,17 +14,23 @@ export async function waitForCondition(
 	}
 }
 
-// Runs the first statement containing `marker`, then fails it as if the
-// connection dropped after the commit but before the response arrived.
-export function loseFirstResponse(sql: Sql, marker: string): Sql {
+// Runs the first statement whose text or parameters contain `marker`, waits for `beforeLoss`,
+// then fails it as if the connection dropped after the commit but before the response arrived.
+// Another `code` fails it with an error the client does not retry.
+export function loseFirstResponse(
+	sql: Sql,
+	marker: string,
+	{ beforeLoss, code = "ECONNRESET" }: { beforeLoss?: () => Promise<void>; code?: string } = {},
+): Sql {
 	let lost = false;
 	return new Proxy(sql, {
 		apply(target, thisArg, args) {
 			const query = Reflect.apply(target, thisArg, args);
-			if (lost || !String(args[0]).includes(marker)) return query;
+			if (lost || !args.map(String).join().includes(marker)) return query;
 			lost = true;
-			return query.then(() => {
-				throw Object.assign(new Error("connection reset"), { code: "ECONNRESET" });
+			return query.then(async () => {
+				await beforeLoss?.();
+				throw Object.assign(new Error(`lost response (${code})`), { code });
 			});
 		},
 	});
