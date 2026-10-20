@@ -238,7 +238,7 @@ const executionId = await conductor.signalWithStart({
   queue: "default", // optional
   key: "thread-1",
   signal: { name: "input", id: requestId, payload },
-  input: {}, // used only when it starts an execution
+  input: {}, // used only when it starts an execution (default: {})
   priority: 0, // optional
   metadata: {}, // optional
 });
