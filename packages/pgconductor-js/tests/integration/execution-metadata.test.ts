@@ -161,6 +161,121 @@ describe("execution metadata (Postgres integration)", () => {
 		expect(seen).toEqual({ conductor: { tenant: "acme" }, ctx: { tenant: "globex" } });
 	});
 
+	test("ctx.signalWithStart and ctx.emit inherit metadata or take an override", async () => {
+		const db = await child();
+		const orderPlaced = defineEvent({
+			name: "order.placed",
+			payload: z.object({ source: z.string() }),
+		});
+		const conductor = Conductor.create({
+			sql: db.sql,
+			tasks: TaskSchemas.fromSchema([
+				defineTask({ name: "starter" }),
+				defineTask({ name: "session", payload: z.object({ label: z.string() }) }),
+			]),
+			events: [orderPlaced],
+			metadata: metadataSchema,
+			context: {},
+		});
+		const seen: Record<string, unknown> = {};
+		const errors: string[] = [];
+		const ids: string[] = [];
+		const session = conductor.createTask(
+			{ name: "session" },
+			{ invocable: true },
+			async (event, ctx) => {
+				seen[event.payload.label] = ctx.metadata;
+				if (event.payload.label === "inherited") {
+					await ctx.waitForAny("idle", { more: { signal: "more" } });
+				}
+			},
+		);
+		const listener = conductor.createTask(
+			{ name: "listener" },
+			{ event: "order.placed" },
+			async (event, ctx) => {
+				seen[`event-${event.payload.source}`] = ctx.metadata;
+			},
+		);
+		const starter = conductor.createTask(
+			{ name: "starter" },
+			{ invocable: true },
+			async (_e, ctx) => {
+				const start = (stepKey: string, key: string, options: object = {}) =>
+					ctx.signalWithStart(stepKey, {
+						task: "session",
+						key,
+						signal: { name: "more", id: stepKey },
+						input: { label: stepKey },
+						...options,
+					});
+				ids.push(await start("inherited", "a"));
+				await start("overridden", "b", { metadata: { tenant: "acme", replyTo: "thread-2" } });
+				await start("function", "c", {
+					metadata: (metadata: { tenant: string } | undefined) => ({
+						tenant: metadata?.tenant || "",
+						replyTo: "thread-3",
+					}),
+				});
+				// signals the running execution, which keeps its metadata
+				ids.push(await start("existing", "a", { metadata: { tenant: "other" } }));
+				await ctx.emit("order.placed", { source: "inherited" });
+				await ctx.emit(
+					"order.placed",
+					{ source: "function" },
+					{ metadata: (metadata) => ({ tenant: metadata?.tenant || "", replyTo: "thread-4" }) },
+				);
+				await start("invalid", "d", { metadata: { tenant: 1 } }).catch((err: Error) =>
+					errors.push(err.message),
+				);
+				await ctx
+					.emit("order.placed", { source: "invalid" }, { metadata: { tenant: 1 } as never })
+					.catch((err: Error) => errors.push(err.message));
+				seen.starter = ctx.metadata;
+			},
+		);
+		const orchestrator = Orchestrator.create({
+			conductor,
+			tasks: [starter, session, listener],
+			defaultWorker: { pollIntervalMs: 10, flushIntervalMs: 10 },
+		});
+
+		await orchestrator.start();
+		await conductor.invoke(
+			{ name: "starter" },
+			{},
+			{ metadata: { tenant: "acme", replyTo: "thread-1" } },
+		);
+		await waitForCondition(() => Object.keys(seen).length === 6);
+		await waitForCondition(async () => {
+			const [row] = await db.sql`
+				select 1 from pgconductor._private_executions
+				where key = 'a' and completed_at is not null
+			`;
+			return row !== undefined;
+		});
+		await orchestrator.stop();
+
+		const inherited = { tenant: "acme", replyTo: "thread-1" };
+		expect(seen).toEqual({
+			starter: inherited,
+			inherited,
+			overridden: { tenant: "acme", replyTo: "thread-2" },
+			function: { tenant: "acme", replyTo: "thread-3" },
+			"event-inherited": inherited,
+			"event-function": { tenant: "acme", replyTo: "thread-4" },
+		});
+		expect(ids[1]).toBe(ids[0]);
+		expect(errors).toHaveLength(2);
+		for (const error of errors) expect(error).toContain("Invalid metadata: tenant:");
+		const sessions = await db.sql<{ key: string; metadata: unknown }[]>`
+			select key, metadata from pgconductor._private_executions
+			where task_key = 'session' order by key
+		`;
+		expect(sessions.map((row) => row.key)).toEqual(["a", "b", "c"]);
+		expect(sessions[0]?.metadata).toEqual(inherited);
+	});
+
 	test("retries, resumes and dead-letter deliveries keep metadata", async () => {
 		const db = await child();
 		const conductor = Conductor.create({

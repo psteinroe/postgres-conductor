@@ -58,7 +58,8 @@ const handleMention = conductor.createTask(
 These executions inherit the metadata of the execution or event that created them:
 
 - Executions triggered by an event
-- Children created with `ctx.invokeAndWait()`
+- Children created with `ctx.invokeAndWait()` or `ctx.invoke()`
+- Executions started by `ctx.signalWithStart()`
 - Events emitted with `ctx.emit()`, and the executions they trigger
 - Cron executions scheduled with `ctx.schedule()`
 - Dead-letter deliveries
@@ -68,8 +69,9 @@ execution and keep its metadata. Cron schedules declared as task triggers have n
 
 ## Overriding Metadata for a Child
 
-Pass `metadata` to `ctx.invokeAndWait()` to replace the metadata of that child only. A function
-receives the current metadata:
+Pass `metadata` to `ctx.invokeAndWait()`, `ctx.invoke()`, `ctx.signalWithStart()` or `ctx.emit()`
+to replace the metadata of that child or event only. `ctx.signalWithStart()` applies it only when
+it starts the execution. A function receives the current metadata:
 
 ```typescript
 await ctx.invokeAndWait("reply", { name: "post-reply" }, payload, {

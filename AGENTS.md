@@ -225,6 +225,7 @@ Tables live in the `pgconductor` schema with a `_private_` prefix (`_private_exe
 - A parent is locked before its linked children: the cascade runs after the writes of the path that ended the parent
 - `cancel_execution()` and `_private_register_event_race()` lock their whole set at once with `_private_lock_executions()`: `for update nowait`, and when a row is busy, it waits for each row alone in a subtransaction it rolls back, then tries again. They never wait while holding part of the set, so its order does not matter. `cancel_execution()` includes the linked subtree of the rows it fails, so its calls for linked children find their locks held
 - Queue configuration: registration and `drop_queue()` lock queue rows in name order before tasks and subscriptions
+- A signal locks only the signalled execution: `_private_store_signal()` resolves its signal branches and wakes it under the row lock the sender holds
 
 **Cron Schedules**
 - A claimed occurrence inserts its successor before the handler runs, through `_private_schedule_next_occurrence()`: it takes a share lock on the queue row, then inserts only if the occurrence is still claimed and not cancelled
@@ -246,7 +247,7 @@ Tables live in the `pgconductor` schema with a `_private_` prefix (`_private_exe
 
 **Execution Metadata**
 - `metadata jsonb` on `_private_executions` follows the same paths as `trace_context`: event → triggered executions, parent → child, terminal failure → dead-letter delivery, cron occurrence → next occurrence
-- `TaskContext` passes its metadata explicitly to `ctx.invokeAndWait` children, `ctx.emit` and `ctx.schedule`
+- `TaskContext` passes its metadata explicitly to `ctx.invoke`, `ctx.invokeAndWait` and `ctx.signalWithStart` children, `ctx.emit` and `ctx.schedule`. All but `ctx.schedule` take a `metadata` override, resolved and validated by `childMetadata()`
 - `pgconductor._private_check_metadata()` enforces the 8 KB limit where metadata enters (`invoke()`, `emit_event()`, and `ctx.invokeAndWait` overrides before hang-up, so settlement never fails on size)
 
 **Custom Events**
@@ -275,6 +276,7 @@ Tables live in the `pgconductor` schema with a `_private_` prefix (`_private_exe
 - A delivery failure (a throwing `ctx.onSignal` handler or a failed acknowledgement) aborts the attempt as `signal-failed`, except after the worker signal aborted: stopping ends acknowledgement retries, so the handler keeps its slot and the attempt is released once it returns
 - Re-queues are unbounded by design: each needs a signal stored after the previous attempt started, which the next attempt receives at claim time, so an execution re-runs only while signals keep arriving
 - `key` on `_private_executions` with a partial unique index makes at most one non-terminal, non-cancelled execution per `(task_key, key, queue)`; `signal_with_start()` takes a transaction advisory lock on the key, then signals the existing execution or inserts one
+- Signals wake an execution only when it is suspended at a `ctx.waitForAny()` with a `{ signal: name }` branch for their name. Such a branch is an `execution_wait` subscription with `signal_name` set. `_private_register_event_race` resolves it at once with an undelivered signal of that name, or with the one whose handler is running (`SignalInbox.hold()` starts no handler from the `waitForAny()` call until the race registered, and passes the running one, so only signals handled before the call do not count); otherwise it subscribes. It holds the execution's row lock, as senders do, so `_private_store_signal()` sees the subscription of a signal stored later: it stores `{status: 'resolved', signal: {id, name}}` under the branch's step key if the subscription has not expired and wakes the execution if suspended at a wait. The branch does not consume the signal; handlers receive it as usual
 
 ### Task Configuration Options
 

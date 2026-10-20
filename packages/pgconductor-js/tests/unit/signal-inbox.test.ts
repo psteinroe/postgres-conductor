@@ -206,6 +206,32 @@ describe("SignalInbox", () => {
 		expect(s.acked).toEqual([]);
 	});
 
+	test("hold starts no handler and passes the signal whose handler is running", async () => {
+		const s = store();
+		s.add("input", "a");
+		s.add("input", "b");
+		const delivered: string[] = [];
+		const release = new Deferred<void>();
+		const inbox = new SignalInbox({ ack: s.ack, onError: () => {} });
+
+		inbox.listen("input", async (_payload, { id }) => {
+			delivered.push(id);
+			if (id === "a") await release.promise;
+		});
+		s.poll(inbox);
+		await flush();
+		await inbox.hold(async (delivering) => {
+			expect(delivering).toEqual({ id: "a", name: "input" });
+			release.resolve();
+			await flush();
+			expect(s.acked).toEqual(["a"]);
+			expect(delivered).toEqual(["a"]);
+		});
+		await inbox.close({ drain: true });
+
+		expect(delivered).toEqual(["a", "b"]);
+	});
+
 	test("rejects a second handler for a name", () => {
 		const inbox = new SignalInbox({ ack: async () => {}, onError: () => {} });
 		inbox.listen("input", () => {});

@@ -202,6 +202,7 @@ export type RegisterEventRaceArgs = {
 	timeoutMs: number | null;
 	orchestratorId: string;
 	claimToken: string;
+	deliveringSignalId: string | null;
 };
 
 export class QueryBuilder {
@@ -1473,6 +1474,7 @@ export class QueryBuilder {
 		timeoutMs,
 		orchestratorId,
 		claimToken,
+		deliveringSignalId,
 	}: RegisterEventRaceArgs): PendingQuery<{ result: EventRaceResult | null }[]> {
 		return this.sql<{ result: EventRaceResult | null }[]>`
 			select pgconductor._private_register_event_race(
@@ -1483,7 +1485,8 @@ export class QueryBuilder {
 				${claimToken}::uuid,
 				${stepKey}::text,
 				${this.sql.json(branches)}::jsonb,
-				${timeoutMs}::bigint
+				${timeoutMs}::bigint,
+				${deliveringSignalId}::text
 			) as result
 		`;
 	}

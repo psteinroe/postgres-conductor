@@ -29,6 +29,36 @@ const session = conductor.createTask(
 - Register listeners before the handler awaits anything. A signal reached while its name has no listener is skipped; if a listener for it registers later in the attempt, the execution is re-queued and the next attempt receives it
 - One listener per name and attempt. The handler re-runs from the top on every attempt, so register listeners again each time
 
+## Waiting for a Signal
+
+An execution that has nothing to do can suspend until its next signal instead of ending, with a `{ signal: name }` branch of [`ctx.waitForAny()`](../api/task-context.md#ctxwaitforany). It can wait for other branches, such as a tool execution, at the same time:
+
+```typescript
+const session = conductor.createTask(
+  { name: "session" },
+  { invocable: true },
+  async (event, ctx) => {
+    ctx.onSignal("input", (payload, { id }) => saveInput(id, payload));
+    const toolId = await ctx.invoke("start-tool", { name: "run-tool" }, event.payload);
+
+    for (let n = 0; ; n++) {
+      await processSavedInputs(ctx, n);
+      const winner = await ctx.waitForAny(
+        `idle:${n}`,
+        { input: { signal: "input" }, tool: { execution: toolId } },
+        { timeout: "1h" },
+      );
+      if (winner.key === "timeout") return;
+    }
+  },
+);
+```
+
+- The branch wins at once when the execution holds a signal with that name whose handler has not returned, including one stored before the wait. Otherwise the next signal with that name, from `conductor.signal()`, `ctx.sendSignal()` or `signalWithStart()`, wakes the execution
+- The wait does not consume the signal. The next attempt delivers it to `ctx.onSignal()` handlers as usual; `winner.signal` only holds its `id` and `name`
+- Signals for other names are kept and do not wake the execution
+- A signal stays undelivered until a handler for its name returns, so register a handler for every signal branch. Without one, the signal wins every later wait at once
+
 ## Sending Signals
 
 Signal a known execution:
@@ -74,7 +104,7 @@ const sessionId = await ctx.signalWithStart("start-session", {
 });
 ```
 
-`ctx.signalWithStart()` passes the metadata of the calling execution to an execution it starts.
+`ctx.signalWithStart()` passes the metadata of the calling execution to an execution it starts, unless its `metadata` option overrides it. `ctx.sendSignal()` starts nothing and takes no metadata.
 
 ## Delivery Guarantees
 
@@ -85,7 +115,7 @@ No signal is lost when the handler returns:
 - **Completion:** when the handler returns, the attempt first delivers the signals it has already read to their listeners. Settlement then checks, in the same transaction, for signals the attempt listens for but did not deliver, which are ones stored after the worker last read them. If there are any, the execution is not completed but re-queued, and the new attempt receives them when it starts. Its result is discarded and the re-run does not count as an attempt
 - **Signals with no listener:** a signal whose name the attempt never listened for does not re-queue it. The execution completes and the signal is not delivered
 - **Retries:** a failed attempt delivers its remaining signals to the next attempt
-- **Sleeping or waiting:** signals for an execution that sleeps, waits for a child or waits for an event are kept and delivered when its handler next runs. A signal does not wake it
+- **Sleeping or waiting:** signals for an execution that sleeps, waits for a child or waits for an event are kept and delivered when its handler next runs. A signal does not wake it, unless it waits in `ctx.waitForAny()` with a signal branch for its name
 - **Pending executions** receive their signals when they first run
 - **Cancellation and permanent failure:** undelivered signals are dropped. Signalling a cancelled execution returns `false`
 

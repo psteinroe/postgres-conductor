@@ -9,6 +9,7 @@ import {
 	WaitForEventTimeoutError,
 	type EventSubscription,
 	type ExecutionOutcome,
+	type SignalInfo,
 } from "../../src/index";
 
 describe("waitForEvent API", () => {
@@ -101,6 +102,13 @@ describe("waitForEvent API", () => {
 				}),
 			).toEqualTypeOf<
 				{ key: "tool"; outcome: ExecutionOutcome<{ doubled: number }> } | { key: "timeout" }
+			>();
+			expectTypeOf(
+				await ctx.waitForAny("idle", { input: { signal: "input" }, tool: { execution: "id" } }),
+			).toEqualTypeOf<
+				| { key: "input"; signal: SignalInfo }
+				| { key: "tool"; outcome: ExecutionOutcome }
+				| { key: "timeout" }
 			>();
 			expectTypeOf(ctx.executionId).toEqualTypeOf<string>();
 			expectTypeOf(ctx.queue).toEqualTypeOf<string>();

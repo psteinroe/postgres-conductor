@@ -20,6 +20,7 @@ export type {
 	BatchTaskEvent,
 	EventSubscription,
 	ExecutionBranch,
+	SignalBranch,
 	SignalMessage,
 	WaitForAnyResult,
 } from "./task-context.js";
