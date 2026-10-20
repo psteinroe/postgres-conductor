@@ -321,7 +321,7 @@ describe("dead-letter queues (Postgres integration)", () => {
 			select failed_at, cancelled from pgconductor._private_executions where id = ${id}::uuid
 		`;
 		expect(rows[0]?.failed_at).not.toBeNull();
-		expect(rows[0]?.cancelled).toBe(false);
+		expect(rows[0]?.cancelled).toBe(true);
 		const destinationRows = await db.sql<{ count: string }[]>`
 			select count(*)::text as count from pgconductor._private_executions where queue = 'dlq'
 		`;

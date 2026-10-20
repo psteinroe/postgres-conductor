@@ -155,6 +155,18 @@ describe("Execution results", () => {
 		});
 	}, 30000);
 
+	test("getExecution returns a cancelled pending execution", async () => {
+		const { conductor } = await setup();
+
+		const id = await conductor.invoke({ name: "slow" }, {});
+		await conductor.cancel(id, { reason: "no longer needed" });
+
+		expect(await conductor.getExecution(id)).toMatchObject({
+			status: "cancelled",
+			error: "no longer needed",
+		});
+	});
+
 	test("getExecution returns null for unknown and removed executions", async () => {
 		const { conductor, orchestrator } = await setup({ removeOnComplete: true });
 

@@ -1017,6 +1017,7 @@ begin
     select e.id, e.queue,
       case when e.id = any(v_ancestor_ids) then 'Child execution failed: ' || p_reason
         else p_reason end as error,
+      e.id = any(v_ancestor_ids) is not true as cancelled,
       t.remove_on_fail_days = 0 as should_remove
     from pgconductor._private_executions e
     left join pgconductor._private_tasks t on t.key = e.task_key and t.queue = e.queue
@@ -1035,6 +1036,7 @@ begin
     set
       failed_at = pgconductor._private_current_time(),
       last_error = p.error,
+      cancelled = p.cancelled,
       waiting_on_execution_id = null,
       waiting_step_key = null
     from pending p
