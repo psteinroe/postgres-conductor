@@ -104,7 +104,7 @@ const sessionId = await ctx.signalWithStart("start-session", {
 });
 ```
 
-`ctx.signalWithStart()` passes the metadata of the calling execution to an execution it starts.
+`ctx.signalWithStart()` passes the metadata of the calling execution to an execution it starts, unless its `metadata` option overrides it. `ctx.sendSignal()` starts nothing and takes no metadata.
 
 ## Delivery Guarantees
 

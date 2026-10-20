@@ -241,9 +241,16 @@ Emit a typed custom event from a task:
 const eventId = await ctx.emit(
   "event-name",
   { /* event payload */ },
-  options?: { dedupe_key?: string }
+  options?: {
+    dedupe_key?: string,
+    metadata?: Metadata | ((metadata: Metadata | undefined) => Metadata),
+  }
 );
 ```
+
+The event, and the executions it triggers, inherit `ctx.metadata` unless `metadata` overrides it
+for this event. A function receives the current metadata; the result is validated against the
+Conductor's `metadata` schema.
 
 Emits are not memoized, so a retried attempt emits again. Pass a `dedupe_key` derived from the
 execution's input to emit once across attempts: repeating it for the same event name emits nothing
@@ -414,7 +421,7 @@ ctx.onSignal("input", async (payload, { id, name }) => {
 
 ## ctx.sendSignal()
 
-Send a signal to an execution. Idempotent by signal id. Returns `false` if the execution is completed, failed, cancelled or unknown.
+Send a signal to an execution. Idempotent by signal id. Returns `false` if the execution is completed, failed, cancelled or unknown. It starts nothing, so it takes no `metadata`.
 
 ```typescript
 await ctx.sendSignal(executionId, { name: "input", id: "report-1", payload });
@@ -422,13 +429,14 @@ await ctx.sendSignal(executionId, { name: "input", id: "report-1", payload });
 
 ## ctx.signalWithStart()
 
-Like `conductor.signalWithStart()`. Sends the signal and memoizes the execution ID under the step key in one statement, so retries and resumes return that ID, also after the execution completed. An execution it starts inherits this execution's metadata.
+Like `conductor.signalWithStart()`. Sends the signal and memoizes the execution ID under the step key in one statement, so retries and resumes return that ID, also after the execution completed. An execution it starts inherits this execution's metadata unless `metadata` overrides it, as for `ctx.invoke()`. `metadata` applies only when the call starts the execution: a running one keeps its metadata.
 
 ```typescript
 const sessionId = await ctx.signalWithStart("start-session", {
   task: "session",
   key: threadKey,
   signal: { name: "input", id: messageId, payload },
+  metadata: (metadata) => ({ ...metadata, replyTo: threadKey }), // optional
 });
 ```
 

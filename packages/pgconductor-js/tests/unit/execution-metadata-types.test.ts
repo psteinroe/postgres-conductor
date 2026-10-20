@@ -46,6 +46,14 @@ describe("execution metadata types", () => {
 			expectTypeOf(
 				await ctx.invoke("start", { name: "worker" }, {}, { metadata: { tenant: "acme" } }),
 			).toEqualTypeOf<string>();
+			const signal = { name: "input", id: "1" };
+			await ctx.signalWithStart("session", {
+				task: "worker",
+				key: "k",
+				signal,
+				metadata: (metadata) => ({ tenant: metadata?.tenant || "acme" }),
+			});
+			await ctx.emit("ping", {}, { metadata: { tenant: "acme" } });
 
 			if (false) {
 				// @ts-expect-error - metadata is readonly
@@ -54,6 +62,10 @@ describe("execution metadata types", () => {
 				await ctx.invokeAndWait("child", { name: "worker" }, {}, { metadata: { tenant: 1 } });
 				// @ts-expect-error - wrong metadata shape
 				await ctx.invoke("start", { name: "worker" }, {}, { metadata: { tenant: 1 } });
+				// @ts-expect-error - wrong metadata shape
+				await ctx.signalWithStart("session", { task: "worker", key: "k", signal, metadata: {} });
+				// @ts-expect-error - wrong metadata shape
+				await ctx.emit("ping", {}, { metadata: { tenant: 1 } });
 			}
 		});
 

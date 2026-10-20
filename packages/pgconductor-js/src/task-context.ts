@@ -755,9 +755,15 @@ export class TaskContext<
 			/** Payload of the execution, used only when it starts one */
 			input?: InferPayload<TDef>;
 			priority?: number;
+			/**
+			 * Metadata of the execution, used only when it starts one. Defaults to the metadata of
+			 * this execution.
+			 */
+			metadata?: Metadata | ((metadata: Readonly<Metadata> | undefined) => Metadata);
 		},
 	): Promise<string> {
 		await this.checkpoint();
+		const metadata = await this.childMetadata(options.metadata);
 
 		const id = await this.opts.db.signalWithStartStep(
 			{
@@ -774,7 +780,7 @@ export class TaskContext<
 					input: (options.input || {}) as Payload,
 					priority: options.priority,
 					traceContext: this.opts.telemetry.traceContext(),
-					metadata: this.opts.execution.metadata,
+					metadata,
 				},
 			},
 			{ signal: this.signal },
@@ -787,6 +793,7 @@ export class TaskContext<
 	 * @param event - Event name to emit
 	 * @param payload - Typed event payload
 	 * @param opts.dedupe_key - Repeating a key for the same event name emits nothing and returns the original event ID
+	 * @param opts.metadata - Metadata of the event, passed to the executions it triggers. Defaults to the metadata of this execution
 	 * @returns Event ID
 	 */
 	async emit<
@@ -795,15 +802,19 @@ export class TaskContext<
 	>(
 		event: TName,
 		payload: InferEventPayload<TDef>,
-		opts?: { dedupe_key?: string },
+		opts?: {
+			dedupe_key?: string;
+			metadata?: Metadata | ((metadata: Readonly<Metadata> | undefined) => Metadata);
+		},
 	): Promise<string> {
 		payload = await validateEventPayload(this.opts.eventDefinitions, event, payload);
+		const metadata = await this.childMetadata(opts?.metadata);
 		return this.opts.db.emitEvent(
 			{
 				eventKey: event,
 				payload: payload as any,
 				traceContext: this.opts.telemetry.traceContext(),
-				metadata: this.opts.execution.metadata,
+				metadata,
 				dedupeKey: opts?.dedupe_key,
 			},
 			{ signal: this.signal },
