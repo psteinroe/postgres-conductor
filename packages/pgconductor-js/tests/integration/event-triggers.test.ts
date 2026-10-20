@@ -4,7 +4,7 @@ import { Conductor } from "../../src/conductor";
 import { Orchestrator } from "../../src/orchestrator";
 import { defineTask } from "../../src/task-definition";
 import { defineEvent } from "../../src/event-definition";
-import { TaskSchemas, EventSchemas } from "../../src/schemas";
+import { TaskSchemas } from "../../src/schemas";
 import { TestDatabasePool } from "../fixtures/test-database";
 import type { TestDatabase } from "../fixtures/test-database";
 import { waitForCondition } from "../test-utils";
@@ -49,7 +49,7 @@ describe("Event Triggers - Custom Events", () => {
 		const conductor = Conductor.create({
 			sql: db.sql,
 			tasks: TaskSchemas.fromSchema([taskDef]),
-			events: EventSchemas.fromSchema([userCreated]),
+			events: [userCreated],
 			context: {},
 		});
 
@@ -95,7 +95,7 @@ describe("Event Triggers - Custom Events", () => {
 		const conductor = Conductor.create({
 			sql: db.sql,
 			tasks: TaskSchemas.fromSchema([taskDef]),
-			events: EventSchemas.fromSchema([userCreated]),
+			events: [userCreated],
 			context: {},
 		});
 
@@ -160,7 +160,7 @@ describe("Event Triggers - Custom Events", () => {
 		const conductor = Conductor.create({
 			sql: db.sql,
 			tasks: TaskSchemas.fromSchema([taskDef]),
-			events: EventSchemas.fromSchema([orderPlaced]),
+			events: [orderPlaced],
 			context: {},
 		});
 
@@ -217,7 +217,7 @@ describe("Event Triggers - Custom Events", () => {
 		const conductor = Conductor.create({
 			sql: db.sql,
 			tasks: TaskSchemas.fromSchema([taskDef1, taskDef2]),
-			events: EventSchemas.fromSchema([userCreated]),
+			events: [userCreated],
 			context: {},
 		});
 
@@ -292,7 +292,7 @@ describe("Event Triggers - Custom Events", () => {
 		const conductor = Conductor.create({
 			sql: db.sql,
 			tasks: TaskSchemas.fromSchema([taskDef]),
-			events: EventSchemas.fromSchema([contactCreated]),
+			events: [contactCreated],
 			context: {},
 		});
 		const task = conductor.createTask(

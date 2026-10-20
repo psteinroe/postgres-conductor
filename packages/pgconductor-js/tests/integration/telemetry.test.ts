@@ -20,7 +20,7 @@ import type { Sql } from "postgres";
 import { z } from "zod";
 import { Conductor } from "../../src/conductor";
 import { defineEvent } from "../../src/event-definition";
-import { EventSchemas, TaskSchemas } from "../../src/schemas";
+import { TaskSchemas } from "../../src/schemas";
 import { Orchestrator } from "../../src/orchestrator";
 import { Task } from "../../src/task";
 import { Worker } from "../../src/worker";
@@ -187,9 +187,7 @@ describe("OpenTelemetry instrumentation", () => {
 		const { client: db, sql } = await createDb();
 		const conductor = Conductor.create({
 			sql,
-			events: EventSchemas.fromSchema([
-				defineEvent({ name: "disabled.event", payload: z.object({}) }),
-			]),
+			events: [defineEvent({ name: "disabled.event", payload: z.object({}) })],
 			context: {},
 			telemetry: false,
 		});
@@ -490,9 +488,7 @@ describe("trace propagation across internal executions", () => {
 		const conductor = Conductor.create({
 			sql: db.sql,
 			tasks: TaskSchemas.fromSchema([defineTask({ name: "trace-on-event" })]),
-			events: EventSchemas.fromSchema([
-				defineEvent({ name: "trace.event", payload: z.object({}) }),
-			]),
+			events: [defineEvent({ name: "trace.event", payload: z.object({}) })],
 			context: {},
 		});
 		const destination = conductor.createTask(

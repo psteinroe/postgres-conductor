@@ -14,7 +14,7 @@ import { z } from "zod";
 const conductor = Conductor.create({
   sql,
   tasks: TaskSchemas.fromSchema([handleMention, postReply]),
-  events: EventSchemas.fromSchema([mentioned]),
+  events: [mentioned],
   metadata: z.object({ tenant: z.string(), replyTo: z.string().optional() }),
   context: {},
 });

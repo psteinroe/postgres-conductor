@@ -2,7 +2,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, test } from "vitest";
 import { z } from "zod";
 import { Conductor } from "../../src/conductor";
 import { Orchestrator } from "../../src/orchestrator";
-import { EventSchemas, TaskSchemas } from "../../src/schemas";
+import { TaskSchemas } from "../../src/schemas";
 import { defineTask } from "../../src/task-definition";
 import { defineEvent } from "../../src/event-definition";
 import { TestDatabasePool, type TestDatabase } from "../fixtures/test-database";
@@ -127,7 +127,7 @@ describe("execution metadata (Postgres integration)", () => {
 		const conductor = Conductor.create({
 			sql: db.sql,
 			tasks: TaskSchemas.fromSchema([defineTask({ name: "emitter" })]),
-			events: EventSchemas.fromSchema([orderPlaced]),
+			events: [orderPlaced],
 			metadata: metadataSchema,
 			context: {},
 		});
@@ -267,7 +267,7 @@ describe("execution metadata (Postgres integration)", () => {
 		const conductor = Conductor.create({
 			sql: db.sql,
 			tasks: TaskSchemas.fromSchema([defineTask({ name: "noop" })]),
-			events: EventSchemas.fromSchema([defineEvent({ name: "ping", payload: z.object({}) })]),
+			events: [defineEvent({ name: "ping", payload: z.object({}) })],
 			metadata: z.object({ tenant: z.string() }).passthrough(),
 			context: {},
 		});

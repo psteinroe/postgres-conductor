@@ -74,7 +74,7 @@ const task = conductor.createTask(
 ## ctx.waitForEvent()
 
 Wait durably for the next matching custom event. The event must belong to the Conductor's
-runtime `EventSchemas` catalog. Filters use the same typed operators and matching semantics as
+runtime `events` catalog. Filters use the same typed operators and matching semantics as
 event-triggered tasks. The subscription is persisted before the worker is released, so a restart
 does not lose the wait.
 

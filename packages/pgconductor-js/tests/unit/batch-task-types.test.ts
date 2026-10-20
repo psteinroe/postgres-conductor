@@ -3,7 +3,7 @@ import { expectTypeOf } from "expect-type";
 import { Conductor } from "../../src/conductor";
 import { defineTask } from "../../src/task-definition";
 // import { defineEvent } from "../../src/event-definition";
-import { TaskSchemas /*, EventSchemas */ } from "../../src/schemas";
+import { TaskSchemas } from "../../src/schemas";
 import { z } from "zod";
 import type { BatchTaskContext, BatchTaskEvent } from "../../src/task-context";
 
@@ -150,7 +150,7 @@ describe("batch task types", () => {
 	// 	const conductor = Conductor.create({
 	// 		sql: {} as any,
 	// 		tasks: TaskSchemas.fromSchema([taskDef]),
-	// 		events: EventSchemas.fromSchema([orderPlaced]),
+	// 		events: [orderPlaced],
 	// 		context: {},
 	// 	});
 
@@ -229,7 +229,7 @@ describe("batch task types", () => {
 	// 	const conductor = Conductor.create({
 	// 		sql: {} as any,
 	// 		tasks: TaskSchemas.fromSchema([taskDef]),
-	// 		events: EventSchemas.fromSchema([userCreated, userDeleted]),
+	// 		events: [userCreated, userDeleted],
 	// 		context: {},
 	// 	});
 

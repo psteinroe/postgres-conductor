@@ -57,9 +57,7 @@ export class TaskSchemas<
 
 /**
  * Stackable adapter for standard-schema based event definitions.
- *
- * @example
- * EventSchemas.fromSchema([orderPlaced]).fromSchema([userDeleted])
+ * Kept for compatibility: `Conductor.create` accepts the event definitions array directly.
  */
 export class EventSchemas<
 	TSchemaTypes extends readonly EventDefinition<string, any, any>[] = readonly [],
@@ -68,6 +66,8 @@ export class EventSchemas<
 
 	/**
 	 * Create EventSchemas from standard-schema based event definitions.
+	 *
+	 * @deprecated Pass the event definitions directly: `events: [orderPlaced]`.
 	 */
 	static fromSchema<const T extends readonly EventDefinition<string, any, any>[]>(
 		events: T,
@@ -77,6 +77,8 @@ export class EventSchemas<
 
 	/**
 	 * Chain: Add more standard-schema based event definitions.
+	 *
+	 * @deprecated Pass the event definitions directly: `events: [orderPlaced, userDeleted]`.
 	 */
 	fromSchema<const T extends readonly EventDefinition<string, any, any>[]>(
 		events: T,
@@ -93,5 +95,11 @@ export type InferTasksFromSchema<T> =
 			: readonly [...TSchema, TUnion]
 		: readonly [];
 
+export type EventCatalog = readonly EventDefinition<string, any, any>[] | EventSchemas<any>;
+
 export type InferEventsFromSchema<T> =
-	T extends EventSchemas<infer TSchema> ? TSchema : readonly [];
+	T extends EventSchemas<infer TSchema>
+		? TSchema
+		: T extends readonly EventDefinition<string, any, any>[]
+			? T
+			: readonly [];

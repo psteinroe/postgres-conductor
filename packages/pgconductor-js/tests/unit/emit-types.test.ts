@@ -3,7 +3,7 @@ import { expectTypeOf } from "expect-type";
 import { Conductor } from "../../src/conductor";
 import { defineTask } from "../../src/task-definition";
 import { defineEvent } from "../../src/event-definition";
-import { TaskSchemas, EventSchemas } from "../../src/schemas";
+import { TaskSchemas } from "../../src/schemas";
 import { z } from "zod";
 
 // Mock SQL instance for type-only tests
@@ -27,7 +27,7 @@ describe("emit method types", () => {
 		const conductor = Conductor.create({
 			sql: mockSql,
 			tasks: TaskSchemas.fromSchema([]),
-			events: EventSchemas.fromSchema([userCreated, orderPlaced]),
+			events: [userCreated, orderPlaced],
 			context: {},
 		});
 
@@ -64,7 +64,7 @@ describe("emit method types", () => {
 		const conductor = Conductor.create({
 			sql: mockSql,
 			tasks: TaskSchemas.fromSchema([taskDef]),
-			events: EventSchemas.fromSchema([userCreated]),
+			events: [userCreated],
 			context: {},
 		});
 
