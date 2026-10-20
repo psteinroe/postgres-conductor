@@ -320,7 +320,7 @@ describe("Step Support", () => {
 		await db.client.invoke({ task_key: "reclaimed-task", queue: "default" });
 		const execution = (
 			await db.client.getExecutions({
-				orchestratorId: crypto.randomUUID(),
+				orchestratorId: await db.registerOrchestrator(),
 				queueName: "default",
 				batchSize: 1,
 				taskKeys: ["reclaimed-task"],

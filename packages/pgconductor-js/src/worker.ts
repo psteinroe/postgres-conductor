@@ -108,8 +108,8 @@ export class Worker<
 		string,
 		{ controller: TypedAbortController<TaskAbortReasons>; claimToken: string; inbox: SignalInbox }
 	>();
-	// Claimed and not yet settled, including results buffered for flush
-	private readonly held = new Set<string>();
+	// Claim token of each execution claimed and not yet settled, including results buffered for flush
+	private readonly held = new Map<string, string>();
 
 	constructor(
 		public readonly queueName: string,
@@ -148,10 +148,6 @@ export class Worker<
 			logger: this.logger,
 			localClock: clock && (() => clock.now()),
 		});
-	}
-
-	get heldExecutionIds(): string[] {
-		return [...this.held];
 	}
 
 	/**
@@ -370,6 +366,7 @@ export class Worker<
 				batchSize,
 				taskKeys,
 				running,
+				held: [...this.held.keys()],
 			});
 			for (const id of cancelled) {
 				this._running
@@ -377,7 +374,7 @@ export class Worker<
 					?.controller.abort({ reason: "cancelled", __pgconductorTaskAborted: true });
 			}
 			for (const stored of signals) this._running.get(stored.execution_id)?.inbox.push(stored);
-			for (const exec of executions) this.held.add(exec.id);
+			for (const exec of executions) this.held.set(exec.id, exec.claim_token);
 			return executions;
 		};
 
@@ -639,7 +636,7 @@ export class Worker<
 							error: output.error,
 						} as const;
 					case "suspended":
-						this.held.delete(exec.id);
+						this.release(exec.id, exec.claim_token);
 						return [];
 					case "released":
 						return {
@@ -883,7 +880,7 @@ export class Worker<
 					run: () => this.db.returnExecutions({ orchestratorId, results }, { signal: this.signal }),
 				});
 				for (const result of results) {
-					this.held.delete(result.execution_id);
+					this.release(result.execution_id, result.claim_token);
 				}
 			} catch (err) {
 				this.logger.error("Error flushing results:", err);
@@ -918,6 +915,11 @@ export class Worker<
 			await timerFlush;
 			await flushNow(true);
 		}
+	}
+
+	// A newer claim of the same execution stays held
+	private release(executionId: string, claimToken: string): void {
+		if (this.held.get(executionId) === claimToken) this.held.delete(executionId);
 	}
 
 	private get abortController(): AbortController {

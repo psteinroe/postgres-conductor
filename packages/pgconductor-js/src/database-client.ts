@@ -4,6 +4,7 @@ import type { Migration } from "./migration-store.js";
 import {
 	QueryBuilder,
 	type OrchestratorHeartbeatArgs,
+	type RegisterOrchestratorArgs,
 	type RecoverStaleOrchestratorsArgs,
 	type SweepOrchestratorsArgs,
 	type OrchestratorShutdownArgs,
@@ -386,21 +387,27 @@ export class DatabaseClient {
 		return RETRYABLE_SQLSTATE_CODES.has(code) || RETRYABLE_SYSTEM_ERROR_CODES.has(code);
 	}
 
+	async registerOrchestrator(
+		args: RegisterOrchestratorArgs,
+		opts?: QueryMethodOptions,
+	): Promise<{ shutdown_reason: string | null }> {
+		const [row] = await this.query(() => this.builder.buildRegisterOrchestrator(args), {
+			label: "registerOrchestrator",
+			...opts,
+		});
+		return row;
+	}
+
+	/** Returns undefined once the orchestrator was recovered as stale */
 	async orchestratorHeartbeat(
 		args: OrchestratorHeartbeatArgs,
 		opts?: QueryMethodOptions,
-	): Promise<
-		{
-			registered: boolean;
-			signal_type: string | null;
-			signal_execution_id: string | null;
-			signal_payload: Record<string, any> | null;
-		}[]
-	> {
-		return this.query(() => this.builder.buildOrchestratorHeartbeat(args), {
+	): Promise<{ shutdown_reason: string | null } | undefined> {
+		const [row] = await this.query(() => this.builder.buildOrchestratorHeartbeat(args), {
 			label: "orchestratorHeartbeat",
 			...opts,
 		});
+		return row;
 	}
 
 	async ackSignals(args: AckSignalsArgs, opts?: QueryMethodOptions): Promise<void> {
@@ -573,7 +580,8 @@ export class DatabaseClient {
 			});
 		} catch (err) {
 			const pgErr = err as { code?: string };
-			if (pgErr?.code === "42P01") {
+			// Not installed yet
+			if (pgErr?.code === "3F000" || pgErr?.code === "42883") {
 				return;
 			}
 			throw err;

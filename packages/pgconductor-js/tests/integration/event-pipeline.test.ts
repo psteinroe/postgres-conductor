@@ -77,18 +77,19 @@ describe("event pipeline", () => {
 	async function claimEvent(
 		db: TestDatabase,
 		eventId: string,
-		orchestratorId = crypto.randomUUID(),
+		orchestratorId?: string,
 	): Promise<string> {
+		const owner = orchestratorId || (await db.registerOrchestrator());
 		const claimed = (
 			await db.client.getExecutions({
-				orchestratorId,
+				orchestratorId: owner,
 				queueName: INTERNAL_QUEUE,
 				batchSize: 10,
 				taskKeys: [DISPATCH_TASK],
 			})
 		).executions;
 		expect(claimed.some((execution) => execution.id === eventId)).toBe(true);
-		return orchestratorId;
+		return owner;
 	}
 
 	async function blocked(db: TestDatabase): Promise<boolean> {
@@ -1216,7 +1217,7 @@ describe("event pipeline", () => {
 		});
 		const waiterId = await db.client.invoke({ task_key: "pipeline.waiter", queue: "default" });
 		if (!waiterId) throw new Error("invoke did not return an execution id");
-		const waiterOwner = crypto.randomUUID();
+		const waiterOwner = await db.registerOrchestrator();
 		const [waiter] = (
 			await db.client.getExecutions({
 				orchestratorId: waiterOwner,
@@ -1285,7 +1286,7 @@ describe("event pipeline", () => {
 		const eventId = await db.client.emitEvent({ eventKey: "pipeline.independent", payload: {} });
 		const sourceOwner = await claimEvent(db, eventId);
 		await db.client.dispatchCustomEvents({ eventIds: [eventId], orchestratorId: sourceOwner });
-		const destinationOwner = crypto.randomUUID();
+		const destinationOwner = await db.registerOrchestrator();
 		const [failedDestination] = (
 			await db.client.getExecutions({
 				orchestratorId: destinationOwner,
@@ -1319,12 +1320,12 @@ describe("event pipeline", () => {
 			eventKey: "pipeline.independent",
 			payload: {},
 		});
-		const secondSourceOwner = await claimEvent(db, completedEventId, crypto.randomUUID());
+		const secondSourceOwner = await claimEvent(db, completedEventId);
 		await db.client.dispatchCustomEvents({
 			eventIds: [completedEventId],
 			orchestratorId: secondSourceOwner,
 		});
-		const completionOwner = crypto.randomUUID();
+		const completionOwner = await db.registerOrchestrator();
 		const [completedDestination] = (
 			await db.client.getExecutions({
 				orchestratorId: completionOwner,
@@ -1410,7 +1411,7 @@ describe("event pipeline", () => {
 			new DatabaseClient({ sql, logger: new DefaultLogger() }),
 		];
 		try {
-			const owners = [crypto.randomUUID(), crypto.randomUUID()];
+			const owners = [await db.registerOrchestrator(), await db.registerOrchestrator()];
 			const claims = await Promise.all(
 				clients.map((client, index) =>
 					client.getExecutions({

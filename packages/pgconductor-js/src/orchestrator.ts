@@ -214,7 +214,7 @@ export class Orchestrator {
 					throw new Error("Could not acquire migration lock");
 				}
 
-				const signals = await this.db.orchestratorHeartbeat(
+				const { shutdown_reason } = await this.db.registerOrchestrator(
 					{
 						orchestratorId: this.orchestratorId,
 						version: PACKAGE_VERSION,
@@ -223,9 +223,8 @@ export class Orchestrator {
 					{ signal: this.signal },
 				);
 
-				// Check for shutdown signal on startup
-				if (signals.some((s) => s.signal_type === "shutdown")) {
-					throw new Error("Received shutdown signal during startup");
+				if (shutdown_reason) {
+					throw new Error(`Received shutdown signal during startup: ${shutdown_reason}`);
 				}
 
 				this.heartbeatController = new AbortController();
@@ -318,9 +317,8 @@ export class Orchestrator {
 	/**
 	 * Run the heartbeat loop until cleanup stops it, so the orchestrator stays live while workers drain:
 	 * - Updates last_heartbeat_at every heartbeat
-	 * - Checks for version mismatch shutdowns from database
+	 * - Stops when the database asks for a shutdown, such as for a newer migration
 	 * - Stops when another orchestrator recovered us as stale
-	 * - Releases claims the workers do not hold, such as a claim whose response was lost
 	 * - Recovers stale orchestrators periodically (every 8th heartbeat)
 	 */
 	private async runHeartbeats(signal: AbortSignal): Promise<void> {
@@ -338,39 +336,20 @@ export class Orchestrator {
 					);
 				}
 
-				// Send heartbeat and process signals. Without a signal it is not retried: a retry would
-				// release claims made after the held executions were collected.
-				const signals = await this.db.orchestratorHeartbeat({
+				const heartbeat = await this.db.orchestratorHeartbeat({
 					orchestratorId: this.orchestratorId,
-					version: PACKAGE_VERSION,
-					migrationNumber: this.migrationStore.getLatestMigrationNumber(),
-					held: {
-						executionIds: this.workers.flatMap((worker) => worker.heldExecutionIds),
-						claimGrace: `${HEARTBEAT_INTERVAL_MS} milliseconds`,
-					},
 				});
 
-				// Our row was gone, so another orchestrator recovered our executions
-				if (signals.some((s) => s.registered)) {
+				// Our row is gone, so another orchestrator recovered our executions
+				if (!heartbeat) {
 					this.logger.warn("Orchestrator was recovered as stale, shutting down");
 					this.abortController.abort();
 					return;
 				}
 
-				// Process signals in order
-				for (const signal of signals) {
-					if (!signal.signal_type) continue;
-
-					switch (signal.signal_type) {
-						case "shutdown":
-							if (!this.isShuttingDown) {
-								this.logger.info(
-									`Received shutdown signal: ${signal.signal_payload?.reason || "unknown"}`,
-								);
-								this.abortController.abort();
-							}
-							break;
-					}
+				if (heartbeat.shutdown_reason && !this.isShuttingDown) {
+					this.logger.info(`Received shutdown signal: ${heartbeat.shutdown_reason}`);
+					this.abortController.abort();
 				}
 			} catch (err) {
 				this.logger.error("Heartbeat error:", err);

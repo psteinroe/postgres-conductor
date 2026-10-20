@@ -16,11 +16,14 @@ import type {
 	TaskSpec,
 } from "./database-client.js";
 
-export type OrchestratorHeartbeatArgs = {
+export type RegisterOrchestratorArgs = {
 	orchestratorId: string;
 	version: string;
 	migrationNumber: number;
-	held?: { executionIds: string[]; claimGrace: string };
+};
+
+export type OrchestratorHeartbeatArgs = {
+	orchestratorId: string;
 };
 
 export type RecoverStaleOrchestratorsArgs = {
@@ -46,6 +49,8 @@ export type GetExecutionsArgs = {
 	taskKeys: string[];
 	/** Running executions, to read their cancellation and signals stored after `after_seq` */
 	running?: { execution_id: string; claim_token: string; after_seq: number | null }[];
+	/** Executions the worker holds; its other claims in the queue are released */
+	held?: string[];
 };
 
 export type RemoveExecutionsArgs = {
@@ -193,94 +198,47 @@ export type RegisterEventRaceArgs = {
 export class QueryBuilder {
 	constructor(private readonly sql: Sql) {}
 
-	buildOrchestratorHeartbeat({
+	buildRegisterOrchestrator({
 		orchestratorId,
 		version,
 		migrationNumber,
-		held,
-	}: OrchestratorHeartbeatArgs): PendingQuery<
-		{
-			registered: boolean;
-			signal_type: string | null;
-			signal_execution_id: string | null;
-			signal_payload: Record<string, any> | null;
-		}[]
-	> {
-		return this.sql<
-			{
-				registered: boolean;
-				signal_type: string | null;
-				signal_execution_id: string | null;
-				signal_payload: Record<string, any> | null;
-			}[]
-		>`
-			with latest as (
-				select coalesce(max(version), -1) as db_version
-				from pgconductor.schema_migrations
-			),
-			-- Insert/update orchestrator record
-			upserted_orchestrator as (
-				insert into pgconductor._private_orchestrators as o (
-					id,
-					version,
-					migration_number,
-					last_heartbeat_at
-				)
-				select
-					${orchestratorId}::uuid,
-					${version}::text,
-					${migrationNumber}::integer,
-					pgconductor._private_current_time()
-				on conflict (id)
-				do update
-				set
-					last_heartbeat_at = pgconductor._private_current_time(),
-					version = excluded.version,
-					migration_number = excluded.migration_number
-				-- xmax = 0 when the row was inserted rather than updated
-				returning (xmax = 0) as registered
-			),
-			${
-				held
-					? this.sql`
-			-- Release claims the workers do not hold, such as a claim whose response was lost. The
-			-- grace keeps claims whose response may still be in flight.
-			released_orphans as (
-				update pgconductor._private_executions e
-				set
-					locked_by = null,
-					locked_at = null
-				where e.locked_by = ${orchestratorId}::uuid
-					and e.locked_at < pgconductor._private_current_time() - ${held.claimGrace}::interval
-					and not (e.id = any(${this.sql.array(held.executionIds, 2951)}::uuid[]))
-			),`
-					: this.sql``
-			}
-			-- Signal shutdown if newer migration exists
-			shutdown_signal_inserted as (
-				insert into pgconductor._private_orchestrator_signals (orchestrator_id, type, payload)
-				select
-					${orchestratorId}::uuid,
-					'shutdown',
-					jsonb_build_object('reason', 'newer_migration_detected')
-				from latest
-				where latest.db_version > ${migrationNumber}::integer
-				on conflict (orchestrator_id) where type = 'shutdown' do nothing
-			),
-			-- Read and delete all signals for this orchestrator (ordered by creation)
-			deleted_signals as (
-				delete from pgconductor._private_orchestrator_signals
-				where orchestrator_id = ${orchestratorId}::uuid
-				returning type, execution_id, payload, created_at
+	}: RegisterOrchestratorArgs): PendingQuery<[{ shutdown_reason: string | null }]> {
+		return this.sql<[{ shutdown_reason: string | null }]>`
+			insert into pgconductor._private_orchestrators as o (
+				id,
+				version,
+				migration_number,
+				last_heartbeat_at
 			)
-			select
-				o.registered,
-				s.type as signal_type,
-				s.execution_id as signal_execution_id,
-				s.payload as signal_payload
-			from upserted_orchestrator o
-			left join deleted_signals s on true
-			order by s.created_at asc
+			values (
+				${orchestratorId}::uuid,
+				${version}::text,
+				${migrationNumber}::integer,
+				pgconductor._private_current_time()
+			)
+			on conflict (id) do update
+			set last_heartbeat_at = excluded.last_heartbeat_at
+			returning coalesce(
+				o.shutdown_reason,
+				case when (select max(version) from pgconductor.schema_migrations) > o.migration_number
+					then 'newer_migration_detected' end
+			) as shutdown_reason
+		`;
+	}
+
+	/** Update only: no row is returned once the orchestrator was recovered as stale */
+	buildOrchestratorHeartbeat({
+		orchestratorId,
+	}: OrchestratorHeartbeatArgs): PendingQuery<{ shutdown_reason: string | null }[]> {
+		return this.sql<{ shutdown_reason: string | null }[]>`
+			update pgconductor._private_orchestrators o
+			set last_heartbeat_at = pgconductor._private_current_time()
+			where o.id = ${orchestratorId}::uuid
+			returning coalesce(
+				o.shutdown_reason,
+				case when (select max(version) from pgconductor.schema_migrations) > o.migration_number
+					then 'newer_migration_detected' end
+			) as shutdown_reason
 		`;
 	}
 
@@ -354,18 +312,7 @@ export class QueryBuilder {
 		maxAge,
 	}: RecoverStaleOrchestratorsArgs): PendingQuery<RowList<Row[]>> {
 		return this.sql`
-			with expired as (
-				delete from pgconductor._private_orchestrators o
-				where o.last_heartbeat_at < (select pgconductor._private_current_time()) - ${maxAge}::interval
-				returning o.id
-			)
-			-- cancelled executions are reclaimed and settled like any other result
-			update pgconductor._private_executions e
-			set
-				locked_by = null,
-				locked_at = null
-			from expired
-			where e.locked_by = expired.id
+			select pgconductor._private_remove_orchestrators(p_max_age := ${maxAge}::interval)
 		`;
 	}
 
@@ -373,14 +320,9 @@ export class QueryBuilder {
 		migrationNumber,
 	}: SweepOrchestratorsArgs): PendingQuery<RowList<Row[]>> {
 		return this.sql`
-			insert into pgconductor._private_orchestrator_signals (orchestrator_id, type, payload)
-			select
-				id,
-				'shutdown',
-				jsonb_build_object('reason', 'breaking_migration')
-			from pgconductor._private_orchestrators
+			update pgconductor._private_orchestrators
+			set shutdown_reason = 'breaking_migration'
 			where migration_number < ${migrationNumber}::integer
-			on conflict (orchestrator_id) where type = 'shutdown' do nothing
 		`;
 	}
 
@@ -395,18 +337,7 @@ export class QueryBuilder {
 		orchestratorId,
 	}: OrchestratorShutdownArgs): PendingQuery<RowList<Row[]>> {
 		return this.sql`
-			with deleted as (
-				delete from pgconductor._private_orchestrators
-				where id = ${orchestratorId}::uuid
-				returning id
-			)
-			-- cancelled executions are reclaimed and settled like any other result
-			update pgconductor._private_executions e
-			set
-				locked_by = null,
-				locked_at = null
-			from deleted
-			where e.locked_by = deleted.id
+			select pgconductor._private_remove_orchestrators(p_id := ${orchestratorId}::uuid)
 		`;
 	}
 
@@ -416,6 +347,7 @@ export class QueryBuilder {
 		batchSize,
 		taskKeys,
 		running = [],
+		held,
 	}: GetExecutionsArgs): PendingQuery<[ClaimResult]> {
 		return this.sql<[ClaimResult]>`
 			-- Read limit mode from the database so rolling workers cannot bypass new limits.
@@ -426,8 +358,14 @@ export class QueryBuilder {
 					where t.queue = ${queueName}::text
 						and (t.concurrency_limit is not null or t.group_concurrency_limit is not null)
 				) as enabled
-			), claim_clock as materialized (
+			),
+			-- Locking the owner row keeps recovery from deleting it while the claim is in flight. An
+			-- owner that was already deleted claims nothing.
+			claim_clock as materialized (
 				select pgconductor._private_current_time() as now_ts
+				from pgconductor._private_orchestrators o
+				where o.id = ${orchestratorId}::uuid
+				for key share
 			), unconstrained_candidates as (
 				select e.id
 				from pgconductor._private_executions e
@@ -544,7 +482,23 @@ export class QueryBuilder {
 					e.waiting_step_key, e.cancelled, e.last_error, e.dedupe_key, e.cron_expression,
 					e.locked_by, e.claim_token, e."group", e.priority, e.run_at, e.created_at,
 					e.subscription_id, e.trace_context, e.metadata, e.dead_letter, e.signal_count
-			), running as materialized (
+			),${
+				held
+					? this.sql`
+			-- Release claims the worker does not hold, such as one whose response was lost. A worker
+			-- claims one statement at a time, so no claim it does not hold is in flight.
+			released_orphans as (
+				update pgconductor._private_executions e
+				set
+					locked_by = null,
+					locked_at = null
+				from claim_clock
+				where e.queue = ${queueName}::text
+					and e.locked_by = ${orchestratorId}::uuid
+					and not (e.id = any(${this.sql.array(held, 2951)}::uuid[]))
+			),`
+					: this.sql``
+			} running as materialized (
 				select e.id, e.cancelled, r.after_seq
 				from jsonb_to_recordset(${this.sql.json(running)}::jsonb)
 					as r(execution_id uuid, claim_token uuid, after_seq bigint)

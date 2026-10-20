@@ -146,7 +146,7 @@ describe("ctx.waitForResult and execution branches (Postgres integration)", () =
 		awaitedId: string,
 	) {
 		const waiterId = await conductor.invoke({ name: "waiter" }, { id: awaitedId });
-		const orchestratorId = crypto.randomUUID();
+		const orchestratorId = await database.registerOrchestrator();
 		const { executions } = await database.client.getExecutions({
 			orchestratorId,
 			queueName: "default",
@@ -265,7 +265,7 @@ describe("ctx.waitForResult and execution branches (Postgres integration)", () =
 		await Promise.all(orchestrators.map((orchestrator) => orchestrator.stop()));
 		const workId = await conductor.invoke({ name: "work" }, { value: 1 });
 		const waiterId = await conductor.invoke({ name: "waiter" }, { id: "race" });
-		const orchestratorId = crypto.randomUUID();
+		const orchestratorId = await database.registerOrchestrator();
 		const { executions } = await database.client.getExecutions({
 			orchestratorId,
 			queueName: "default",
@@ -342,7 +342,7 @@ describe("ctx.waitForResult and execution branches (Postgres integration)", () =
 		await Promise.all(orchestrators.map((orchestrator) => orchestrator.stop()));
 		const awaitedId = await conductor.invoke({ name: "waiter" }, { id: "awaited" });
 		const waiterId = await conductor.invoke({ name: "work" }, { value: 1 });
-		const orchestratorId = crypto.randomUUID();
+		const orchestratorId = await database.registerOrchestrator();
 		const { executions } = await database.client.getExecutions({
 			orchestratorId,
 			queueName: "default",
@@ -713,7 +713,7 @@ describe("ctx.waitForResult and execution branches (Postgres integration)", () =
 		await stopOrchestrators();
 		const workId = await conductor.invoke({ name: "work" }, { value: 1 }, { dedupe_key: "same" });
 		await database.client.getExecutions({
-			orchestratorId: crypto.randomUUID(),
+			orchestratorId: await database.registerOrchestrator(),
 			queueName: "default",
 			batchSize: 10,
 			taskKeys: ["work"],
@@ -741,7 +741,7 @@ describe("ctx.waitForResult and execution branches (Postgres integration)", () =
 			{ value: 2 },
 			{ run_at: new Date(Date.now() + 3_600_000) },
 		);
-		const orchestratorId = crypto.randomUUID();
+		const orchestratorId = await database.registerOrchestrator();
 		const { executions } = await database.client.getExecutions({
 			orchestratorId,
 			queueName: "default",

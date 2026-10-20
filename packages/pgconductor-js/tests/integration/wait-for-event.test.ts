@@ -437,7 +437,7 @@ describe("waitForEvent", () => {
 		const executionId = await conductor.invoke({ name: "wait.task" }, { id: "retry" });
 		if (!executionId) throw new Error("invoke did not return an execution id");
 
-		const orchestratorId = crypto.randomUUID();
+		const orchestratorId = await database.registerOrchestrator();
 		const [claimed] = (
 			await database.client.getExecutions({
 				orchestratorId,
@@ -493,7 +493,7 @@ describe("waitForEvent", () => {
 		const executionId = await conductor.invoke({ name: "wait.task" }, { id: "replayed" });
 		if (!executionId) throw new Error("invoke did not return an execution id");
 
-		const orchestratorId = crypto.randomUUID();
+		const orchestratorId = await database.registerOrchestrator();
 		const claim = async () => {
 			const [execution] = (
 				await database.client.getExecutions({
@@ -554,7 +554,7 @@ describe("waitForEvent", () => {
 			const executionId = await conductor.invoke({ name: "wait.task" }, { id: status });
 			if (!executionId) throw new Error("invoke did not return an execution id");
 
-			const orchestratorId = crypto.randomUUID();
+			const orchestratorId = await database.registerOrchestrator();
 			const [execution] = (
 				await database.client.getExecutions({
 					orchestratorId,
@@ -959,7 +959,7 @@ describe("waitForEvent", () => {
 		const executionId = await conductor.invoke({ name: "wait.task" }, { id: "claimed" });
 		if (!executionId) throw new Error("invoke did not return an execution id");
 
-		const orchestratorId = crypto.randomUUID();
+		const orchestratorId = await database.registerOrchestrator();
 		const claim = async (queueName: string, taskKey: string) =>
 			(
 				await database.client.getExecutions({
@@ -1021,7 +1021,7 @@ describe("waitForEvent", () => {
 		const executionId = await conductor.invoke({ name: "wait.task" }, { id: "backoff" });
 		if (!executionId) throw new Error("invoke did not return an execution id");
 
-		const orchestratorId = crypto.randomUUID();
+		const orchestratorId = await database.registerOrchestrator();
 		const claim = async (queueName: string, taskKey: string) =>
 			(
 				await database.client.getExecutions({
