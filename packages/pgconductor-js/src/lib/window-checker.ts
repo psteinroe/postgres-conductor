@@ -30,6 +30,10 @@ export class WindowChecker {
 
 	isWithinWindow(now: Date): boolean {
 		const currentMinutes = now.getUTCHours() * 60 + now.getUTCMinutes();
+		// A window whose start is after its end wraps midnight
+		if (this.startMinutes > this.endMinutes) {
+			return currentMinutes >= this.startMinutes || currentMinutes < this.endMinutes;
+		}
 		return currentMinutes >= this.startMinutes && currentMinutes < this.endMinutes;
 	}
 

@@ -106,7 +106,7 @@ const cancelReport = conductor.createTask(
 );
 ```
 
-This stops future executions and cancels any pending scheduled execution.
+This deletes the pending scheduled execution and cancels a running one, which then schedules no further execution.
 
 ## Schedule Names
 

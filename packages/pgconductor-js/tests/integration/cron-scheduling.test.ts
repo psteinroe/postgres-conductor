@@ -3,12 +3,13 @@ import { test, expect, describe, beforeAll, afterAll, vi } from "vitest";
 import { Conductor } from "../../src/conductor";
 import { Orchestrator } from "../../src/orchestrator";
 import { defineTask } from "../../src/task-definition";
-import { TestDatabasePool } from "../fixtures/test-database";
+import { TestDatabasePool, type TestDatabase } from "../fixtures/test-database";
 import { waitFor } from "../../src/lib/wait-for";
 import { TaskSchemas } from "../../src/schemas";
 import { DatabaseClient } from "../../src/database-client";
 import { DefaultLogger } from "../../src/lib/logger";
 import { loseFirstResponse, waitForCondition } from "../test-utils";
+import { Deferred } from "../../src/lib/deferred";
 
 describe("Cron Scheduling", () => {
 	let pool: TestDatabasePool;
@@ -843,4 +844,139 @@ describe("Cron Scheduling", () => {
 
 		await db.destroy();
 	}, 30000);
+	describe("removing a schedule while an occurrence is about to schedule its successor", () => {
+		// Blocks the worker right before it inserts the next occurrence of a schedule
+		function pauseSuccessor(conductor: Conductor<any, any, any, any, any, any, any>) {
+			const paused = new Deferred<void>();
+			const resume = new Deferred<void>();
+			const scheduleNext = conductor.db.scheduleNextCronExecution.bind(conductor.db);
+			conductor.db.scheduleNextCronExecution = async (args, opts) => {
+				paused.resolve();
+				await resume.promise;
+				return scheduleNext(args, opts);
+			};
+			return { paused: paused.promise, resume: () => resume.resolve() };
+		}
+
+		async function liveOccurrences(db: TestDatabase) {
+			const rows = await db.sql<{ run_at: Date }[]>`
+				select run_at from pgconductor._private_executions
+				where task_key = 'tick' and completed_at is null and failed_at is null and not cancelled
+			`;
+			return rows.map((row) => row.run_at);
+		}
+
+		test("unschedule leaves no live occurrence", async () => {
+			const db = await pool.child();
+			await db.clock.set(new Date("2024-01-01T12:00:30Z"));
+			const conductor = Conductor.create({
+				sql: db.sql,
+				clock: db.clock,
+				tasks: TaskSchemas.fromSchema([defineTask({ name: "tick", payload: z.object({}) })]),
+				context: {},
+			});
+			await conductor.ensureInstalled();
+			const tick = conductor.createTask({ name: "tick" }, { invocable: true }, async () => {});
+			const orchestrator = () =>
+				Orchestrator.create({
+					conductor,
+					tasks: [tick],
+					defaultWorker: { pollIntervalMs: 10, flushIntervalMs: 10 },
+				});
+
+			await orchestrator().drain();
+			await conductor.db.scheduleCronExecution({
+				spec: {
+					task_key: "tick",
+					queue: "default",
+					payload: {},
+					run_at: new Date("2024-01-01T12:01:00Z"),
+					cron_expression: "* * * * *",
+				},
+				scheduleName: "every-minute",
+			});
+
+			const successor = pauseSuccessor(conductor);
+			await db.clock.set(new Date("2024-01-01T12:01:00Z"));
+			const running = orchestrator();
+			await running.start();
+			try {
+				await successor.paused;
+				await db.client.unscheduleCronExecution({
+					taskKey: "tick",
+					queue: "default",
+					scheduleName: "every-minute",
+				});
+				successor.resume();
+
+				await waitForCondition(async () => {
+					const rows = await db.sql`
+						select 1 from pgconductor._private_executions
+						where task_key = 'tick' and run_at = '2024-01-01T12:01:00Z'
+							and completed_at is null and failed_at is null
+					`;
+					return rows.length === 0;
+				});
+			} finally {
+				successor.resume();
+				await running.stop();
+			}
+
+			expect(await liveOccurrences(db)).toEqual([]);
+			await db.destroy();
+		}, 30000);
+
+		test("registration without the schedule leaves no live occurrence", async () => {
+			const db = await pool.child();
+			await db.clock.set(new Date("2024-01-01T12:00:30Z"));
+			const conductor = Conductor.create({
+				sql: db.sql,
+				clock: db.clock,
+				tasks: TaskSchemas.fromSchema([defineTask({ name: "tick", payload: z.object({}) })]),
+				context: {},
+			});
+			await conductor.ensureInstalled();
+			const scheduled = conductor.createTask(
+				{ name: "tick" },
+				[{ invocable: true }, { cron: "* * * * *", name: "every-minute" }],
+				async () => {},
+			);
+			const unscheduled = conductor.createTask(
+				{ name: "tick" },
+				{ invocable: true },
+				async () => {},
+			);
+
+			await Orchestrator.create({ conductor, tasks: [scheduled] }).drain();
+
+			const successor = pauseSuccessor(conductor);
+			await db.clock.set(new Date("2024-01-01T12:01:00Z"));
+			const running = Orchestrator.create({
+				conductor,
+				tasks: [scheduled],
+				defaultWorker: { pollIntervalMs: 10, flushIntervalMs: 10 },
+			});
+			await running.start();
+			try {
+				await successor.paused;
+				await Orchestrator.create({ conductor, tasks: [unscheduled] }).drain();
+				successor.resume();
+
+				await waitForCondition(async () => {
+					const rows = await db.sql`
+						select 1 from pgconductor._private_executions
+						where task_key = 'tick' and run_at = '2024-01-01T12:01:00Z'
+							and completed_at is null and failed_at is null
+					`;
+					return rows.length === 0;
+				});
+			} finally {
+				successor.resume();
+				await running.stop();
+			}
+
+			expect(await liveOccurrences(db)).toEqual([]);
+			await db.destroy();
+		}, 30000);
+	});
 });

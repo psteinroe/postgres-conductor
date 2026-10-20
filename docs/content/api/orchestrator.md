@@ -20,7 +20,7 @@ const orchestrator = Orchestrator.create({
 **Parameters:**
 
 - `conductor`: Conductor instance
-- `tasks`: (optional) Array of tasks using default worker
+- `tasks`: (optional) Array of tasks on the `default` queue, run by the default worker. A task on another queue throws; run it on a worker from `conductor.createWorker()`
 - `workers`: (optional) Array of custom workers from `conductor.createWorker()`
 - `defaultWorker`: (optional) Configuration for default worker
 

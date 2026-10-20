@@ -56,11 +56,13 @@ describe("task queue type constraints", () => {
 			async (_event, _ctx) => {},
 		);
 
-		conductor.createWorker({
-			queue: "default",
-			// @ts-expect-error - queue mismatch
-			tasks: [emailTask],
-		});
+		expect(() =>
+			conductor.createWorker({
+				queue: "default",
+				// @ts-expect-error - queue mismatch
+				tasks: [emailTask],
+			}),
+		).toThrow('Task "send-email" belongs to queue "notifications", not "default"');
 	});
 
 	test("createWorker rejects mixed queue tasks", () => {
@@ -94,14 +96,16 @@ describe("task queue type constraints", () => {
 		);
 
 		// Type error: tasks have different queues
-		conductor.createWorker({
-			queue: "notifications",
-			tasks: [
-				emailTask,
-				// @ts-expect-error - processTask is on default queue, not notifications
-				processTask,
-			],
-		});
+		expect(() =>
+			conductor.createWorker({
+				queue: "notifications",
+				tasks: [
+					emailTask,
+					// @ts-expect-error - processTask is on default queue, not notifications
+					processTask,
+				],
+			}),
+		).toThrow('Task "process-data" belongs to queue "default", not "notifications"');
 	});
 
 	test("Orchestrator.create accepts tasks from default queue", () => {
@@ -150,11 +154,13 @@ describe("task queue type constraints", () => {
 			async (_event, _ctx) => {},
 		);
 
-		Orchestrator.create({
-			conductor,
-			// @ts-expect-error - task is on notifications queue, not default
-			tasks: [emailTask],
-		});
+		expect(() =>
+			Orchestrator.create({
+				conductor,
+				// @ts-expect-error - task is on notifications queue, not default
+				tasks: [emailTask],
+			}),
+		).toThrow('Task "send-email" belongs to queue "notifications", not "default"');
 	});
 
 	test("Orchestrator.create rejects mixed queue tasks", () => {
@@ -187,13 +193,15 @@ describe("task queue type constraints", () => {
 			async (_event, _ctx) => {},
 		);
 
-		Orchestrator.create({
-			conductor,
-			tasks: [
-				processTask,
-				// @ts-expect-error - emailTask is on notifications queue, not default
-				emailTask,
-			],
-		});
+		expect(() =>
+			Orchestrator.create({
+				conductor,
+				tasks: [
+					processTask,
+					// @ts-expect-error - emailTask is on notifications queue, not default
+					emailTask,
+				],
+			}),
+		).toThrow('Task "send-email" belongs to queue "notifications", not "default"');
 	});
 });

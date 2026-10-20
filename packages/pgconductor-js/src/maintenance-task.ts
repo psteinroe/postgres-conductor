@@ -7,7 +7,7 @@ function hashToJitter(str: string): number {
 	const hash = crypto.createHash("sha256").update(str).digest();
 	// Use the first 4 bytes as an unsigned integer
 	const int = hash.readUInt32BE(0);
-	return int % 61; // → 0–60 minutes after midnight
+	return int % 60; // → 0–59 minutes after midnight
 }
 
 // we could make this configurable later

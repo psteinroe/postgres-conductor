@@ -31,6 +31,8 @@ Windows use 24-hour time format:
 }
 ```
 
+Times are UTC. The start is inclusive and the end exclusive: `["09:00", "17:00"]` runs from 09:00 up to, but not including, 17:00. A window whose start is after its end, like `["22:00", "06:00"]`, spans midnight.
+
 **Examples:**
 
 ```typescript

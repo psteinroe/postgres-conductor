@@ -6,6 +6,7 @@ import type { AnyTask } from "../../src/task";
 
 const task = {
 	name: "lifecycle-task",
+	queue: "default",
 	triggers: [{ invocable: true }],
 	maxAttempts: 3,
 	execute: async () => {},

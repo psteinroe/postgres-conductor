@@ -5,15 +5,9 @@ import { Orchestrator } from "../../src/orchestrator";
 import { defineTask } from "../../src/task-definition";
 import { TestDatabasePool } from "../fixtures/test-database";
 import type { TestDatabase } from "../fixtures/test-database";
-import crypto from "crypto";
 import { TaskSchemas } from "../../src/schemas";
 import { createMaintenanceTask } from "../../src/maintenance-task";
-
-function hashToJitter(str: string): number {
-	const hash = crypto.createHash("sha256").update(str).digest();
-	const int = hash.readUInt32BE(0);
-	return int % 61;
-}
+import { nextCronOccurrence } from "../../src/lib/cron";
 
 describe("Maintenance Task", () => {
 	let pool: TestDatabasePool;
@@ -32,26 +26,61 @@ describe("Maintenance Task", () => {
 		await pool?.destroy();
 	});
 
+	function maintenanceCron(queue: string): string {
+		const [trigger] = createMaintenanceTask(queue).triggers;
+		if (!("cron" in trigger)) throw new Error("maintenance task has no cron trigger");
+		return trigger.cron;
+	}
+
 	test("jitter is consistent and distributed", () => {
-		// Test that same queue always gets same jitter
-		const jitter1 = hashToJitter("default");
-		const jitter2 = hashToJitter("default");
-		expect(jitter1).toBe(jitter2);
+		expect(maintenanceCron("default")).toBe(maintenanceCron("default"));
 
-		// Test that different queues get different jitter (high probability)
-		const queues = ["default", "reports", "emails", "analytics", "jobs"];
-		const jitters = queues.map((q) => hashToJitter(q));
+		// queue-53 hashes to 60 modulo 61
+		const queues = ["default", "reports", "emails", "analytics", "jobs", "queue-53"];
+		const crons = queues.map(maintenanceCron);
 
-		// All jitters should be in valid range [0, 60]
-		for (const j of jitters) {
-			expect(j).toBeGreaterThanOrEqual(0);
-			expect(j).toBeLessThanOrEqual(60);
+		for (const cron of crons) {
+			const next = nextCronOccurrence(cron, new Date("2024-01-01T12:00:00Z"));
+			expect(next.toISOString()).toMatch(/^2024-01-02T00:[0-5]\d:00\.000Z$/);
 		}
 
-		// At least 4 out of 5 should be unique (allowing for small collision chance)
-		const uniqueJitters = new Set(jitters);
-		expect(uniqueJitters.size).toBeGreaterThanOrEqual(4);
+		// At least 5 out of 6 should be unique (allowing for small collision chance)
+		expect(new Set(crons).size).toBeGreaterThanOrEqual(5);
 	});
+
+	test("a worker starts on every queue name", async () => {
+		const db = await pool.child();
+		databases.push(db);
+		const queue = "queue-53";
+
+		const conductor = Conductor.create({
+			sql: db.sql,
+			tasks: TaskSchemas.fromSchema([defineTask({ name: "job", queue, payload: z.object({}) })]),
+			context: {},
+		});
+		await conductor.ensureInstalled();
+		const job = conductor.createTask({ name: "job", queue }, { invocable: true }, async () => {});
+		const orchestrator = () =>
+			Orchestrator.create({
+				conductor,
+				workers: [
+					conductor.createWorker({
+						queue,
+						tasks: [job],
+						config: { pollIntervalMs: 50, flushIntervalMs: 50 },
+					}),
+				],
+			});
+
+		await orchestrator().drain();
+		const id = await conductor.invoke({ name: "job", queue }, {});
+		await orchestrator().drain();
+
+		const [row] = await db.sql<{ completed_at: Date | null }[]>`
+			select completed_at from pgconductor._private_executions where id = ${id}
+		`;
+		expect(row?.completed_at).not.toBeNull();
+	}, 30000);
 
 	test("removes old completed executions based on retention policy", async () => {
 		const db = await pool.child();

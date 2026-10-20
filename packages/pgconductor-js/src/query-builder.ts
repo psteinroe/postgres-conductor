@@ -76,6 +76,15 @@ export type UnscheduleCronExecutionArgs = {
 	scheduleName: string;
 };
 
+export type ScheduleNextCronExecutionArgs = {
+	executionId: string;
+	queue: string;
+	orchestratorId: string;
+	claimToken: string;
+	runAt: Date;
+	dedupeKey: string;
+};
+
 export type GetExecutionArgs = {
 	executionId: string;
 	task?: { key: string; queue: string };
@@ -1233,36 +1242,33 @@ export class QueryBuilder {
 		taskKey,
 		queue,
 		scheduleName,
-	}: UnscheduleCronExecutionArgs): PendingQuery<[{ resolved: number }]> {
-		return this.sql<[{ resolved: number }]>`
-			with
-			-- Delete pending executions
-			removed as (
-				delete from pgconductor._private_executions
-				where task_key = ${taskKey}::text
-					and queue = ${queue}::text
-					and dedupe_key like 'dynamic::%'
-					and split_part(dedupe_key, '::', 2) = ${scheduleName}::text
-					and cron_expression is not null
-					and is_available
-				returning result_waiters
-			), ${this.removedScheduleWaits()},
-			-- Mark running executions as cancelled (no signal needed, they'll fail naturally)
-			cancelled_running as (
-				update pgconductor._private_executions e
-				set cancelled = true
-				where e.task_key = ${taskKey}::text
-					and e.queue = ${queue}::text
-					and e.dedupe_key like 'dynamic::%'
-					and split_part(e.dedupe_key, '::', 2) = ${scheduleName}::text
-					and e.cron_expression is not null
-					and e.locked_by is not null
-					and e.completed_at is null
-					and e.failed_at is null
-					and e.cancelled = false
-				returning 1
+	}: UnscheduleCronExecutionArgs): PendingQuery<Row[]> {
+		return this.sql`
+			select pgconductor._private_unschedule(
+				p_task_key := ${taskKey}::text,
+				p_queue := ${queue}::text,
+				p_schedule_name := ${scheduleName}::text
 			)
-			select count(*)::int as resolved from resolved_result_waits
+		`;
+	}
+
+	buildScheduleNextCronExecution({
+		executionId,
+		queue,
+		orchestratorId,
+		claimToken,
+		runAt,
+		dedupeKey,
+	}: ScheduleNextCronExecutionArgs): PendingQuery<Row[]> {
+		return this.sql`
+			select pgconductor._private_schedule_next_occurrence(
+				p_execution_id := ${executionId}::uuid,
+				p_queue := ${queue}::text,
+				p_orchestrator_id := ${orchestratorId}::uuid,
+				p_claim_token := ${claimToken}::uuid,
+				p_run_at := ${runAt.toISOString()}::timestamptz,
+				p_dedupe_key := ${dedupeKey}::text
+			)
 		`;
 	}
 
