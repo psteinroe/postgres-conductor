@@ -969,7 +969,10 @@ $function$
 ;
 
 -- stores a signal for an execution whose row the caller has locked; an id stored before is
--- ignored. the worker running the execution reads it with its next claim.
+-- ignored. the worker running the execution reads it with its next claim. a new signal resolves
+-- the ctx.waitForAny() signal branches listening for its name and wakes an execution suspended
+-- at a wait, like dispatch does. registration holds the same row lock, so it either sees the
+-- signal or its branch is resolved here.
 create or replace function pgconductor._private_store_signal(
   p_execution_id uuid,
   p_queue text,
@@ -987,11 +990,41 @@ begin
   values (p_execution_id, p_queue, p_id, p_name, p_payload)
   on conflict (execution_id, id) do nothing;
 
-  if found then
-    update pgconductor._private_executions
-    set signal_count = signal_count + 1
-    where id = p_execution_id and queue = p_queue;
+  if not found then
+    return;
   end if;
+
+  update pgconductor._private_executions
+  set signal_count = signal_count + 1
+  where id = p_execution_id and queue = p_queue;
+
+  with stored_steps as (
+    insert into pgconductor._private_steps (execution_id, queue, key, result)
+    select p_execution_id, p_queue, subscription.step_key, jsonb_build_object(
+      'status', 'resolved', 'signal', jsonb_build_object('id', p_id, 'name', p_name)
+    )
+    from pgconductor._private_custom_event_subscriptions subscription
+    where subscription.kind = 'execution_wait'
+      and subscription.execution_id = p_execution_id
+      and subscription.signal_name = p_name
+      and (subscription.expires_at is null
+        or subscription.expires_at >= pgconductor._private_current_time())
+    on conflict (execution_id, key) do nothing
+    returning key
+  ), deleted_waits as (
+    delete from pgconductor._private_custom_event_subscriptions subscription
+    using stored_steps step
+    where subscription.kind = 'execution_wait'
+      and subscription.execution_id = p_execution_id
+      and subscription.step_key = step.key
+  )
+  update pgconductor._private_executions e
+  set run_at = pgconductor._private_current_time(), waiting_step_key = null
+  where e.id = p_execution_id and e.queue = p_queue
+    and e.locked_by is null
+    and e.waiting_on_execution_id is null
+    and e.waiting_step_key is not null
+    and exists (select 1 from stored_steps);
 end;
 $function$;
 
@@ -1337,7 +1370,7 @@ create unique index idx_executions_event_destination
 
 create table pgconductor._private_custom_event_subscriptions (
     id uuid primary key default pgconductor._private_portable_uuidv7(),
-    -- null for a wait on the outcome of another execution
+    -- null for a wait on the outcome of another execution or on a signal
     event_key text,
     task_key text not null,
     queue text not null,
@@ -1349,6 +1382,8 @@ create table pgconductor._private_custom_event_subscriptions (
     step_key text,
     expires_at timestamptz,
     awaited_execution_id uuid,
+    -- a ctx.waitForAny() branch that a signal with this name wakes
+    signal_name text,
     constraint chk_custom_event_subscription_event_key check (
         btrim(event_key) <> '' and octet_length(event_key) between 1 and 255
     ),
@@ -1361,13 +1396,14 @@ create table pgconductor._private_custom_event_subscriptions (
             and execution_id is null
             and step_key is null
             and expires_at is null
-            and awaited_execution_id is null)
+            and awaited_execution_id is null
+            and signal_name is null)
         or
         (kind = 'execution_wait'
             and execution_id is not null
             and step_key is not null
             and payload_fields is null
-            and (event_key is null) = (awaited_execution_id is not null))
+            and num_nonnulls(event_key, awaited_execution_id, signal_name) = 1)
     ),
     constraint fk_custom_event_subscription_execution
         foreign key (execution_id, queue)
@@ -1782,7 +1818,10 @@ $function$;
 -- event was stored first wins (then branch order). An { execution } branch is
 -- registered here: the outcome of a settled execution is stored at once, otherwise
 -- the wait gets a subscription and is added to the execution's result_waiters, from
--- which settlement and cancel_execution store the outcome. Otherwise the timeout is set
+-- which settlement and cancel_execution store the outcome. A { signal } branch is
+-- registered here too: an undelivered signal with its name, or the one whose handler is
+-- running (p_delivering_signal_id), is stored at once, otherwise the wait gets a
+-- subscription from which _private_store_signal stores the next one. Otherwise the timeout is set
 -- on all branch subscriptions and the execution is released until dispatch wakes
 -- it or the timeout passes. Settling removes the branch subscriptions and closes
 -- the branches, so subscribing again on a resume is a no-op.
@@ -1794,7 +1833,8 @@ create or replace function pgconductor._private_register_event_race(
     p_claim_token uuid,
     p_step_key text,
     p_branches jsonb,
-    p_timeout_ms bigint
+    p_timeout_ms bigint,
+    p_delivering_signal_id text default null
 )
 returns jsonb
 language plpgsql
@@ -1914,6 +1954,45 @@ begin
         ) r
         where awaited.id = r.awaited_execution_id;
     end if;
+
+    -- A { signal } branch wins with a signal whose handler has not returned. Senders lock this
+    -- row, so a signal stored after this check resolves the branch through its subscription
+    with branches as materialized (
+        select branch->>'stepKey' as step_key, branch->>'signal' as name
+        from jsonb_array_elements(p_branches) branch
+        where branch ? 'signal'
+          and not exists (
+              select 1 from pgconductor._private_steps step
+              where step.execution_id = p_execution_id and step.key = branch->>'stepKey'
+          )
+    ), received as (
+        select distinct on (b.step_key) b.step_key, s.id, s.name
+        from branches b
+        join pgconductor._private_execution_signals s
+            on s.execution_id = p_execution_id
+            and s.name = b.name
+            and (s.delivered_at is null or s.id = p_delivering_signal_id)
+        where not exists (
+            select 1 from pgconductor._private_custom_event_subscriptions subscription
+            where subscription.kind = 'execution_wait'
+              and subscription.execution_id = p_execution_id
+              and subscription.step_key = b.step_key
+        )
+        order by b.step_key, s.seq
+    ), settled as (
+        insert into pgconductor._private_steps (execution_id, queue, key, result)
+        select p_execution_id, p_queue, r.step_key, jsonb_build_object(
+            'status', 'resolved', 'signal', jsonb_build_object('id', r.id, 'name', r.name)
+        )
+        from received r
+    )
+    insert into pgconductor._private_custom_event_subscriptions (
+        task_key, queue, required_field_count, kind, execution_id, step_key, signal_name
+    )
+    select p_task_key, p_queue, 0, 'execution_wait', p_execution_id, b.step_key, b.name
+    from branches b
+    where not exists (select 1 from received r where r.step_key = b.step_key)
+    on conflict (execution_id, step_key) do nothing;
 
     select jsonb_build_object('key', branch.value->>'key') || (step.result - 'status')
     into v_result

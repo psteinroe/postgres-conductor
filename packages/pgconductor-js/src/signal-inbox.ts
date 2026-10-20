@@ -26,6 +26,9 @@ export class SignalInbox {
 	private readonly handlers = new Map<string, SignalHandler>();
 	private readonly queue = new AsyncQueue<StoredSignal>(Infinity);
 	private lastSeq = 0;
+	private delivering: SignalInfo | null = null;
+	private holds = 0;
+	private resume: (() => void) | null = null;
 	private consuming: Promise<void> | null = null;
 	private closed = false;
 	private stopped = false;
@@ -62,6 +65,20 @@ export class SignalInbox {
 	}
 
 	/**
+	 * Run `fn` without starting a handler, passing the signal whose handler is running and not yet
+	 * acknowledged. Every other signal read so far stays undelivered until `fn` settles.
+	 */
+	async hold<T>(fn: (delivering: SignalInfo | null) => Promise<T>): Promise<T> {
+		this.holds++;
+		try {
+			return await fn(this.delivering);
+		} finally {
+			this.holds--;
+			if (this.holds === 0) this.resume?.();
+		}
+	}
+
+	/**
 	 * Stop accepting handlers and signals. With `drain`, deliver the signals already received
 	 * first; otherwise stop after the running handler. Returns the error that failed delivery.
 	 */
@@ -69,16 +86,21 @@ export class SignalInbox {
 		this.closed = true;
 		this.stopped = !drain;
 		this.queue.close();
+		this.resume?.();
 		await this.consuming;
 		return this.failure;
 	}
 
 	private async consume(): Promise<void> {
 		for await (const signal of this.queue) {
+			while (this.holds > 0 && !this.closed) {
+				await new Promise<void>((resolve) => (this.resume = resolve));
+			}
 			if (this.stopped) return;
 			const handler = this.handlers.get(signal.name);
 			if (!handler) continue;
 
+			this.delivering = { id: signal.id, name: signal.name };
 			try {
 				await handler(signal.payload, { id: signal.id, name: signal.name });
 			} catch (err) {
@@ -94,6 +116,7 @@ export class SignalInbox {
 				this.fail(coerceError(err));
 				return;
 			}
+			this.delivering = null;
 		}
 	}
 

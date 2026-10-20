@@ -232,12 +232,14 @@ export type EventRaceBranch = {
 	executionId?: string;
 	taskKey?: string;
 	queue?: string;
+	signal?: string;
 };
 
 export type EventRaceResult = {
 	key: string;
 	event?: { name: string; payload: Payload };
 	outcome?: ExecutionOutcome;
+	signal?: { id: string; name: string };
 };
 
 export interface EventSubscriptionSpec {

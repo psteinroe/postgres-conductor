@@ -133,14 +133,24 @@ const decision = await subscription.wait({ timeout: "24h" });
 
 ## ctx.waitForAny()
 
-Wait for whichever of several subscriptions receives an event first, an execution settles first, or a timeout:
+Wait for whichever of several subscriptions receives an event first, an execution settles first, a signal arrives, or a timeout:
 
 ```typescript
 const winner = await ctx.waitForAny(
   stepKey: string,
-  branches: Record<string, EventSubscription | { execution: string, task?: { name: string, queue?: string } }>,
+  branches: Record<
+    string,
+    | EventSubscription
+    | { execution: string, task?: { name: string, queue?: string } }
+    | { signal: string }
+  >,
   options?: { timeout?: DurationInput }
-): Promise<{ key: string, event } | { key: string, outcome: ExecutionOutcome } | { key: "timeout" }>
+): Promise<
+  | { key: string, event }
+  | { key: string, outcome: ExecutionOutcome }
+  | { key: string, signal: { id: string, name: string } }
+  | { key: "timeout" }
+>
 ```
 
 **Example:**
@@ -180,16 +190,42 @@ if (winner.key === "tool") {
 }
 ```
 
+A `{ signal: name }` branch wins when this execution receives a signal with that name, so a
+long-running execution can wait for its next input instead of ending. The wait does not consume
+the signal: [`ctx.onSignal()`](../task-execution/signals.md) handlers still receive it.
+
+```typescript
+ctx.onSignal("input", (payload, { id }) => saveInput(id, payload));
+
+for (let n = 0; ; n++) {
+  await processSavedInputs(ctx, n);
+  const winner = await ctx.waitForAny(
+    `idle:${n}`,
+    { input: { signal: "input" }, tool: { execution: toolId } },
+    { timeout: "1h" },
+  );
+  if (winner.key !== "input") break;
+  // winner.signal: { id, name } of the signal that won
+}
+```
+
 **Behavior:**
-- Each value is a subscription from `ctx.subscribe()` or an `{ execution: id }` branch, and
-  `winner.key` is the name you gave it in the object. An execution branch is registered by
-  `waitForAny()` itself and memoized under the step key `<stepKey>:<name>`.
+- Each value is a subscription from `ctx.subscribe()`, an `{ execution: id }` branch or a
+  `{ signal: name }` branch, and `winner.key` is the name you gave it in the object. Execution
+  and signal branches are registered by `waitForAny()` itself and memoized under the step key
+  `<stepKey>:<name>`.
+- A signal branch wins at once when the execution holds a signal with that name whose
+  `ctx.onSignal()` handler has not returned yet, including one stored before the call. Otherwise
+  the next signal with that name wakes the execution. No signal handler starts from the call
+  until the wait has registered, so only a signal handled before the call does not count.
+- A signal stays undelivered until a handler for its name returns, so register a handler for
+  every signal branch: without one, the signal wins every later wait at once.
 - Add `task` to an execution branch to type `winner.outcome.result` by that task's return type.
   An execution of another task is then not found.
 - Exactly one branch wins. One that already holds an event or outcome wins without suspending,
   including an execution that settled before the call. If several do, the one stored first
   wins, and ties go to the one listed first. Otherwise the execution suspends until the first
-  matching event or settlement.
+  matching event, settlement or signal.
 - Losing executions keep running; the wait never cancels them.
 - The timeout starts when `waitForAny()` is first called. When it wins, the result is
   `{ key: "timeout" }` instead of an error, so `timeout` cannot be used as a name.

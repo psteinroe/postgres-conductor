@@ -34,7 +34,7 @@ import {
 } from "./event-definition.js";
 import { compileEventFilter } from "./event-trigger-validation.js";
 import { validateSchema } from "./lib/validate-schema.js";
-import type { SignalHandler, SignalInbox } from "./signal-inbox.js";
+import type { SignalHandler, SignalInbox, SignalInfo } from "./signal-inbox.js";
 
 /** Why an attempt was aborted, read from its abort controller and never from handler output */
 export type TaskAbortReasons =
@@ -89,6 +89,12 @@ export type EventSubscription<TEvent> = {
  */
 export type ExecutionBranch = { execution: string; task?: TaskIdentifier<string, string> };
 
+/**
+ * A `ctx.waitForAny()` branch that waits for a signal with this name. It does not consume the
+ * signal: `ctx.onSignal()` handlers still receive it.
+ */
+export type SignalBranch = { signal: string };
+
 type ExecutionBranchResult<
 	TBranch,
 	Tasks extends readonly TaskDefinition<string, any, any, string>[],
@@ -117,7 +123,9 @@ export type WaitForAnyResult<
 				? { key: K; event: TEvent }
 				: TBranches[K] extends ExecutionBranch
 					? { key: K; outcome: ExecutionOutcome<ExecutionBranchResult<TBranches[K], Tasks>> }
-					: never;
+					: TBranches[K] extends SignalBranch
+						? { key: K; signal: SignalInfo }
+						: never;
 	  }[keyof TBranches & string]
 	| { key: "timeout" };
 
@@ -368,51 +376,62 @@ export class TaskContext<
 
 	/**
 	 * Wait for the first of several branches, or the timeout: a `ctx.subscribe()`
-	 * subscription receives an event, or an `{ execution: id }` branch settles. A
-	 * branch that already holds its event or outcome wins at once; when several do,
-	 * the one stored first wins. An execution branch is stored under
-	 * `<stepKey>:<branch>`. All subscriptions are removed when the wait settles, and
+	 * subscription receives an event, an `{ execution: id }` branch settles, or this
+	 * execution receives a signal named by a `{ signal: name }` branch. A branch that
+	 * already holds its event or outcome, or a signal whose handler has not returned,
+	 * wins at once; when several do, the one stored first wins. Execution and signal
+	 * branches are stored under `<stepKey>:<branch>`. All subscriptions are removed when the wait settles, and
 	 * the winner is memoized by the step key.
 	 */
 	async waitForAny<
-		const TBranches extends Record<string, EventSubscription<unknown> | ExecutionBranch>,
+		const TBranches extends Record<
+			string,
+			EventSubscription<unknown> | ExecutionBranch | SignalBranch
+		>,
 	>(
 		stepKey: string,
 		branches: TBranches & { timeout?: never },
 		options: { timeout?: DurationInput } = {},
 	): Promise<WaitForAnyResult<TBranches, Tasks>> {
-		const cached = await this.opts.db.loadStep(
-			{
-				executionId: this.opts.execution.id,
-				queue: this.opts.execution.queue,
-				key: stepKey,
-			},
-			{ signal: this.signal },
-		);
-		if (cached !== undefined) return cached as WaitForAnyResult<TBranches, Tasks>;
-		const result = await this.opts.db.registerEventRace(
-			{
-				executionId: this.opts.execution.id,
-				queue: this.opts.execution.queue,
-				taskKey: this.opts.execution.task_key,
-				stepKey,
-				branches: Object.entries(branches).map(([key, branch]) =>
-					"execution" in branch
-						? {
-								key,
-								stepKey: `${stepKey}:${key}`,
-								executionId: branch.execution,
-								taskKey: branch.task?.name,
-								queue: branch.task?.queue || "default",
-							}
-						: { key, stepKey: branch.key },
-				),
-				timeoutMs: options.timeout === undefined ? null : parseDuration(options.timeout),
-				orchestratorId: this.opts.execution.locked_by,
-				claimToken: this.opts.execution.claim_token,
-			},
-			{ signal: this.signal },
-		);
+		// From the call on, no signal handler starts, and the one running is passed along: a signal
+		// handled before the wait registers would neither win nor wake it
+		const result = await this.opts.signals.hold(async (delivering) => {
+			const cached = await this.opts.db.loadStep(
+				{
+					executionId: this.opts.execution.id,
+					queue: this.opts.execution.queue,
+					key: stepKey,
+				},
+				{ signal: this.signal },
+			);
+			if (cached !== undefined) return cached;
+			return this.opts.db.registerEventRace(
+				{
+					executionId: this.opts.execution.id,
+					queue: this.opts.execution.queue,
+					taskKey: this.opts.execution.task_key,
+					stepKey,
+					branches: Object.entries(branches).map(([key, branch]) =>
+						"execution" in branch
+							? {
+									key,
+									stepKey: `${stepKey}:${key}`,
+									executionId: branch.execution,
+									taskKey: branch.task?.name,
+									queue: branch.task?.queue || "default",
+								}
+							: "signal" in branch
+								? { key, stepKey: `${stepKey}:${key}`, signal: branch.signal }
+								: { key, stepKey: branch.key },
+					),
+					timeoutMs: options.timeout === undefined ? null : parseDuration(options.timeout),
+					orchestratorId: this.opts.execution.locked_by,
+					claimToken: this.opts.execution.claim_token,
+					deliveringSignalId: delivering?.id || null,
+				},
+				{ signal: this.signal },
+			);
+		});
 		if (!result) return this.abortAndHangup({ reason: "suspended" });
 		return result as WaitForAnyResult<TBranches, Tasks>;
 	}
