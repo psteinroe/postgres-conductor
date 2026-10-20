@@ -1316,8 +1316,8 @@ export class QueryBuilder {
 		result,
 		orchestratorId,
 		claimToken,
-	}: SaveStepArgs): PendingQuery<RowList<Row[]>> {
-		return this.sql<RowList<Row[]>>`
+	}: SaveStepArgs): PendingQuery<[{ claimed: boolean }]> {
+		return this.sql<[{ claimed: boolean }]>`
 			with claimed_execution as materialized (
 				select e.id, e.queue
 				from pgconductor._private_executions e
@@ -1326,11 +1326,14 @@ export class QueryBuilder {
 					and e.locked_by = ${orchestratorId}::uuid
 					and e.claim_token = ${claimToken}::uuid
 				for update
+			),
+			inserted as (
+				insert into pgconductor._private_steps (execution_id, queue, key, result)
+				select e.id, e.queue, ${key}::text, ${this.sql.json(result)}::jsonb
+				from claimed_execution e
+				on conflict (execution_id, key) do nothing
 			)
-			insert into pgconductor._private_steps (execution_id, queue, key, result)
-			select e.id, e.queue, ${key}::text, ${this.sql.json(result)}::jsonb
-			from claimed_execution e
-			on conflict (execution_id, key) do nothing
+			select exists (select 1 from claimed_execution) as claimed
 		`;
 	}
 

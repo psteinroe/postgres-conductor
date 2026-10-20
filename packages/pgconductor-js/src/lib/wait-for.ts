@@ -7,26 +7,20 @@ export function waitFor(
 	options?: { signal?: AbortSignal; jitter?: number },
 ): Promise<void> {
 	return new Promise<void>((resolve) => {
-		if (options?.signal?.aborted) {
+		const signal = options?.signal;
+		if (signal?.aborted) {
 			resolve();
 			return;
 		}
 
 		const jitter = options?.jitter || 0;
 		const delay = jitter > 0 ? ms + Math.random() * jitter : ms;
-		const timeout = setTimeout(resolve, delay);
-
-		if (options?.signal) {
-			options.signal.addEventListener(
-				"abort",
-				() => {
-					clearTimeout(timeout);
-					resolve();
-				},
-				{
-					once: true,
-				},
-			);
-		}
+		const done = () => {
+			clearTimeout(timeout);
+			signal?.removeEventListener("abort", done);
+			resolve();
+		};
+		const timeout = setTimeout(done, delay);
+		signal?.addEventListener("abort", done);
 	});
 }

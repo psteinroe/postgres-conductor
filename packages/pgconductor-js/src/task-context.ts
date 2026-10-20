@@ -36,22 +36,22 @@ import { compileEventFilter } from "./event-trigger-validation.js";
 import { validateSchema } from "./lib/validate-schema.js";
 import type { SignalHandler, SignalInbox } from "./signal-inbox.js";
 
+/** Why an attempt was aborted, read from its abort controller and never from handler output */
 export type TaskAbortReasons =
 	// if cancelled by a user
-	| { reason: "cancelled"; __pgconductorTaskAborted: true }
-	// the database already released the task
-	| { reason: "suspended"; __pgconductorTaskAborted: true }
+	| { reason: "cancelled" }
+	// the database already released the task, or the attempt no longer holds its claim
+	| { reason: "suspended" }
 	// the task is released
 	| {
 			reason: "released";
 			reschedule_in_ms: number | "infinity";
 			step_key?: string;
-			__pgconductorTaskAborted: true;
 	  }
 	// the task ran longer than its timeoutMs
-	| { reason: "timed-out"; __pgconductorTaskAborted: true }
+	| { reason: "timed-out" }
 	// a signal handler threw
-	| { reason: "signal-failed"; error: string; __pgconductorTaskAborted: true }
+	| { reason: "signal-failed"; error: string }
 	// the task invoked a child
 	| {
 			reason: "child-invocation";
@@ -62,19 +62,7 @@ export type TaskAbortReasons =
 			group?: string | null;
 			trace_context: TraceContextCarrier | null;
 			metadata: Payload | null;
-			__pgconductorTaskAborted: true;
 	  };
-
-type DistributiveOmit<T, K extends PropertyKey> = T extends any ? Omit<T, K> : never;
-
-export function isTaskAbortReason(result: unknown): result is TaskAbortReasons {
-	return (
-		typeof result === "object" &&
-		result !== null &&
-		"__pgconductorTaskAborted" in result &&
-		(result as TaskAbortReasons).__pgconductorTaskAborted === true
-	);
-}
 
 export class WaitForEventTimeoutError extends Error {
 	readonly code = "PGCONDUCTOR_WAIT_FOR_EVENT_TIMEOUT";
@@ -228,8 +216,6 @@ export class TaskContext<
 	 * need an idempotency key.
 	 */
 	async step<T extends JsonValue | void>(name: string, fn: () => Promise<T> | T): Promise<T> {
-		await this.checkpoint();
-
 		// Check if step already completed
 		const cached = await this.opts.db.loadStep(
 			{
@@ -244,6 +230,9 @@ export class TaskContext<
 			return (cached as { result: T }).result;
 		}
 
+		// After the read, so fn never starts once the attempt aborted
+		await this.checkpoint();
+
 		// Execute and save. A cache hit intentionally has no span.
 		return this.opts.telemetry.trace({
 			name: `step ${this.opts.execution.task_key}`,
@@ -255,7 +244,7 @@ export class TaskContext<
 			},
 			run: async () => {
 				const result = await fn();
-				await this.opts.db.saveStep(
+				const saved = await this.opts.db.saveStep(
 					{
 						executionId: this.opts.execution.id,
 						queue: this.opts.execution.queue,
@@ -266,7 +255,7 @@ export class TaskContext<
 					},
 					{ signal: this.signal },
 				);
-				return result;
+				return saved ? result : this.abortAndHangup({ reason: "suspended" });
 			},
 		});
 	}
@@ -839,13 +828,8 @@ export class TaskContext<
 	 * Abort the current execution and hang up indefinitely
 	 * @return Promise that never resolves
 	 **/
-	private abortAndHangup(
-		reason: DistributiveOmit<TaskAbortReasons, "__pgconductorTaskAborted">,
-	): Promise<never> {
-		this.opts.abortController.abort({
-			__pgconductorTaskAborted: true,
-			...reason,
-		} as TaskAbortReasons);
+	private abortAndHangup(reason: TaskAbortReasons): Promise<never> {
+		this.opts.abortController.abort(reason);
 		return new Promise(() => {});
 	}
 }
@@ -886,12 +870,7 @@ export class BatchTaskContext {
 			return;
 		}
 
-		this.abortController.abort({
-			__pgconductorTaskAborted: true,
-			reason: "released",
-			reschedule_in_ms: ms,
-			step_key: id,
-		} as TaskAbortReasons);
+		this.abortController.abort({ reason: "released", reschedule_in_ms: ms, step_key: id });
 		return new Promise(() => {});
 	}
 }

@@ -135,16 +135,18 @@ Tables live in the `pgconductor` schema with a `_private_` prefix (`_private_exe
 - Polls the database for ready executions of one queue, claiming only the tasks it registers; it throws at construction for a task of another queue
 - Claims only tasks inside their time window (`WindowChecker`, also used by checkpoints); a window whose start is after its end spans midnight
 - Executes tasks with concurrency control (via `mapConcurrent`)
-- Batches and flushes results back to the database
+- Batches and flushes results back to the database. Flushes run one at a time, so the final flush follows every earlier one; it retries with its own 10s deadline, since the worker signal is already aborted on stop, and a result it cannot settle rejects the worker's `stopped`
+- Each attempt races the handler, and then the draining of its signals, against an abort promise that resolves with `{ abort: reason }`. Abort reasons (`TaskAbortReasons`) are read only from the attempt's abort controller, never from handler or middleware output
 - Claiming returns each execution's undelivered signals, which prime its `SignalInbox` before the handler runs
-- The claim statement also reads the cancellation flag and newer undelivered signals of the worker's running executions (`running` in `getExecutions`), aborts cancelled ones and hands signals to their `SignalInbox`. While all slots are busy the worker still runs it every `pollIntervalMs`, with a batch size of 0, as long as an execution runs
-- Handles graceful shutdown via AbortController
+- The claim statement also reads the cancellation flag and newer undelivered signals of the worker's running executions (`running` in `getExecutions`), aborts cancelled ones and hands signals to their `SignalInbox`. While all slots are busy the worker still runs it every `pollIntervalMs`, with a batch size of 0, as long as an execution runs. Batch members are polled too and share the batch's controller; cancelling one releases the others without spending their attempt. After a drain's last empty claim the worker keeps these zero-sized polls until its pipeline ends, then joins the fetch loop before resetting
+- Handles graceful shutdown via AbortController; a stop during registration retries ends them and settles `stopped`
 
 **TaskContext** (`task-context.ts`)
 - Provides API to task functions: `step()`, `sleep()`, `invoke()`, `invokeAndWait()`, `waitForResult()`, `waitForEvent()`, `subscribe()`, `waitForAny()`, `onSignal()`, `sendSignal()`, `signalWithStart()`, plus `executionId` and `queue`
 - `invoke()` inserts an independent execution and memoizes its id as a step in one statement. Only with `cancelWithParent` does it set `parent_execution_id`, together with `cancel_with_parent`; settlement fails a completed child that has a parent but neither a waiter nor that flag
 - Memoized by step key, so a replay returns the stored result: `step()`, `sleep()`, `invoke()`, `invokeAndWait()`, `waitForResult()`, `waitForEvent()`, `subscribe()`, `waitForAny()` and `signalWithStart()`. `emit()` (deduplicated only with a `dedupe_key`), `sendSignal()` (deduplicated by signal id), `schedule()` (replaces the pending occurrence), `unschedule()` and `cancel()` are not memoized and run again on every replay
 - `checkpoint()` hangs up when the abort signal fired or the time window closed; it persists nothing
+- `step()` checkpoints after reading the step, so `fn` never starts once the attempt aborted, and hangs up as suspended when the claim fence rejects its save
 - Hangup pattern: abort execution and return never-resolving promise
 - Resume happens automatically when database wakes execution
 
@@ -160,7 +162,8 @@ Tables live in the `pgconductor` schema with a `_private_` prefix (`_private_exe
 - Startup registers the orchestrator row; the periodic heartbeat only updates it. A heartbeat that finds no row means the orchestrator was recovered as stale, and it stops
 - Shutdown is persistent state: a breaking migration sets `shutdown_reason` on the row, and every heartbeat reports it (or a newer installed migration) until the row is deleted, so a lost heartbeat response loses nothing
 - Every 8th heartbeat recovers stale orchestrators via `_private_remove_orchestrators()`, which also removes the orchestrator on shutdown
-- Provides `stopped` promise for graceful shutdown
+- Provides `stopped` promise for graceful shutdown. `stop()` interrupts startup, `run()` and `drain()` alike
+- Cleanup retries removing the orchestrator for at most 10s, then gives up and leaves the rest to stale recovery; local lifecycle state and process listeners are reset in a `finally`
 - Runs the internal event dispatch worker only when the conductor has `events` configured
 - One queue = one codebase: every orchestrator polling a queue runs the same task set, so worker registration owns the whole queue and replaces its cron schedules and trigger subscriptions
 

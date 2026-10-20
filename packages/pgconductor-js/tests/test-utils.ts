@@ -29,3 +29,31 @@ export function loseFirstResponse(sql: Sql, marker: string): Sql {
 		},
 	});
 }
+
+// Fails statements containing `marker` before they run while `fail` returns an error
+export function failStatements(sql: Sql, marker: string, fail: () => Error | null): Sql {
+	return new Proxy(sql, {
+		apply(target, thisArg, args) {
+			const query = Reflect.apply(target, thisArg, args);
+			if (!String(args[0]).includes(marker)) return query;
+			const error = fail();
+			return error ? Promise.reject(error) : query;
+		},
+	});
+}
+
+// Error shaped like a dropped connection, which DatabaseClient retries when given a signal
+export function connectionError(code = "ECONNRESET"): Error {
+	return Object.assign(new Error(`injected ${code}`), { code });
+}
+
+// Resolves "timeout" if the promise does not settle within ms
+export function within(promise: Promise<unknown>, ms: number): Promise<"done" | "timeout"> {
+	return Promise.race([
+		promise.then(
+			() => "done" as const,
+			() => "done" as const,
+		),
+		sleep(ms).then(() => "timeout" as const),
+	]);
+}

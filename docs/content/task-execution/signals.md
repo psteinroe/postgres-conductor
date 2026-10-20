@@ -89,7 +89,7 @@ No signal is lost when the handler returns:
 - **Pending executions** receive their signals when they first run
 - **Cancellation and permanent failure:** undelivered signals are dropped. Signalling a cancelled execution returns `false`
 
-When the handler returns while signal handlers are still running or signals it already read are waiting for them, the attempt waits for them before settling. Signals that arrive after the handler returned are left to the re-queued attempt.
+When the handler returns while signal handlers are still running or signals it already read are waiting for them, the attempt waits for them before settling. `timeoutMs` and cancellation still apply while it waits, and a signal handler that suspends, for example with `ctx.sleep()`, suspends the attempt. Signals that arrive after the handler returned are left to the re-queued attempt.
 
 A handler does not have to wait for its signals: one that registers listeners and returns right away still receives every signal stored before it started. Re-queues are not limited, because each one needs a signal stored after the previous attempt started, and the next attempt receives that signal when it starts. An execution therefore re-runs only while new signals keep arriving. To handle a stream of signals in one attempt, keep the handler running, for example until it has been idle for a while.
 

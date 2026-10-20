@@ -1,3 +1,4 @@
+import { getEventListeners } from "node:events";
 import { test, expect, describe } from "vitest";
 import { waitFor } from "../../../src/lib/wait-for";
 
@@ -88,5 +89,11 @@ describe("waitFor", () => {
 		const elapsed = Date.now() - start;
 
 		expect(elapsed).toBeLessThan(50);
+	});
+
+	test("removes its abort listener when the delay ends", async () => {
+		const controller = new AbortController();
+		for (let i = 0; i < 3; i++) await waitFor(1, { signal: controller.signal });
+		expect(getEventListeners(controller.signal, "abort")).toHaveLength(0);
 	});
 });
