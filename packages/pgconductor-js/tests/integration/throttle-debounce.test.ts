@@ -2,6 +2,8 @@ import { describe, test, expect, beforeAll, afterAll, afterEach } from "vitest";
 import { TestDatabasePool } from "../fixtures/test-database";
 import type { TestDatabase } from "../fixtures/test-database";
 import { Conductor } from "../../src/conductor";
+import { Orchestrator } from "../../src/orchestrator";
+import { Deferred } from "../../src/lib/deferred";
 import { TaskSchemas } from "../../src/schemas";
 import { defineTask } from "../../src/task-definition";
 import { z } from "zod";
@@ -437,5 +439,127 @@ describe("Throttle and Debounce Integration", () => {
 			where task_key = 'test-task'
 		`;
 		expect(executions.map((e) => e.payload)).toEqual([{ value: 1 }]);
+	});
+
+	describe("with a dedupe key", () => {
+		async function setup() {
+			const db = await pool.child();
+			databases.push(db);
+			await db.clock.set(new Date("2024-01-01T12:00:10Z"));
+			const conductor = Conductor.create({
+				sql: db.sql,
+				clock: db.clock,
+				tasks: TaskSchemas.fromSchema([defineTask({ name: "sync", payload: z.object({}) })]),
+				context: {},
+			});
+			await conductor.ensureInstalled();
+			return { db, conductor };
+		}
+
+		test("throttle starts a new execution in the next slot while the first is pending", async () => {
+			const { db, conductor } = await setup();
+			const opts = { dedupe_key: "customer-1", throttle: { seconds: 60 } };
+
+			const first = await conductor.invoke({ name: "sync" }, {}, opts);
+			await db.clock.advance("1m");
+			const second = await conductor.invoke({ name: "sync" }, {}, opts);
+
+			expect(first).toBeTruthy();
+			expect(second).toBeTruthy();
+			expect(second).not.toBe(first);
+		});
+
+		test("throttle starts a new execution in the next slot after the first completed", async () => {
+			const { db, conductor } = await setup();
+			const opts = { dedupe_key: "customer-1", throttle: { seconds: 60 } };
+			const sync = conductor.createTask({ name: "sync" }, { invocable: true }, async () => {});
+			const drain = () =>
+				Orchestrator.create({
+					conductor,
+					tasks: [sync],
+					defaultWorker: { pollIntervalMs: 50, flushIntervalMs: 50 },
+				}).drain();
+			await drain();
+
+			const first = await conductor.invoke({ name: "sync" }, {}, opts);
+			await drain();
+			await db.clock.advance("1m");
+			const second = await conductor.invoke({ name: "sync" }, {}, opts);
+
+			const rows = await db.sql<{ id: string; completed: boolean }[]>`
+				select id, completed_at is not null as completed from pgconductor._private_executions
+				where task_key = 'sync'
+				order by id
+			`;
+			expect([...rows]).toEqual([
+				{ id: first, completed: true },
+				{ id: second, completed: false },
+			]);
+		});
+
+		test("debounce starts a new execution after its target slot moved", async () => {
+			const { db, conductor } = await setup();
+			const opts = { dedupe_key: "customer-1", debounce: { seconds: 60 } };
+
+			const first = await conductor.invoke({ name: "sync" }, {}, opts);
+			await db.clock.advance("1m");
+			const second = await conductor.invoke({ name: "sync" }, {}, opts);
+
+			expect(second).toBeTruthy();
+			expect(second).not.toBe(first);
+		});
+
+		test("keeps throttled and ordinary executions of the same key apart", async () => {
+			const { db, conductor } = await setup();
+
+			const throttled = await conductor.invoke(
+				{ name: "sync" },
+				{},
+				{ dedupe_key: "customer-1", throttle: { seconds: 60 } },
+			);
+			const ordinary = await conductor.invoke({ name: "sync" }, {}, { dedupe_key: "customer-1" });
+			const repeated = await conductor.invoke({ name: "sync" }, {}, { dedupe_key: "customer-1" });
+
+			expect(ordinary).not.toBe(throttled);
+			expect(repeated).toBe(ordinary);
+			const rows = await db.sql`select id from pgconductor._private_executions`;
+			expect(rows).toHaveLength(2);
+		});
+
+		test("throttles a re-invoke in the same slot while the execution runs", async () => {
+			const { db, conductor } = await setup();
+			const opts = { dedupe_key: "customer-1", throttle: { seconds: 60 } };
+			const started = new Deferred<void>();
+			const release = new Deferred<void>();
+			const sync = conductor.createTask({ name: "sync" }, { invocable: true }, async () => {
+				started.resolve();
+				await release.promise;
+			});
+			const orchestrator = Orchestrator.create({
+				conductor,
+				tasks: [sync],
+				defaultWorker: { pollIntervalMs: 50, flushIntervalMs: 50 },
+			});
+			await orchestrator.start();
+
+			try {
+				const first = await conductor.invoke({ name: "sync" }, {}, opts);
+				await started.promise;
+
+				const throttled = await conductor.invoke({ name: "sync" }, {}, opts);
+				const ordinary = await conductor.invoke({ name: "sync" }, {}, { dedupe_key: "customer-1" });
+
+				expect(throttled).toBeNull();
+				expect(ordinary).not.toBe(first);
+				const [row] = await db.sql<{ locked: boolean; failed_at: Date | null }[]>`
+					select locked_at is not null as locked, failed_at
+					from pgconductor._private_executions where id = ${first}
+				`;
+				expect(row).toEqual({ locked: true, failed_at: null });
+			} finally {
+				release.resolve();
+				await orchestrator.stop();
+			}
+		});
 	});
 });

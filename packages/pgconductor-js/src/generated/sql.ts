@@ -124,10 +124,14 @@ create table pgconductor._private_executions (
     -- source execution metadata of a dead-letter delivery, copied so the source row may be removed
     dead_letter jsonb,
     primary key (id, queue),
-    unique (task_key, dedupe_key, queue),
     constraint chk_executions_event_delivery_parent
         check (subscription_id is null or parent_execution_id is not null)
 ) partition by list (queue);
+
+-- ordinary dedupe: one stored execution per key. throttled and debounced executions are keyed by
+-- their slot below instead, so a stored one does not block the key in a later slot
+create unique index on pgconductor._private_executions (task_key, dedupe_key, queue)
+where singleton_on is null;
 
 -- unique index for singleton throttle/debounce enforcement on parent table
 -- this automatically creates matching indexes on all partitions
@@ -544,7 +548,7 @@ begin
     spec."group"
   from unnest(p_cron_schedules) as spec
   where spec.dedupe_key is not null
-  on conflict (task_key, dedupe_key, queue) do update set
+  on conflict (task_key, dedupe_key, queue) where singleton_on is null do update set
     payload = excluded.payload,
     run_at = excluded.run_at,
     cron_expression = excluded.cron_expression,
@@ -695,7 +699,8 @@ begin
     execution."group", execution.metadata
   from pgconductor._private_executions execution
   where execution.id = p_execution_id and execution.queue = p_queue
-  on conflict (task_key, dedupe_key, queue) do update set dedupe_key = excluded.dedupe_key
+  on conflict (task_key, dedupe_key, queue) where singleton_on is null
+  do update set dedupe_key = excluded.dedupe_key
   returning e.id into v_next_id;
 
   insert into pgconductor._private_steps (execution_id, queue, key, result)
@@ -764,8 +769,9 @@ begin
   v_now := pgconductor._private_current_time();
   v_run_at := coalesce(p_run_at, v_now);
 
-  -- clear locked dedupe key before insert (supersede pattern)
-  if p_dedupe_key is not null then
+  -- clear locked dedupe key before insert (supersede pattern). throttle and debounce never
+  -- supersede: a running execution holds its slot
+  if p_dedupe_key is not null and p_dedupe_seconds is null then
       with superseded as (
           select e.id, e.queue, e.result_waiters, t.remove_on_fail_days = 0 as should_remove
           from pgconductor._private_executions e
@@ -773,6 +779,7 @@ begin
           where e.dedupe_key = p_dedupe_key
               and e.task_key = p_task_key
               and e.queue = p_queue
+              and e.singleton_on is null
               and e.locked_at is not null
           for update of e
       ),
@@ -918,7 +925,7 @@ begin
     coalesce(p_priority, 0),
     p_group
   )
-  on conflict (task_key, dedupe_key, queue) do update set
+  on conflict (task_key, dedupe_key, queue) where singleton_on is null do update set
     payload = excluded.payload,
     trace_context = excluded.trace_context,
     metadata = excluded.metadata,
@@ -1973,6 +1980,10 @@ set search_path to ''
 as $function$
 declare
     v_payload jsonb := p_payload;
+    -- json array text, so no two (name, key) pairs encode alike
+    v_dedupe_key text := case
+        when p_dedupe_key is not null then jsonb_build_array(p_event_key, p_dedupe_key)::text
+    end;
 begin
     if p_event_key is null
         or btrim(p_event_key) = ''
@@ -1996,7 +2007,7 @@ begin
         jsonb_build_object('eventKey', p_event_key, 'payload', v_payload),
         p_trace_context,
         p_metadata,
-        p_event_key || ':' || p_dedupe_key
+        v_dedupe_key
     )
     on conflict do nothing;
 
@@ -2011,7 +2022,8 @@ begin
         from pgconductor._private_executions
         where task_key = 'pgconductor.event-dispatch'
           and queue = 'pgconductor.internal'
-          and dedupe_key = p_event_key || ':' || p_dedupe_key
+          and dedupe_key = v_dedupe_key
+          and singleton_on is null
     );
 end;
 $function$;

@@ -1251,7 +1251,7 @@ export class QueryBuilder {
 					${spec.priority || 0}::integer,
 					${spec.group || null}::text
 				)
-				on conflict (task_key, dedupe_key, queue) do update set
+				on conflict (task_key, dedupe_key, queue) where singleton_on is null do update set
 					payload = excluded.payload,
 					metadata = excluded.metadata,
 					cron_expression = excluded.cron_expression,
@@ -1450,7 +1450,8 @@ export class QueryBuilder {
 					${cancelWithParent}::boolean
 				from claimed_execution
 				where not exists (select from stored_step)
-				on conflict (task_key, dedupe_key, queue) do update set dedupe_key = excluded.dedupe_key
+				on conflict (task_key, dedupe_key, queue) where singleton_on is null
+				do update set dedupe_key = excluded.dedupe_key
 				returning e.id
 			), saved_step as (
 				insert into pgconductor._private_steps (execution_id, queue, key, result)
