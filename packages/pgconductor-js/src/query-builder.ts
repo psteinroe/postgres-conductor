@@ -1186,51 +1186,27 @@ export class QueryBuilder {
 	buildScheduleCronExecution({
 		spec,
 		scheduleName,
-	}: ScheduleCronExecutionArgs): PendingQuery<[{ resolved: number }]> {
+	}: ScheduleCronExecutionArgs): PendingQuery<Row[]> {
 		assert.ok(spec.run_at, "scheduleCronExecution requires run_at");
 		assert.ok(spec.cron_expression, "scheduleCronExecution requires cron_expression");
 
 		const runAt = spec.run_at as Date;
 		const cronExpression = spec.cron_expression as string;
 		const timestampSeconds = Math.floor(runAt.getTime() / 1000);
-		const dedupeKey = `dynamic::${scheduleName}::${timestampSeconds}`;
 
-		return this.sql<[{ resolved: number }]>`
-			with removed as (
-				delete from pgconductor._private_executions
-				where task_key = ${spec.task_key}::text
-					and queue = ${spec.queue}::text
-					and dedupe_key like 'dynamic::%'
-					and split_part(dedupe_key, '::', 2) = ${scheduleName}::text
-					and dedupe_key <> ${dedupeKey}::text
-					and cron_expression is not null
-					and is_available
-				returning result_waiters
-			), ${this.removedScheduleWaits()},
-			-- a running or settled occurrence is kept
-			scheduled as (
-				insert into pgconductor._private_executions as e (
-					task_key, queue, payload, metadata, run_at, dedupe_key, cron_expression, priority, "group"
-				) values (
-					${spec.task_key}::text,
-					${spec.queue}::text,
-					${spec.payload ? this.sql.json(spec.payload) : null}::jsonb,
-					${spec.metadata ? this.sql.json(spec.metadata) : null}::jsonb,
-					${runAt.toISOString()}::timestamptz,
-					${dedupeKey}::text,
-					${cronExpression}::text,
-					${spec.priority || 0}::integer,
-					${spec.group || null}::text
-				)
-				on conflict (task_key, dedupe_key, queue) where singleton_on is null do update set
-					payload = excluded.payload,
-					metadata = excluded.metadata,
-					cron_expression = excluded.cron_expression,
-					priority = excluded.priority,
-					"group" = excluded."group"
-				where e.is_available
+		return this.sql`
+			select pgconductor._private_schedule(
+				p_task_key := ${spec.task_key}::text,
+				p_queue := ${spec.queue}::text,
+				p_schedule_name := ${scheduleName}::text,
+				p_dedupe_key := ${`dynamic::${scheduleName}::${timestampSeconds}`}::text,
+				p_run_at := ${runAt.toISOString()}::timestamptz,
+				p_cron_expression := ${cronExpression}::text,
+				p_payload := ${spec.payload ? this.sql.json(spec.payload) : null}::jsonb,
+				p_metadata := ${spec.metadata ? this.sql.json(spec.metadata) : null}::jsonb,
+				p_priority := ${spec.priority || 0}::integer,
+				p_group := ${spec.group || null}::text
 			)
-			select count(*)::int as resolved from resolved_result_waits
 		`;
 	}
 
@@ -1266,18 +1242,6 @@ export class QueryBuilder {
 				p_dedupe_key := ${dedupeKey}::text
 			)
 		`;
-	}
-
-	// Waits for pending schedule executions removed by the statement's `removed` CTE
-	private removedScheduleWaits(): PendingQuery<Row[]> {
-		return this.sql`resolved_result_waits as (
-			select pgconductor._private_resolve_result_waits(jsonb_agg(w.value || jsonb_build_object(
-				'outcome', jsonb_build_object('status', 'cancelled', 'reason', 'Schedule removed')
-			)))
-			from removed r
-			cross join lateral jsonb_array_elements(r.result_waiters) w
-			having count(*) > 0
-		)`;
 	}
 
 	buildInvokeBatch(specs: ExecutionSpec[]): PendingQuery<{ id: string }[]> {

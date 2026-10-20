@@ -1,3 +1,4 @@
+import postgres from "postgres";
 import { z } from "zod";
 import { test, expect, describe, beforeAll, afterAll, vi } from "vitest";
 import { Conductor } from "../../src/conductor";
@@ -892,6 +893,150 @@ describe("Cron Scheduling", () => {
 
 		await db.destroy();
 	}, 30000);
+	test("every occurrence of a dynamic schedule gets its payload and priority", async () => {
+		const db = await pool.child();
+		await db.clock.set(new Date("2024-01-01T12:00:30Z"));
+		const conductor = Conductor.create({
+			sql: db.sql,
+			clock: db.clock,
+			tasks: TaskSchemas.fromSchema([
+				defineTask({ name: "report", payload: z.object({ userId: z.string() }) }),
+			]),
+			context: {},
+		});
+		await conductor.ensureInstalled();
+		const events: unknown[] = [];
+		const report = conductor.createTask({ name: "report" }, { invocable: true }, async (event) => {
+			events.push(event);
+		});
+		const drain = () => Orchestrator.create({ conductor, tasks: [report] }).drain();
+
+		await conductor.db.scheduleCronExecution({
+			spec: {
+				task_key: "report",
+				queue: "default",
+				payload: { userId: "u1" },
+				run_at: new Date("2024-01-01T12:01:00Z"),
+				cron_expression: "* * * * *",
+				priority: 3,
+			},
+			scheduleName: "user-u1",
+		});
+		await db.clock.set(new Date("2024-01-01T12:01:00Z"));
+		await drain();
+		await db.clock.set(new Date("2024-01-01T12:02:00Z"));
+		await drain();
+
+		const event = { name: "pgconductor.invoke", payload: { userId: "u1" } };
+		expect(events).toEqual([event, event]);
+		const pending = await db.sql`
+			select payload, priority from pgconductor._private_executions
+			where task_key = 'report' and is_available
+		`;
+		expect(pending).toEqual([{ payload: { userId: "u1" }, priority: 3 }]);
+
+		await db.destroy();
+	}, 30000);
+
+	describe("replacing a schedule while an occurrence schedules its successor", () => {
+		const runAt = new Date("2030-01-01T00:00:00Z");
+		const replacedAt = new Date("2030-01-01T00:05:00Z");
+
+		async function claimOccurrence(db: TestDatabase) {
+			await Conductor.create({ sql: db.sql, context: {} }).ensureInstalled();
+			await db.client.scheduleCronExecution({
+				spec: { task_key: "tick", queue: "default", run_at: runAt, cron_expression: "* * * * *" },
+				scheduleName: "every-minute",
+			});
+			await db.sql`
+				update pgconductor._private_executions
+				set locked_at = now(), locked_by = gen_random_uuid(), claim_token = gen_random_uuid()
+			`;
+		}
+
+		function scheduleSuccessor(sql: postgres.Sql) {
+			const next = new Date(runAt.getTime() + 60_000);
+			return sql`
+				select pgconductor._private_schedule_next_occurrence(
+					e.id, e.queue, e.locked_by, e.claim_token, ${next.toISOString()}::timestamptz,
+					${`dynamic::every-minute::${next.getTime() / 1000}`}
+				)
+				from pgconductor._private_executions e
+				where e.locked_by is not null
+			`;
+		}
+
+		function replaceSchedule(db: TestDatabase) {
+			return db.client.scheduleCronExecution({
+				spec: {
+					task_key: "tick",
+					queue: "default",
+					run_at: replacedAt,
+					cron_expression: "*/5 * * * *",
+				},
+				scheduleName: "every-minute",
+			});
+		}
+
+		async function pendingOccurrences(db: TestDatabase) {
+			const rows = await db.sql<{ run_at: Date }[]>`
+				select run_at from pgconductor._private_executions where task_key = 'tick' and is_available
+			`;
+			return rows.map((row) => row.run_at);
+		}
+
+		test("a successor scheduled after the replacement is not inserted", async () => {
+			const db = await pool.child();
+			await claimOccurrence(db);
+
+			await replaceSchedule(db);
+			await scheduleSuccessor(db.sql);
+
+			expect(await pendingOccurrences(db)).toEqual([replacedAt]);
+			await db.destroy();
+		});
+
+		test("a replacement concurrent with the successor removes it", async () => {
+			const db = await pool.child();
+			await claimOccurrence(db);
+			const successorSql = postgres(db.url, { max: 1 });
+			const observer = postgres(db.url, { max: 1 });
+			const inserted = new Deferred<void>();
+			const commit = new Deferred<void>();
+
+			try {
+				const successor = successorSql.begin(async (sql) => {
+					await scheduleSuccessor(sql);
+					inserted.resolve();
+					await commit.promise;
+				});
+				await inserted.promise;
+				let replaced = false;
+				const replacing = replaceSchedule(db).finally(() => {
+					replaced = true;
+				});
+				// The replacement either finished without seeing the uncommitted successor or waits for it
+				await waitForCondition(async () => {
+					const rows = await observer`
+						select 1 from pg_stat_activity
+						where datname = current_database() and wait_event_type = 'Lock'
+					`;
+					return replaced || rows.length === 1;
+				});
+				commit.resolve();
+				await successor;
+				await replacing;
+			} finally {
+				commit.resolve();
+				await successorSql.end();
+				await observer.end();
+			}
+
+			expect(await pendingOccurrences(db)).toEqual([replacedAt]);
+			await db.destroy();
+		});
+	});
+
 	describe("removing a schedule while an occurrence is about to schedule its successor", () => {
 		// Blocks the worker right before it inserts the next occurrence of a schedule
 		function pauseSuccessor(conductor: Conductor<any, any, any, any, any, any, any>) {

@@ -228,8 +228,9 @@ Tables live in the `pgconductor` schema with a `_private_` prefix (`_private_exe
 - A signal locks only the signalled execution: `_private_store_signal()` resolves its signal branches and wakes it under the row lock the sender holds
 
 **Cron Schedules**
-- A claimed occurrence inserts its successor before the handler runs, through `_private_schedule_next_occurrence()`: it takes a share lock on the queue row, then inserts only if the occurrence is still claimed and not cancelled
-- Removing schedules (registration, `_private_unschedule()`) holds the queue row lock and deletes pending occurrences, then cancels running ones in a separate statement, which sees occurrences claimed while the delete ran
+- A claimed occurrence inserts its successor before the handler runs, through `_private_schedule_next_occurrence()`: it takes a share lock on the queue row, then inserts only if the occurrence is still claimed and not cancelled, and no occurrence of its schedule with a later scheduled time (the dedupe key's timestamp) is still live, which means the schedule was replaced. The successor copies payload, priority, group and metadata
+- Removing schedules (registration, `_private_unschedule()`) holds the queue row lock and deletes pending occurrences, then cancels running ones in a separate statement, which sees occurrences claimed while the delete ran. Replacing a dynamic schedule (`_private_schedule()`, `ctx.schedule()`) holds it too and deletes pending occurrences in a later statement
+- Occurrences of a dynamic schedule (`dynamic::` dedupe keys) run as `pgconductor.invoke` events with their payload, so it is validated like an invocation; static cron triggers run as an event named after the trigger, without payload
 
 **Migrations**
 - `SchemaManager.ensureLatest()` applies each missing migration in its own transaction under the `pgconductor:migrations` advisory lock. Migration 0 creates the ledger (`schema_migrations`), so it is repeatable and its ledger row is inserted `on conflict do nothing`; later migrations check the ledger under the lock

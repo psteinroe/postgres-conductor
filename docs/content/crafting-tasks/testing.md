@@ -73,7 +73,7 @@ await clock.reset();                                // Back to real time
 
 Fake time keeps running from where you set it, like real time, so things that happen one after another get later times. Assert timestamps with bounds, such as `toBeGreaterThanOrEqual()`, rather than exact values. Without `set()`, `advance()` starts from the current real time.
 
-**Cron:** a worker schedules the next occurrence when it starts and after each run.
+**Cron:** a worker schedules the next occurrence when it starts and when an occurrence starts running, before its handler.
 
 ```typescript
 const report = conductor.createTask(
