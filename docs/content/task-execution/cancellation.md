@@ -36,6 +36,7 @@ console.log(cancelled); // true if cancelled, false if already completed
 
 - Cancelling an execution also cancels the executions it is waiting on
 - Every workflow waiting on a cancelled execution fails with "Child execution failed: <reason>"
+- Executions started with `ctx.invoke(..., { cancelWithParent: true })` are cancelled with the reason their parent ended with, when it is cancelled or fails permanently. This applies in any state and to their own linked children. A running parent cancels them once it has stopped
 
 ## Graceful Cancellation
 

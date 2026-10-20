@@ -216,6 +216,8 @@ const cancelled = await conductor.cancel(
 
 Returns `true` if cancelled, `false` if already completed.
 
+Executions it waits on and executions it started with `ctx.invoke(..., { cancelWithParent: true })` are cancelled with it. See [Cancellation](../task-execution/cancellation.md#workflows).
+
 ## conductor.signal()
 
 Send a signal to an execution. Returns `false` if the execution is completed, failed, cancelled or unknown. Sending a signal id again stores it once. See [Signals](../task-execution/signals.md).
