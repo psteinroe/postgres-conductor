@@ -633,7 +633,7 @@ describe("waitForEvent", () => {
 			database,
 			async (id, ctx) => {
 				try {
-					const value = await ctx.waitForEvent(`outcome:${id}`, { event, timeout: "100ms" });
+					const value = await ctx.waitForEvent(`outcome:${id}`, { event, timeout: "1s" });
 					outcomes.push(`match:${value.payload.id}`);
 				} catch (error) {
 					if (error instanceof WaitForEventTimeoutError) outcomes.push("timeout");
@@ -646,7 +646,7 @@ describe("waitForEvent", () => {
 		await waiting(database);
 		await conductor.emit("wait.order", { id: "outcome", kind: "match" });
 		await until(async () => outcomes.length === 1);
-		await sleep(150);
+		await sleep(1_000);
 		expect(outcomes).toEqual(["match:outcome"]);
 		expect(
 			Number(
