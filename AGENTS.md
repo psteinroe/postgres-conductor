@@ -157,8 +157,9 @@ Tables live in the `pgconductor` schema with a `_private_` prefix (`_private_exe
 - Manages multiple workers, plus the internal event-dispatch worker when events are configured
 - Handles startup/shutdown coordination and heartbeats
 - Heartbeats keep running while workers drain after shutdown and stop in cleanup, so a slow handler is not recovered as stale
-- Heartbeat signals carry only shutdowns; cancellation and application signals are read by the worker's claim
-- Every 8th heartbeat recovers stale orchestrators (unlocks their executions); an orchestrator whose row was recovered stops itself when its next heartbeat has to re-insert the row
+- Startup registers the orchestrator row; the periodic heartbeat only updates it. A heartbeat that finds no row means the orchestrator was recovered as stale, and it stops
+- Shutdown is persistent state: a breaking migration sets `shutdown_reason` on the row, and every heartbeat reports it (or a newer installed migration) until the row is deleted, so a lost heartbeat response loses nothing
+- Every 8th heartbeat recovers stale orchestrators via `_private_remove_orchestrators()`, which also removes the orchestrator on shutdown
 - Provides `stopped` promise for graceful shutdown
 - Runs the internal event dispatch worker only when the conductor has `events` configured
 - One queue = one codebase: every orchestrator polling a queue runs the same task set, so worker registration owns the whole queue and replaces its cron schedules and trigger subscriptions
@@ -198,7 +199,9 @@ Tables live in the `pgconductor` schema with a `_private_` prefix (`_private_exe
 **Claims and Retries**
 - Every claim sets a fresh `claim_token`. Settlement, `saveStep`, `registerEventWait` and `clearWaitingState` require it alongside `locked_by`, so a retried or late request from an earlier claim by the same orchestrator cannot modify a newer claim
 - `DatabaseClient.query()` retries connection errors only when called with a `signal`, and a connection error is ambiguous: the statement may have committed. `getExecutions` and the periodic heartbeat are called without one and never retried; a failed poll or heartbeat is followed by the next one
-- A claim whose response was lost is recovered like an expired lease: each worker tracks the executions it holds (claimed and not yet settled), and the heartbeat releases rows locked by its orchestrator that are not held and were locked more than one heartbeat interval ago
+- Each worker tracks the claim token of every execution it holds (claimed and not yet settled) and removes an entry only for the token of the attempt that settled or suspended, so a late acknowledgement of an earlier attempt cannot drop a newer claim
+- A claim whose response was lost is released by the worker's next claim: the claim statement releases rows of its queue locked by its orchestrator that the worker does not hold (`held` in `getExecutions`). A worker claims one statement at a time, so no claim it does not hold is in flight
+- A claim locks its owner row (`for key share`) and claims nothing when the row is gone. `_private_remove_orchestrators()` deletes owners first, which waits for claims in flight, and releases their executions in a second statement whose snapshot includes those claims. Direct `getExecutions` callers need a registered orchestrator (`registerOrchestrator`; tests use `db.registerOrchestrator()`)
 - `query()` retries by calling its callback again; build the query inside the callback, because a postgres.js query only runs once
 
 **Middleware**

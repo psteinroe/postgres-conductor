@@ -40,6 +40,12 @@ export class TestDatabase {
 		return new TestDatabase(sql, name, masterUrl, testDbUrl);
 	}
 
+	// Claims need a registered owner
+	async registerOrchestrator(orchestratorId: string = crypto.randomUUID()): Promise<string> {
+		await this.client.registerOrchestrator({ orchestratorId, version: "test", migrationNumber: 1 });
+		return orchestratorId;
+	}
+
 	async close(): Promise<void> {
 		await this.sql.end();
 	}

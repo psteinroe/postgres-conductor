@@ -174,7 +174,7 @@ describe("dead-letter queues (Postgres integration)", () => {
 			queue: "default",
 			payload: { value: "x" },
 		});
-		const orchestratorId = crypto.randomUUID();
+		const orchestratorId = await db.registerOrchestrator();
 		const claimed = (
 			await db.client.getExecutions({
 				orchestratorId,
@@ -248,7 +248,7 @@ describe("dead-letter queues (Postgres integration)", () => {
 			insert into pgconductor._private_executions (task_key, queue, payload, dead_letter)
 			values ('delivered-destination', 'dlq', '{}', jsonb_build_object('sourceExecutionId', ${executionId}::text))
 		`;
-		const orchestratorId = crypto.randomUUID();
+		const orchestratorId = await db.registerOrchestrator();
 		const [execution] = (
 			await db.client.getExecutions({
 				orchestratorId,
@@ -353,12 +353,7 @@ describe("dead-letter queues (Postgres integration)", () => {
 			queue: "default",
 			payload: {},
 		});
-		const orchestratorId = crypto.randomUUID();
-		await db.client.orchestratorHeartbeat({
-			orchestratorId,
-			version: "test",
-			migrationNumber: 1,
-		});
+		const orchestratorId = await db.registerOrchestrator();
 		const [execution] = (
 			await db.client.getExecutions({
 				orchestratorId,
@@ -425,7 +420,7 @@ describe("dead-letter queues (Postgres integration)", () => {
 		});
 		const parent = (
 			await db.client.getExecutions({
-				orchestratorId: crypto.randomUUID(),
+				orchestratorId: await db.registerOrchestrator(),
 				queueName: "default",
 				batchSize: 1,
 				taskKeys: ["cancelled-child-parent"],
@@ -450,12 +445,7 @@ describe("dead-letter queues (Postgres integration)", () => {
 				},
 			],
 		});
-		const childOrchestratorId = crypto.randomUUID();
-		await db.client.orchestratorHeartbeat({
-			orchestratorId: childOrchestratorId,
-			version: "test",
-			migrationNumber: 1,
-		});
+		const childOrchestratorId = await db.registerOrchestrator();
 		const child = (
 			await db.client.getExecutions({
 				orchestratorId: childOrchestratorId,
@@ -567,7 +557,7 @@ describe("dead-letter queues (Postgres integration)", () => {
 		});
 		const claimed = (
 			await db.client.getExecutions({
-				orchestratorId: crypto.randomUUID(),
+				orchestratorId: await db.registerOrchestrator(),
 				queueName: "default",
 				batchSize: 1,
 				taskKeys: ["rollback-source"],

@@ -47,6 +47,7 @@ afterAll(async () => {
 async function createDb() {
 	const db = await pool.child();
 	await Conductor.create({ sql: db.sql, context: {} }).ensureInstalled();
+	await db.registerOrchestrator(orchestratorId);
 	return db;
 }
 

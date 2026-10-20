@@ -63,7 +63,7 @@ describe("SchemaManager", () => {
 		await new SchemaManager(client).ensureLatest(controller.signal);
 
 		const olderId = crypto.randomUUID();
-		await client.orchestratorHeartbeat({
+		await client.registerOrchestrator({
 			orchestratorId: olderId,
 			version: "old",
 			migrationNumber: 1,
@@ -89,12 +89,8 @@ describe("SchemaManager", () => {
 			]);
 			expect(state).toBe("waiting");
 
-			const signals = await client.orchestratorHeartbeat({
-				orchestratorId: olderId,
-				version: "old",
-				migrationNumber: 1,
-			});
-			expect(signals.map((s) => s.signal_payload?.reason)).toEqual(["breaking_migration"]);
+			const heartbeat = await client.orchestratorHeartbeat({ orchestratorId: olderId });
+			expect(heartbeat?.shutdown_reason).toBe("breaking_migration");
 			await client.orchestratorShutdown({ orchestratorId: olderId });
 
 			const result = await migrating;
@@ -111,7 +107,7 @@ describe("SchemaManager", () => {
 		const client = new DatabaseClient({ sql: db.sql, logger: new DefaultLogger() });
 		await new SchemaManager(client).ensureLatest(new AbortController().signal);
 
-		await client.orchestratorHeartbeat({
+		await client.registerOrchestrator({
 			orchestratorId: crypto.randomUUID(),
 			version: "old",
 			migrationNumber: 1,

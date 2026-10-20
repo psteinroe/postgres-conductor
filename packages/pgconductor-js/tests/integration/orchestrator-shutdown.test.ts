@@ -160,12 +160,12 @@ test("stop() waits for an in-flight heartbeat and nothing runs after cleanup", a
 	let heartbeats = 0;
 	let heartbeatSettled = false;
 	conductor.db.orchestratorHeartbeat = async (args, opts) => {
-		if (++heartbeats === 2) {
+		if (++heartbeats === 1) {
 			heartbeatStarted.resolve();
 			await releaseHeartbeat.promise;
-			const signals = await heartbeat(args, opts);
+			const result = await heartbeat(args, opts);
 			heartbeatSettled = true;
-			return signals;
+			return result;
 		}
 		return heartbeat(args, opts);
 	};
@@ -189,7 +189,7 @@ test("stop() waits for an in-flight heartbeat and nothing runs after cleanup", a
 
 	vi.advanceTimersByTime(120_000);
 	await db.sql`select 1`;
-	expect(heartbeats).toBe(2);
+	expect(heartbeats).toBe(1);
 	process.off("unhandledRejection", onUnhandled);
 	expect(unhandled).toEqual([]);
 });

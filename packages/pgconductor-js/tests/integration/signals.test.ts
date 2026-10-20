@@ -539,7 +539,7 @@ describe("Signals", () => {
 		const id = await conductor.invoke({ name: "session" }, {});
 		await conductor.signal(id, { name: "input", id: "s1" });
 
-		const orchestratorId = crypto.randomUUID();
+		const orchestratorId = await db.registerOrchestrator();
 		const claim = async () => {
 			const [execution] = (
 				await db.client.getExecutions({

@@ -55,26 +55,13 @@ create table pgconductor._private_orchestrators (
     id uuid default pgconductor._private_portable_uuidv7() primary key,
     last_heartbeat_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     version text,
-    migration_number integer
+    migration_number integer,
+    -- set when the orchestrator must stop; every heartbeat reports it until the row is deleted
+    shutdown_reason text
 );
 
 create index idx_orchestrators_heartbeat on pgconductor._private_orchestrators (last_heartbeat_at);
 create index idx_orchestrators_sweep on pgconductor._private_orchestrators (migration_number);
-
-create table pgconductor._private_orchestrator_signals (
-    id uuid primary key default pgconductor._private_portable_uuidv7(),
-    orchestrator_id uuid not null references pgconductor._private_orchestrators(id) on delete cascade,
-    type text not null,
-    execution_id uuid,
-    payload jsonb not null default '{}'::jsonb,
-    created_at timestamptz not null default pgconductor._private_current_time()
-);
-
-create index idx_orchestrator_signals_orchestrator on pgconductor._private_orchestrator_signals(orchestrator_id, created_at);
-
-create unique index idx_orchestrator_signals_shutdown_unique
-    on pgconductor._private_orchestrator_signals(orchestrator_id)
-    where type = 'shutdown';
 
 create table pgconductor._private_queues (
     name text primary key
@@ -377,6 +364,38 @@ create trigger manage_queue_partition_trigger
 
 -- create default queue (trigger will create its partition)
 insert into pgconductor._private_queues (name) values ('default');
+
+-- deletes an orchestrator by id, or those whose last heartbeat is older than p_max_age, and
+-- releases their executions. a claim locks its owner row, so the delete waits for claims in
+-- flight, and the release runs as a second statement whose snapshot includes them.
+create or replace function pgconductor._private_remove_orchestrators(
+    p_id uuid default null,
+    p_max_age interval default null
+)
+ returns void
+ language plpgsql
+ volatile
+ set search_path to ''
+as $function$
+declare
+  v_ids uuid[];
+begin
+  with deleted as (
+    delete from pgconductor._private_orchestrators o
+    where o.id = p_id
+      or o.last_heartbeat_at < pgconductor._private_current_time() - p_max_age
+    returning o.id
+  )
+  select array_agg(id) into v_ids from deleted;
+
+  -- cancelled executions are reclaimed and settled like any other result
+  update pgconductor._private_executions e
+  set
+    locked_by = null,
+    locked_at = null
+  where e.locked_by = any(v_ids);
+end;
+$function$;
 
 -- metadata is copied to derived executions, so it is only checked where it enters
 create or replace function pgconductor._private_check_metadata(p_metadata jsonb)

@@ -92,7 +92,7 @@ describe("execution foundations", () => {
 
 		const first = (
 			await db.client.getExecutions({
-				orchestratorId: crypto.randomUUID(),
+				orchestratorId: await db.registerOrchestrator(),
 				queueName: "queue-a",
 				batchSize: 1,
 				taskKeys: ["same-task"],
@@ -100,7 +100,7 @@ describe("execution foundations", () => {
 		).executions[0];
 		const second = (
 			await db.client.getExecutions({
-				orchestratorId: crypto.randomUUID(),
+				orchestratorId: await db.registerOrchestrator(),
 				queueName: "queue-b",
 				batchSize: 1,
 				taskKeys: ["same-task"],
@@ -312,7 +312,7 @@ describe("execution foundations", () => {
 		if (!parentId) throw new Error("expected parent execution");
 		const parent = (
 			await db.client.getExecutions({
-				orchestratorId: crypto.randomUUID(),
+				orchestratorId: await db.registerOrchestrator(),
 				queueName: "parent-retention",
 				batchSize: 1,
 				taskKeys: ["parent"],
@@ -347,7 +347,7 @@ describe("execution foundations", () => {
 		if (!childId) throw new Error("expected child execution");
 		const child = (
 			await db.client.getExecutions({
-				orchestratorId: crypto.randomUUID(),
+				orchestratorId: await db.registerOrchestrator(),
 				queueName: "parent-retention",
 				batchSize: 1,
 				taskKeys: ["child"],
@@ -402,7 +402,7 @@ describe("execution foundations", () => {
 		if (!parentId) throw new Error("expected parent execution");
 		const parent = (
 			await db.client.getExecutions({
-				orchestratorId: crypto.randomUUID(),
+				orchestratorId: await db.registerOrchestrator(),
 				queueName: "parent-queue",
 				batchSize: 1,
 				taskKeys: ["parent"],
@@ -430,7 +430,7 @@ describe("execution foundations", () => {
 
 		const child = (
 			await db.client.getExecutions({
-				orchestratorId: crypto.randomUUID(),
+				orchestratorId: await db.registerOrchestrator(),
 				queueName: "child-queue",
 				batchSize: 1,
 				taskKeys: ["child"],
@@ -468,8 +468,7 @@ describe("execution foundations", () => {
 			cronSchedules: [],
 			eventSubscriptions: [],
 		});
-		const orchestratorId = crypto.randomUUID();
-		await db.client.orchestratorHeartbeat({ orchestratorId, version: "test", migrationNumber: 1 });
+		const orchestratorId = await db.registerOrchestrator();
 		const executionId = await db.client.invoke({ task_key: "cancelled", queue: "cancel-buffered" });
 		if (!executionId) throw new Error("expected execution");
 		const claimed = (
@@ -523,7 +522,7 @@ describe("execution foundations", () => {
 		const executionId = await db.client.invoke({ task_key: "replayed-task", queue: "replayed" });
 		if (!executionId) throw new Error("expected execution id");
 
-		const orchestratorId = crypto.randomUUID();
+		const orchestratorId = await db.registerOrchestrator();
 		const claim = async () => {
 			const [execution] = (
 				await db.client.getExecutions({
@@ -576,7 +575,7 @@ describe("execution foundations", () => {
 		await db.client.invoke({ task_key: "retried-settlement-task", queue: "retried-settlement" });
 		const [claimed] = (
 			await db.client.getExecutions({
-				orchestratorId: crypto.randomUUID(),
+				orchestratorId: await db.registerOrchestrator(),
 				queueName: "retried-settlement",
 				batchSize: 1,
 				taskKeys: ["retried-settlement-task"],
@@ -649,7 +648,7 @@ describe("execution foundations", () => {
 		if (!parentId) throw new Error("expected parent execution");
 		const parent = (
 			await db.client.getExecutions({
-				orchestratorId: crypto.randomUUID(),
+				orchestratorId: await db.registerOrchestrator(),
 				queueName: "cascade-parent",
 				batchSize: 1,
 				taskKeys: ["parent"],
@@ -720,7 +719,7 @@ describe("execution foundations", () => {
 		`;
 		const claimed = (
 			await db.client.getExecutions({
-				orchestratorId: crypto.randomUUID(),
+				orchestratorId: await db.registerOrchestrator(),
 				queueName: "enqueue-order",
 				batchSize: 3,
 				taskKeys: ["ordered"],
@@ -765,12 +764,7 @@ describe("execution foundations", () => {
 		const executionId = await db.client.invoke({ task_key: "fenced-task", queue: "fenced" });
 		if (!executionId) throw new Error("expected execution id");
 
-		const oldOrchestrator = crypto.randomUUID();
-		await db.client.orchestratorHeartbeat({
-			orchestratorId: oldOrchestrator,
-			version: "test",
-			migrationNumber: 1,
-		});
+		const oldOrchestrator = await db.registerOrchestrator();
 		const oldClaim = (
 			await db.client.getExecutions({
 				orchestratorId: oldOrchestrator,
@@ -788,7 +782,7 @@ describe("execution foundations", () => {
 		`;
 		await db.client.recoverStaleOrchestrators({ maxAge: "1 second" });
 
-		const newOrchestrator = crypto.randomUUID();
+		const newOrchestrator = await db.registerOrchestrator();
 		const currentClaim = (
 			await db.client.getExecutions({
 				orchestratorId: newOrchestrator,

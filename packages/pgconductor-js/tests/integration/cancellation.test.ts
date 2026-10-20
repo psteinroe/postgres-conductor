@@ -669,7 +669,13 @@ describe("Cancellation Support", () => {
 
 		await db.client.orchestratorShutdown({ orchestratorId });
 
-		// The released execution is reclaimed and settled as cancelled
+		// Another orchestrator reclaims the released execution and settles it as cancelled
+		const survivor = Orchestrator.create({
+			conductor,
+			tasks: [longTask],
+			defaultWorker: { pollIntervalMs: 50, flushIntervalMs: 50 },
+		});
+		await survivor.start();
 		await waitForCondition(async () => {
 			const [execution] = await db.sql<[{ failed: boolean }]>`
 				select failed_at is not null as failed
@@ -695,6 +701,7 @@ describe("Cancellation Support", () => {
 		expect(failedExec[0]!.last_error).toBe("Cancelled by user");
 		expect(failedExec[0]!.locked_by).toBeNull();
 
+		await survivor.stop();
 		await orchestrator.stop();
 	}, 15000);
 

@@ -9,7 +9,8 @@ type IDatabaseClient = PublicMethodsOf<DatabaseClient>;
 
 export class MockDatabaseClient implements IDatabaseClient {
 	close = vi.fn(async () => {});
-	orchestratorHeartbeat = vi.fn(async () => []);
+	registerOrchestrator = vi.fn(async () => ({ shutdown_reason: null }));
+	orchestratorHeartbeat = vi.fn(async () => ({ shutdown_reason: null }));
 	recoverStaleOrchestrators = vi.fn(async () => {});
 	sweepOrchestrators = vi.fn(async () => {});
 	getInstalledMigrationNumber = vi.fn(async () => -1);
