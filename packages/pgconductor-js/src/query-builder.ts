@@ -11,7 +11,6 @@ import type {
 	JsonValue,
 	EventRaceBranch,
 	EventRaceResult,
-	ResultWaitResult,
 	Payload,
 	ClaimResult,
 	TaskSpec,
@@ -168,17 +167,6 @@ export type RegisterEventWaitArgs = {
 	timeoutMs: number | null;
 	orchestratorId: string;
 	suspend: boolean;
-	claimToken: string;
-};
-
-export type RegisterResultWaitArgs = {
-	executionId: string;
-	queue: string;
-	taskKey: string;
-	stepKey: string;
-	awaitedExecutionId: string;
-	timeoutMs: number | null;
-	orchestratorId: string;
 	claimToken: string;
 };
 
@@ -1217,8 +1205,9 @@ export class QueryBuilder {
 					and split_part(dedupe_key, '::', 2) = ${scheduleName}::text
 					and cron_expression is not null
 					and is_available
-			)
-			select id from pgconductor.invoke(
+				returning result_waiters
+			), ${this.removedScheduleWaits()}
+			select id from (select count(*) from resolved_result_waits) r, pgconductor.invoke(
 				p_task_key := ${spec.task_key}::text,
 				p_queue := ${spec.queue}::text,
 				p_payload := ${spec.payload ? this.sql.json(spec.payload) : null}::jsonb,
@@ -1238,11 +1227,11 @@ export class QueryBuilder {
 		taskKey,
 		queue,
 		scheduleName,
-	}: UnscheduleCronExecutionArgs): PendingQuery<[]> {
-		return this.sql<[]>`
+	}: UnscheduleCronExecutionArgs): PendingQuery<[{ resolved: number }]> {
+		return this.sql<[{ resolved: number }]>`
 			with
 			-- Delete pending executions
-			deleted_pending as (
+			removed as (
 				delete from pgconductor._private_executions
 				where task_key = ${taskKey}::text
 					and queue = ${queue}::text
@@ -1250,8 +1239,8 @@ export class QueryBuilder {
 					and split_part(dedupe_key, '::', 2) = ${scheduleName}::text
 					and cron_expression is not null
 					and is_available
-				returning 1
-			),
+				returning result_waiters
+			), ${this.removedScheduleWaits()},
 			-- Mark running executions as cancelled (no signal needed, they'll fail naturally)
 			cancelled_running as (
 				update pgconductor._private_executions e
@@ -1267,8 +1256,20 @@ export class QueryBuilder {
 					and e.cancelled = false
 				returning 1
 			)
-			select where false
+			select count(*)::int as resolved from resolved_result_waits
 		`;
+	}
+
+	// Waits for pending schedule executions removed by the statement's `removed` CTE
+	private removedScheduleWaits(): PendingQuery<Row[]> {
+		return this.sql`resolved_result_waits as (
+			select pgconductor._private_resolve_result_waits(jsonb_agg(w.value || jsonb_build_object(
+				'outcome', jsonb_build_object('status', 'cancelled', 'reason', 'Schedule removed')
+			)))
+			from removed r
+			cross join lateral jsonb_array_elements(r.result_waiters) w
+			having count(*) > 0
+		)`;
 	}
 
 	buildInvokeBatch(specs: ExecutionSpec[]): PendingQuery<{ id: string }[]> {
@@ -1446,31 +1447,6 @@ export class QueryBuilder {
 		`;
 	}
 
-	buildRegisterResultWait({
-		executionId,
-		queue,
-		taskKey,
-		stepKey,
-		awaitedExecutionId,
-		timeoutMs,
-		orchestratorId,
-		claimToken,
-	}: RegisterResultWaitArgs): PendingQuery<{ result: ResultWaitResult | null }[]> {
-		return this.sql<{ result: ResultWaitResult | null }[]>`
-			select pgconductor._private_register_result_wait(
-				${executionId}::uuid,
-				${queue}::text,
-				${taskKey}::text,
-				${orchestratorId}::uuid,
-				${claimToken}::uuid,
-				${stepKey}::text,
-				${awaitedExecutionId}::uuid,
-				${timeoutMs}::bigint,
-				true
-			) as result
-		`;
-	}
-
 	buildRegisterEventRace({
 		executionId,
 		queue,
@@ -1535,7 +1511,15 @@ export class QueryBuilder {
 					and p.child_locked_by is null   -- not currently executing
 					and e.completed_at is null
 					and e.failed_at is null
-				returning e.id
+				returning e.id, e.result_waiters
+			),
+			resolved_result_waits as (
+				select pgconductor._private_resolve_result_waits(jsonb_agg(w.value || jsonb_build_object(
+					'outcome', jsonb_build_object('status', 'failed', 'error', 'Cancelled: parent timed out')
+				)))
+				from failed_pending_child c
+				cross join lateral jsonb_array_elements(c.result_waiters) w
+				having count(*) > 0
 			),
 			-- Signal executing (locked) children to cancel
 			signaled_executing_child as (
@@ -1564,6 +1548,8 @@ export class QueryBuilder {
 			select id from failed_pending_child
 			union all
 			select id from signaled_executing_child
+			union all
+			select null from resolved_result_waits
 		`;
 	}
 

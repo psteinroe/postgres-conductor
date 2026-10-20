@@ -24,9 +24,10 @@ describe("waitForEvent API", () => {
 			filterable: ["thread"],
 		});
 		const task = defineTask({ name: "api.wait", payload: z.object({}) });
+		const work = defineTask({ name: "api.work", returns: z.object({ doubled: z.number() }) });
 		const conductor = Conductor.create({
 			sql: {} as any,
-			tasks: TaskSchemas.fromSchema([task]),
+			tasks: TaskSchemas.fromSchema([task, work]),
 			events: EventSchemas.fromSchema([event, reply]),
 			context: {},
 		});
@@ -89,6 +90,18 @@ describe("waitForEvent API", () => {
 			expectTypeOf(
 				await ctx.waitForResult<{ doubled: number }>("result", "id", { timeout: "1h" }),
 			).toEqualTypeOf<ExecutionOutcome<{ doubled: number }> | { status: "timeout" }>();
+			expectTypeOf(
+				await ctx.waitForResult("typed", { name: "api.work" }, "id", { timeout: "1h" }),
+			).toEqualTypeOf<ExecutionOutcome<{ doubled: number }> | { status: "timeout" }>();
+			// @ts-expect-error unknown task
+			ctx.waitForResult("bad", { name: "api.missing" }, "id");
+			expectTypeOf(
+				await ctx.waitForAny("typed-any", {
+					tool: { execution: "id", task: { name: "api.work" } },
+				}),
+			).toEqualTypeOf<
+				{ key: "tool"; outcome: ExecutionOutcome<{ doubled: number }> } | { key: "timeout" }
+			>();
 			expectTypeOf(ctx.executionId).toEqualTypeOf<string>();
 			expectTypeOf(ctx.queue).toEqualTypeOf<string>();
 		});

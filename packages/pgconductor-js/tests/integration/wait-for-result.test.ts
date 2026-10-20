@@ -128,6 +128,55 @@ describe("ctx.waitForResult and execution branches (Postgres integration)", () =
 		});
 	}
 
+	async function resultWaiters(database: TestDatabase, executionId: string) {
+		const [row] = await database.sql<{ result_waiters: unknown }[]>`
+			select result_waiters from pgconductor._private_executions where id = ${executionId}::uuid
+		`;
+		return row?.result_waiters;
+	}
+
+	async function stopOrchestrators() {
+		await Promise.all(orchestrators.map((orchestrator) => orchestrator.stop()));
+	}
+
+	// Suspends a waiter at ctx.waitForResult("result", awaitedId) without a worker
+	async function suspendWaiter(
+		database: TestDatabase,
+		conductor: Awaited<ReturnType<typeof setup>>,
+		awaitedId: string,
+	) {
+		const waiterId = await conductor.invoke({ name: "waiter" }, { id: awaitedId });
+		const orchestratorId = crypto.randomUUID();
+		const { executions } = await database.client.getExecutions({
+			orchestratorId,
+			queueName: "default",
+			batchSize: 10,
+			taskKeys: ["waiter"],
+		});
+		const claimToken = executions.find((execution) => execution.id === waiterId)?.claim_token;
+		await database.sql`
+			select pgconductor._private_register_event_race(
+				${waiterId}::uuid, 'default', 'waiter', ${orchestratorId}::uuid, ${claimToken || null}::uuid,
+				'result',
+				${database.sql.json([{ key: "result", stepKey: "result:result", executionId: awaitedId }])}::jsonb,
+				null
+			)
+		`;
+		await suspendedAt(database, waiterId, "result");
+		return waiterId;
+	}
+
+	async function woken(database: TestDatabase, waiterId: string) {
+		const [row] = await database.sql<{ result: unknown; due: boolean }[]>`
+			select s.result, e.waiting_step_key is null
+				and e.run_at <= pgconductor._private_current_time() as due
+			from pgconductor._private_executions e
+			left join pgconductor._private_steps s on s.execution_id = e.id and s.key = 'result:result'
+			where e.id = ${waiterId}::uuid
+		`;
+		return row;
+	}
+
 	async function waits(database: TestDatabase) {
 		const [row] = await database.sql<{ n: number }[]>`
 			select count(*)::int as n from pgconductor._private_custom_event_subscriptions
@@ -159,7 +208,7 @@ describe("ctx.waitForResult and execution branches (Postgres integration)", () =
 
 		const outcome = { status: "completed", result: { doubled: 4 } };
 		expect(outcomes).toEqual([outcome, outcome]);
-		expect(await step(database, waiterId, "result")).toEqual({ status: "resolved", outcome });
+		expect(await step(database, waiterId, "result")).toEqual({ key: "result", outcome });
 		expect(await waits(database)).toBe(0);
 	});
 
@@ -234,9 +283,11 @@ describe("ctx.waitForResult and execution branches (Postgres integration)", () =
 			// The registration holds the awaited row until the settlement statement has taken its snapshot
 			const registering = registration.begin(async (sql) => {
 				await sql`
-					select pgconductor._private_register_result_wait(
+					select pgconductor._private_register_event_race(
 						${waiterId}::uuid, 'default', 'waiter', ${orchestratorId}::uuid,
-						${claimToken(waiterId)}::uuid, 'result', ${workId}::uuid, null, true
+						${claimToken(waiterId)}::uuid, 'result',
+						${sql.json([{ key: "result", stepKey: "result:result", executionId: workId }])}::jsonb,
+						null
 					)
 				`;
 				registered.resolve();
@@ -271,7 +322,7 @@ describe("ctx.waitForResult and execution branches (Postgres integration)", () =
 			await observer.end();
 		}
 
-		expect(await step(database, waiterId, "result")).toEqual({
+		expect(await step(database, waiterId, "result:result")).toEqual({
 			status: "resolved",
 			outcome: { status: "completed", result: { doubled: 2 } },
 		});
@@ -301,10 +352,11 @@ describe("ctx.waitForResult and execution branches (Postgres integration)", () =
 		const claimToken = (id: string) =>
 			executions.find((execution) => execution.id === id)?.claim_token || "";
 		await database.sql`
-			select pgconductor._private_register_result_wait(
-				${waiterId}::uuid, 'default', 'work', ${orchestratorId}::uuid,
-				${claimToken(waiterId)}::uuid, 'result', ${awaitedId}::uuid, null, false
-			)
+			update pgconductor._private_executions
+			set result_waiters = ${database.sql.json([
+				{ execution_id: waiterId, queue: "default", step_key: "result" },
+			])}::jsonb
+			where id = ${awaitedId}::uuid
 		`;
 
 		await database.client.returnExecutions({
@@ -468,9 +520,10 @@ describe("ctx.waitForResult and execution branches (Postgres integration)", () =
 
 		expect(outcomes).toEqual([{ status: "timeout" }]);
 		expect((await conductor.getExecution(workId))?.status).toBe("running");
+		expect(await resultWaiters(database, workId)).toBeNull();
 		release.resolve();
 		expect(await conductor.waitForResult(workId, { pollIntervalMs: 10 })).toEqual({ doubled: 2 });
-		expect(await step(database, waiterId, "result")).toEqual({ status: "timed_out" });
+		expect(await step(database, waiterId, "result")).toEqual({ key: "timeout" });
 	});
 
 	test("waitForAny resolves with an execution branch that settles first", async () => {
@@ -528,6 +581,7 @@ describe("ctx.waitForResult and execution branches (Postgres integration)", () =
 		const workId = ids[0] || "";
 		await conductor.emit("result.click", { id: workId });
 		await conductor.waitForResult(waiterId, { pollIntervalMs: 10 });
+		expect(await resultWaiters(database, workId)).toBeNull();
 		release.resolve();
 		await conductor.waitForResult(workId, { pollIntervalMs: 10 });
 
@@ -628,6 +682,141 @@ describe("ctx.waitForResult and execution branches (Postgres integration)", () =
 		release.resolve();
 		await conductor.waitForResult(workId, { pollIntervalMs: 10 });
 		expect(await step(database, waiterId, "any:work")).toEqual({ status: "closed" });
+	});
+
+	test("a wait for a task finds only executions of that task", async () => {
+		const database = await db();
+		const errors = new Set<string>();
+		const outcomes: unknown[] = [];
+		const ids: string[] = [];
+		const conductor = await setup(database, {
+			waiter: async (_id, ctx) => {
+				const id = await ctx.invoke("start", { name: "work" }, { value: 2 });
+				ids.push(id);
+				await ctx.waitForResult("other", { name: "leaf" }, id).catch((error: Error) => {
+					errors.add(error.message);
+				});
+				outcomes.push(await ctx.waitForResult("typed", { name: "work" }, id));
+			},
+		});
+
+		const waiterId = await conductor.invoke({ name: "waiter" }, { id: "typed" });
+		await conductor.waitForResult(waiterId, { pollIntervalMs: 10 });
+
+		expect([...errors]).toEqual([`Execution ${ids[0]} not found`]);
+		expect(outcomes).toEqual([{ status: "completed", result: { doubled: 4 } }]);
+	});
+
+	test("an execution superseded by a reinvoke resolves the wait as failed", async () => {
+		const database = await db();
+		const conductor = await setup(database, { waiter: async () => {} });
+		await stopOrchestrators();
+		const workId = await conductor.invoke({ name: "work" }, { value: 1 }, { dedupe_key: "same" });
+		await database.client.getExecutions({
+			orchestratorId: crypto.randomUUID(),
+			queueName: "default",
+			batchSize: 10,
+			taskKeys: ["work"],
+		});
+		const waiterId = await suspendWaiter(database, conductor, workId);
+
+		await conductor.invoke({ name: "work" }, { value: 2 }, { dedupe_key: "same" });
+
+		expect(await woken(database, waiterId)).toEqual({
+			result: {
+				status: "resolved",
+				outcome: { status: "failed", error: "superseded by reinvoke" },
+			},
+			due: true,
+		});
+	});
+
+	test("a pending child failed when its parent's wait times out resolves the wait", async () => {
+		const database = await db();
+		const conductor = await setup(database, { waiter: async () => {} });
+		await stopOrchestrators();
+		const parentId = await conductor.invoke({ name: "work" }, { value: 1 });
+		const childId = await conductor.invoke(
+			{ name: "work" },
+			{ value: 2 },
+			{ run_at: new Date(Date.now() + 3_600_000) },
+		);
+		const orchestratorId = crypto.randomUUID();
+		const { executions } = await database.client.getExecutions({
+			orchestratorId,
+			queueName: "default",
+			batchSize: 10,
+			taskKeys: ["work"],
+		});
+		await database.sql`
+			update pgconductor._private_executions set waiting_on_execution_id = ${childId}::uuid
+			where id = ${parentId}::uuid
+		`;
+		const waiterId = await suspendWaiter(database, conductor, childId);
+
+		await database.client.clearWaitingState({
+			executionId: parentId,
+			queue: "default",
+			orchestratorId,
+			claimToken: executions.find((execution) => execution.id === parentId)?.claim_token || "",
+		});
+
+		expect(await woken(database, waiterId)).toEqual({
+			result: {
+				status: "resolved",
+				outcome: { status: "failed", error: "Cancelled: parent timed out" },
+			},
+			due: true,
+		});
+	});
+
+	test("removing pending schedule executions resolves their waits as cancelled", async () => {
+		const database = await db();
+		const conductor = await setup(database, { waiter: async () => {} });
+		await stopOrchestrators();
+		const schedule = async (dedupeKey: string) => {
+			const [row] = await database.sql<{ id: string }[]>`
+				insert into pgconductor._private_executions (task_key, queue, dedupe_key, cron_expression, run_at)
+				values ('work', 'default', ${dedupeKey}, '0 0 * * *', now() + interval '1 hour')
+				returning id
+			`;
+			return suspendWaiter(database, conductor, row?.id || "");
+		};
+		const unscheduled = await schedule("dynamic::unscheduled::1");
+		const rescheduled = await schedule("dynamic::rescheduled::1");
+		const removed = await schedule("scheduled::removed::1");
+
+		await database.client.unscheduleCronExecution({
+			taskKey: "work",
+			queue: "default",
+			scheduleName: "unscheduled",
+		});
+		await database.client.scheduleCronExecution({
+			spec: {
+				task_key: "work",
+				queue: "default",
+				run_at: new Date(Date.now() + 7_200_000),
+				cron_expression: "0 1 * * *",
+			},
+			scheduleName: "rescheduled",
+		});
+		await database.client.registerWorker({
+			queueName: "default",
+			taskSpecs: [{ key: "waiter" }, { key: "work" }, { key: "leaf" }],
+			cronSchedules: [],
+			eventSubscriptions: [],
+		});
+
+		const cancelled = {
+			result: {
+				status: "resolved",
+				outcome: { status: "cancelled", reason: "Schedule removed" },
+			},
+			due: true,
+		};
+		expect(await woken(database, unscheduled)).toEqual(cancelled);
+		expect(await woken(database, rescheduled)).toEqual(cancelled);
+		expect(await woken(database, removed)).toEqual(cancelled);
 	});
 
 	test("ctx.executionId and ctx.queue identify the execution", async () => {

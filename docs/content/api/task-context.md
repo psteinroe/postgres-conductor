@@ -137,7 +137,7 @@ Wait for whichever of several subscriptions receives an event first, an executio
 ```typescript
 const winner = await ctx.waitForAny(
   stepKey: string,
-  branches: Record<string, EventSubscription | { execution: string }>,
+  branches: Record<string, EventSubscription | { execution: string, task?: { name: string, queue?: string } }>,
   options?: { timeout?: DurationInput }
 ): Promise<{ key: string, event } | { key: string, outcome: ExecutionOutcome } | { key: "timeout" }>
 ```
@@ -183,6 +183,8 @@ if (winner.key === "tool") {
 - Each value is a subscription from `ctx.subscribe()` or an `{ execution: id }` branch, and
   `winner.key` is the name you gave it in the object. An execution branch is registered by
   `waitForAny()` itself and memoized under the step key `<stepKey>:<name>`.
+- Add `task` to an execution branch to type `winner.outcome.result` by that task's return type.
+  An execution of another task is then not found.
 - Exactly one branch wins. One that already holds an event or outcome wins without suspending,
   including an execution that settled before the call. If several do, the one stored first
   wins, and ties go to the one listed first. Otherwise the execution suspends until the first
@@ -311,8 +313,9 @@ const result = await conductor.waitForResult({ name: "support-flow" }, handoffId
 Wait until an execution settles and return its outcome as a value:
 
 ```typescript
-const outcome = await ctx.waitForResult<TResult>(
+const outcome = await ctx.waitForResult(
   stepKey: string,
+  taskRef?: { name: string, queue?: string },  // optional, types the result
   executionId: string,
   options?: { timeout?: DurationInput }
 ): Promise<
@@ -329,7 +332,7 @@ const outcome = await ctx.waitForResult<TResult>(
 const id = await ctx.invoke("start-tool", { name: "run-tool" }, input);
 await ctx.step("announce", () => postMessage("Tool started"));
 
-const outcome = await ctx.waitForResult("tool-result", id, { timeout: "24h" });
+const outcome = await ctx.waitForResult("tool-result", { name: "run-tool" }, id, { timeout: "24h" });
 if (outcome.status === "completed") {
   // outcome.result
 } else if (outcome.status === "timeout") {
@@ -339,19 +342,24 @@ if (outcome.status === "completed") {
 
 **Behavior:**
 - Works for any execution ID, typically one started with `ctx.invoke()` or `conductor.invoke()`.
-- The task suspends until the execution settles. Settling wakes it in the same transaction: a
-  completion, a failure after the last retry, and a cancellation while pending or running each
-  resolve with the matching outcome.
+- The task suspends until the execution settles. Whatever ends the execution wakes it in the
+  same transaction: a completion, a failure after the last retry, a cancellation while pending
+  or running, being superseded by a reinvoke with the same `dedupe_key`, and the removal of a
+  pending schedule execution (`cancelled` with reason `Schedule removed`). Dropping the queue
+  of the execution does not wake it.
 - A failed or cancelled execution never fails the waiting task; the outcome is the value.
   `failed` carries the last error and `cancelled` the cancellation reason.
 - An execution that already settled returns at once without suspending.
 - The timeout starts at the first call and resolves to `{ status: "timeout" }`. The execution
   keeps running.
 - The outcome is memoized by the step key, so retries and resumes return it even after the
-  execution has been removed by retention.
+  execution has been removed by retention. It is a `ctx.waitForAny()` with one branch named
+  `result`, so it also uses the step key `<stepKey>:result`.
 - Throws if the execution does not exist when the wait starts, including one already removed by
   retention. A wait that started before the removal still receives the outcome.
-- `TResult` only types the result; it is not validated.
+- With a task, the result is typed by its return type and an execution of another task is not
+  found. Without one, `ctx.waitForResult<TResult>(stepKey, executionId)` types the result as
+  `TResult`. Neither validates the result.
 
 ## ctx.onSignal()
 
