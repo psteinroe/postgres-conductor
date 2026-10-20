@@ -1,4 +1,4 @@
-import type { PollableAsyncIterable } from "./async-queue";
+import type { PollableAsyncIterable } from "./async-queue.js";
 
 /**
  * Concurrently maps over an async iterable with a concurrency limit.

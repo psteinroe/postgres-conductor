@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import { AsyncLocalStorage } from "node:async_hooks";
 import {
 	context,
@@ -138,7 +138,7 @@ const producerCarrier = (name: string) => {
 	return { carrier: carrier as TraceContextCarrier, producer };
 };
 
-describe.serial("OpenTelemetry instrumentation", () => {
+describe("OpenTelemetry instrumentation", () => {
 	test("a Conductor made before provider registration uses the later global provider", async () => {
 		const conductor = Conductor.create({ sql: fakeSql, context: {} });
 		const { exporter, provider } = installProvider();
@@ -430,7 +430,7 @@ describe.serial("OpenTelemetry instrumentation", () => {
 	});
 });
 
-describe.serial("trace propagation across internal executions", () => {
+describe("trace propagation across internal executions", () => {
 	const processSpans = (exporter: InMemorySpanExporter, taskKey: string) =>
 		exporter
 			.getFinishedSpans()

@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test } from "vitest";
 import { z } from "zod";
 import { defineEvent } from "../../src/event-definition";
 import { compileEventTriggers } from "../../src/event-trigger-validation";

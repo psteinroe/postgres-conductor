@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, test, expect } from "bun:test";
+import { afterAll, afterEach, beforeAll, test, expect } from "vitest";
 import { spawn } from "child_process";
 import { writeFileSync, unlinkSync, existsSync, mkdirSync } from "fs";
 import { join } from "path";
@@ -31,7 +31,7 @@ afterAll(async () => {
  * Helper to run a subprocess script and collect output.
  */
 async function runSubprocess(scriptPath: string, signal: string): Promise<string> {
-	const child = spawn("bun", ["run", scriptPath], {
+	const child = spawn("node", ["--import", "tsx", scriptPath], {
 		stdio: ["ignore", "pipe", "pipe"],
 		env: process.env,
 	});
@@ -262,7 +262,7 @@ process.exit(0);
 `,
 	);
 
-	const child = spawn("bun", ["run", scriptPath], {
+	const child = spawn("node", ["--import", "tsx", scriptPath], {
 		stdio: ["ignore", "pipe", "pipe"],
 		env: process.env,
 	});
@@ -395,7 +395,7 @@ process.exit(0);
 `,
 	);
 
-	const child = spawn("bun", ["run", scriptPath], {
+	const child = spawn("node", ["--import", "tsx", scriptPath], {
 		stdio: ["ignore", "pipe", "pipe"],
 		env: process.env,
 	});

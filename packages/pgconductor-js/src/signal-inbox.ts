@@ -1,6 +1,6 @@
-import type { JsonValue, StoredSignal } from "./database-client";
-import { AsyncQueue } from "./lib/async-queue";
-import { coerceError } from "./lib/coerce-error";
+import type { JsonValue, StoredSignal } from "./database-client.js";
+import { AsyncQueue } from "./lib/async-queue.js";
+import { coerceError } from "./lib/coerce-error.js";
 
 export type SignalInfo = { id: string; name: string };
 

@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, test } from "vitest";
 import { nextCronOccurrence } from "../../../src/lib/cron";
 
 const originalTz = process.env.TZ;

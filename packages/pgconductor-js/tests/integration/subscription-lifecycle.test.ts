@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, describe, expect, mock, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, test, vi } from "vitest";
 import { z } from "zod";
 import { Conductor } from "../../src/conductor";
 import { defineEvent } from "../../src/event-definition";
@@ -47,7 +47,7 @@ describe("event subscription lifecycle", () => {
 			events: EventSchemas.fromSchema([event]),
 			context: {},
 		});
-		const handler = mock(async () => {});
+		const handler = vi.fn(async () => {});
 		const task = conductor.createTask(
 			{ name: "on-user-created" },
 			{ event: "user.created" },
@@ -121,7 +121,7 @@ describe("event subscription lifecycle", () => {
 				event: "user.qualified",
 				filter: { score: [7], region: ["us", "eu"], active: [true] },
 			},
-			mock(async () => {}),
+			vi.fn(async () => {}),
 		);
 		const orchestrator = Orchestrator.create({ conductor, tasks: [task] });
 		orchestrators.push(orchestrator);
@@ -207,7 +207,7 @@ describe("event subscription lifecycle", () => {
 				firstConductor.createTask(
 					{ name: "first-handler" },
 					{ event: "user.changed" },
-					mock(async () => {}),
+					vi.fn(async () => {}),
 				),
 			],
 		});
@@ -227,7 +227,7 @@ describe("event subscription lifecycle", () => {
 				secondConductor.createTask(
 					{ name: "second-handler" },
 					{ event: "user.changed", fields: "userId" },
-					mock(async () => {}),
+					vi.fn(async () => {}),
 				),
 			],
 		});
@@ -273,12 +273,12 @@ describe("event subscription lifecycle", () => {
 				conductor.createTask(
 					{ name: "handler-1" },
 					{ event: "user.multi" },
-					mock(async () => {}),
+					vi.fn(async () => {}),
 				),
 				conductor.createTask(
 					{ name: "handler-2" },
 					{ event: "user.multi" },
-					mock(async () => {}),
+					vi.fn(async () => {}),
 				),
 			],
 		});

@@ -1,4 +1,4 @@
-import { mock } from "bun:test";
+import { vi } from "vitest";
 import type { DatabaseClient } from "../../src/database-client";
 
 type PublicMethodsOf<T> = {
@@ -8,41 +8,41 @@ type PublicMethodsOf<T> = {
 type IDatabaseClient = PublicMethodsOf<DatabaseClient>;
 
 export class MockDatabaseClient implements IDatabaseClient {
-	close = mock(async () => {});
-	orchestratorHeartbeat = mock(async () => []);
-	recoverStaleOrchestrators = mock(async () => {});
-	sweepOrchestrators = mock(async () => {});
-	getInstalledMigrationNumber = mock(async () => -1);
-	applyMigration = mock(async () => "applied" as const);
-	countActiveOrchestratorsBelow = mock(async () => 0);
-	orchestratorShutdown = mock(async () => {});
-	getExecution = mock(async () => null);
-	getExecutions = mock(async () => ({ executions: [], signals: [], cancelled: [] }));
-	returnExecutions = mock(async (_results) => {});
-	removeExecutions = mock(async () => false);
-	registerWorker = mock(async () => {});
-	scheduleCronExecution = mock(async () => "mock-cron-id");
-	unscheduleCronExecution = mock(async () => {});
-	invoke = mock(async () => "mock-id");
-	invokeChild = mock(async () => "mock-child-id");
-	invokeBatch = mock(async () => ["mock-id"]);
-	loadStep = mock(async () => null);
-	countSteps = mock(async () => 0);
-	saveStep = mock(async (_args) => {});
-	startExecution = mock(async () => "mock-started-id");
-	checkMetadata = mock(async () => {});
-	clearWaitingState = mock(async () => {});
-	registerEventWait = mock(async () => null);
-	registerEventRace = mock(async () => null);
-	cancelExecution = mock(async () => true);
-	ackSignals = mock(async () => {});
-	signalExecution = mock(async () => true);
-	signalWithStart = mock(async () => "mock-execution-id");
-	getDatabaseTime = mock(async () => new Date());
-	setFakeTime = mock(async () => {});
-	clearFakeTime = mock(async () => {});
-	emitEvent = mock(async () => "mock-event-id");
-	dispatchCustomEvents = mock(async ({ eventIds }: { eventIds: string[] }) => eventIds);
+	close = vi.fn(async () => {});
+	orchestratorHeartbeat = vi.fn(async () => []);
+	recoverStaleOrchestrators = vi.fn(async () => {});
+	sweepOrchestrators = vi.fn(async () => {});
+	getInstalledMigrationNumber = vi.fn(async () => -1);
+	applyMigration = vi.fn(async () => "applied" as const);
+	countActiveOrchestratorsBelow = vi.fn(async () => 0);
+	orchestratorShutdown = vi.fn(async () => {});
+	getExecution = vi.fn(async () => null);
+	getExecutions = vi.fn(async () => ({ executions: [], signals: [], cancelled: [] }));
+	returnExecutions = vi.fn(async (_results) => {});
+	removeExecutions = vi.fn(async () => false);
+	registerWorker = vi.fn(async () => {});
+	scheduleCronExecution = vi.fn(async () => "mock-cron-id");
+	unscheduleCronExecution = vi.fn(async () => {});
+	invoke = vi.fn(async () => "mock-id");
+	invokeChild = vi.fn(async () => "mock-child-id");
+	invokeBatch = vi.fn(async () => ["mock-id"]);
+	loadStep = vi.fn(async () => null);
+	countSteps = vi.fn(async () => 0);
+	saveStep = vi.fn(async (_args) => {});
+	startExecution = vi.fn(async () => "mock-started-id");
+	checkMetadata = vi.fn(async () => {});
+	clearWaitingState = vi.fn(async () => {});
+	registerEventWait = vi.fn(async () => null);
+	registerEventRace = vi.fn(async () => null);
+	cancelExecution = vi.fn(async () => true);
+	ackSignals = vi.fn(async () => {});
+	signalExecution = vi.fn(async () => true);
+	signalWithStart = vi.fn(async () => "mock-execution-id");
+	getDatabaseTime = vi.fn(async () => new Date());
+	setFakeTime = vi.fn(async () => {});
+	clearFakeTime = vi.fn(async () => {});
+	emitEvent = vi.fn(async () => "mock-event-id");
+	dispatchCustomEvents = vi.fn(async ({ eventIds }: { eventIds: string[] }) => eventIds);
 
 	constructor(overrides: Partial<IDatabaseClient> = {}) {
 		Object.assign(this, overrides);

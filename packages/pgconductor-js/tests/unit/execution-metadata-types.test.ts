@@ -1,4 +1,4 @@
-import { test, describe } from "bun:test";
+import { test, describe } from "vitest";
 import { expectTypeOf } from "expect-type";
 import { z } from "zod";
 import { Conductor } from "../../src/conductor";

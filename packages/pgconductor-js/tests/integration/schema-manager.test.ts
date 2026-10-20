@@ -1,4 +1,4 @@
-import { test, expect, describe, beforeAll, afterAll, afterEach, spyOn } from "bun:test";
+import { test, expect, describe, beforeAll, afterAll, afterEach, vi } from "vitest";
 import { TestDatabasePool } from "../fixtures/test-database";
 import type { TestDatabase } from "../fixtures/test-database";
 import { DatabaseClient } from "../../src/database-client";
@@ -70,7 +70,7 @@ describe("SchemaManager", () => {
 		});
 
 		const getMigration = MigrationStore.prototype.getMigration;
-		const spy = spyOn(MigrationStore.prototype, "getMigration").mockImplementation(function (
+		const spy = vi.spyOn(MigrationStore.prototype, "getMigration").mockImplementation(function (
 			this: MigrationStore,
 			version: number,
 		) {
@@ -118,7 +118,7 @@ describe("SchemaManager", () => {
 		});
 
 		const getMigration = MigrationStore.prototype.getMigration;
-		const spy = spyOn(MigrationStore.prototype, "getMigration").mockImplementation(function (
+		const spy = vi.spyOn(MigrationStore.prototype, "getMigration").mockImplementation(function (
 			this: MigrationStore,
 			version: number,
 		) {

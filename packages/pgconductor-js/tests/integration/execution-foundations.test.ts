@@ -1,4 +1,5 @@
-import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
+import { setTimeout as sleep } from "node:timers/promises";
+import { afterAll, afterEach, beforeAll, describe, expect, test } from "vitest";
 import postgres from "postgres";
 import { Conductor } from "../../src/conductor";
 import { DatabaseClient } from "../../src/database-client";
@@ -615,7 +616,7 @@ describe("execution foundations", () => {
 
 			await Promise.race([
 				settled,
-				Bun.sleep(5_000).then(() => {
+				sleep(5_000).then(() => {
 					throw new Error("settlement was not retried");
 				}),
 			]);

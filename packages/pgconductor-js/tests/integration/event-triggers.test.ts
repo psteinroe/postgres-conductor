@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { test, expect, describe, beforeAll, afterAll, afterEach, mock } from "bun:test";
+import { test, expect, describe, beforeAll, afterAll, afterEach, vi } from "vitest";
 import { Conductor } from "../../src/conductor";
 import { Orchestrator } from "../../src/orchestrator";
 import { defineTask } from "../../src/task-definition";
@@ -40,7 +40,7 @@ describe("Event Triggers - Custom Events", () => {
 			payload: z.object({}),
 		});
 
-		const taskFn = mock(async (event) => {
+		const taskFn = vi.fn(async (event) => {
 			expect(event.name).toBe("user.created");
 			expect(event.payload.userId).toBe("user-123");
 			expect(event.payload.email).toBe("test@example.com");
@@ -99,7 +99,7 @@ describe("Event Triggers - Custom Events", () => {
 			context: {},
 		});
 
-		const taskFn = mock(async (event) => {
+		const taskFn = vi.fn(async (event) => {
 			// Should only have selected fields
 			expect(event.payload.userId).toBe("user-123");
 			expect(event.payload.email).toBe("test@example.com");
@@ -152,7 +152,7 @@ describe("Event Triggers - Custom Events", () => {
 			payload: z.object({}),
 		});
 
-		const taskFn = mock(async (event) => {
+		const taskFn = vi.fn(async (event) => {
 			// Should only be called for orders > 1000
 			expect(event.payload.total).toBeGreaterThan(1000);
 		});
@@ -211,8 +211,8 @@ describe("Event Triggers - Custom Events", () => {
 			payload: z.object({}),
 		});
 
-		const task1Fn = mock(async () => {});
-		const task2Fn = mock(async () => {});
+		const task1Fn = vi.fn(async () => {});
+		const task2Fn = vi.fn(async () => {});
 
 		const conductor = Conductor.create({
 			sql: db.sql,
@@ -288,7 +288,7 @@ describe("Event Triggers - Custom Events", () => {
 			payload: z.object({ id: z.string(), email: z.string() }),
 		});
 		const taskDef = defineTask({ name: "handle-contact-created", payload: z.object({}) });
-		const taskFn = mock(async () => {});
+		const taskFn = vi.fn(async () => {});
 		const conductor = Conductor.create({
 			sql: db.sql,
 			tasks: TaskSchemas.fromSchema([taskDef]),

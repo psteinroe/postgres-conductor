@@ -1,6 +1,6 @@
-import { MigrationStore } from "./migration-store";
-import { waitFor } from "./lib/wait-for";
-import type { DatabaseClient } from "./database-client";
+import { MigrationStore } from "./migration-store.js";
+import { waitFor } from "./lib/wait-for.js";
+import type { DatabaseClient } from "./database-client.js";
 
 const POLL_INTERVAL_MS = 2000;
 const POLL_JITTER_MS = 500;

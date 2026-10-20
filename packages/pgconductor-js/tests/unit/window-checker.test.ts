@@ -1,4 +1,4 @@
-import { test, expect, describe } from "bun:test";
+import { test, expect, describe } from "vitest";
 import { WindowChecker } from "../../src/lib/window-checker";
 
 describe("WindowChecker", () => {

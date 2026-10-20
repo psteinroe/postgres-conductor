@@ -73,7 +73,7 @@ const conductor = Conductor.create({
 // With TypeScript types
 const conductor = Conductor.create({
   connectionString: "postgres://localhost/mydb",
-  tasks: TaskSchemas.fromTypes<[SendEmailTask, ProcessOrderTask]>(),
+  tasks: TaskSchemas.fromUnion<SendEmailTask | ProcessOrderTask>(),
   context: {},
 });
 ```

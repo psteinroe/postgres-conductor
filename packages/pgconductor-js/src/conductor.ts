@@ -5,7 +5,7 @@ import {
 	type ExecutionInfo,
 	type ExecutionSpec,
 	type Payload,
-} from "./database-client";
+} from "./database-client.js";
 import {
 	Task,
 	type TaskConfiguration,
@@ -16,8 +16,13 @@ import {
 	type ExecuteFunction,
 	type TaskIdentifier,
 	type ValidateDeadLetterConfiguration,
-} from "./task";
-import type { TaskContext, BatchTaskContext, BatchTaskEvent, SignalMessage } from "./task-context";
+} from "./task.js";
+import type {
+	TaskContext,
+	BatchTaskContext,
+	BatchTaskEvent,
+	SignalMessage,
+} from "./task-context.js";
 import {
 	type FindTaskByIdentifier,
 	type InferPayload,
@@ -28,28 +33,28 @@ import {
 	type Trigger,
 	type ValidateTriggers,
 	type ValidateEventTriggers,
-} from "./task-definition";
-import { EVENT_DISPATCH_QUEUE, EVENT_DISPATCH_TASK } from "./event-dispatch-task";
-import { Worker, type WorkerConfig } from "./worker";
-import { DefaultLogger, type Logger } from "./lib/logger";
-import type { AddedContext, Middleware } from "./middleware";
-import { waitFor } from "./lib/wait-for";
-import { SchemaManager } from "./schema-manager";
-import { Telemetry } from "./telemetry";
-import { validateSchema } from "./lib/validate-schema";
+} from "./task-definition.js";
+import { EVENT_DISPATCH_QUEUE, EVENT_DISPATCH_TASK } from "./event-dispatch-task.js";
+import { Worker, type WorkerConfig } from "./worker.js";
+import { DefaultLogger, type Logger } from "./lib/logger.js";
+import type { AddedContext, Middleware } from "./middleware.js";
+import { waitFor } from "./lib/wait-for.js";
+import { SchemaManager } from "./schema-manager.js";
+import { Telemetry } from "./telemetry.js";
+import { validateSchema } from "./lib/validate-schema.js";
 import {
 	validateEventPayload,
 	type EventDefinition,
 	type EventName,
 	type FindEventByIdentifier,
 	type InferEventPayload,
-} from "./event-definition";
+} from "./event-definition.js";
 import {
 	TaskSchemas,
 	EventSchemas,
 	type InferTasksFromSchema,
 	type InferEventsFromSchema,
-} from "./schemas";
+} from "./schemas.js";
 
 export type WaitForResultOptions = {
 	/** Reject with a `TimeoutError` after this many milliseconds */

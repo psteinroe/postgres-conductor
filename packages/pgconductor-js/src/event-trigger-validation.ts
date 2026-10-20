@@ -1,6 +1,6 @@
-import type { EventFilterTerm } from "./database-client";
-import type { EventDefinition, EventFilterScalar } from "./event-definition";
-import type { Trigger } from "./task-definition";
+import type { EventFilterTerm } from "./database-client.js";
+import type { EventDefinition, EventFilterScalar } from "./event-definition.js";
+import type { Trigger } from "./task-definition.js";
 
 const MAX_FILTER_ALTERNATIVES = 4;
 

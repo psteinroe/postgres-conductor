@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { test, expect, describe, beforeAll, afterAll, afterEach, mock } from "bun:test";
+import { test, expect, describe, beforeAll, afterAll, afterEach, vi } from "vitest";
 import { Conductor } from "../../src/conductor";
 import { Orchestrator } from "../../src/orchestrator";
 import { defineTask } from "../../src/task-definition";
@@ -35,7 +35,7 @@ describe("Step Support", () => {
 			returns: z.object({ result: z.number() }),
 		});
 
-		const expensiveFn = mock((n: number) => n * 2);
+		const expensiveFn = vi.fn((n: number) => n * 2);
 		const taskCompleted = new Deferred<void>();
 
 		const conductor = Conductor.create({
@@ -87,7 +87,7 @@ describe("Step Support", () => {
 			returns: z.object({ completed: z.boolean() }),
 		});
 
-		const executionSteps = mock((step: string) => step);
+		const executionSteps = vi.fn((step: string) => step);
 		const sleepStarted = new Deferred<void>();
 		const sleepFinished = new Deferred<void>();
 
@@ -143,7 +143,7 @@ describe("Step Support", () => {
 			returns: z.object({ processed: z.number() }),
 		});
 
-		const processedItems = mock((item: number) => item);
+		const processedItems = vi.fn((item: number) => item);
 		const checkpointCompleted = new Deferred<void>();
 
 		const conductor = Conductor.create({
@@ -196,9 +196,9 @@ describe("Step Support", () => {
 			returns: z.object({ result: z.number() }),
 		});
 
-		const step1Fn = mock((n: number) => n + 1);
-		const step2Fn = mock((n: number) => n * 2);
-		const step3Fn = mock((n: number) => n - 3);
+		const step1Fn = vi.fn((n: number) => n + 1);
+		const step2Fn = vi.fn((n: number) => n * 2);
+		const step3Fn = vi.fn((n: number) => n - 3);
 		const stepsCompleted = new Deferred<void>();
 
 		const conductor = Conductor.create({

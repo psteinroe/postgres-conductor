@@ -1,7 +1,7 @@
-import type { DatabaseClient, Payload } from "./database-client";
-import type { BatchTaskContext, BatchTaskEvent } from "./task-context";
-import { Task } from "./task";
-import * as assert from "./lib/assert";
+import type { DatabaseClient, Payload } from "./database-client.js";
+import type { BatchTaskContext, BatchTaskEvent } from "./task-context.js";
+import { Task } from "./task.js";
+import * as assert from "./lib/assert.js";
 
 export const EVENT_DISPATCH_QUEUE = "pgconductor.internal";
 export const EVENT_DISPATCH_TASK = "pgconductor.event-dispatch";

@@ -1,5 +1,6 @@
 import postgres, { type Sql } from "postgres";
-import { GenericContainer, type StartedTestContainer, Wait } from "testcontainers";
+import { PostgreSqlContainer } from "@testcontainers/postgresql";
+import { inject } from "vitest";
 import { DatabaseClient } from "../../src/database-client";
 import { DefaultLogger } from "../../src/lib/logger";
 
@@ -43,7 +44,7 @@ export class TestDatabase {
 	async destroy(): Promise<void> {
 		await this.sql.end();
 
-		const master = postgres(this.masterUrl, { max: 1 });
+		const master = postgres(this.masterUrl, { max: 1, onnotice: () => {} });
 		try {
 			await master.unsafe(`DROP DATABASE IF EXISTS ${this.name}`);
 		} finally {
@@ -52,58 +53,30 @@ export class TestDatabase {
 	}
 }
 
+export async function startPostgres(): Promise<{ url: string; stop: () => Promise<unknown> }> {
+	// If DATABASE_URL is set (e.g., in CI), use it instead of starting a container
+	const databaseUrl = process.env.DATABASE_URL;
+	if (databaseUrl) {
+		return { url: databaseUrl, stop: async () => {} };
+	}
+
+	const container = await new PostgreSqlContainer("postgres:15")
+		.withCommand(["postgres", "-c", "wal_level=logical"])
+		.start();
+	return { url: container.getConnectionUri(), stop: () => container.stop() };
+}
+
 export class TestDatabasePool {
-	private readonly container: StartedTestContainer;
 	private readonly masterUrl: string;
 	private readonly children: TestDatabase[] = [];
 
-	private constructor(container: StartedTestContainer, masterUrl: string) {
-		this.container = container;
+	private constructor(masterUrl: string) {
 		this.masterUrl = masterUrl;
 	}
 
-	static async create(): Promise<TestDatabasePool> {
-		// If DATABASE_URL is set (e.g., in CI), use it instead of starting a container
-		const databaseUrl = process.env.DATABASE_URL;
-
-		if (databaseUrl) {
-			// CI mode: use existing Postgres service
-			const testSql = postgres(databaseUrl, { max: 1, connect_timeout: 5 });
-			try {
-				await testSql`SELECT 1`;
-			} finally {
-				await testSql.end();
-			}
-
-			// Return pool without container (container will be null)
-			return new TestDatabasePool(null as any, databaseUrl);
-		}
-
-		// Local mode: start testcontainer
-		const containerConfig = new GenericContainer("postgres:15")
-			.withEnvironment({
-				POSTGRES_PASSWORD: "postgres",
-				POSTGRES_USER: "postgres",
-				POSTGRES_DB: "postgres",
-			})
-			.withCommand(["postgres", "-c", "wal_level=logical"])
-			.withExposedPorts(5432)
-			.withWaitStrategy(Wait.forLogMessage(/database system is ready to accept connections/, 2));
-
-		const container = await containerConfig.start();
-
-		const host = container.getHost();
-		const port = container.getMappedPort(5432);
-		const masterUrl = `postgres://postgres:postgres@${host}:${port}/postgres`;
-
-		const testSql = postgres(masterUrl, { max: 1, connect_timeout: 5 });
-		try {
-			await testSql`SELECT 1`;
-		} finally {
-			await testSql.end();
-		}
-
-		return new TestDatabasePool(container, masterUrl);
+	// The integration project's global setup starts one Postgres and provides its URL
+	static async create(masterUrl = inject("databaseUrl")): Promise<TestDatabasePool> {
+		return new TestDatabasePool(masterUrl);
 	}
 
 	async child(): Promise<TestDatabase> {
@@ -117,7 +90,7 @@ export class TestDatabasePool {
 		await Promise.all(this.children.map((child) => child.sql.end()));
 
 		// Drop all databases
-		const master = postgres(this.masterUrl, { max: 1 });
+		const master = postgres(this.masterUrl, { max: 1, onnotice: () => {} });
 		try {
 			await Promise.all(
 				this.children.map((child) => master.unsafe(`DROP DATABASE IF EXISTS ${child.name}`)),
@@ -127,10 +100,5 @@ export class TestDatabasePool {
 		}
 
 		this.children.length = 0;
-
-		// Stop container if running in local mode
-		if (this.container) {
-			await this.container.stop();
-		}
 	}
 }

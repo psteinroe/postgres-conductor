@@ -1,5 +1,6 @@
+import { setTimeout as sleep } from "node:timers/promises";
 import { z } from "zod";
-import { test, expect, describe, beforeAll, afterAll, afterEach, mock } from "bun:test";
+import { test, expect, describe, beforeAll, afterAll, afterEach, vi } from "vitest";
 import { Conductor } from "../../src/conductor";
 import { Orchestrator } from "../../src/orchestrator";
 import { defineTask } from "../../src/task-definition";
@@ -34,7 +35,7 @@ describe("Basic Task Execution", () => {
 			payload: z.object({ name: z.string() }),
 		});
 
-		const contextFn = mock((s: string) => `Hello ${s}`);
+		const contextFn = vi.fn((s: string) => `Hello ${s}`);
 
 		const conductor = Conductor.create({
 			sql: db.sql,
@@ -178,7 +179,7 @@ describe("Basic Task Execution", () => {
 		const flushStarted = Promise.withResolvers<void>();
 		conductor.db.returnExecutions = async (grouped, opts) => {
 			flushStarted.resolve();
-			await Bun.sleep(500);
+			await sleep(500);
 			return returnExecutions(grouped, opts);
 		};
 		const task = conductor.createTask({ name: "flush-task" }, { invocable: true }, async () => {});

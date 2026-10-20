@@ -1,3 +1,4 @@
+import { setTimeout as sleep } from "node:timers/promises";
 import type { Sql } from "postgres";
 
 export async function waitForCondition(
@@ -9,7 +10,7 @@ export async function waitForCondition(
 		if (Date.now() >= deadline) {
 			throw new Error(`condition was not met within ${timeoutMs}ms`);
 		}
-		await Bun.sleep(25);
+		await sleep(25);
 	}
 }
 

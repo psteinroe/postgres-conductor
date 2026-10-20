@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { test, expect, describe, beforeAll, afterAll, mock } from "bun:test";
+import { test, expect, describe, beforeAll, afterAll, vi } from "vitest";
 import { Conductor } from "../../src/conductor";
 import { Orchestrator } from "../../src/orchestrator";
 import { defineTask } from "../../src/task-definition";
@@ -83,7 +83,7 @@ describe("Cron Scheduling", () => {
 			context: {},
 		});
 
-		const executions = mock(() => {});
+		const executions = vi.fn(() => {});
 
 		const syncTask = conductor.createTask(
 			{ name: "frequent-sync" },
@@ -136,7 +136,7 @@ describe("Cron Scheduling", () => {
 			context: {},
 		});
 
-		const executions = mock(() => {});
+		const executions = vi.fn(() => {});
 
 		const multiTask = conductor.createTask(
 			{ name: "multi-schedule" },
@@ -270,7 +270,7 @@ describe("Cron Scheduling", () => {
 			context: {},
 		});
 
-		const executions = mock((payload: { value: number }) => payload.value);
+		const executions = vi.fn((payload: { value: number }) => payload.value);
 
 		const hybridTask = conductor.createTask(
 			{ name: "hybrid-task" },
@@ -324,7 +324,7 @@ describe("Cron Scheduling", () => {
 			context: {},
 		});
 
-		const targetExecutions = mock(() => {});
+		const targetExecutions = vi.fn(() => {});
 
 		const dynamicTask = conductor.createTask(
 			{ name: "dynamic-target" },
@@ -405,7 +405,7 @@ describe("Cron Scheduling", () => {
 			context: {},
 		});
 
-		const targetExecutions = mock(() => {});
+		const targetExecutions = vi.fn(() => {});
 
 		const dynamicTask = conductor.createTask(
 			{ name: "dynamic-target" },
@@ -491,7 +491,7 @@ describe("Cron Scheduling", () => {
 			context: {},
 		});
 
-		const executions = mock(() => {});
+		const executions = vi.fn(() => {});
 
 		const frequentTask = conductor.createTask(
 			{ name: "frequent-task" },
@@ -536,7 +536,7 @@ describe("Cron Scheduling", () => {
 		});
 
 		let attemptCount = 0;
-		const executions = mock(() => {
+		const executions = vi.fn(() => {
 			attemptCount++;
 			// Fail first attempt, succeed on subsequent
 			if (attemptCount === 1) {
@@ -603,7 +603,7 @@ describe("Cron Scheduling", () => {
 			context: {},
 		});
 
-		const executions = mock(() => {});
+		const executions = vi.fn(() => {});
 
 		const cronTask = conductor.createTask(
 			{ name: "dedupe-cron" },

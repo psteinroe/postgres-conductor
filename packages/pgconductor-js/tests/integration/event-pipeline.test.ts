@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, test } from "vitest";
 import postgres from "postgres";
 import { z } from "zod";
 import { Conductor } from "../../src/conductor";
@@ -688,7 +688,7 @@ describe("event pipeline", () => {
 
 		try {
 			await firstInserted;
-			let timeout: Timer | undefined;
+			let timeout: ReturnType<typeof setTimeout> | undefined;
 			const [second] = await Promise.race([
 				secondSql`select pgconductor.emit_event('pipeline.concurrent', '{}'::jsonb) as id`,
 				new Promise<never>((_, reject) => {
@@ -699,7 +699,7 @@ describe("event pipeline", () => {
 				}),
 			]);
 			if (timeout) clearTimeout(timeout);
-			expect(second?.id).toBeString();
+			expect(second?.id).toBeTypeOf("string");
 		} finally {
 			releaseFirst();
 			await firstTransaction;

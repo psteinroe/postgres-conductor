@@ -6,18 +6,18 @@ Benchmark suite for measuring pgconductor performance.
 
 ```bash
 # Run all benchmarks
-bun perf/run.ts
+pnpm perf
 
 # Run specific category
-bun perf/run.ts throughput
-bun perf/run.ts scaling
-bun perf/run.ts concurrency
+pnpm perf throughput
+pnpm perf scaling
+pnpm perf concurrency
 
 # Run specific scenario
-bun perf/run.ts throughput/simple-100
+pnpm perf throughput/simple-100
 
 # Output as JSON
-bun perf/run.ts --json
+pnpm perf --json
 ```
 
 ## Available Benchmarks
@@ -75,5 +75,5 @@ export function createBenchmarks(ctx: BenchmarkContext) {
 ```yaml
 # .github/workflows/benchmark.yml
 - name: Run benchmarks
-  run: bun perf/run.ts --json > results.json
+  run: pnpm perf --json > results.json
 ```
