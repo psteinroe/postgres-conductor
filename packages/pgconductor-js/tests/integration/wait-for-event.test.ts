@@ -589,11 +589,11 @@ describe("waitForEvent", () => {
 			const result = {
 				execution_id: executionId,
 				claim_token: execution.claim_token,
-				queue: "default",
 				task_key: "wait.task",
 			};
 			await database.client.returnExecutions({
 				orchestratorId,
+				queueName: "default",
 				results: [
 					status === "completed" ? { ...result, status } : { ...result, status, error: "failed" },
 				],
@@ -1065,11 +1065,11 @@ describe("waitForEvent", () => {
 		if (!second) throw new Error("expected claim");
 		await database.client.returnExecutions({
 			orchestratorId,
+			queueName: "default",
 			results: [
 				{
 					execution_id: executionId,
 					claim_token: second.claim_token,
-					queue: "default",
 					task_key: "wait.task",
 					status: "failed",
 					error: "failed before waiting again",

@@ -639,11 +639,11 @@ describe("Signals", () => {
 		const first = await claim();
 		await db.client.returnExecutions({
 			orchestratorId,
+			queueName: "default",
 			results: [
 				{
 					execution_id: id,
 					claim_token: first.claim_token,
-					queue: "default",
 					task_key: "session",
 					status: "released",
 					reschedule_in_ms: 0,
