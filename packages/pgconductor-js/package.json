@@ -69,13 +69,7 @@
 		"zod": "catalog:"
 	},
 	"peerDependencies": {
-		"@opentelemetry/api": ">=1.4 <2",
-		"@testcontainers/postgresql": ">=11 <12"
-	},
-	"peerDependenciesMeta": {
-		"@testcontainers/postgresql": {
-			"optional": true
-		}
+		"@opentelemetry/api": ">=1.4 <2"
 	},
 	"dependencies": {
 		"@standard-schema/spec": "^1.0.0",

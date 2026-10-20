@@ -25,7 +25,7 @@ describe("SchemaManager", () => {
 	});
 
 	test("ensureLatest works on clean database", async () => {
-		const db = await pool.child({ migrate: false });
+		const db = await pool.child();
 		databases.push(db);
 		const client = new DatabaseClient({ sql: db.sql, logger: new DefaultLogger() });
 		const schemaManager = new SchemaManager(client);
@@ -56,7 +56,7 @@ describe("SchemaManager", () => {
 	}, 30000);
 
 	test("breaking migration waits for signalled older orchestrators to exit", async () => {
-		const db = await pool.child({ migrate: false });
+		const db = await pool.child();
 		databases.push(db);
 		const client = new DatabaseClient({ sql: db.sql, logger: new DefaultLogger() });
 		const controller = new AbortController();
@@ -106,7 +106,7 @@ describe("SchemaManager", () => {
 	}, 30000);
 
 	test("aborting stops waiting for older orchestrators to exit", async () => {
-		const db = await pool.child({ migrate: false });
+		const db = await pool.child();
 		databases.push(db);
 		const client = new DatabaseClient({ sql: db.sql, logger: new DefaultLogger() });
 		await new SchemaManager(client).ensureLatest(new AbortController().signal);

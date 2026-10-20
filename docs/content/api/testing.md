@@ -1,59 +1,45 @@
 # Testing API
 
-Helpers for testing tasks against a real Postgres, exported from `pgconductor-js/testing`. See [Testing](../crafting-tasks/testing.md) for a guide.
+Exported from `pgconductor-js/testing`. See [Testing](../crafting-tasks/testing.md) for a guide.
 
-## createTestDatabase()
+## createTestClock()
 
-Create an isolated database:
+Control database time:
 
 ```typescript
-import { createTestDatabase } from "pgconductor-js/testing";
+import { createTestClock } from "pgconductor-js/testing";
 
-const testDb = await createTestDatabase({
-  url?,      // Postgres server to create the database on
-  migrate?,  // Install the Postgres Conductor schema (default: true)
-});
+const sql = postgres(testDatabaseUrl, { max: 1 });
+const clock = createTestClock(sql);
+const conductor = Conductor.create({ sql, tasks, context });
 ```
 
 **Parameters:**
 
-- `url`: (optional) Connection string of the server. Defaults to `DATABASE_URL`, then to a Postgres container started once per process with the optional `@testcontainers/postgresql` peer dependency
-- `migrate`: (optional) Clone a migrated template database. With `false`, the database is empty, for tests of `conductor.ensureInstalled()` or `orchestrator.start()` migrations
+- `sql`: a postgres.js pool with a single connection (`max: 1`). Fake time is a session setting, so only queries on this connection see it
 
-**Returns:** a `TestDatabase`:
+The clock applies to everything that uses `sql`, including orchestrators that are running on it.
 
-- `sql`: a postgres.js pool with a single connection; pass it to `Conductor.create({ sql })`
-- `url`: connection string of the test database
-- `name`: database name
-- `clock`: the database clock
-- `destroy()`: close `sql` and drop the database
+## clock.set(date)
 
-## testDb.clock
-
-Database time for everything that uses `testDb.sql`. Changes reach orchestrators that are running on it.
+Fake the time. It stands still until it is moved again.
 
 ```typescript
-await testDb.clock.set(new Date("2024-01-01T12:00:00Z"));
-await testDb.clock.advance("15m");
-await testDb.clock.reset();
+await clock.set(new Date("2024-01-01T12:00:00Z"));
 ```
 
-- `set(date)`: fake the time; it stands still until it is moved again
-- `advance(duration)`: move time forward by a duration in milliseconds or a string such as `"15s"`, `"15m"`, `"1h"` or `"1d"`; starts from real time if time is not faked
-- `reset()`: return to real time
+## clock.advance(duration)
 
-## startPostgres()
-
-Get a Postgres server, for example in a Vitest global setup:
+Move time forward by a duration in milliseconds or a string such as `"15s"`, `"15m"`, `"1h"` or `"1d"`. Starts from real time if time is not faked.
 
 ```typescript
-import { startPostgres } from "pgconductor-js/testing";
-
-const postgres = await startPostgres({ image: "postgres:17" });
-process.env.DATABASE_URL = postgres.url;
-// ...
-await postgres.stop();
+await clock.advance("15m");
 ```
 
-- Uses `DATABASE_URL` if it is set; `stop()` then does nothing
-- Otherwise starts a container from `image` (default: `postgres:17`) with `@testcontainers/postgresql`, which must be installed
+## clock.reset()
+
+Return to real time.
+
+```typescript
+await clock.reset();
+```

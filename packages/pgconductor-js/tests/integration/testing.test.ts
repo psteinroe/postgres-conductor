@@ -1,28 +1,48 @@
 // Uses only the public package API: the package check runs this file against the packed tarball
+import { randomUUID } from "node:crypto";
 import { setTimeout } from "node:timers/promises";
-import { afterEach, beforeEach, expect, test } from "vitest";
+import postgres, { type Sql } from "postgres";
+import { afterAll, afterEach, beforeEach, expect, test } from "vitest";
 import { Conductor, Orchestrator, TaskSchemas, type DefineTask } from "pgconductor-js";
-import { createTestDatabase, type TestDatabase } from "pgconductor-js/testing";
+import { createTestClock, type TestClock } from "pgconductor-js/testing";
 
 type Tasks =
 	| DefineTask<{ name: "report" }>
 	| DefineTask<{ name: "remind"; payload: { to: string } }>
 	| DefineTask<{ name: "charge"; returns: { attempt: number } }>;
 
-let testDb: TestDatabase;
+const serverUrl =
+	process.env.DATABASE_URL || "postgres://postgres:postgres@localhost:5432/postgres";
+const server = postgres(serverUrl, { max: 1, onnotice: () => {} });
+
+let database: string;
+let sql: Sql;
+let clock: TestClock;
 
 beforeEach(async () => {
-	testDb = await createTestDatabase();
-	await testDb.clock.set(new Date("2024-01-01T12:00:00Z"));
+	database = `pgconductor_test_${randomUUID().replaceAll("-", "")}`;
+	await server.unsafe(`create database ${database}`);
+	const url = new URL(serverUrl);
+	url.pathname = `/${database}`;
+	// Fake time is a session setting, so everything shares one connection
+	sql = postgres(url.toString(), { max: 1 });
+	await createConductor().ensureInstalled();
+	clock = createTestClock(sql);
+	await clock.set(new Date("2024-01-01T12:00:00Z"));
 });
 
 afterEach(async () => {
-	await testDb.destroy();
+	await sql.end();
+	await server.unsafe(`drop database ${database}`);
+});
+
+afterAll(async () => {
+	await server.end();
 });
 
 function createConductor() {
 	return Conductor.create({
-		sql: testDb.sql,
+		sql,
 		tasks: TaskSchemas.fromUnion<Tasks>(),
 		context: {},
 	});
@@ -44,11 +64,11 @@ test("runs a cron task when time advances", async () => {
 	await orchestrator.drain();
 	expect(runs).toBe(0);
 
-	await testDb.clock.advance("15m");
+	await clock.advance("15m");
 	await orchestrator.drain();
 	expect(runs).toBe(1);
 
-	await testDb.clock.advance("15m");
+	await clock.advance("15m");
 	await orchestrator.drain();
 	expect(runs).toBe(2);
 });
@@ -70,7 +90,7 @@ test("resumes ctx.sleep when time advances", async () => {
 	await orchestrator.drain();
 	expect(sent).toEqual([]);
 
-	await testDb.clock.advance("1h");
+	await clock.advance("1h");
 	await orchestrator.drain();
 	expect(sent).toEqual(["ada@example.com"]);
 	expect(await conductor.getExecution(id)).toMatchObject({
@@ -94,11 +114,11 @@ test("retries after the backoff", async () => {
 	expect(await conductor.getExecution(id)).toMatchObject({ status: "pending", attempts: 1 });
 
 	// The first retry waits 15 seconds
-	await testDb.clock.advance("14s");
+	await clock.advance("14s");
 	await orchestrator.drain();
 	expect(attempts).toBe(1);
 
-	await testDb.clock.advance("1s");
+	await clock.advance("1s");
 	await orchestrator.drain();
 	expect(await conductor.getExecution({ name: "charge" }, id)).toMatchObject({
 		status: "completed",
@@ -123,15 +143,15 @@ test("running workers follow clock changes", async () => {
 	});
 	await orchestrator.start();
 
-	await testDb.clock.advance("15m");
+	await clock.advance("15m");
 	await expect.poll(() => runs).toBe(1);
 
 	// The next run is scheduled from the new time, at 12:30
-	await testDb.clock.advance("14m");
+	await clock.advance("14m");
 	await setTimeout(200);
 	expect(runs).toBe(1);
 
-	await testDb.clock.advance("1m");
+	await clock.advance("1m");
 	await expect.poll(() => runs).toBe(2);
 
 	await orchestrator.stop();
