@@ -819,6 +819,70 @@ describe("ctx.waitForResult and execution branches (Postgres integration)", () =
 		expect(await woken(database, removed)).toEqual(cancelled);
 	});
 
+	test("a linked child waiting on its parent is cancelled when the parent fails", async () => {
+		const database = await db();
+		const children: string[] = [];
+		const outcomes: unknown[] = [];
+		const conductor = await setup(database, {
+			waiter: async (id, ctx) => {
+				outcomes.push(await ctx.waitForResult("parent", id));
+			},
+			work: async (_value, ctx) => {
+				const childId = await ctx.invoke(
+					"child",
+					{ name: "waiter" },
+					{ id: ctx.executionId },
+					{ cancelWithParent: true },
+				);
+				children.push(childId);
+				await suspendedAt(database, childId, "parent");
+				throw new Error("parent failed");
+			},
+			workOptions: { maxAttempts: 1 },
+		});
+
+		const parentId = await conductor.invoke({ name: "work" }, { value: 1 });
+		await waitForCondition(
+			async () => (await conductor.getExecution(parentId))?.status === "failed",
+		);
+		const child = await conductor.getExecution(children[0] || "");
+
+		expect(outcomes).toEqual([]);
+		expect({ status: child?.status, error: child?.error }).toEqual({
+			status: "cancelled",
+			error: "parent failed",
+		});
+	});
+
+	test("a pending linked child cancelled with its parent resolves its waiters", async () => {
+		const database = await db();
+		const ids: string[] = [];
+		const outcomes: unknown[] = [];
+		const conductor = await setup(database, {
+			waiter: async (id, ctx) => {
+				outcomes.push(await ctx.waitForResult("result", id));
+			},
+			work: async (value, ctx) => {
+				if (value === 2) return;
+				const childId = await ctx.invoke(
+					"child",
+					{ name: "work" },
+					{ value: 2 },
+					{ cancelWithParent: true, run_at: new Date(Date.now() + 3_600_000) },
+				);
+				ids.push(await ctx.invoke("waiter", { name: "waiter" }, { id: childId }));
+				await suspendedAt(database, ids[0] || "", "result");
+				throw new Error("parent failed");
+			},
+			workOptions: { maxAttempts: 1 },
+		});
+
+		await conductor.invoke({ name: "work" }, { value: 1 });
+		await waitForCondition(() => outcomes.length === 1);
+
+		expect(outcomes).toEqual([{ status: "cancelled", reason: "parent failed" }]);
+	});
+
 	test("ctx.executionId and ctx.queue identify the execution", async () => {
 		const database = await db();
 		const seen: unknown[] = [];

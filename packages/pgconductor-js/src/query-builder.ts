@@ -849,7 +849,7 @@ export class QueryBuilder {
 			where child.completed_at is null and child.failed_at is null
 		)`);
 		ctes.push(this.sql`cancelled_descendants as materialized (
-			select e.id, e.queue, d.reason,
+			select e.id, e.queue, d.reason, e.result_waiters,
 				e.locked_by is not null and v.execution_id is null as running,
 				t.remove_on_fail_days = 0 as should_remove
 			from linked_descendants d
@@ -955,7 +955,8 @@ export class QueryBuilder {
 			returning subscription.id
 		)`);
 		// Waits for a settled execution are read from its locked row, which also holds waits
-		// registered after this statement's snapshot
+		// registered after this statement's snapshot. Descendants cancelled here are not woken:
+		// the function's update would precede the statement's own and lose it.
 		ctes.push(this.sql`resolved_result_waits as (
 			select pgconductor._private_resolve_result_waits(jsonb_agg(w.value || jsonb_build_object('outcome', s.outcome)))
 			from (
@@ -978,8 +979,13 @@ export class QueryBuilder {
 				select p.parent_result_waiters,
 					jsonb_build_object('status', 'failed', 'error', 'Child execution failed: ' || p.child_error)
 				from failed_parent_targets p
+				union all
+				select d.result_waiters, jsonb_build_object('status', 'cancelled', 'reason', d.reason)
+				from cancelled_descendants d
+				where not d.running
 			) s
 			cross join lateral jsonb_array_elements(s.result_waiters) w
+			where (w.value->>'execution_id')::uuid not in (select id from cancelled_descendants)
 			having count(*) > 0
 		)`);
 		ctes.push(this.sql`retried as (
