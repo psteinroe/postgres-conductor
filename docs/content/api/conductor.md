@@ -78,7 +78,7 @@ const task = conductor.createTask(
   timeoutMs?: number;                     // Fail an attempt that runs longer (default: none)
   concurrency?: number;                   // Max concurrent executions (default: unlimited)
   window?: [string, string];              // Time window (e.g., ["09:00", "17:00"])
-  removeOnComplete?: boolean | { days: number };  // Retention policy (true: at the next maintenance run)
+  removeOnComplete?: boolean | { days: number };  // Retention policy (true: when it settles)
   removeOnFail?: boolean | { days: number };      // Retention policy
   batch?: { size: number; timeoutMs: number };  // Batch processing config
   deadLetter?: { queue: string; task?: Task };    // Final-failure destination

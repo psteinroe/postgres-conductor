@@ -40,7 +40,7 @@ Old executions are automatically removed by the maintenance task.
 }
 ```
 
-**Remove completed at the next maintenance run:**
+**Remove completed as soon as it settles:**
 
 ```typescript
 {
@@ -108,7 +108,7 @@ Postgres Conductor runs daily maintenance automatically on each queue:
 
 No manual intervention required. Maintenance does not release executions locked by a crashed worker: running orchestrators recover those through their heartbeats.
 
-An execution's result is stored on the execution, so [`conductor.getExecution()` and `conductor.waitForResult()`](../api/conductor.md#conductorgetexecution) can only read it until the execution is removed. [`ctx.waitForResult()`](../api/task-context.md#ctxwaitforresult) receives the outcome if it started waiting before the removal, and throws if it starts after.
+An execution's result is stored on the execution, so [`conductor.getExecution()` and `conductor.waitForResult()`](../api/conductor.md#conductorgetexecution) can only read it until the execution is removed. [`ctx.waitForResult()`](../api/task-context.md#ctxwaitforresult) receives the outcome if it started waiting before the removal, and throws if it starts after; see [Reporting Outcomes](report-outcomes.md#retention).
 
 ## What's Next?
 

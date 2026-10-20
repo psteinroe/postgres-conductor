@@ -175,6 +175,8 @@ const workflow = conductor.createTask(
 
 Unlike `ctx.invokeAndWait()`, the outcome is a value: a failed or cancelled execution resolves the wait instead of failing the caller, and a timeout leaves the execution running. To race the execution against events, pass it as an `{ execution: id }` branch to [`ctx.waitForAny()`](../api/task-context.md#ctxwaitforany).
 
+To report an outcome to another execution, see [Reporting Outcomes](report-outcomes.md).
+
 Outside a task, await an execution with [`conductor.waitForResult()`](../api/conductor.md) or read it with `conductor.getExecution()`.
 
 ## What's Next?

@@ -62,7 +62,11 @@ describe("ctx.waitForResult and execution branches (Postgres integration)", () =
 		}: {
 			waiter: Handler;
 			work?: (value: number, ctx: any) => Promise<unknown>;
-			workOptions?: { maxAttempts?: number; removeOnComplete?: { days: number } };
+			workOptions?: {
+				maxAttempts?: number;
+				removeOnComplete?: boolean | { days: number };
+				removeOnFail?: boolean | { days: number };
+			};
 			orchestratorCount?: number;
 		},
 	) {
@@ -481,6 +485,49 @@ describe("ctx.waitForResult and execution branches (Postgres integration)", () =
 		expect(outcomes).toEqual([{ status: "completed", result: { doubled: 10 } }]);
 		expect(await conductor.getExecution(ids[0] || "")).toBeNull();
 	});
+
+	test.each([
+		{ status: "completed", work: async () => {}, workOptions: { removeOnComplete: true } },
+		{
+			status: "failed",
+			work: async () => {
+				throw new Error("boom");
+			},
+			workOptions: { maxAttempts: 1, removeOnFail: true },
+		},
+	])(
+		"a $status execution removed before the wait fails it as not found",
+		async ({ work, workOptions }) => {
+			const database = await db();
+			const errors: string[] = [];
+			const ids: string[] = [];
+			const fail = (error: Error) => {
+				errors.push(error.message);
+			};
+			const conductor = await setup(database, {
+				waiter: async (_id, ctx) => {
+					const id = await ctx.invoke("start", { name: "work" }, { value: 1 });
+					ids.push(id);
+					await ctx.step("await-removal", () =>
+						waitForCondition(async () => (await conductor.getExecution(id)) === null),
+					);
+					await ctx.waitForResult("result", id).catch(fail);
+					await ctx.waitForAny("any", { work: { execution: id } }).catch(fail);
+				},
+				work,
+				workOptions,
+			});
+
+			const waiterId = await conductor.invoke({ name: "waiter" }, { id: "removed-before" });
+			await conductor.waitForResult(waiterId, { pollIntervalMs: 10 });
+			const workId = ids[0] || "";
+			await conductor.waitForResult(workId, { pollIntervalMs: 10 }).catch(fail);
+
+			const notFound = `Execution ${workId} not found`;
+			expect(errors).toEqual([notFound, notFound, notFound]);
+			expect(await waits(database)).toBe(0);
+		},
+	);
 
 	test("an unknown execution fails the wait", async () => {
 		const database = await db();

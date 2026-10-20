@@ -58,6 +58,7 @@ nav = [
     { "Task Triggers" = "crafting-tasks/triggers.md" },
     { "Retries and Steps" = "crafting-tasks/retries-and-steps.md" },
     { "Child Invocation" = "crafting-tasks/child-invocation.md" },
+    { "Reporting Outcomes" = "crafting-tasks/report-outcomes.md" },
     { "Long-Running Tasks" = "crafting-tasks/long-running.md" },
     { "Custom Context" = "crafting-tasks/custom-context.md" },
     { "Execution Metadata" = "crafting-tasks/execution-metadata.md" },
