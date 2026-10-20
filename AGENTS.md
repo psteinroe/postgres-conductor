@@ -230,7 +230,8 @@ Tables live in the `pgconductor` schema with a `_private_` prefix (`_private_exe
 **Result Waits**
 - `ctx.waitForResult()` and `{ execution: id }` branches of `ctx.waitForAny()` are `execution_wait` subscriptions with `awaited_execution_id` set and no event key, so race, timeout and cleanup work as for event waits
 - `_private_register_result_wait` locks the awaited execution before the waiter (the order settlement uses), stores the outcome at once if it settled, and otherwise appends `{execution_id, queue, step_key}` to the awaited row's `result_waiters`
-- Settlement (`outcome_waits` in `buildReturnExecutions`) and `cancel_execution()` read `result_waiters` from the locked row, like `signal_count`, so a wait registered after their snapshot is not missed. They store `{status: 'resolved', outcome}` under the wait's step key and wake a waiter suspended at a wait, like dispatch does
+- Settlement (`resolved_result_waits` in `buildReturnExecutions`) and `cancel_execution()` read `result_waiters` from the locked row, like `signal_count`, so a wait registered after their snapshot is not missed. They pass the waits with their outcomes to `_private_resolve_result_waits`, which stores `{status: 'resolved', outcome}` under each wait's step key and wakes a waiter suspended at a wait, like dispatch does
+- The delivery is a plpgsql function called only when a settled execution has waiters: settlement is planned on every call, and each reference to the partitioned executions table adds planning cost per queue
 - Waiting creates no parent link: a failed or cancelled execution never fails its waiter, and timeouts or cancelling the waiter leave it running. An unknown execution raises at registration
 
 **Signals**

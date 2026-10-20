@@ -967,9 +967,9 @@ export class QueryBuilder {
 			returning subscription.id
 		)`);
 		// Waits for a settled execution are read from its locked row, which also holds waits
-		// registered after this statement's snapshot. A waiter suspended at a wait is woken.
-		ctes.push(this.sql`outcome_waits as materialized (
-			select w.execution_id, w.queue, w.step_key, s.outcome
+		// registered after this statement's snapshot
+		ctes.push(this.sql`resolved_result_waits as (
+			select pgconductor._private_resolve_result_waits(jsonb_agg(w.value || jsonb_build_object('outcome', s.outcome)))
 			from (
 				select r.result_waiters,
 					case when oc.id is null
@@ -991,46 +991,8 @@ export class QueryBuilder {
 					jsonb_build_object('status', 'failed', 'error', 'Child execution failed: ' || p.child_error)
 				from failed_parent_targets p
 			) s
-			cross join lateral jsonb_to_recordset(s.result_waiters)
-				as w(execution_id uuid, queue text, step_key text)
-		)`);
-		// A waiter removed by this statement gets no step, which would reference a deleted row
-		ctes.push(this.sql`locked_outcome_waiters as materialized (
-			select e.id, e.queue,
-				e.locked_by is null
-					and e.waiting_on_execution_id is null
-					and e.waiting_step_key is not null as suspended
-			from pgconductor._private_executions e
-			where (e.id, e.queue) in (select w.execution_id, w.queue from outcome_waits w)
-				and e.completed_at is null
-				and e.failed_at is null
-				and not e.cancelled
-				and e.id not in (select id from deleted_completed union all select id from deleted_failed)
-			order by e.id
-			for update of e
-		)`);
-		ctes.push(this.sql`outcome_steps as (
-			insert into pgconductor._private_steps (execution_id, queue, key, result)
-			select w.execution_id, w.queue, w.step_key,
-				jsonb_build_object('status', 'resolved', 'outcome', w.outcome)
-			from outcome_waits w
-			join locked_outcome_waiters l on l.id = w.execution_id and l.queue = w.queue
-			on conflict (execution_id, key) do nothing
-			returning execution_id, queue, key
-		)`);
-		ctes.push(this.sql`deleted_outcome_waits as (
-			delete from pgconductor._private_custom_event_subscriptions subscription
-			using outcome_steps step
-			where subscription.kind = 'execution_wait'
-				and subscription.execution_id = step.execution_id
-				and subscription.step_key = step.key
-		)`);
-		ctes.push(this.sql`woken_outcome_waiters as (
-			update pgconductor._private_executions e
-			set run_at = nt.ts, waiting_step_key = null
-			from now_ts nt, locked_outcome_waiters l
-			where e.id = l.id and e.queue = l.queue and l.suspended
-				and exists (select 1 from outcome_steps step where step.execution_id = l.id)
+			cross join lateral jsonb_array_elements(s.result_waiters) w
+			having count(*) > 0
 		)`);
 		ctes.push(this.sql`retried as (
 			update pgconductor._private_executions e
@@ -1092,7 +1054,9 @@ export class QueryBuilder {
 		)`);
 
 		const combined = ctes.reduce((acc, cte, i) => (i === 0 ? cte : this.sql`${acc}, ${cte}`));
-		return this.sql<[{ result: number }]>`with recursive ${combined} select 1 as result`;
+		return this.sql<[{ result: number }]>`
+			with recursive ${combined} select 1 as result from (select count(*) from resolved_result_waits) r
+		`;
 	}
 	buildRemoveExecutions({
 		queueName,

@@ -282,6 +282,58 @@ describe("ctx.waitForResult and execution branches (Postgres integration)", () =
 		expect(waiter).toEqual({ waiting_step_key: null, due: true });
 	});
 
+	test("a waiter removed in the settlement that settles the awaited execution", async () => {
+		const database = await db();
+		const conductor = await setup(database, {
+			waiter: async () => {},
+			workOptions: { removeOnComplete: { days: 0 } },
+		});
+		await Promise.all(orchestrators.map((orchestrator) => orchestrator.stop()));
+		const awaitedId = await conductor.invoke({ name: "waiter" }, { id: "awaited" });
+		const waiterId = await conductor.invoke({ name: "work" }, { value: 1 });
+		const orchestratorId = crypto.randomUUID();
+		const { executions } = await database.client.getExecutions({
+			orchestratorId,
+			queueName: "default",
+			batchSize: 10,
+			taskKeys: ["work", "waiter"],
+		});
+		const claimToken = (id: string) =>
+			executions.find((execution) => execution.id === id)?.claim_token || "";
+		await database.sql`
+			select pgconductor._private_register_result_wait(
+				${waiterId}::uuid, 'default', 'work', ${orchestratorId}::uuid,
+				${claimToken(waiterId)}::uuid, 'result', ${awaitedId}::uuid, null, false
+			)
+		`;
+
+		await database.client.returnExecutions({
+			orchestratorId,
+			results: [
+				{
+					execution_id: waiterId,
+					queue: "default",
+					task_key: "work",
+					claim_token: claimToken(waiterId),
+					status: "completed",
+					result: { doubled: 2 },
+				},
+				{
+					execution_id: awaitedId,
+					queue: "default",
+					task_key: "waiter",
+					claim_token: claimToken(awaitedId),
+					status: "completed",
+				},
+			],
+		});
+
+		expect(await conductor.getExecution(waiterId)).toBeNull();
+		expect((await conductor.getExecution(awaitedId))?.status).toBe("completed");
+		const steps = await database.sql`select 1 from pgconductor._private_steps`;
+		expect(steps.length).toBe(0);
+	});
+
 	test("an execution cancelled while pending resolves the wait as cancelled", async () => {
 		const database = await db();
 		const outcomes: unknown[] = [];
