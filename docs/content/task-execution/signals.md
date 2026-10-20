@@ -95,4 +95,4 @@ A handler does not have to wait for its signals: one that registers listeners an
 
 ## Errors
 
-A signal handler that throws fails the attempt like an uncaught error in the handler, with the error `Signal handler for "<name>" failed: <message>`. The signal is not marked delivered, so the retry receives it again.
+A signal handler that throws fails the attempt like an uncaught error in the handler, with the error `Signal handler for "<name>" failed: <message>`. The signal is not marked delivered, so the retry receives it again. During `orchestrator.stop()`, a signal handler that throws, or a signal that cannot be marked delivered, releases the attempt once the handler returns, without using up a retry.

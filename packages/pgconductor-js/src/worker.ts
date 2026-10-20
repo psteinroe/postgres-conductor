@@ -573,6 +573,9 @@ export class Worker<
 					{ signal: this.signal },
 				),
 			onError: (error) => {
+				// Stopping ends the retries of an acknowledgement. The handler keeps its slot, and the
+				// attempt is released with the signal undelivered.
+				if (this.signal.aborted) return;
 				taskAbortController.abort({ reason: "signal-failed", error: error.message });
 			},
 		});
@@ -705,6 +708,7 @@ export class Worker<
 			}
 
 			if (outcome.signalFailure) {
+				if (this.signal.aborted) return { ...identity, status: "released" } as const;
 				return {
 					...identity,
 					status: "failed",

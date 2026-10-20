@@ -387,6 +387,160 @@ describe("drain()", () => {
 	});
 });
 
+describe("stop() while a handler runs a step", () => {
+	const ackStatement = "set delivered_at = pgconductor._private_current_time()";
+
+	// `ack` replaces the response of every signal acknowledgement
+	async function setup({
+		signal,
+		ack = (query) => query,
+		onInput,
+	}: {
+		signal: boolean;
+		ack?: (query: Promise<unknown>) => Promise<unknown>;
+		onInput?: (signal: AbortSignal) => Promise<void>;
+	}) {
+		const db = await child();
+		const conductor = Conductor.create({
+			sql: new Proxy(db.sql, {
+				apply(target, thisArg, args) {
+					const query = Reflect.apply(target, thisArg, args);
+					return String(args[0]).includes(ackStatement) ? ack(query) : query;
+				},
+			}),
+			tasks: TaskSchemas.fromSchema([sessionDefinition]),
+			context: {},
+		});
+		const received = new Deferred<void>();
+		const stepRunning = new Deferred<void>();
+		const gate = new Deferred<void>();
+		let finished = false;
+		const task = conductor.createTask(sessionDefinition, { invocable: true }, async (_e, ctx) => {
+			ctx.onSignal("input", async () => {
+				received.resolve();
+				await onInput?.(ctx.signal);
+			});
+			if (signal) await received.promise;
+			await ctx.step("work", async () => {
+				stepRunning.resolve();
+				await gate.promise;
+			});
+			finished = true;
+		});
+		await conductor.ensureInstalled();
+		const orchestrator = Orchestrator.create({
+			conductor,
+			tasks: [task],
+			defaultWorker: { pollIntervalMs: 50, flushIntervalMs: 50 },
+		});
+		const id = await conductor.invoke({ name: "session" }, {});
+		if (signal) await conductor.signal(id, { name: "input", id: "s1" });
+		await orchestrator.start();
+		await stepRunning.promise;
+		const delivered = async () => {
+			const [s] = await db.sql<{ delivered: boolean }[]>`
+				select delivered_at is not null as delivered from pgconductor._private_execution_signals
+			`;
+			return s?.delivered;
+		};
+		return { db, id, orchestrator, gate, delivered, finished: () => finished };
+	}
+
+	test("waits for the handler when no signal is involved", async () => {
+		const { db, id, orchestrator, gate, finished } = await setup({ signal: false });
+		try {
+			const stopped = orchestrator.stop();
+			expect(await within(stopped, 300)).toBe("timeout");
+			gate.resolve();
+			await stopped;
+			expect(finished()).toBe(true);
+			expect(await row(db, id)).toMatchObject({ completed: true, failed: false });
+		} finally {
+			gate.resolve();
+			await orchestrator.stop();
+		}
+	});
+
+	test("completes once a slow acknowledgement returns", async () => {
+		const release = new Deferred<void>();
+		const { db, id, orchestrator, gate, delivered } = await setup({
+			signal: true,
+			ack: (query) => query.then(async (rows) => (await release.promise, rows)),
+		});
+		try {
+			gate.resolve();
+			await sleep(200);
+			expect(await row(db, id)).toMatchObject({ completed: false, locked: true });
+			release.resolve();
+			await waitForCondition(async () => (await row(db, id))?.completed === true);
+			expect(await delivered()).toBe(true);
+		} finally {
+			release.resolve();
+			gate.resolve();
+			await orchestrator.stop();
+		}
+	});
+
+	test("waits for the handler while an acknowledgement is in flight", async () => {
+		const release = new Deferred<void>();
+		const { db, id, orchestrator, gate, delivered, finished } = await setup({
+			signal: true,
+			ack: (query) => query.then(async (rows) => (await release.promise, rows)),
+		});
+		try {
+			const stopped = orchestrator.stop();
+			expect(await within(stopped, 300)).toBe("timeout");
+			release.resolve();
+			expect(await within(stopped, 300)).toBe("timeout");
+			gate.resolve();
+			await stopped;
+			expect(finished()).toBe(true);
+			expect(await row(db, id)).toMatchObject({ completed: true, failed: false });
+			expect(await delivered()).toBe(true);
+		} finally {
+			release.resolve();
+			gate.resolve();
+			await orchestrator.stop();
+		}
+	});
+
+	test.each([
+		["stop() ends the acknowledgement's retries", { ack: () => Promise.reject(connectionError()) }],
+		[
+			"the signal handler stops on ctx.signal",
+			{
+				onInput: (signal: AbortSignal) =>
+					new Promise<void>((_, reject) =>
+						signal.addEventListener("abort", () => reject(new Error("stopped"))),
+					),
+			},
+		],
+	])("waits for the handler and releases it when %s", async (_name, options) => {
+		const { db, id, orchestrator, gate, delivered, finished } = await setup({
+			signal: true,
+			...options,
+		});
+		try {
+			const stopped = orchestrator.stop();
+			expect(await within(stopped, 300)).toBe("timeout");
+			gate.resolve();
+			await stopped;
+			expect(finished()).toBe(true);
+			expect(await row(db, id)).toMatchObject({
+				completed: false,
+				failed: false,
+				locked: false,
+				attempts: 0,
+				last_error: null,
+			});
+			expect(await delivered()).toBe(false);
+		} finally {
+			gate.resolve();
+			await orchestrator.stop();
+		}
+	});
+});
+
 test("stop() interrupts a worker registration that keeps retrying", async () => {
 	const db = await child();
 	let attempts = 0;
