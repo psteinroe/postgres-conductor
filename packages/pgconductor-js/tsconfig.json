@@ -1,6 +1,11 @@
 {
 	"extends": "../../tsconfig.json",
 	"compilerOptions": {
-		"types": ["node"]
+		"types": ["node"],
+		// tests/integration/testing.test.ts imports the package like a consumer
+		"paths": {
+			"pgconductor-js": ["./src/index.ts"],
+			"pgconductor-js/testing": ["./src/testing.ts"]
+		}
 	}
 }

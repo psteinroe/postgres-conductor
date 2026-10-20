@@ -126,6 +126,22 @@ jobs:
       fail-fast: false
       matrix:
         node: [22, lts/*]
+
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+          POSTGRES_DB: postgres
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
     steps:
       - name: Checkout PR branch
         uses: actions/checkout@v4
@@ -144,6 +160,8 @@ jobs:
 
       - name: Check package
         run: bash ./scripts/check-package.sh
+        env:
+          DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
 
   unit-test:
     name: Unit Test

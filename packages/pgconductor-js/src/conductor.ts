@@ -129,6 +129,11 @@ export type ConductorOptions<
 	middleware?: readonly Middleware<any, object, any>[];
 
 	logger?: Logger;
+	/**
+	 * Time source for cron schedules and time windows, corrected to database time like the system clock.
+	 * Tests pass `createTestClock(sql)` from `pgconductor-js/testing`.
+	 */
+	clock?: { now(): Date };
 	/** Disable OpenTelemetry instrumentation. The default is enabled and uses the global API provider. */
 	telemetry?: false;
 };
@@ -196,6 +201,7 @@ export class Conductor<
 				>;
 			};
 			logger?: Logger;
+			clock?: { now(): Date };
 			telemetry?: false;
 		},
 	): Conductor<
@@ -306,6 +312,7 @@ export class Conductor<
 			this.options.context,
 			this.telemetry,
 			this.options.middleware,
+			this.options.clock,
 		);
 	}
 

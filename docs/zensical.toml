@@ -90,6 +90,7 @@ nav = [
     { "Orchestrator" = "api/orchestrator.md" },
     { "Task Context" = "api/task-context.md" },
     { "Worker Configuration" = "api/worker-config.md" },
+    { "Testing" = "api/testing.md" },
   ]},
 ]
 

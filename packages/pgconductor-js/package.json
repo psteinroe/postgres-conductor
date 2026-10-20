@@ -11,6 +11,10 @@
 			"types": "./dist/src/index.d.ts",
 			"import": "./dist/src/index.js"
 		},
+		"./testing": {
+			"types": "./dist/src/testing.d.ts",
+			"import": "./dist/src/testing.js"
+		},
 		"./package.json": "./package.json"
 	},
 	"bin": {

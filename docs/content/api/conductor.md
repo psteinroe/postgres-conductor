@@ -18,6 +18,7 @@ const conductor = Conductor.create({
   logger?,              // Optional custom logger
   events?,              // Optional EventSchemas
   metadata?,            // Optional Standard Schema for execution metadata
+  clock?,               // Optional time source, for tests
   telemetry?,           // Set to false to disable OpenTelemetry tracing
 });
 ```
@@ -32,6 +33,7 @@ const conductor = Conductor.create({
 - `logger`: (optional) Custom logger implementation
 - `events`: (optional) `EventSchemas.fromSchema([...])` for typed custom events
 - `metadata`: (optional) Standard Schema that types and validates execution metadata (see [Execution Metadata](../crafting-tasks/execution-metadata.md))
+- `clock`: (optional) Object with `now(): Date` that workers use instead of the system clock for cron schedules and time windows, still corrected to database time. Tests pass `createTestClock(sql)` (see [Testing](../crafting-tasks/testing.md))
 - `telemetry`: (optional) `false` disables OpenTelemetry spans and trace context propagation. Enabled by default, using the globally registered provider
 
 **Connection options:**

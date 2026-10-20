@@ -119,6 +119,7 @@ export class Worker<
 		private readonly extraContext: object = {},
 		private readonly telemetry = new Telemetry(),
 		private readonly middleware: readonly Middleware<any, any>[] = [],
+		clock?: { now(): Date },
 	) {
 		const maintenanceTask = createMaintenanceTask(this.queueName);
 		this.tasks = tasks.reduce(
@@ -139,6 +140,7 @@ export class Worker<
 		this.clock = new Clock({
 			sampleDatabaseTime: (signal) => this.db.getDatabaseTime({ signal }),
 			logger: this.logger,
+			localClock: clock && (() => clock.now()),
 		});
 	}
 

@@ -1,6 +1,20 @@
+import { fileURLToPath } from "node:url";
 import { defineConfig } from "vitest/config";
 
 export default defineConfig({
+	resolve: {
+		// tests/integration/testing.test.ts imports the package like a consumer
+		alias: [
+			{
+				find: "pgconductor-js/testing",
+				replacement: fileURLToPath(new URL("src/testing.ts", import.meta.url)),
+			},
+			{
+				find: "pgconductor-js",
+				replacement: fileURLToPath(new URL("src/index.ts", import.meta.url)),
+			},
+		],
+	},
 	test: {
 		// Integration test files share one Postgres; each test creates its own database
 		maxWorkers: 2,

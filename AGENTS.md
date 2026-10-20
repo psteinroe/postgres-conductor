@@ -30,6 +30,7 @@ pgconductor/
         │   ├── telemetry.ts          # OpenTelemetry tracing
         │   ├── database-client.ts    # Postgres client wrapper
         │   ├── query-builder.ts      # SQL for claiming, settlement, registration
+        │   ├── testing.ts            # pgconductor-js/testing: createTestClock (fake time)
         │   ├── lib/                  # Utilities (deferred, async-queue, etc.)
         │   └── generated/
         │       └── sql.ts            # Auto-generated from migrations
@@ -64,6 +65,8 @@ pnpm vitest run tests/integration/<file>       # One file
 ```
 
 `vitest.config.ts` has a `unit` and an `integration` project. The integration project's global setup starts one Postgres container (or uses `DATABASE_URL`) and provides its URL to every test file; `TestDatabasePool.create()` reads it with `inject("databaseUrl")`. Files run in parallel on 2 workers, each test in its own database.
+
+`tests/integration/testing.test.ts` imports `pgconductor-js` and `pgconductor-js/testing` like a consumer (aliased to `src/` in `vitest.config.ts` and `tsconfig.json`) and reads `DATABASE_URL`, which the global setup also sets. `scripts/check-package.sh` runs it against the packed tarball, so it may only use the public API.
 
 **Unit Tests** (`tests/unit/`)
 - Test utilities and type-level APIs in isolation (no database required)
@@ -303,14 +306,14 @@ const rows = await db.sql`select * from pgconductor._private_executions`;
 `pgconductor._private_current_time()` returns `current_setting('pgconductor.fake_now')` when set. Test databases use a single connection (`max: 1`), so a session-level setting is seen by the test, conductor and workers alike:
 
 ```typescript
-await db.client.setFakeTime({ date: new Date("2024-01-01T12:00:00Z") });
-await db.client.setFakeTime({ date: new Date("2024-01-01T13:00:00Z") }); // advance
-await db.client.clearFakeTime();
+await db.clock.set(new Date("2024-01-01T12:00:00Z"));
+await db.clock.advance("1h");
+await db.clock.reset();
 ```
 
-Useful for sleeps, timeouts, backoff schedules and time windows. Always clean up fake time at the end of tests.
+Useful for sleeps, timeouts, backoff schedules and time windows. Each test database is dropped afterwards, so fake time needs no cleanup. `db.client.setFakeTime()` sets the same setting but does not move the workers' clock.
 
-Cron scheduling and time windows (worker fetch filtering, `ctx.step()` and `ctx.checkpoint()`) use the worker's `Clock` (`src/lib/clock.ts`): local time corrected by an offset sampled from the database when the worker starts and every 10 minutes. Set fake time before starting the orchestrator. To move time while a worker runs, restart the orchestrator or also shift the local clock with `vi.setSystemTime()` (see `tests/integration/window-execution.test.ts`). Without `vi.useFakeTimers()` it only fakes `Date` and timers keep running; `vi.useRealTimers()` restores it. `vi.useFakeTimers()` fakes timers and `Date` but not `setImmediate`, which postgres.js needs to send queries (`fakeTimers` in `vitest.config.ts`).
+Cron scheduling and time windows (worker fetch filtering, `ctx.step()` and `ctx.checkpoint()`) use the worker's `Clock` (`src/lib/clock.ts`): local time corrected by an offset sampled from the database when the worker starts and every 10 minutes. `Conductor.create({ clock })` replaces the local time. `db.clock` (`createTestClock(sql)` from `src/testing.ts`) sets `fake_now` and returns the same time from `now()`, so the offset stays zero; pass `clock: db.clock` to the conductor and running workers follow `db.clock.set()` and `advance()`. Use `vi.setSystemTime()` only for code that reads `Date` directly. Without `vi.useFakeTimers()` it only fakes `Date` and timers keep running; `vi.useRealTimers()` restores it. `vi.useFakeTimers()` fakes timers and `Date` but not `setImmediate`, which postgres.js needs to send queries (`fakeTimers` in `vitest.config.ts`).
 
 ## Development Environment
 

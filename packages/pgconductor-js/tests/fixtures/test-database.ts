@@ -3,10 +3,12 @@ import { PostgreSqlContainer } from "@testcontainers/postgresql";
 import { inject } from "vitest";
 import { DatabaseClient } from "../../src/database-client";
 import { DefaultLogger } from "../../src/lib/logger";
+import { createTestClock, type TestClock } from "../../src/testing";
 
 export class TestDatabase {
 	public readonly sql: Sql;
 	public readonly client: DatabaseClient;
+	public readonly clock: TestClock;
 	public readonly name: string;
 	public readonly url: string;
 	private readonly masterUrl: string;
@@ -14,6 +16,7 @@ export class TestDatabase {
 	private constructor(sql: Sql, name: string, masterUrl: string, url: string) {
 		this.sql = sql;
 		this.client = new DatabaseClient({ sql, logger: new DefaultLogger() });
+		this.clock = createTestClock(sql);
 		this.name = name;
 		this.masterUrl = masterUrl;
 		this.url = url;

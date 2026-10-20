@@ -2,7 +2,8 @@
 
 # Packs pgconductor-js, installs the tarball with npm into a temporary project
 # and checks that it works for a plain Node consumer: ESM imports, TypeScript
-# types and the CLI.
+# types, the CLI and, when DATABASE_URL is set, the pgconductor-js/testing
+# example test.
 
 set -euo pipefail
 
@@ -19,7 +20,7 @@ cat > package.json <<'EOF'
 { "name": "consumer", "private": true, "type": "module" }
 EOF
 
-npm install --no-audit --no-fund ./pgconductor-js-*.tgz @opentelemetry/api typescript@5 @types/node
+npm install --no-audit --no-fund ./pgconductor-js-*.tgz @opentelemetry/api typescript@5 @types/node postgres vitest@5
 
 if grep -q '"catalog:\|"workspace:' node_modules/pgconductor-js/package.json; then
 	echo "Packed package.json contains unresolved catalog: or workspace: specifiers"
@@ -53,6 +54,8 @@ EOF
 
 node exports.mjs
 
+cp "$JS_DIR/tests/integration/testing.test.ts" testing.test.ts
+
 cat > tsconfig.json <<'EOF'
 {
 	"compilerOptions": {
@@ -64,7 +67,7 @@ cat > tsconfig.json <<'EOF'
 		"skipLibCheck": true,
 		"types": ["node"]
 	},
-	"files": ["consumer.ts"]
+	"files": ["consumer.ts", "testing.test.ts"]
 }
 EOF
 
@@ -134,3 +137,9 @@ EOF
 npx tsc -p tsconfig.json
 
 npx pgconductor --help
+
+if [ -n "${DATABASE_URL:-}" ]; then
+	npx vitest run testing.test.ts
+else
+	echo "DATABASE_URL is not set; skipping testing.test.ts"
+fi
