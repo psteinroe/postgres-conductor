@@ -61,7 +61,7 @@ const result = await ctx.invokeAndWait(
 );
 ```
 
-If the child doesn't complete within the timeout, the parent task fails with a timeout error.
+If the child doesn't complete within the timeout, `ctx.invokeAndWait()` throws a timeout error and the child is cancelled.
 
 ## Error Handling
 
@@ -69,6 +69,8 @@ If a child task fails permanently (exhausts all retries), the parent task fails 
 ```
 Child execution failed: <child error message>
 ```
+
+The parent fails permanently, without running its handler again, so a `try`/`catch` around `ctx.invokeAndWait()` does not see it. To handle a failed child, start it with `ctx.invoke()` and wait with `ctx.waitForResult()`, which returns the outcome as a value.
 
 ## Multiple Children
 

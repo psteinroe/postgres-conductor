@@ -222,6 +222,11 @@ export class TaskContext<
 		return deadLetter ? { ...deadLetter, failedAt: new Date(deadLetter.failedAt) } : null;
 	}
 
+	/**
+	 * Run `fn` and save its result under `name`. Retries and resumes return the saved result.
+	 * `fn` runs again if the attempt ends before the result is saved, so external side effects
+	 * need an idempotency key.
+	 */
 	async step<T extends JsonValue | void>(name: string, fn: () => Promise<T> | T): Promise<T> {
 		await this.checkpoint();
 
@@ -266,6 +271,10 @@ export class TaskContext<
 		});
 	}
 
+	/**
+	 * Hang up if `ctx.signal` is aborted or the task is outside its time window. Saves nothing:
+	 * a released execution runs its handler again from the start.
+	 */
 	async checkpoint(): Promise<void> {
 		// Check abort signal
 		if (this.signal.aborted) {

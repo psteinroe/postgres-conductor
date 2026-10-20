@@ -11,18 +11,18 @@ Set priority when invoking tasks:
 await conductor.invoke(
   { name: "critical-task" },
   { data: "urgent" },
-  { priority: 10 }
+  { priority: -10 }
 );
 
 // Low priority (processed last)
 await conductor.invoke(
   { name: "background-task" },
   { data: "not-urgent" },
-  { priority: 1 }
+  { priority: 10 }
 );
 ```
 
-Higher numbers = higher priority. Tasks with higher priority are processed first.
+Lower numbers = higher priority. Ready executions are claimed in ascending priority order, then by `run_at`.
 
 ## Default Priority
 
@@ -35,5 +35,5 @@ await conductor.invoke({ name: "task" }, { data });
 
 ## What's Next?
 
-- [Rate Limiting & Deduplication](../controlling-execution/rate-limiting.md) - Control task execution frequency
+- [Deduplication](deduplication.md) - Prevent duplicate executions
 - [Worker Configuration](../api/worker-config.md) - Configure concurrency and polling

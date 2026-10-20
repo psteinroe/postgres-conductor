@@ -65,7 +65,7 @@ await conductor.invoke(
 );
 ```
 
-A redelivery after the webhook was processed is ignored. A redelivery that arrives while it is still running starts a new execution, so the handler can still run twice. Wrap side effects in [steps](../crafting-tasks/retries-and-steps.md) or make them idempotent.
+A redelivery after the webhook was processed is ignored. A redelivery that arrives while it is still running starts a new execution, so the handler can still run twice. Steps do not help here, because each execution has its own steps. Make the side effects idempotent, for example with an idempotency key derived from `event.id`.
 
 ## Events
 
@@ -93,6 +93,6 @@ await conductor.invoke(
 
 ## What's Next?
 
-- [Rate Limiting](rate-limiting.md) - Throttle and debounce task execution
+- [Conductor API](../api/conductor.md#conductorinvoke) - Throttle and debounce task execution
 - [Batching](batching.md) - Bulk task invocation
 - [Priority](priority.md) - Control execution order

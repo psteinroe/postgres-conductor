@@ -4,7 +4,7 @@ The task context (`ctx`) provides methods and properties available inside task h
 
 ## ctx.step()
 
-Execute idempotent steps with memoization:
+Run a callback and save its result under the step name:
 
 ```typescript
 const result = await ctx.step(
@@ -34,8 +34,9 @@ const task = conductor.createTask(
 ```
 
 **Behavior:**
-- First call: Executes `fn`, stores result in database
-- Subsequent calls (retries): Returns cached result without executing `fn`
+- First call: Executes `fn`, then saves its result in the database
+- Later calls (retries and resumes): Return the saved result without executing `fn`
+- `fn` runs again if the attempt ends before its result is saved, for example when it throws or the worker crashes after its side effect. Pass idempotency keys to external services (see [What Steps Guarantee](../crafting-tasks/retries-and-steps.md#what-steps-guarantee))
 - Step names must be unique within a task execution
 
 ## ctx.sleep()
@@ -68,7 +69,7 @@ const task = conductor.createTask(
 **Behavior:**
 - Task hangs up (releases worker)
 - Resumes after duration expires
-- Execution continues from where it left off
+- The handler runs again from the start: steps return their saved results and this sleep returns at once
 
 ## ctx.waitForEvent()
 
@@ -218,7 +219,7 @@ the event was dispatched. See [Deduplicating Emits](../crafting-tasks/triggers.m
 Invoke a child task and wait for result:
 
 ```typescript
-const result = await ctx.invokeAndWait<TResult>(
+const result = await ctx.invokeAndWait(
   stepName: string,
   taskRef: { name: string, queue?: string },
   payload: TPayload,
@@ -227,7 +228,7 @@ const result = await ctx.invokeAndWait<TResult>(
     group?: string,
     metadata?: Metadata | ((metadata: Metadata | undefined) => Metadata),
   }
-): Promise<TResult>
+): Promise<TResult> // inferred from the task's return type
 ```
 
 **Example:**
@@ -252,8 +253,12 @@ const parent = conductor.createTask(
 **Behavior:**
 - Creates child execution
 - Parent hangs up and waits
-- Returns child's result
-- Throws if child fails or times out
+- Returns child's result, memoized by the step name
+- Throws if the timeout elapses first; the child is cancelled
+- If the child fails permanently or is cancelled, the parent fails permanently with
+  `Child execution failed: <error>` without running its handler again, so a `catch` around
+  `invokeAndWait()` does not see it. Use `ctx.invoke()` and
+  [`ctx.waitForResult()`](#ctxwaitforresult) to handle a failed child as a value
 - The child inherits `ctx.metadata` unless `metadata` overrides it for that child
 
 ## ctx.invoke()
@@ -393,7 +398,7 @@ const sessionId = await ctx.signalWithStart("start-session", {
 
 ## ctx.checkpoint()
 
-Save progress during long-running tasks:
+Stop the handler here if `ctx.signal` is aborted or the task is outside its time window:
 
 ```typescript
 await ctx.checkpoint(): Promise<void>
@@ -403,30 +408,32 @@ await ctx.checkpoint(): Promise<void>
 
 ```typescript
 const task = conductor.createTask(
-  { name: "process-batch" },
+  { name: "delete-old-data", window: ["02:00", "04:00"] },
   { invocable: true },
   async (event, ctx) => {
-    const { items } = event.payload;
+    let hasMore = true;
 
-    for (let i = 0; i < items.length; i++) {
-      await processItem(items[i]);
+    while (hasMore) {
+      hasMore = await deleteBatch(1000); // safe to repeat
 
-      if (i % 100 === 0) {
-        await ctx.checkpoint(); // Save progress
-      }
+      await ctx.checkpoint(); // stop here on shutdown or when the window closes
     }
   }
 );
 ```
 
 **Behavior:**
-- Commits current state to database
-- Allows task to resume from checkpoint if interrupted
-- Works with graceful shutdown
+- Returns at once while `ctx.signal` is not aborted and the task is inside its time window
+- Otherwise stops the handler. On shutdown or outside the window, the execution is released and
+  runs again later; on cancellation or timeout, it ends like any cancelled or timed-out attempt
+- Saves nothing: a released execution runs its handler again from the start, so the work since
+  the last saved step repeats. Use `ctx.step()` for results that must not be recomputed
+- `ctx.step()` checks the same before each step
 
 ## ctx.schedule()
 
-Dynamically schedule a cron task:
+Dynamically schedule a cron task. Not memoized: a retried or resumed attempt that reaches it
+schedules again, which replaces the pending execution of `scheduleName`:
 
 ```typescript
 await ctx.schedule(
@@ -450,7 +457,8 @@ await ctx.schedule(
 
 ## ctx.unschedule()
 
-Remove a dynamic cron schedule:
+Remove a dynamic cron schedule. Not memoized: a retried or resumed attempt that reaches it removes
+the schedule again:
 
 ```typescript
 await ctx.unschedule(

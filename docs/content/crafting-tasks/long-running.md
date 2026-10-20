@@ -4,7 +4,7 @@ For tasks that process many items or run for extended periods, use steps to cach
 
 ## Steps for Side Effects
 
-Use steps to cache operations with side effects - they prevent duplicate work on retry:
+Use steps to save the results of operations with side effects - a retry skips steps whose results were saved:
 
 ```typescript
 const processLargeDataset = conductor.createTask(
@@ -15,7 +15,7 @@ const processLargeDataset = conductor.createTask(
       return await fetchThousandsOfItems();
     });
 
-    // Each item gets its own step - never processes twice
+    // Each item gets its own step - skipped on retry once saved
     for (const item of items) {
       await ctx.step(`process-${item.id}`, async () => {
         await processItem(item); // API call, database write, etc.
@@ -29,14 +29,16 @@ const processLargeDataset = conductor.createTask(
 
 **What steps do:**
 
-- Cache results of operations with side effects
-- Prevent duplicate work on retry (no double charges, duplicate emails, etc.)
+- Save results of operations with side effects
+- Skip work whose result was saved when the task retries or resumes
 - Provide automatic release points for shutdown and time windows
+
+A step interrupted before its result was saved runs again, so external side effects such as charges and emails still need an idempotency key. See [What Steps Guarantee](retries-and-steps.md#what-steps-guarantee).
 
 **Use steps when:**
 
 - Operations have side effects (API calls, payments, emails, database writes)
-- You want to prevent duplicate work on retry
+- You want to skip completed work on retry
 - You can create meaningful unique names for each operation
 
 ## Checkpoints for Graceful Interruption
@@ -77,7 +79,7 @@ const deleteOldData = conductor.createTask(
 - Long computations without meaningful intermediate step names
 - You want more frequent release opportunities than step boundaries provide
 
-**⚠️ Important:** Checkpoints don't cache results. The operation must be idempotent or track its own progress.
+**⚠️ Important:** Checkpoints save nothing. A released task runs its handler again from the start, so the work since the last saved step repeats. It must be idempotent or track its own progress.
 
 ## Graceful Shutdown
 
@@ -85,10 +87,10 @@ Checkpoints enable zero-downtime deployments. When a worker receives a shutdown 
 
 1. **Stops accepting new work** - No new tasks fetched from database
 2. **Waits for safe release point** - Current task runs until it hits a checkpoint, step boundary or task completion
-3. **Releases task** - Task returned to queue with current state
+3. **Releases task** - Task returned to the queue; it runs again from the start of its handler, with its saved steps
 4. **Shuts down cleanly** - Worker process exits
 
-This ensures no work is lost during deployments or scale-downs.
+Saved steps are kept, so completed steps do not run again after a deployment or scale-down.
 
 `ctx.signal` is aborted when shutdown starts. A task that throws because it saw the signal is released, not failed, so it does not use up an attempt.
 
@@ -200,4 +202,4 @@ const bulkExport = conductor.createTask(
 
 - [Retries and Steps](retries-and-steps.md) - Understand retry behavior
 - [Testing](testing.md) - Test long-running tasks with drain mode
-- [Worker Configuration](../scaling/worker-config.md) - Configure polling and concurrency
+- [Worker Configuration](../api/worker-config.md) - Configure polling and concurrency

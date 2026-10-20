@@ -33,7 +33,7 @@ This is bad! The customer was double-charged.
 
 ## The Solution: Wrap Side Effects in Steps
 
-Steps cache their results. On retry, cached steps return their saved result without re-executing:
+Steps save their results. On retry, a step with a saved result returns it without running its callback again:
 
 ```typescript
 // ✅ Solution: Safe retries with steps
@@ -41,14 +41,18 @@ const processOrder = conductor.createTask(
   { name: "process-order" },
   { invocable: true },
   async (event, ctx) => {
-    // Charge payment (runs once, cached)
+    // Charge payment (skipped on retry once its result is saved)
     const charge = await ctx.step("charge-customer", async () => {
-      return await chargeCustomer(event.payload.amount);
+      return await chargeCustomer(event.payload.amount, {
+        idempotencyKey: `order-${event.payload.id}`,
+      });
     });
 
-    // Send email (runs once, cached)
+    // Send email (skipped on retry once its result is saved)
     await ctx.step("send-confirmation", async () => {
-      await sendConfirmation(event.payload.email);
+      await sendConfirmation(event.payload.email, {
+        idempotencyKey: `order-${event.payload.id}`,
+      });
     });
 
     // Update database (retries only this step if it fails)
@@ -64,9 +68,22 @@ const processOrder = conductor.createTask(
 **What happens now:**
 
 1. First attempt: Customer charged, email sent, database save fails
-2. Retry: Steps 1 and 2 return cached results, only step 3 re-runs
+2. Retry: Steps 1 and 2 return their saved results, only step 3 re-runs
 
-The customer is charged once, email sent once.
+The retry does not charge the customer or send the email again. The idempotency keys cover the case steps cannot, described next.
+
+## What Steps Guarantee
+
+A step saves its result after its callback returns. Once saved, the result is never recomputed: retries and resumes return it without calling the callback.
+
+Until the result is saved, the step has no result, and the next attempt runs the callback again. This happens when:
+
+- The callback throws: the attempt fails and nothing is saved
+- The attempt ends between the side effect and the save, for example because the worker crashes, loses its database connection or times out
+
+Steps are therefore at-least-once around their callback. For side effects outside your database, such as charges and emails, pass an idempotency key that stays the same across attempts, derived from the payload or from `ctx.executionId` and the step name, so the external service ignores a repeat.
+
+The handler always runs from the start: on every retry and every resume after `ctx.sleep()` or a wait, code outside steps runs again.
 
 ## Working with Loops
 
@@ -94,7 +111,7 @@ const processBatch = conductor.createTask(
 **Solution:** Wrap each iteration in a step:
 
 ```typescript
-// ✅ Solution: Each item processes once
+// ✅ Solution: Each item is skipped once its step is saved
 const processBatch = conductor.createTask(
   { name: "process-batch" },
   { invocable: true },
@@ -110,8 +127,8 @@ const processBatch = conductor.createTask(
 
 **What happens now:**
 
-- Orders 1-49 return cached results
-- Only order 50+ run (or retry if they failed)
+- Orders 1-49 return saved results
+- Only orders 50+ run. Order 50 runs again from the start, so `processOrder()` must tolerate a repeat
 
 ## Dynamic Step Names
 
@@ -136,7 +153,7 @@ const syncUsers = conductor.createTask(
 );
 ```
 
-Each user gets their own cached step.
+Each user gets their own step.
 
 ## Sleep for Delays
 
@@ -168,7 +185,7 @@ const reminderWorkflow = conductor.createTask(
 - Task runs `send-welcome` step
 - Task pauses at `ctx.sleep()` and releases the worker
 - After 24 hours, task resumes
-- `send-welcome` returns cached result (doesn't re-send email)
+- The handler runs again from the start: `send-welcome` returns its saved result (doesn't re-send email)
 - `send-reminder` runs for first time
 
 ## Step Names Must Be Unique
@@ -199,7 +216,7 @@ const bad = conductor.createTask(
 );
 ```
 
-Duplicate step names will cause the second step to return the first step's cached result.
+Duplicate step names will cause the second step to return the first step's saved result.
 
 ## What's Next?
 

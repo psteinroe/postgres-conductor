@@ -35,7 +35,7 @@ await conductor.invoke({ name: "process-item" }, [
   {
     payload: { id: 3 },
     dedupe_key: "item-3",
-    run_at: Date.now() + 3600000, // 1 hour later
+    run_at: new Date(Date.now() + 3600000), // 1 hour later
   },
 ]);
 ```
@@ -145,5 +145,5 @@ const batchTask = conductor.createTask(
 
 ## What's Next?
 
-- [Rate Limiting & Deduplication](../controlling-execution/rate-limiting.md) - Control task execution frequency and prevent duplicates
-- [Worker Configuration](../scaling/worker-config.md) - Tune fetch batch size and polling
+- [Deduplication](deduplication.md) - Prevent duplicate executions
+- [Worker Configuration](../api/worker-config.md) - Tune fetch batch size and polling

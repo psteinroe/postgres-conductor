@@ -58,17 +58,17 @@ const parent = conductor.createTask(
 );
 ```
 
-If the child doesn't complete within 30 seconds, the parent task fails with a timeout error.
+If the child doesn't complete within 30 seconds, `ctx.invokeAndWait()` throws a timeout error. Uncaught, it fails the attempt like any other error.
 
 ## Timeout Behavior
 
 When a timeout occurs:
 
 1. The parent task receives an error
-2. The child task continues running (not cancelled)
-3. The parent task fails and moves to retries
+2. The child task is cancelled: a pending child never runs, and a running child's `ctx.signal` is aborted
+3. If the parent does not catch the error, the attempt fails and moves to retries
 
-The child task completes independently, but its result isn't returned to the parent.
+To let the child keep running, start it with `ctx.invoke()` and wait for it with `ctx.waitForResult()`, whose timeout leaves the execution running.
 
 ## Infinite Timeout
 
