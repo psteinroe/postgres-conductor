@@ -283,14 +283,14 @@ const result = await conductor.waitForResult(
   { name: "send-email" },     // optional, types the result
   executionId,
   {
-    timeout?: number,         // milliseconds, rejects with a TimeoutError
+    timeout?: DurationInput,  // milliseconds or a string such as "30s"; rejects with a TimeoutError
     pollIntervalMs?: number,  // default: 1000
     signal?: AbortSignal,     // rejects with the abort reason
   },
 );
 ```
 
-Resolves with the return value of a completed execution. Rejects with the error message if the execution failed or was cancelled, and rejects if the execution does not exist. The result is only available while the execution exists: with `removeOnComplete: true` the execution is removed when it completes, so `waitForResult` rejects with a not found error.
+Resolves with the return value of a completed execution. The timeout also cancels a read in flight, so a blocked database cannot delay the rejection, and `timeout: 0` rejects at once. Rejects with the error message if the execution failed or was cancelled, and rejects if the execution does not exist. The result is only available while the execution exists: with `removeOnComplete: true` the execution is removed when it completes, so `waitForResult` rejects with a not found error.
 
 Inside a task, use [`ctx.waitForResult()`](task-context.md#ctxwaitforresult) instead: it suspends the task rather than polling and returns failures and cancellations as values.
 

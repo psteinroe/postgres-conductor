@@ -135,7 +135,7 @@ const batchTask = conductor.createTask(
 
 - `logger` - Logging methods
 - `signal` - AbortSignal for cancellation. Cancelling any execution of a running batch aborts it; the cancelled executions fail and the others run again without using up an attempt
-- `sleep(id, ms)` - Reschedule all executions in the batch. On replay it returns once every execution in the batch has slept at `id`. Since a replayed batch can contain new peers, executions that already slept wait again until the whole batch has.
+- `sleep(id, duration)` - Reschedule all executions in the batch. On replay it returns once every execution in the batch has slept at `id`. Since a replayed batch can contain new peers, executions that already slept wait again until the whole batch has.
 
 **BatchTaskContext does NOT have:**
 

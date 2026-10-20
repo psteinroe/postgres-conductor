@@ -46,7 +46,7 @@ Pause execution for a duration:
 ```typescript
 await ctx.sleep(
   stepName: string,
-  durationMs: number
+  duration: DurationInput // milliseconds, or a string such as "15s", "15m", "1h" or "1d"
 ): Promise<void>
 ```
 
@@ -59,7 +59,7 @@ const task = conductor.createTask(
   async (event, ctx) => {
     await ctx.step("step1", () => doWork());
 
-    await ctx.sleep("pause", 3600000); // 1 hour
+    await ctx.sleep("pause", "1h");
 
     await ctx.step("step2", () => moreWork());
   }
@@ -228,7 +228,11 @@ for (let n = 0; ; n++) {
   matching event, settlement or signal.
 - Losing executions keep running; the wait never cancels them.
 - The timeout starts when `waitForAny()` is first called. When it wins, the result is
-  `{ key: "timeout" }` instead of an error, so `timeout` cannot be used as a name.
+  `{ key: "timeout" }` instead of an error, so `timeout` cannot be used as a name. An event or
+  outcome after the timeout does not win, even when the task resumes later.
+- At least one branch must be open: a race whose branches are all closed by an earlier
+  `waitForAny()` or already timed out, or one without branches, throws
+  `waitForAny "<stepKey>" has no open branch`.
 - When the wait settles, all of the subscriptions are removed. Calling `wait()` on one that did
   not win throws, unless its event arrived before the wait settled.
 - The result is memoized by the step key, so retries and resumes return the same winner.
@@ -267,7 +271,7 @@ const result = await ctx.invokeAndWait(
   taskRef: { name: string, queue?: string },
   payload: TPayload,
   options?: {
-    timeout?: number,
+    timeout?: DurationInput, // milliseconds, or a string such as "30s"
     group?: string,
     metadata?: Metadata | ((metadata: Metadata | undefined) => Metadata),
   }
@@ -285,7 +289,7 @@ const parent = conductor.createTask(
       "call-child",
       { name: "child-task" },
       { input: event.payload.value },
-      { timeout: 30000 } // 30 second timeout
+      { timeout: "30s" }
     );
 
     return { final: childResult.output + 10 };
@@ -297,7 +301,9 @@ const parent = conductor.createTask(
 - Creates child execution
 - Parent hangs up and waits
 - Returns child's result, memoized by the step name
-- Throws if the timeout elapses first; the child is cancelled
+- Throws if the timeout elapses first; the child is cancelled. The timeout is memoized by the
+  step name, so retries and resumes throw it again instead of invoking the child again.
+  `timeout: 0` times out at once; omit `timeout` to wait indefinitely
 - If the child fails permanently or is cancelled, the parent fails permanently with
   `Child execution failed: <error>` without running its handler again, so a `catch` around
   `invokeAndWait()` does not see it. Use `ctx.invoke()` and
@@ -399,7 +405,8 @@ if (outcome.status === "completed") {
   `failed` carries the last error and `cancelled` the cancellation reason.
 - An execution that already settled returns at once without suspending.
 - The timeout starts at the first call and resolves to `{ status: "timeout" }`. The execution
-  keeps running.
+  keeps running. An outcome after the timeout resolves to `{ status: "timeout" }` too, even when
+  the task resumes later.
 - The outcome is memoized by the step key, so retries and resumes return it even after the
   execution has been removed by retention. It is a `ctx.waitForAny()` with one branch named
   `result`, so it also uses the step key `<stepKey>:result`.

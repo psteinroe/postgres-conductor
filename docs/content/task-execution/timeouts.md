@@ -68,11 +68,13 @@ When a timeout occurs:
 2. The child task is cancelled: a pending child never runs, and a running child's `ctx.signal` is aborted
 3. If the parent does not catch the error, the attempt fails and moves to retries
 
+The timeout is memoized by the step name: when the handler replays after catching it, `ctx.invokeAndWait()` throws it again without invoking the child again.
+
 To let the child keep running, start it with `ctx.invoke()` and wait for it with `ctx.waitForResult()`, whose timeout leaves the execution running.
 
 ## Infinite Timeout
 
-Omit the timeout option to wait indefinitely:
+The timeout is a duration: milliseconds, or a string such as `"30s"` or `"1h"`. `timeout: 0` times out at once. Omit the timeout option to wait indefinitely:
 
 ```typescript
 // Wait forever for child to complete

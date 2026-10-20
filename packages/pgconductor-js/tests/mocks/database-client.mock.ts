@@ -33,7 +33,7 @@ export class MockDatabaseClient implements IDatabaseClient {
 	saveStep = vi.fn(async (_args) => true);
 	startExecution = vi.fn(async () => "mock-started-id");
 	checkMetadata = vi.fn(async () => {});
-	clearWaitingState = vi.fn(async () => {});
+	clearWaitingState = vi.fn(async () => true);
 	registerEventWait = vi.fn(async () => null);
 	registerEventRace = vi.fn(async () => null);
 	cancelExecution = vi.fn(async () => true);
