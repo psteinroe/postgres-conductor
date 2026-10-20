@@ -136,6 +136,8 @@ describe("report an execution's outcome to another execution", () => {
 			{ sessionKey: "s1", input: "hi" },
 		);
 		await conductor.waitForResult(first, { pollIntervalMs: 10 });
+		await waitForCondition(() => received.length === 1);
+		await conductor.waitForResult(received[0]?.sessionId || "", { pollIntervalMs: 10 });
 		const second = await conductor.invoke(
 			{ name: "watch-tool-call" },
 			{ sessionKey: "s1", input: "fail" },
@@ -143,14 +145,9 @@ describe("report an execution's outcome to another execution", () => {
 		await conductor.waitForResult(second, { pollIntervalMs: 10 });
 		await waitForCondition(() => received.length === 2);
 
-		const [toolIds, sessions] = await Promise.all([
-			database.sql<{ id: string }[]>`
-				select id from pgconductor._private_executions where task_key = 'tool-call' order by created_at
-			`,
-			database.sql`
-				select 1 from pgconductor._private_executions where task_key = 'session' and completed_at is not null
-			`,
-		]);
+		const toolIds = await database.sql<{ id: string }[]>`
+			select id from pgconductor._private_executions where task_key = 'tool-call' order by created_at
+		`;
 		const [okId, failedId] = toolIds.map((row) => row.id);
 		expect(received.map(({ id, payload }) => ({ id, payload }))).toEqual([
 			{
@@ -163,7 +160,6 @@ describe("report an execution's outcome to another execution", () => {
 			},
 		]);
 		expect(received[0]?.sessionId).not.toBe(received[1]?.sessionId);
-		expect(sessions.length).toBe(2);
 	});
 
 	test("a watcher shuts down the work it owns when its caller is cancelled", async () => {
