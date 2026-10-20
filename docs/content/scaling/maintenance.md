@@ -13,6 +13,6 @@ Custom events use ordinary internal executions and therefore do not require a se
 
 ## What's Next?
 
-- [Worker Configuration](worker-config.md) - Optimize worker performance
+- [Worker Configuration](../api/worker-config.md) - Optimize worker performance
 - [Horizontal Scaling](horizontal.md) - Add more workers
 - [Live Migrations](live-migrations.md) - Zero-downtime deployments

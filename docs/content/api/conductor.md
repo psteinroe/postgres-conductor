@@ -78,8 +78,8 @@ const task = conductor.createTask(
   timeoutMs?: number;                     // Fail an attempt that runs longer (default: none)
   concurrency?: number;                   // Max concurrent executions (default: unlimited)
   window?: [string, string];              // Time window (e.g., ["09:00", "17:00"])
-  removeOnComplete?: { days: number } | false;  // Retention policy
-  removeOnFail?: { days: number } | false;      // Retention policy
+  removeOnComplete?: boolean | { days: number };  // Retention policy (true: at the next maintenance run)
+  removeOnFail?: boolean | { days: number };      // Retention policy
   batch?: { size: number; timeoutMs: number };  // Batch processing config
   deadLetter?: { queue: string; task?: Task };    // Final-failure destination
 }
@@ -218,7 +218,7 @@ const cancelled = await conductor.cancel(
 
 Returns `true` if cancelled, `false` if already completed.
 
-Executions it waits on and executions it started with `ctx.invoke(..., { cancelWithParent: true })` are cancelled with it. See [Cancellation](../task-execution/cancellation.md#workflows).
+Executions it waits on with `ctx.invokeAndWait()` and executions it started with `ctx.invoke(..., { cancelWithParent: true })` are cancelled with it. See [Cancellation](../task-execution/cancellation.md#cancellation-states).
 
 ## conductor.signal()
 

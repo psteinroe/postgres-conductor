@@ -26,12 +26,14 @@ const task = conductor.createTask(
 );
 ```
 
-All log messages automatically include:
+If your logger has a `child(metadata)` method, as pino and winston loggers do, `ctx.logger` is a child logger with:
 
-- Task name
-- Execution ID
-- Queue name
-- Timestamp
+- `task_key`
+- `execution_id`
+- `queue`
+- `orchestrator_id`
+
+The default logger writes to the console unchanged, without this metadata or timestamps.
 
 ## Log Levels
 

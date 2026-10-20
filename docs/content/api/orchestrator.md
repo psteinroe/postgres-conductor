@@ -113,8 +113,9 @@ Access orchestrator state:
 ```typescript
 orchestrator.info.id              // Orchestrator ID (UUID)
 orchestrator.info.isRunning       // boolean
-orchestrator.info.isShuttingDown  // boolean
-orchestrator.info.isStopped       // boolean
+orchestrator.info.shutdownSignal  // boolean, true once shutdown started
+orchestrator.isShuttingDown       // boolean
+orchestrator.isStopped            // boolean
 ```
 
 ## What's Next?

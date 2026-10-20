@@ -14,7 +14,7 @@ select * from pgconductor._private_executions
 where queue = 'default'           -- Filter to this queue's partition
   and locked_at is null           -- Not already claimed
   and run_at <= now()             -- Ready to run
-order by priority desc, run_at
+order by priority, run_at
 limit 10
 for update skip locked;           -- Lock rows, skip if another worker grabbed them
 ```
@@ -35,7 +35,7 @@ const orchestrator = Orchestrator.create({
 // Deploy with 10 replicas - workers compete for locks!
 ```
 
-Each worker's `FOR UPDATE SKIP LOCKED` query blocks on rows that other workers are trying to lock. Postgres has to coordinate who gets which rows. With many workers, this creates significant contention.
+`SKIP LOCKED` keeps workers from waiting on each other's rows, but every worker scans the same head of the queue and has to step over the rows others hold. With many workers, each claim does more work for fewer rows.
 
 **The partitioning solution:**
 
@@ -93,6 +93,6 @@ The rule exists because registration owns the whole queue. When a worker starts,
 
 ## What's Next?
 
-- [Worker Configuration](worker-config.md) - Tune worker performance
+- [Worker Configuration](../api/worker-config.md) - Tune worker performance
 - [Maintenance Task](maintenance.md) - Database housekeeping
 - [Live Migrations](live-migrations.md) - Zero-downtime deployments

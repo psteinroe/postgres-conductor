@@ -142,7 +142,8 @@ Tables live in the `pgconductor` schema with a `_private_` prefix (`_private_exe
 **TaskContext** (`task-context.ts`)
 - Provides API to task functions: `step()`, `sleep()`, `invoke()`, `invokeAndWait()`, `waitForResult()`, `waitForEvent()`, `subscribe()`, `waitForAny()`, `onSignal()`, `sendSignal()`, `signalWithStart()`, plus `executionId` and `queue`
 - `invoke()` inserts an independent execution and memoizes its id as a step in one statement. Only with `cancelWithParent` does it set `parent_execution_id`, together with `cancel_with_parent`; settlement fails a completed child that has a parent but neither a waiter nor that flag
-- All operations are idempotent (use steps as memoization)
+- Memoized by step key, so a replay returns the stored result: `step()`, `sleep()`, `invoke()`, `invokeAndWait()`, `waitForResult()`, `waitForEvent()`, `subscribe()`, `waitForAny()` and `signalWithStart()`. `emit()` (deduplicated only with a `dedupe_key`), `sendSignal()` (deduplicated by signal id), `schedule()` (replaces the pending occurrence), `unschedule()` and `cancel()` are not memoized and run again on every replay
+- `checkpoint()` hangs up when the abort signal fired or the time window closed; it persists nothing
 - Hangup pattern: abort execution and return never-resolving promise
 - Resume happens automatically when database wakes execution
 
@@ -185,7 +186,8 @@ Tables live in the `pgconductor` schema with a `_private_` prefix (`_private_exe
 - `ctx.step(name, fn)` checks if step exists in database before executing
 - If exists, returns cached result
 - If not, executes fn and saves result
-- This enables idempotent retries and resume after hangup
+- A saved result is never recomputed. A step is at least once around `fn`: an attempt that ends after `fn`'s side effect but before the save runs `fn` again, so docs recommend idempotency keys for external side effects
+- Handlers replay from the start on every retry and resume; only memoized operations are skipped
 
 **Cascade Failures**
 - When a child fails permanently (attempts >= max_attempts), its parent fails too

@@ -8,7 +8,7 @@ Use `run_at` to schedule a task for later:
 
 ```typescript
 // Run in 1 hour
-const runAt = Date.now() + 3600000;
+const runAt = new Date(Date.now() + 3600000);
 
 await conductor.invoke(
   { name: "send-reminder" },
@@ -42,18 +42,14 @@ Invoking again before it runs replaces the payload and `run_at` of the pending e
 To cancel a delayed task, you need its execution ID:
 
 ```typescript
-// Schedule with dedupe_key
 const executionId = await conductor.invoke(
   { name: "delayed-task" },
   {},
-  {
-    dedupe_key: "unique-key",
-    run_at: Date.now() + 3600000,
-  }
+  { run_at: new Date(Date.now() + 3600000) }
 );
 
 // Later: cancel it
-await conductor.cancel({ name: "delayed-task" }, "unique-key");
+await conductor.cancel(executionId);
 ```
 
 See [Cancellation](cancellation.md) for details.

@@ -22,5 +22,5 @@ This happens automatically on every orchestrator startup.
 ## What's Next?
 
 - [Horizontal Scaling](horizontal.md) - Add more workers for capacity
-- [Worker Configuration](worker-config.md) - Tune worker performance
+- [Worker Configuration](../api/worker-config.md) - Tune worker performance
 - [Maintenance Task](maintenance.md) - Database housekeeping

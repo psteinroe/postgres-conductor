@@ -168,7 +168,7 @@ const parentTask = conductor.createTask(
 );
 ```
 
-**Note**: `conductor.invoke()` (called from outside a task) does not wait for completion and does not return results. Return types are only useful with `ctx.invokeAndWait()` (called from within a task).
+**Note**: `conductor.invoke()` (called from outside a task) does not wait for completion and does not return results. Return types type the results of `ctx.invokeAndWait()`, `ctx.waitForResult()`, `conductor.getExecution()` and `conductor.waitForResult()`.
 
 ## Sharing Definitions
 
