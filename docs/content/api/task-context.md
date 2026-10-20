@@ -253,6 +253,7 @@ const executionId = await ctx.invoke(
     run_at?: Date,
     priority?: number,
     group?: string,
+    cancelWithParent?: boolean,
   }
 ): Promise<string>
 ```
@@ -278,6 +279,10 @@ const result = await conductor.waitForResult({ name: "support-flow" }, handoffId
   and resumes return the same ID
 - The execution is independent: this task does not wait for it, its failure does not fail this
   task, and cancelling this task does not cancel it
+- With `cancelWithParent: true`, the execution is cancelled with this task's reason when this task
+  is cancelled or fails permanently, in any state and transitively for executions it started the
+  same way. One that completed first stays completed. The link is set only when this call starts
+  the execution
 - `dedupe_key` defaults to a key derived from this execution and the step name. Pass your own to
   reconnect to an execution: if one of the task already holds the key, its ID is returned and
   nothing is started, superseded or updated

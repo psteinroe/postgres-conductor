@@ -123,6 +123,8 @@ create table pgconductor._private_executions (
     waiting_on_execution_id uuid,
     waiting_step_key text,
     parent_execution_id uuid,
+    -- started by ctx.invoke with cancelWithParent: cancelled when its parent is cancelled or fails permanently
+    cancel_with_parent boolean default false not null,
     subscription_id uuid,
     singleton_on timestamptz,
     -- signals ever stored for this execution; settlement reads it from the locked row to see
@@ -1060,6 +1062,18 @@ begin
   using pending p
   where s.kind = 'execution_wait'
     and s.execution_id = p.id;
+
+  -- linked children are cancelled with the reason their parent ended with
+  perform pgconductor.cancel_execution(
+    e.id,
+    case when e.parent_execution_id = any(v_ancestor_ids) then 'Child execution failed: ' || p_reason
+      else p_reason end
+  )
+  from pgconductor._private_executions e
+  where e.parent_execution_id = any(v_descendant_ids || p_execution_id || v_ancestor_ids)
+    and e.cancel_with_parent
+    and e.completed_at is null
+    and e.failed_at is null;
 
   return true;
 end;

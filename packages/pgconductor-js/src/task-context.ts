@@ -422,9 +422,10 @@ export class TaskContext<
 	}
 
 	/**
-	 * Start an independent execution and return its id without waiting for it.
+	 * Start an execution and return its id without waiting for it.
 	 * Memoized by the step key: retries and resumes return the same execution.
-	 * The execution is not cancelled with this one, and its outcome does not affect it.
+	 * Its outcome does not affect this execution. It is not cancelled with this one unless
+	 * `cancelWithParent` is set.
 	 */
 	async invoke<
 		TName extends TaskName<Tasks>,
@@ -444,6 +445,7 @@ export class TaskContext<
 			run_at,
 			priority,
 			group,
+			cancelWithParent = false,
 		}: {
 			/**
 			 * Returns the execution that holds this key instead of starting a new one.
@@ -455,6 +457,11 @@ export class TaskContext<
 			run_at?: Date;
 			priority?: number;
 			group?: string;
+			/**
+			 * Cancel the started execution with this one's reason when this execution is cancelled
+			 * or fails permanently. Applies only when this call starts the execution.
+			 */
+			cancelWithParent?: boolean;
 		} = {},
 	): Promise<string> {
 		const cached = await this.opts.db.loadStep(
@@ -488,6 +495,7 @@ export class TaskContext<
 					trace_context: this.opts.telemetry.traceContext(),
 					metadata: await this.childMetadata(metadata),
 				},
+				cancelWithParent,
 			},
 			{ signal: this.signal },
 		);

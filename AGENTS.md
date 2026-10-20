@@ -138,7 +138,7 @@ Tables live in the `pgconductor` schema with a `_private_` prefix (`_private_exe
 
 **TaskContext** (`task-context.ts`)
 - Provides API to task functions: `step()`, `sleep()`, `invoke()`, `invokeAndWait()`, `waitForEvent()`, `subscribe()`, `onSignal()`, `sendSignal()`, `signalWithStart()`
-- `invoke()` inserts an independent execution and memoizes its id as a step in one statement; it never sets `parent_execution_id` (settlement fails a completed child that has a parent but no waiter)
+- `invoke()` inserts an independent execution and memoizes its id as a step in one statement. Only with `cancelWithParent` does it set `parent_execution_id`, together with `cancel_with_parent`; settlement fails a completed child that has a parent but neither a waiter nor that flag
 - All operations are idempotent (use steps as memoization)
 - Hangup pattern: abort execution and return never-resolving promise
 - Resume happens automatically when database wakes execution
@@ -198,6 +198,11 @@ Tables live in the `pgconductor` schema with a `_private_` prefix (`_private_exe
 **Middleware**
 - `Conductor.create({ middleware })` wraps every attempt of non-batch, non-internal tasks in `worker.ts`
 - `next(added)` merges `added` into the attempt's `TaskContext` and resolves on suspension too; the worker's outer race against the abort promise keeps a suspension from becoming a result or failure
+
+**Cancel With Parent**
+- `cancel_with_parent` on a child row links it to `parent_execution_id` without a waiting edge
+- `cancel_execution()` on a pending execution cancels the linked children of every row it failed by calling itself, with that row's reason. A running execution only gets the flag; its settlement cascades
+- Settlement cascades from `terminal_failures` (permanent failures, cancellations and failed waiting ancestors) in the same statement: `linked_descendants` follows linked children and, below the first level, the children they wait on. Running ones get the cancelled flag; pending ones fail as cancelled. A row in the same batch whose outcome would keep it alive (retry, sleep, child, signal re-queue) is cancelled instead, so those CTEs exclude `cancelled_descendants`
 
 **Infinity Pattern**
 - Postgres `'infinity'::timestamptz` for indefinite waiting

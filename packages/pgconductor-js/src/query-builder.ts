@@ -108,6 +108,7 @@ export type StartExecutionArgs = {
 	claimToken: string;
 	key: string;
 	spec: ExecutionSpec & { dedupe_key: string };
+	cancelWithParent: boolean;
 };
 
 export type ClearWaitingStateArgs = {
@@ -667,6 +668,7 @@ export class QueryBuilder {
 			from now_ts nt, signal_requeued q
 			where e.id = q.execution_id and e.queue = q.queue
 				and e.locked_by = ${orchestratorId}::uuid
+				and not exists (select 1 from cancelled_descendants d where d.id = e.id)
 			returning e.id
 		)`);
 		ctes.push(this.sql`failed_results as (
@@ -674,10 +676,12 @@ export class QueryBuilder {
 			where status in ('failed', 'permanently_failed') or execution_cancelled
 		)`);
 		ctes.push(this.sql`released_results as (
-			select * from valid_results where status = 'released' and not execution_cancelled
+			select * from valid_results r where status = 'released' and not execution_cancelled
+				and not exists (select 1 from cancelled_descendants d where d.id = r.execution_id)
 		)`);
 		ctes.push(this.sql`invoke_child_data as (
-			select * from valid_results where status = 'invoke_child' and not execution_cancelled
+			select * from valid_results r where status = 'invoke_child' and not execution_cancelled
+				and not exists (select 1 from cancelled_descendants d where d.id = r.execution_id)
 		)`);
 
 		// A completed child may wake only a parent which is still waiting and is not
@@ -691,6 +695,7 @@ export class QueryBuilder {
 				and parent.completed_at is null
 				and parent.failed_at is null
 				and parent.locked_by is null
+				and not exists (select 1 from cancelled_descendants d where d.id = parent.id)
 			for update of parent
 		)`);
 		ctes.push(this.sql`parent_steps_all as (
@@ -711,6 +716,7 @@ export class QueryBuilder {
 				and e.locked_by = ${orchestratorId}::uuid
 				and e.parent_execution_id is not null
 				and e.subscription_id is null
+				and not e.cancel_with_parent
 				and not exists (
 					select 1 from pgconductor._private_executions parent
 					where parent.waiting_on_execution_id = r.execution_id
@@ -824,6 +830,57 @@ export class QueryBuilder {
 				p.parent_metadata
 			from failed_parent_targets p
 		)`);
+		// Linked children of a terminal failure are cancelled with its error, transitively, with the
+		// executions they wait on. A row settled by this statement keeps a terminal outcome.
+		ctes.push(this.sql`linked_descendants as (
+			select child.id, child.waiting_on_execution_id, t.failure_error as reason, 1 as depth
+			from terminal_failures t
+			join pgconductor._private_executions child
+				on child.parent_execution_id = t.execution_id and child.cancel_with_parent
+			where child.completed_at is null and child.failed_at is null
+			union all
+			select child.id, child.waiting_on_execution_id, d.reason, d.depth + 1
+			from linked_descendants d
+			join pgconductor._private_executions child
+				on child.parent_execution_id = d.id
+				and (child.cancel_with_parent or child.id = d.waiting_on_execution_id)
+			where child.completed_at is null and child.failed_at is null
+		)`);
+		ctes.push(this.sql`cancelled_descendants as materialized (
+			select e.id, e.queue, d.reason,
+				e.locked_by is not null and v.execution_id is null as running,
+				t.remove_on_fail_days = 0 as should_remove
+			from linked_descendants d
+			join pgconductor._private_executions e on e.id = d.id
+			left join pgconductor._private_tasks t on t.key = e.task_key and t.queue = e.queue
+			left join valid_results v on v.execution_id = e.id
+			where e.completed_at is null and e.failed_at is null
+				and not exists (select 1 from completed_results c where c.execution_id = e.id)
+				and not exists (select 1 from permanently_failed_children p where p.execution_id = e.id)
+				and not exists (select 1 from locked_ancestors a where a.parent_id = e.id)
+			order by d.depth
+			for update of e
+		)`);
+		// running ones are aborted by the workers running them on their next poll
+		ctes.push(this.sql`flagged_descendants as (
+			update pgconductor._private_executions e
+			set cancelled = true, last_error = d.reason
+			from cancelled_descendants d
+			where e.id = d.id and e.queue = d.queue and d.running and not e.cancelled
+		)`);
+		ctes.push(this.sql`deleted_descendants as (
+			delete from pgconductor._private_executions e
+			using cancelled_descendants d
+			where e.id = d.id and e.queue = d.queue and not d.running and d.should_remove
+		)`);
+		ctes.push(this.sql`updated_descendants as (
+			update pgconductor._private_executions e
+			set failed_at = nt.ts, cancelled = true, last_error = d.reason,
+				waiting_on_execution_id = null, waiting_step_key = null,
+				locked_by = null, locked_at = null
+			from now_ts nt, cancelled_descendants d
+			where e.id = d.id and e.queue = d.queue and not d.running and d.should_remove is not true
+		)`);
 		ctes.push(this.sql`dead_lettered as (
 			insert into pgconductor._private_executions (task_key, queue, payload, run_at, "group", trace_context, metadata, dead_letter)
 			select
@@ -887,6 +944,8 @@ export class QueryBuilder {
 				select id, queue from updated_completed
 				union all
 				select id, queue from updated_failed
+				union all
+				select id, queue from cancelled_descendants where not running
 			) terminal
 			where subscription.kind = 'execution_wait'
 				and subscription.execution_id = terminal.id
@@ -906,6 +965,7 @@ export class QueryBuilder {
 				and r.status <> 'permanently_failed'
 				and not r.execution_cancelled
 				and e.attempts < tc.max_attempts
+				and not exists (select 1 from cancelled_descendants d where d.id = e.id)
 			returning e.id
 		)`);
 
@@ -1270,6 +1330,7 @@ export class QueryBuilder {
 		claimToken,
 		key,
 		spec,
+		cancelWithParent,
 	}: StartExecutionArgs): PendingQuery<{ id: string }[]> {
 		return this.sql<{ id: string }[]>`
 			with claimed_execution as materialized (
@@ -1282,7 +1343,8 @@ export class QueryBuilder {
 				for update
 			), started_execution as (
 				insert into pgconductor._private_executions as e (
-					id, task_key, queue, payload, trace_context, metadata, run_at, dedupe_key, priority, "group"
+					id, task_key, queue, payload, trace_context, metadata, run_at, dedupe_key, priority, "group",
+					parent_execution_id, cancel_with_parent
 				)
 				select
 					pgconductor._private_portable_uuidv7(),
@@ -1294,7 +1356,9 @@ export class QueryBuilder {
 					coalesce(${spec.run_at ? spec.run_at.toISOString() : null}::timestamptz, pgconductor._private_current_time()),
 					${spec.dedupe_key}::text,
 					${spec.priority || 0}::integer,
-					${spec.group || null}::text
+					${spec.group || null}::text,
+					case when ${cancelWithParent}::boolean then claimed_execution.id end,
+					${cancelWithParent}::boolean
 				from claimed_execution
 				on conflict (task_key, dedupe_key, queue) do update set dedupe_key = excluded.dedupe_key
 				returning e.id

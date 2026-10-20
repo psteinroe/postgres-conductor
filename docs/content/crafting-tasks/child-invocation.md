@@ -125,12 +125,31 @@ const intake = conductor.createTask(
 | Returns | The child's result | The execution ID |
 | Caller | Hangs up until the child settles | Continues immediately |
 | Child fails | Caller fails | Caller is unaffected |
-| Caller cancelled | Child is cancelled | Execution keeps running |
+| Caller cancelled | Child is cancelled | Execution keeps running, unless `cancelWithParent` is set |
 | Retries and resumes | Return the memoized result | Return the same execution ID |
 
 Both inherit the caller's [metadata](execution-metadata.md) unless `metadata` overrides it.
 
 Retrying the invoking attempt never starts a second execution, even if it crashed right after the start: the execution is deduplicated by a key derived from the caller and the step name. Pass `dedupe_key` to use your own key instead, for example to reconnect to a workflow for a conversation. If an execution of the task already holds the key, `ctx.invoke()` returns its ID without starting, superseding or updating anything.
+
+### Cancelling with the Parent
+
+Pass `cancelWithParent: true` to cancel the execution together with the caller: when the caller is cancelled or fails permanently, the execution is cancelled with the same reason, whatever state it is in (pending, running or suspended in a sleep, wait or child). This applies transitively to executions it started with `cancelWithParent` and to the children it waits on:
+
+```typescript
+const session = conductor.createTask(
+  { name: "session" },
+  { invocable: true },
+  async (event, ctx) => {
+    const toolId = await ctx.invoke("tool", { name: "run-tool" }, event.payload, {
+      cancelWithParent: true,
+    });
+    // keep working while the tool runs
+  }
+);
+```
+
+An execution that completed before the caller ended stays completed, and a caller retry or completion leaves it running. The link is set only when the call starts the execution: an execution returned for an existing `dedupe_key` keeps its own.
 
 Await the invoked execution elsewhere with [`conductor.waitForResult()`](../api/conductor.md) or read it with `conductor.getExecution()`.
 
