@@ -28,7 +28,8 @@ export function createTestClock(sql: Sql): TestClock {
 				coalesce(extract(epoch from o.value) * 1000, 0)::float8 as offset_ms
 			from o
 		`;
-		offsetMs = row?.offset_ms || 0;
+		// Date has millisecond precision; rounding up keeps now() from reading before the time set
+		offsetMs = Math.ceil(row?.offset_ms || 0);
 	};
 
 	return {
