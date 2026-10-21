@@ -218,7 +218,15 @@ export class Conductor<
 		InferTasksFromSchema<TTaskSchemas>,
 		InferEventsFromSchema<TEventSchemas>,
 		InferMetadata<TMetadataSchema>,
-		AddedContext<TAdded>
+		AddedContext<
+			TAdded,
+			TaskContext<
+				InferTasksFromSchema<TTaskSchemas>,
+				InferEventsFromSchema<TEventSchemas>,
+				InferMetadata<TMetadataSchema>
+			> &
+				TExtraContext
+		>
 	> {
 		return new Conductor(options);
 	}

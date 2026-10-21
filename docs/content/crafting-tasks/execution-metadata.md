@@ -69,8 +69,8 @@ execution and keep its metadata. Cron schedules declared as task triggers have n
 
 ## Overriding Metadata for a Child
 
-Pass `metadata` to `ctx.invokeAndWait()`, `ctx.invoke()`, `ctx.signalWithStart()` or `ctx.emit()`
-to replace the metadata of that child or event only. `ctx.signalWithStart()` applies it only when
+Pass `metadata` to `ctx.invokeAndWait()`, `ctx.invoke()`, `ctx.signalWithStart()`, `ctx.emit()`
+or the options of `ctx.schedule()` to replace the metadata of that child, event or schedule only. `ctx.signalWithStart()` applies it only when
 it starts the execution. A function receives the current metadata:
 
 ```typescript

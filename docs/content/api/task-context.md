@@ -490,10 +490,12 @@ schedules again, which replaces the pending execution of `scheduleName`:
 await ctx.schedule(
   taskRef: { name: string, queue?: string },
   scheduleName: string,
-  cronOptions: { cron: string },
+  cronOptions: { cron: string, priority?: number, group?: string, metadata?: TMetadata | ((metadata) => TMetadata) },
   payload?: TPayload
 ): Promise<void>
 ```
+
+`metadata` sets the metadata of the occurrences and defaults to the metadata of this execution.
 
 **Example:**
 
@@ -611,6 +613,21 @@ and `event.execution.queue`.
 You can extend the task context with your own services and utilities.
 
 See [Custom Context](../crafting-tasks/custom-context.md) for details.
+
+## Wrapping Methods
+
+Middleware can replace context methods with wrappers that call the originals, for example to
+transform metadata or reject reserved step keys. Each wrapper runs once per call: context methods
+never call each other through `ctx`. See
+[Wrapping Context Methods](../crafting-tasks/custom-context.md#wrapping-context-methods).
+
+## Step Keys
+
+Steps are stored under the keys passed to context methods, except for derived keys:
+`<stepKey>:<branch>` for execution and signal branches of `ctx.waitForAny()` (so
+`<stepKey>:result` for `ctx.waitForResult()`), and `pgconductor.next-occurrence` for the next
+occurrence of a cron schedule. See
+[Reserving Step Keys](../crafting-tasks/custom-context.md#reserving-step-keys).
 
 ## What's Next?
 
