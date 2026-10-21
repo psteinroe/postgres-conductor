@@ -585,6 +585,69 @@ begin
 end;
 $function$;
 
+-- Replaces the pending occurrence of the dynamic cron schedule p_schedule_name
+-- with p_dedupe_key; a running occurrence is kept. Holding the queue row lock,
+-- like _private_unschedule, orders it with a running occurrence inserting its
+-- successor: one that commits first is removed by the delete, one that commits
+-- later sees the new occurrence and inserts none.
+create or replace function pgconductor._private_schedule(
+    p_task_key text,
+    p_queue text,
+    p_schedule_name text,
+    p_dedupe_key text,
+    p_run_at timestamptz,
+    p_cron_expression text,
+    p_payload jsonb,
+    p_metadata jsonb,
+    p_priority integer,
+    p_group text
+)
+returns void
+language plpgsql
+volatile
+set search_path to ''
+as $function$
+declare
+  v_resolved integer;
+begin
+  perform 1 from pgconductor._private_queues queue where queue.name = p_queue for update;
+
+  with removed as (
+    delete from pgconductor._private_executions
+    where task_key = p_task_key
+      and queue = p_queue
+      and dedupe_key like 'dynamic::%'
+      and split_part(dedupe_key, '::', 2) = p_schedule_name
+      and dedupe_key <> p_dedupe_key
+      and cron_expression is not null
+      and is_available
+    returning result_waiters
+  )
+  select pgconductor._private_resolve_result_waits(jsonb_agg(w.value || jsonb_build_object(
+    'outcome', jsonb_build_object('status', 'cancelled', 'reason', 'Schedule removed')
+  )))
+  into v_resolved
+  from removed r
+  cross join lateral jsonb_array_elements(r.result_waiters) w
+  having count(*) > 0;
+
+  -- a running or settled occurrence is kept
+  insert into pgconductor._private_executions as e (
+    task_key, queue, payload, metadata, run_at, dedupe_key, cron_expression, priority, "group"
+  ) values (
+    p_task_key, p_queue, p_payload, p_metadata, p_run_at, p_dedupe_key, p_cron_expression,
+    p_priority, p_group
+  )
+  on conflict (task_key, dedupe_key, queue) where singleton_on is null do update set
+    payload = excluded.payload,
+    metadata = excluded.metadata,
+    cron_expression = excluded.cron_expression,
+    priority = excluded.priority,
+    "group" = excluded."group"
+  where e.is_available;
+end;
+$function$;
+
 -- Removes the dynamic cron schedule p_schedule_name: deletes its pending
 -- occurrences and cancels running ones. Holding the queue row lock, like
 -- registration, keeps running occurrences from inserting a successor until
@@ -638,9 +701,10 @@ end;
 $function$;
 
 -- Inserts the next occurrence of the cron schedule of the claimed occurrence
--- p_execution_id unless it was cancelled. Removing a schedule holds the queue
--- row lock and cancels running occurrences, so a removal that commits first
--- leaves no successor and one that commits later sees and removes it. The
+-- p_execution_id unless it was cancelled, or the schedule was replaced by a
+-- later occurrence that has not ended. Removing or replacing a schedule holds
+-- the queue row lock, so a removal or replacement that commits first leaves no
+-- second successor and one that commits later sees and removes it. The
 -- successor is stored as a step, so retries and later attempts of the
 -- occurrence insert it once, and an existing one is never superseded.
 create or replace function pgconductor._private_schedule_next_occurrence(
@@ -678,16 +742,34 @@ begin
     return;
   end if;
 
-  insert into pgconductor._private_executions as e (
-    task_key, queue, run_at, dedupe_key, cron_expression, "group", metadata
-  )
-  select execution.task_key, execution.queue, p_run_at, p_dedupe_key, execution.cron_expression,
-    execution."group", execution.metadata
+  select later.id into v_next_id
   from pgconductor._private_executions execution
+  join pgconductor._private_executions later
+    on later.task_key = execution.task_key
+    and later.queue = execution.queue
+    and split_part(later.dedupe_key, '::', 1) = split_part(execution.dedupe_key, '::', 1)
+    and split_part(later.dedupe_key, '::', 2) = split_part(execution.dedupe_key, '::', 2)
+    and later.cron_expression is not null
+    -- the scheduled time: run_at moves with retries and sleeps
+    and split_part(later.dedupe_key, '::', 3)::bigint > split_part(execution.dedupe_key, '::', 3)::bigint
+    and later.completed_at is null
+    and later.failed_at is null
+    and not later.cancelled
   where execution.id = p_execution_id and execution.queue = p_queue
-  on conflict (task_key, dedupe_key, queue) where singleton_on is null
-  do update set dedupe_key = excluded.dedupe_key
-  returning e.id into v_next_id;
+  limit 1;
+
+  if v_next_id is null then
+    insert into pgconductor._private_executions as e (
+      task_key, queue, payload, run_at, dedupe_key, cron_expression, priority, "group", metadata
+    )
+    select execution.task_key, execution.queue, execution.payload, p_run_at, p_dedupe_key,
+      execution.cron_expression, execution.priority, execution."group", execution.metadata
+    from pgconductor._private_executions execution
+    where execution.id = p_execution_id and execution.queue = p_queue
+    on conflict (task_key, dedupe_key, queue) where singleton_on is null
+    do update set dedupe_key = excluded.dedupe_key
+    returning e.id into v_next_id;
+  end if;
 
   insert into pgconductor._private_steps (execution_id, queue, key, result)
   values (p_execution_id, p_queue, 'pgconductor.next-occurrence', jsonb_build_object('id', v_next_id));

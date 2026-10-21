@@ -84,6 +84,8 @@ await ctx.schedule(
 );
 ```
 
+Every occurrence of a dynamic schedule runs its task like an invocation: `event.name` is `"pgconductor.invoke"` and `event.payload` is the scheduled payload, validated against the task's payload schema. Its `priority` and `group` options also apply to every occurrence.
+
 Dynamic schedules are kept separately from static cron triggers: they survive worker restarts and deployments, and a dynamic schedule never replaces a static trigger with the same name. They run until removed with `ctx.unschedule()`.
 
 ## Unschedule
@@ -122,7 +124,7 @@ await ctx.schedule({ name: "task" }, "schedule-1", { cron: "0 9 * * *" }, {});
 await ctx.schedule({ name: "task" }, "schedule-1", { cron: "0 17 * * *" }, {}); // Overwrites
 ```
 
-Overwriting replaces the pending execution of the schedule. One that is already running is not interrupted.
+Overwriting replaces the pending execution of the schedule. One that is already running is not interrupted, but schedules no further execution: the schedule continues with the new cron expression only.
 
 ## Deduplication
 

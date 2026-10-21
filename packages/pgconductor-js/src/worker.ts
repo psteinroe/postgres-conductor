@@ -56,7 +56,10 @@ const FINAL_FLUSH_TIMEOUT_MS = 10_000;
 
 function taskEventFor(execution: Execution): { name: string; payload?: unknown } {
 	if (execution.cron_expression) {
-		return { name: execution.dedupe_key?.split("::")[1] || "unknown" };
+		const [prefix, scheduleName] = execution.dedupe_key?.split("::") || [];
+		// A dynamic schedule (ctx.schedule) runs its task like an invocation with its payload
+		if (prefix === "dynamic") return { name: "pgconductor.invoke", payload: execution.payload };
+		return { name: scheduleName || "unknown" };
 	}
 	if (
 		execution.subscription_id != null &&
@@ -86,7 +89,7 @@ async function parseOrFail(
 	}
 }
 
-// Invocations carry the payload of the task's schema, events and cron occurrences do not
+// Invocations and dynamic schedules carry the payload of the task's schema, events and cron triggers do not
 async function parsePayload(task: AnyTask, event: { name: string; payload?: unknown }) {
 	if (event.name !== "pgconductor.invoke") return { value: event.payload };
 	return parseOrFail(task.schemas.payload, event.payload, `payload for task "${task.name}"`);
