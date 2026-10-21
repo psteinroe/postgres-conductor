@@ -8,6 +8,11 @@ import type { TaskContext } from "../../src/task-context";
 import type { Middleware, MiddlewareExecution } from "../../src/index";
 
 const task = defineTask({ name: "middleware.typed", payload: z.object({ id: z.string() }) });
+const child = defineTask({
+	name: "middleware.child",
+	payload: z.object({ n: z.number() }),
+	returns: z.object({ ok: z.boolean() }),
+});
 
 describe("middleware types", () => {
 	test("infers keys added by every middleware into the handler context", () => {
@@ -67,6 +72,59 @@ describe("middleware types", () => {
 
 		conductor.createTask({ name: "middleware.typed" }, { invocable: true }, async (_event, ctx) => {
 			expectTypeOf(ctx.thread).toEqualTypeOf<string>();
+		});
+	});
+
+	test("overrides context methods with their original signature", () => {
+		const conductor = Conductor.create({
+			sql: {} as any,
+			tasks: TaskSchemas.fromSchema([task, child]),
+			context: { region: "eu" },
+			metadata: z.object({ tenant: z.string().optional() }),
+			middleware: [
+				async ({ ctx }, next) => {
+					const invoke = ctx.invoke.bind(ctx);
+					const invokeAndWait = ctx.invokeAndWait.bind(ctx);
+					return next({
+						invoke: async (key, task, payload, options = {}) => {
+							expectTypeOf(key).toEqualTypeOf<string>();
+							return invoke(key, task, payload, { ...options, metadata: { tenant: "acme" } });
+						},
+						invokeAndWait: async (key, task, payload, options) =>
+							invokeAndWait(key, task, payload, options),
+						thread: "t",
+					});
+				},
+			],
+		});
+		type Context = TaskContext<
+			[typeof task, typeof child],
+			readonly [],
+			{ tenant?: string | undefined }
+		>;
+
+		conductor.createTask({ name: "middleware.typed" }, { invocable: true }, async (_event, ctx) => {
+			expectTypeOf(ctx.invoke).toEqualTypeOf<Context["invoke"]>();
+			expectTypeOf(ctx.invokeAndWait).toEqualTypeOf<Context["invokeAndWait"]>();
+			expectTypeOf(ctx.thread).toEqualTypeOf<string>();
+			expectTypeOf(
+				await ctx.invokeAndWait("child", { name: "middleware.child" }, { n: 1 }),
+			).toEqualTypeOf<{ ok: boolean }>();
+			// @ts-expect-error the payload keeps its type
+			await ctx.invoke("child", { name: "middleware.child" }, { n: "1" });
+		});
+	});
+
+	test("rejects overrides that change a context method's signature", () => {
+		Conductor.create({
+			sql: {} as any,
+			context: { region: "eu" },
+			middleware: [
+				// @ts-expect-error invoke returns the execution id
+				async (_args, next) => next({ invoke: async (_key: string) => 1 }),
+				// @ts-expect-error region is a string
+				async (_args, next) => next({ region: 1 }),
+			],
 		});
 	});
 

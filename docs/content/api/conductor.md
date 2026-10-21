@@ -29,7 +29,7 @@ const conductor = Conductor.create({
 - `connectionString`: Postgres connection string (mutually exclusive with `sql`)
 - `tasks`: `TaskSchemas.fromSchema([...])` array of task definitions
 - `context`: Object passed to task handlers as `ctx.{property}` (see [Custom Context](../crafting-tasks/custom-context.md))
-- `middleware`: (optional) Functions that run around every attempt of a non-batch task and can add to `ctx` (see [Middleware](../crafting-tasks/custom-context.md#middleware))
+- `middleware`: (optional) Functions that run around every attempt of a non-batch task and can add to `ctx` or wrap its methods (see [Middleware](../crafting-tasks/custom-context.md#middleware) and [Wrapping Context Methods](../crafting-tasks/custom-context.md#wrapping-context-methods))
 - `logger`: (optional) Custom logger implementation
 - `events`: (optional) Array of event definitions from `defineEvent()` for typed custom events
 - `metadata`: (optional) Standard Schema that types and validates execution metadata (see [Execution Metadata](../crafting-tasks/execution-metadata.md))
