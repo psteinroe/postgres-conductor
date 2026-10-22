@@ -108,6 +108,14 @@ describe("ctx.waitForResult and execution branches (Postgres integration)", () =
 		return row?.result;
 	}
 
+	// A stored waitForAny winner as ctx.waitForAny() returns it
+	async function storedWinner(database: TestDatabase, executionId: string, key: string) {
+		const winner = (await step(database, executionId, key)) as { event?: { emittedAt: string } };
+		return winner.event
+			? { ...winner, event: { ...winner.event, emittedAt: new Date(winner.event.emittedAt) } }
+			: winner;
+	}
+
 	async function suspendedAt(database: TestDatabase, executionId: string, stepKey: string) {
 		await waitForCondition(async () => {
 			const [row] = await database.sql`
@@ -585,9 +593,12 @@ describe("ctx.waitForResult and execution branches (Postgres integration)", () =
 		release.resolve();
 		await conductor.waitForResult(workId, { pollIntervalMs: 10 });
 
-		const winner = { key: "click", event: { name: "result.click", payload: { id: workId } } };
+		const winner = {
+			key: "click",
+			event: { name: "result.click", payload: { id: workId }, emittedAt: expect.any(Date) },
+		};
 		expect(winners).toEqual([winner]);
-		expect(await step(database, waiterId, "any")).toEqual(winner);
+		expect(await storedWinner(database, waiterId, "any")).toEqual(winner);
 		expect(await step(database, waiterId, "any:work")).toEqual({ status: "closed" });
 	});
 
@@ -624,7 +635,7 @@ describe("ctx.waitForResult and execution branches (Postgres integration)", () =
 		}
 
 		for (const [id, waiterId] of waiters) {
-			expect(winners[id]).toEqual([await step(database, waiterId, "any")]);
+			expect(winners[id]).toEqual([await storedWinner(database, waiterId, "any")]);
 		}
 		expect(await waits(database)).toBe(0);
 	});

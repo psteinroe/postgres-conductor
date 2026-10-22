@@ -221,8 +221,11 @@ export type ClaimResult = {
 	cancelled: string[];
 };
 
+/** An event as dispatch stores it in a wait's step, with its creation time as a JSON string */
+export type StoredEvent = { name: string; payload: Payload; emittedAt: string };
+
 export type EventWaitResult =
-	| { status: "resolved"; event: { name: string; payload: Payload } }
+	| { status: "resolved"; event: StoredEvent }
 	| { status: "timed_out" }
 	| { status: "closed" };
 
@@ -237,7 +240,7 @@ export type EventRaceBranch = {
 
 export type EventRaceResult = {
 	key: string;
-	event?: { name: string; payload: Payload };
+	event?: StoredEvent;
 	outcome?: ExecutionOutcome;
 	signal?: { id: string; name: string };
 };

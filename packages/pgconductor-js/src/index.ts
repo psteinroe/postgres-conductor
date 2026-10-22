@@ -20,6 +20,7 @@ export type {
 	BatchTaskEvent,
 	EventSubscription,
 	ExecutionBranch,
+	ReceivedEvent,
 	SignalBranch,
 	SignalMessage,
 	WaitForAnyResult,

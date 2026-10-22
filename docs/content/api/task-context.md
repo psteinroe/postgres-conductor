@@ -85,12 +85,17 @@ const event = await ctx.waitForEvent("payment", {
   timeout: 60_000,
 });
 // event.name and event.payload are typed from paymentReceived
+// event.emittedAt: Date, when the event was emitted
 ```
 
 A matching event is delivered once and cached by the step key. The subscription becomes active
 when registration commits; earlier events do not satisfy the wait. If the timeout wins,
 `WaitForEventTimeoutError` is thrown. An event and the timeout never both win: the first one
 recorded for the step key is final.
+
+`event.emittedAt` is the event's creation time in database time, the same time a wait's timeout
+is compared with. It is stored with the event, so replays return the same value. `wait()` and
+event branches of `ctx.waitForAny()` return it too.
 
 To wait for an event caused by your own side effect, use `ctx.subscribe()` so the
 subscription is active before the side effect runs. To wait for the first of several
@@ -146,7 +151,7 @@ const winner = await ctx.waitForAny(
   >,
   options?: { timeout?: DurationInput }
 ): Promise<
-  | { key: string, event }
+  | { key: string, event: { name, payload, emittedAt: Date } }
   | { key: string, outcome: ExecutionOutcome }
   | { key: string, signal: { id: string, name: string } }
   | { key: "timeout" }
@@ -580,6 +585,27 @@ ctx.metadata: Readonly<Metadata> | undefined
 
 Children, emitted events and dynamic schedules created from this execution inherit it. See
 [Execution Metadata](../crafting-tasks/execution-metadata.md).
+
+## ctx.now()
+
+The current time from the worker's clock, without a database round trip:
+
+```typescript
+ctx.now(): Date
+```
+
+The worker's clock is local time corrected by its offset to database time, sampled when the
+worker starts and every 10 minutes. Time windows, `ctx.checkpoint()` and cron schedules use the
+same clock, and it follows a test clock passed as the Conductor's `clock`. It can be off from
+database time by the drift since the last sample; [`conductor.now()`](conductor.md#conductornow)
+reads the database time exactly.
+
+`ctx.now()` is not memoized, so a replay reads a later time. For a value that stays the same
+across retries and resumes, save it in a step:
+
+```typescript
+const startedAt = await ctx.step("started-at", () => ctx.now().toISOString());
+```
 
 ## ctx.executionId
 

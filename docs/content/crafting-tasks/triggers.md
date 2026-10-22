@@ -250,6 +250,21 @@ const winner = await ctx.waitForAny(
 The other subscriptions are removed when one wins. See
 [ctx.waitForAny()](../api/task-context.md#ctxwaitforany).
 
+### Event Times
+
+An awaited event carries `emittedAt`, the time it was emitted in database time. A wait's
+timeout counts from the wait, so to enforce an absolute deadline, compare `emittedAt` with it:
+
+```typescript
+const decision = await subscription.wait({ timeout: "24h" });
+if (decision.emittedAt > new Date(event.payload.expiresAt)) {
+  // decided after the deadline
+}
+```
+
+`emittedAt` is stored with the event, so replays return the same value. To read the database
+time yourself, use [`conductor.now()`](../api/conductor.md#conductornow).
+
 ## Multiple Triggers
 
 Tasks can respond to multiple trigger types:
