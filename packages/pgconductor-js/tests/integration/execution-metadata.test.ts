@@ -337,44 +337,78 @@ describe("execution metadata (Postgres integration)", () => {
 		]);
 	});
 
-	test("cron executions created by ctx.schedule inherit metadata", async () => {
+	test("every occurrence of a ctx.schedule schedule gets its metadata", async () => {
 		const db = await child();
+		await db.clock.set(new Date("2024-01-01T12:00:30Z"));
 		const conductor = Conductor.create({
 			sql: db.sql,
+			clock: db.clock,
 			tasks: TaskSchemas.fromSchema([
-				defineTask({ name: "scheduler" }),
-				defineTask({ name: "report" }),
+				defineTask({ name: "scheduler", payload: z.object({ replace: z.boolean().optional() }) }),
+				defineTask({ name: "report", payload: z.object({ label: z.string() }) }),
 			]),
 			metadata: metadataSchema,
 			context: {},
 		});
-		const seen: unknown[] = [];
+		await conductor.ensureInstalled();
+		const seen: Record<string, unknown[]> = {};
+		const errors: string[] = [];
 		const report = conductor.createTask(
 			{ name: "report" },
 			{ invocable: true },
-			async (_e, ctx) => {
-				seen.push(ctx.metadata);
+			async (event, ctx) => {
+				(seen[event.payload.label] ||= []).push(ctx.metadata);
 			},
 		);
 		const scheduler = conductor.createTask(
 			{ name: "scheduler" },
 			{ invocable: true },
-			async (_e, ctx) => {
-				await ctx.schedule({ name: "report" }, "reporting", { cron: "* * * * * *" });
+			async (event, ctx) => {
+				const schedule = (label: string, options: object = {}) =>
+					ctx.schedule({ name: "report" }, label, { cron: "* * * * *", ...options }, { label });
+				if (event.payload.replace) {
+					await schedule("overridden", { metadata: { tenant: "initech" } });
+					return;
+				}
+				await schedule("inherited");
+				await schedule("overridden", { metadata: { tenant: "globex" } });
+				await schedule("function", {
+					metadata: (metadata: { tenant: string } | undefined) => ({
+						tenant: metadata?.tenant || "",
+						replyTo: "thread-2",
+					}),
+				});
+				await schedule("invalid", { metadata: { tenant: 1 } }).catch((err: Error) =>
+					errors.push(err.message),
+				);
 			},
 		);
-		const orchestrator = Orchestrator.create({
-			conductor,
-			tasks: [report, scheduler],
-			defaultWorker: { pollIntervalMs: 50, flushIntervalMs: 50 },
-		});
+		const drain = () => Orchestrator.create({ conductor, tasks: [report, scheduler] }).drain();
 
-		await orchestrator.start();
 		await conductor.invoke({ name: "scheduler" }, {}, { metadata: { tenant: "acme" } });
-		await waitForCondition(() => seen.length >= 2);
-		await orchestrator.stop();
+		await drain();
+		await db.clock.set(new Date("2024-01-01T12:01:00Z"));
+		await drain();
+		await db.clock.set(new Date("2024-01-01T12:02:00Z"));
+		await drain();
+		await conductor.invoke(
+			{ name: "scheduler" },
+			{ replace: true },
+			{ metadata: { tenant: "acme" } },
+		);
+		await drain();
+		await db.clock.set(new Date("2024-01-01T12:03:00Z"));
+		await drain();
 
-		expect(seen.slice(0, 2)).toEqual([{ tenant: "acme" }, { tenant: "acme" }]);
+		const acme = { tenant: "acme" };
+		const thread = { tenant: "acme", replyTo: "thread-2" };
+		expect(seen).toEqual({
+			inherited: [acme, acme, acme],
+			overridden: [{ tenant: "globex" }, { tenant: "globex" }, { tenant: "initech" }],
+			function: [thread, thread, thread],
+		});
+		expect(errors).toHaveLength(1);
+		expect(errors[0]).toContain("Invalid metadata: tenant:");
 	}, 30000);
 
 	test("metadata is validated against the schema and limited to 8 KB", async () => {

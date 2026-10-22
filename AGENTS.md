@@ -252,7 +252,7 @@ Tables live in the `pgconductor` schema with a `_private_` prefix (`_private_exe
 
 **Execution Metadata**
 - `metadata jsonb` on `_private_executions` follows the same paths as `trace_context`: event → triggered executions, parent → child, terminal failure → dead-letter delivery, cron occurrence → next occurrence
-- `TaskContext` passes its metadata explicitly to `ctx.invoke`, `ctx.invokeAndWait` and `ctx.signalWithStart` children, `ctx.emit` and `ctx.schedule`. All but `ctx.schedule` take a `metadata` override, resolved and validated by `childMetadata()`
+- `TaskContext` passes its metadata explicitly to `ctx.invoke`, `ctx.invokeAndWait` and `ctx.signalWithStart` children, `ctx.emit` and `ctx.schedule`. All take a `metadata` override, resolved and validated by `childMetadata()`; `ctx.schedule` stores it on the occurrence, and each occurrence copies it to the next
 - `pgconductor._private_check_metadata()` enforces the 8 KB limit where metadata enters (`invoke()`, `emit_event()`, and `ctx.invokeAndWait` overrides before hang-up, so settlement never fails on size)
 
 **Custom Events**

@@ -153,10 +153,12 @@ export type SignalMessage = {
 	payload?: JsonValue;
 };
 
-type ScheduleOptions = {
+type ScheduleOptions<Metadata> = {
 	cron: string;
 	priority?: number;
 	group?: string;
+	/** Metadata of every occurrence. Defaults to the metadata of this execution. */
+	metadata?: Metadata | ((metadata: Readonly<Metadata> | undefined) => Metadata);
 };
 
 // second argument for tasks
@@ -645,7 +647,7 @@ export class TaskContext<
 	>(
 		task: TaskIdentifier<TName, TQueue>,
 		scheduleName: string,
-		options: ScheduleOptions,
+		options: ScheduleOptions<Metadata>,
 		payload: InferPayload<TDef> = {} as InferPayload<TDef>,
 	): Promise<void> {
 		if (!scheduleName) {
@@ -672,7 +674,7 @@ export class TaskContext<
 				cron_expression: options.cron,
 				priority: options.priority || null,
 				group: options.group || null,
-				metadata: this.opts.execution.metadata,
+				metadata: await this.childMetadata(options.metadata),
 			},
 			scheduleName,
 		});
