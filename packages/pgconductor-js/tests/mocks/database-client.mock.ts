@@ -21,6 +21,7 @@ export class MockDatabaseClient implements IDatabaseClient {
 	getExecutions = vi.fn(async () => ({ executions: [], signals: [], cancelled: [] }));
 	returnExecutions = vi.fn(async (_results) => {});
 	removeExecutions = vi.fn(async () => false);
+	failUnregisteredExecutions = vi.fn(async () => false);
 	registerWorker = vi.fn(async () => {});
 	scheduleCronExecution = vi.fn(async () => {});
 	unscheduleCronExecution = vi.fn(async () => {});

@@ -105,6 +105,7 @@ Postgres Conductor runs daily maintenance automatically on each queue:
 - Removes old completed executions based on `removeOnComplete`
 - Removes old failed executions based on `removeOnFail`
 - Deletes the steps and other stored state of removed executions with them
+- Fails pending executions of tasks the queue's workers no longer run (see [Maintenance](../scaling/maintenance.md#executions-of-removed-tasks))
 
 No manual intervention required. Maintenance does not release executions locked by a crashed worker: running orchestrators recover those through their heartbeats.
 

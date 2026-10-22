@@ -26,7 +26,7 @@ pgconductor/
         │   ├── middleware.ts         # Per-attempt middleware types
         │   ├── event-definition.ts   # Custom event definitions
         │   ├── event-dispatch-task.ts # Internal event fan-out task
-        │   ├── maintenance-task.ts   # Per-queue retention and cleanup task
+        │   ├── maintenance-task.ts   # Per-queue retention, cleanup and unregistered-task failures
         │   ├── telemetry.ts          # OpenTelemetry tracing
         │   ├── database-client.ts    # Postgres client wrapper
         │   ├── query-builder.ts      # SQL for claiming, settlement, registration
@@ -231,6 +231,11 @@ Tables live in the `pgconductor` schema with a `_private_` prefix (`_private_exe
 - A claimed occurrence inserts its successor before the handler runs, through `_private_schedule_next_occurrence()`: it takes a share lock on the queue row, then inserts only if the occurrence is still claimed and not cancelled, and no occurrence of its schedule with a later scheduled time (the dedupe key's timestamp) is still live, which means the schedule was replaced. The successor copies payload, priority, group and metadata
 - Removing schedules (registration, `_private_unschedule()`) holds the queue row lock and deletes pending occurrences, then cancels running ones in a separate statement, which sees occurrences claimed while the delete ran. Replacing a dynamic schedule (`_private_schedule()`, `ctx.schedule()`) holds it too and deletes pending occurrences in a later statement
 - Occurrences of a dynamic schedule (`dynamic::` dedupe keys) run as `pgconductor.invoke` events with their payload, so it is validated like an invocation; static cron triggers run as an event named after the trigger, without payload
+
+**Unregistered Tasks**
+- Registration clears `unregistered_at` on the tasks it registers and sets it on the queue's other task rows (task rows are never deleted, except by `drop_queue()`)
+- The maintenance task fails pending executions whose task has `unregistered_at` older than a day, or has no row and was created more than a day ago, with `task <key> is not registered on queue <queue>`. The day covers a rolling deploy and its rollback (`UNREGISTERED_GRACE_DAYS`)
+- `failUnregisteredExecutions` claims them for a random claimant and settles them as `permanently_failed` with `buildReturnExecutions` in one transaction, so they take the normal terminal path (dead letters, result waiters, waiting ancestors, linked children) and nothing else sees the claim. Settlement left-joins task rows for this reason
 
 **Migrations**
 - `SchemaManager.ensureLatest()` applies each missing migration in its own transaction under the `pgconductor:migrations` advisory lock. Migration 0 creates the ledger (`schema_migrations`), so it is repeatable and its ledger row is inserted `on conflict do nothing`; later migrations check the ledger under the lock

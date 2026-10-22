@@ -14,6 +14,11 @@ function hashToJitter(str: string): number {
 // should be lower for very high steps per task
 const BATCH_SIZE = 1000;
 
+// Executions of a task that registration left out are failed only after this grace: during a
+// rolling deploy, orchestrators of the previous version still run them until they stop, and a
+// rollback registers the task again. A day covers both; afterwards no worker runs them anymore.
+const UNREGISTERED_GRACE_DAYS = 1;
+
 export const createMaintenanceTask = <Queue extends string = "default">(queue: Queue) => {
 	// Add consistent jitter based on queue name to spread load between midnight and 1am
 	const jitterMinutes = hashToJitter(queue);
@@ -38,6 +43,18 @@ export const createMaintenanceTask = <Queue extends string = "default">(queue: Q
 		async (_, ctx) => {
 			const { db, tasks, signal } = ctx;
 
+			let hasMore = true;
+			while (hasMore) {
+				hasMore = await db.failUnregisteredExecutions(
+					{
+						queueName: queue,
+						graceDays: UNREGISTERED_GRACE_DAYS,
+						batchSize: BATCH_SIZE,
+					},
+					{ signal },
+				);
+			}
+
 			// Skip execution cleanup when no tasks have retention settings (check in-memory config)
 			const hasRetention = Array.from(tasks.values()).some(
 				(t) => t.removeOnComplete || t.removeOnFail,
@@ -48,7 +65,7 @@ export const createMaintenanceTask = <Queue extends string = "default">(queue: Q
 
 			// Delete old completed/failed executions based on retention settings
 			// Steps are automatically deleted via CASCADE foreign key
-			let hasMore = true;
+			hasMore = true;
 			while (hasMore) {
 				hasMore = await db.removeExecutions(
 					{
