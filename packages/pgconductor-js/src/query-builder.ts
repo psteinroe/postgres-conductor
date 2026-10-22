@@ -58,6 +58,13 @@ export type RemoveExecutionsArgs = {
 	batchSize: number;
 };
 
+export type ClaimUnregisteredExecutionsArgs = {
+	claimant: string;
+	queueName: string;
+	graceDays: number;
+	batchSize: number;
+};
+
 export type DispatchCustomEventsArgs = {
 	eventIds: string[];
 	orchestratorId: string;
@@ -645,12 +652,13 @@ export class QueryBuilder {
 			for update of e
 		)`);
 		ctes.push(this.sql`task_configs as materialized (
-			select t.queue, t.key, t.max_attempts, t.remove_on_complete_days, t.remove_on_fail_days,
+			-- maintenance settles executions of tasks that have no row
+			select r.queue, r.task_key as key, t.max_attempts, t.remove_on_complete_days, t.remove_on_fail_days,
 				t.dead_letter_queue, t.dead_letter_task_key
 			from (
 				select distinct queue, task_key from valid_results
 			) r
-			join pgconductor._private_tasks t on t.queue = r.queue and t.key = r.task_key
+			left join pgconductor._private_tasks t on t.queue = r.queue and t.key = r.task_key
 		)`);
 		ctes.push(this.sql`completed_candidates as (
 			select * from valid_results where status = 'completed' and not execution_cancelled
@@ -1096,6 +1104,40 @@ export class QueryBuilder {
 				returning 1
 			)
 			select count(*)::int as deleted_count from deleted
+		`;
+	}
+
+	// Pending executions of tasks that the queue's registrations left out, or never included, for
+	// graceDays. The claim is settled in the same transaction, so nothing else sees its claimant.
+	buildClaimUnregisteredExecutions({
+		claimant,
+		queueName,
+		graceDays,
+		batchSize,
+	}: ClaimUnregisteredExecutionsArgs): PendingQuery<
+		{ id: string; queue: string; task_key: string; claim_token: string }[]
+	> {
+		return this.sql<{ id: string; queue: string; task_key: string; claim_token: string }[]>`
+			with claim_clock as materialized (
+				select pgconductor._private_current_time() as now_ts
+			),
+			candidates as (
+				select e.id, e.queue
+				from pgconductor._private_executions e
+				left join pgconductor._private_tasks t on t.key = e.task_key and t.queue = e.queue
+				cross join claim_clock c
+				where e.queue = ${queueName}
+					and e.is_available
+					and (t.unregistered_at < c.now_ts - ${graceDays} * interval '1 day'
+						or t.key is null and e.created_at < c.now_ts - ${graceDays} * interval '1 day')
+				limit ${batchSize}
+				for update of e skip locked
+			)
+			update pgconductor._private_executions e
+			set locked_by = ${claimant}::uuid, locked_at = c.now_ts, claim_token = gen_random_uuid()
+			from candidates, claim_clock c
+			where e.id = candidates.id and e.queue = candidates.queue
+			returning e.id, e.queue, e.task_key, e.claim_token
 		`;
 	}
 
