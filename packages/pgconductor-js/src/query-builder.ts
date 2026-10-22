@@ -1704,7 +1704,8 @@ export class QueryBuilder {
 					subscription.queue,
 					subscription.step_key,
 					source.event_key,
-					source.event_payload
+					source.event_payload,
+					source.created_at
 				from matched_subscriptions matched
 				join pgconductor._private_custom_event_subscriptions subscription
 					on subscription.id = matched.subscription_id
@@ -1740,7 +1741,8 @@ export class QueryBuilder {
 						'status', 'resolved',
 						'event', jsonb_build_object(
 							'name', wait.event_key,
-							'payload', wait.event_payload
+							'payload', wait.event_payload,
+							'emittedAt', wait.created_at
 						)
 					)
 				from selected_waits wait

@@ -37,6 +37,7 @@ describe("waitForEvent API", () => {
 			expectTypeOf(result).toEqualTypeOf<{
 				name: "api.order";
 				payload: { status: "paid" | "pending"; id: string };
+				emittedAt: Date;
 			}>();
 			// @ts-expect-error id is not declared filterable
 			ctx.waitForEvent("bad", { event, filter: { id: ["x"] } });
@@ -49,11 +50,13 @@ describe("waitForEvent API", () => {
 				EventSubscription<{
 					name: "api.order";
 					payload: { status: "paid" | "pending"; id: string };
+					emittedAt: Date;
 				}>
 			>();
 			expectTypeOf(await subscription.wait({ timeout: "24h" })).toEqualTypeOf<{
 				name: "api.order";
 				payload: { status: "paid" | "pending"; id: string };
+				emittedAt: Date;
 			}>();
 			// @ts-expect-error subscriptions do not take a timeout
 			ctx.subscribe("timeout", { event, timeout: "1h" });
@@ -69,9 +72,20 @@ describe("waitForEvent API", () => {
 			expectTypeOf(winner).toEqualTypeOf<
 				| {
 						key: "decision";
-						event: { name: "api.order"; payload: { status: "paid" | "pending"; id: string } };
+						event: {
+							name: "api.order";
+							payload: { status: "paid" | "pending"; id: string };
+							emittedAt: Date;
+						};
 				  }
-				| { key: "reply"; event: { name: "api.reply"; payload: { thread: string; text: string } } }
+				| {
+						key: "reply";
+						event: {
+							name: "api.reply";
+							payload: { thread: string; text: string };
+							emittedAt: Date;
+						};
+				  }
 				| { key: "timeout" }
 			>();
 			// @ts-expect-error branches are subscriptions
@@ -85,7 +99,14 @@ describe("waitForEvent API", () => {
 			});
 			expectTypeOf(toolOrReply).toEqualTypeOf<
 				| { key: "tool"; outcome: ExecutionOutcome }
-				| { key: "reply"; event: { name: "api.reply"; payload: { thread: string; text: string } } }
+				| {
+						key: "reply";
+						event: {
+							name: "api.reply";
+							payload: { thread: string; text: string };
+							emittedAt: Date;
+						};
+				  }
 				| { key: "timeout" }
 			>();
 			expectTypeOf(
@@ -112,7 +133,9 @@ describe("waitForEvent API", () => {
 			>();
 			expectTypeOf(ctx.executionId).toEqualTypeOf<string>();
 			expectTypeOf(ctx.queue).toEqualTypeOf<string>();
+			expectTypeOf(ctx.now()).toEqualTypeOf<Date>();
 		});
+		expectTypeOf(conductor.now).returns.toEqualTypeOf<Promise<Date>>();
 		expect(WaitForEventTimeoutError).toBeDefined();
 	});
 });

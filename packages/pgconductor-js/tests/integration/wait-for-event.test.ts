@@ -161,7 +161,11 @@ describe("waitForEvent", () => {
 			`;
 		expect(step?.result).toEqual({
 			status: "resolved",
-			event: { name: "wait.order", payload: { id: "yes", kind: "match" } },
+			event: {
+				name: "wait.order",
+				payload: { id: "yes", kind: "match" },
+				emittedAt: expect.any(String),
+			},
 		});
 	});
 
@@ -719,6 +723,14 @@ describe("waitForEvent", () => {
 		return row?.result;
 	}
 
+	// A stored waitForAny winner as ctx.waitForAny() returns it
+	async function storedWinner(database: TestDatabase, executionId: string, key: string) {
+		const winner = (await step(database, executionId, key)) as { event?: { emittedAt: string } };
+		return winner.event
+			? { ...winner, event: { ...winner.event, emittedAt: new Date(winner.event.emittedAt) } }
+			: winner;
+	}
+
 	async function suspendedAt(database: TestDatabase, stepKey: string) {
 		await until(async () => {
 			const [row] = await database.sql<{ present: boolean }[]>`
@@ -772,7 +784,11 @@ describe("waitForEvent", () => {
 		expect(claimed[0]).not.toBeNull();
 		expect(await step(database, executionId, "approve:buffered")).toEqual({
 			status: "resolved",
-			event: { name: "wait.order", payload: { id: "click", kind: "match" } },
+			event: {
+				name: "wait.order",
+				payload: { id: "click", kind: "match" },
+				emittedAt: expect.any(String),
+			},
 		});
 		await waiting(database, 0);
 	});
@@ -1009,7 +1025,11 @@ describe("waitForEvent", () => {
 			await database.client.registerEventWait({ ...args, claimToken: second.claim_token }),
 		).toEqual({
 			status: "resolved",
-			event: { name: "wait.order", payload: { id: "claimed", kind: "match" } },
+			event: {
+				name: "wait.order",
+				payload: { id: "claimed", kind: "match" },
+				emittedAt: expect.any(String),
+			},
 		});
 		await waiting(database, 0);
 	});
@@ -1085,7 +1105,11 @@ describe("waitForEvent", () => {
 		});
 		expect(await step(database, executionId, "backoff:wait")).toEqual({
 			status: "resolved",
-			event: { name: "wait.order", payload: { id: "late", kind: "match" } },
+			event: {
+				name: "wait.order",
+				payload: { id: "late", kind: "match" },
+				emittedAt: expect.any(String),
+			},
 		});
 		expect(await runAt()).toEqual(backoff);
 	});
@@ -1138,11 +1162,22 @@ describe("waitForEvent", () => {
 		expect(winners).toEqual({
 			one: {
 				key: "decision",
-				event: { name: "wait.order", payload: { id: "approved", kind: "match", code: "one" } },
+				event: {
+					name: "wait.order",
+					payload: { id: "approved", kind: "match", code: "one" },
+					emittedAt: expect.any(Date),
+				},
 			},
-			two: { key: "reply", event: { name: "wait.reply", payload: { id: "hello", thread: "two" } } },
+			two: {
+				key: "reply",
+				event: {
+					name: "wait.reply",
+					payload: { id: "hello", thread: "two" },
+					emittedAt: expect.any(Date),
+				},
+			},
 		});
-		expect(await step(database, one, "any:one")).toEqual(winners.one);
+		expect(await storedWinner(database, one, "any:one")).toEqual(winners.one);
 		expect(remaining).toEqual({ one: 0, two: 0 });
 		expect(handles).toEqual({
 			one: "resolved",
@@ -1183,7 +1218,7 @@ describe("waitForEvent", () => {
 		await sleep(100);
 
 		for (const [id, executionId] of executions) {
-			expect(outcomes[id]).toEqual([await step(database, executionId, `any:${id}`)]);
+			expect(outcomes[id]).toEqual([await storedWinner(database, executionId, `any:${id}`)]);
 		}
 		await waiting(database, 0);
 	});
@@ -1226,7 +1261,11 @@ describe("waitForEvent", () => {
 		expect(winners).toEqual([
 			{
 				key: "second",
-				event: { name: "wait.order", payload: { id: "earlier", kind: "match", code: "second" } },
+				event: {
+					name: "wait.order",
+					payload: { id: "earlier", kind: "match", code: "second" },
+					emittedAt: expect.any(Date),
+				},
 			},
 		]);
 	});
@@ -1306,7 +1345,11 @@ describe("waitForEvent", () => {
 		await until(async () => winners.length === 2);
 		const first = {
 			key: "reply",
-			event: { name: "wait.reply", payload: { id: "first", thread: "retry" } },
+			event: {
+				name: "wait.reply",
+				payload: { id: "first", thread: "retry" },
+				emittedAt: expect.any(Date),
+			},
 		};
 		expect(winners).toEqual([first, first]);
 	});
@@ -1340,6 +1383,34 @@ describe("waitForEvent", () => {
 		expect(entered).toEqual(["spurious", "spurious", "spurious"]);
 		expect(result).toEqual(["order", "reply"]);
 		await waiting(database, 0);
+	});
+
+	test("emittedAt can be compared with a deadline in database time", async () => {
+		const database = await db();
+		await database.clock.set(new Date("2024-01-01T12:00:00Z"));
+		const deadline = new Date("2024-01-01T13:00:00Z");
+		const outcomes: Record<string, string> = {};
+		const { conductor } = await setup(
+			database,
+			async (id, ctx) => {
+				const approval = await ctx.waitForEvent(`approval:${id}`, {
+					event,
+					filter: { code: [id] },
+				});
+				outcomes[id] = approval.emittedAt <= deadline ? "approved" : "late";
+			},
+			orchestrators,
+		);
+
+		await conductor.invoke({ name: "wait.task" }, { id: "one" });
+		await conductor.invoke({ name: "wait.task" }, { id: "two" });
+		await suspendedAt(database, "approval:one");
+		await suspendedAt(database, "approval:two");
+		await conductor.emit("wait.order", { id: "a", kind: "match", code: "one" });
+		await database.clock.advance("2h");
+		await conductor.emit("wait.order", { id: "b", kind: "match", code: "two" });
+		await until(async () => Object.keys(outcomes).length === 2);
+		expect(outcomes).toEqual({ one: "approved", two: "late" });
 	});
 
 	describe.each(["fake", "real"])("with %s time", (time) => {
@@ -1385,7 +1456,14 @@ describe("waitForEvent", () => {
 			await conductor.invoke({ name: "wait.task" }, { id: "run" });
 			await until(async () => winners.length === 1);
 			expect(winners).toEqual([
-				{ key: "reply", event: { name: "wait.reply", payload: { id: "hello", thread: "t" } } },
+				{
+					key: "reply",
+					event: {
+						name: "wait.reply",
+						payload: { id: "hello", thread: "t" },
+						emittedAt: expect.any(Date),
+					},
+				},
 			]);
 		});
 
@@ -1418,9 +1496,62 @@ describe("waitForEvent", () => {
 			expect(winners).toEqual([
 				{
 					key: "second",
-					event: { name: "wait.order", payload: { id: "earlier", kind: "match", code: "second" } },
+					event: {
+						name: "wait.order",
+						payload: { id: "earlier", kind: "match", code: "second" },
+						emittedAt: expect.any(Date),
+					},
 				},
 			]);
+		});
+
+		test("event waits return the event's creation time, also on replay", async () => {
+			const database = await clockedDb();
+			const received: { direct: Date; any: Date | null }[] = [];
+			const { conductor } = await setup(
+				database,
+				async (_id, ctx) => {
+					const decision = await ctx.subscribe("decision", { event, filter: { code: ["any"] } });
+					const direct = await ctx.waitForEvent("direct", { event, filter: { code: ["direct"] } });
+					const winner = await ctx.waitForAny("any", { decision });
+					received.push({
+						direct: direct.emittedAt,
+						any: winner.key === "decision" ? winner.event.emittedAt : null,
+					});
+					if (received.length === 1) throw new Error("crash after the waits");
+				},
+				orchestrators,
+			);
+
+			const executionId = await conductor.invoke({ name: "wait.task" }, { id: "run" });
+			await suspendedAt(database, "direct");
+			const direct = await conductor.emit("wait.order", { id: "a", kind: "match", code: "direct" });
+			await suspendedAt(database, "any");
+			const any = await conductor.emit("wait.order", { id: "b", kind: "match", code: "any" });
+			await until(async () => {
+				const [row] = await database.sql`
+					select 1 from pgconductor._private_executions
+					where id = ${executionId}::uuid and last_error is not null and locked_by is null
+				`;
+				return row !== undefined;
+			});
+			await database.sql`
+				update pgconductor._private_executions
+				set run_at = pgconductor._private_current_time()
+				where id = ${executionId}::uuid
+			`;
+			await until(async () => received.length === 2);
+
+			const created = async (id: string) => {
+				const [row] = await database.sql<{ created_at: Date }[]>`
+					select created_at from pgconductor._private_executions where id = ${id}::uuid
+				`;
+				return row?.created_at;
+			};
+			const emitted = { direct: await created(direct), any: await created(any) };
+			expect(received[0]?.direct).toBeInstanceOf(Date);
+			expect(received[0]?.any).toBeInstanceOf(Date);
+			expect(received).toEqual([emitted, emitted]);
 		});
 
 		test("ignores an event emitted before the wait and dispatched after it", async () => {

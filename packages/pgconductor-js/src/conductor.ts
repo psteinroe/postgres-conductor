@@ -450,6 +450,15 @@ export class Conductor<
 		});
 	}
 
+	/**
+	 * Read the database time, the time Postgres Conductor uses for run times, deadlines and event
+	 * creation times. Follows the test clock. Each call is a query; `ctx.now()` in a task reads the
+	 * worker's corrected local clock without one.
+	 */
+	async now(): Promise<Date> {
+		return this.db.getDatabaseTime();
+	}
+
 	async cancel(executionId: string, options?: { reason?: string }): Promise<boolean> {
 		return this.db.cancelExecution(executionId, options || {});
 	}

@@ -1288,7 +1288,7 @@ describe("event pipeline", () => {
 		`;
 		expect(step?.result).toEqual({
 			status: "resolved",
-			event: { name: "pipeline.locked-waiter", payload: { id: 1 } },
+			event: { name: "pipeline.locked-waiter", payload: { id: 1 }, emittedAt: expect.any(String) },
 		});
 	}, 30_000);
 
