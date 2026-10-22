@@ -9,6 +9,9 @@ type IDatabaseClient = PublicMethodsOf<DatabaseClient>;
 
 export class MockDatabaseClient implements IDatabaseClient {
 	close = vi.fn(async () => {});
+	withOwnConnection = vi.fn((): DatabaseClient => {
+		throw new Error("MockDatabaseClient has no connection");
+	});
 	registerOrchestrator = vi.fn(async () => ({ shutdown_reason: null }));
 	orchestratorHeartbeat = vi.fn(async () => ({ shutdown_reason: null }));
 	recoverStaleOrchestrators = vi.fn(async () => {});

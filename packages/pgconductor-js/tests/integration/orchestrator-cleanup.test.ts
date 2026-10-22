@@ -2,6 +2,7 @@ import { afterAll, afterEach, beforeAll, test, expect, vi } from "vitest";
 import { TestDatabasePool } from "../fixtures/test-database";
 import type { TestDatabase } from "../fixtures/test-database";
 import { Conductor } from "../../src/conductor";
+import { DatabaseClient } from "../../src/database-client";
 import { Orchestrator } from "../../src/orchestrator";
 import { Deferred } from "../../src/lib/deferred";
 import { defineTask } from "../../src/task-definition";
@@ -18,6 +19,7 @@ beforeAll(async () => {
 
 afterEach(async () => {
 	vi.useRealTimers();
+	vi.restoreAllMocks();
 	await Promise.all(databases.map((db) => db.destroy()));
 	databases.length = 0;
 });
@@ -273,7 +275,50 @@ test("multiple orchestrators cleanup independently", async () => {
 	await sql2.end();
 });
 
-test("a live orchestrator recovers executions locked by a crashed one", async () => {
+// The heartbeat connection opens on a timer
+async function startWithFakeTimers(orch: Orchestrator): Promise<void> {
+	let settled = false;
+	const starting = orch.start();
+	const done = () => {
+		settled = true;
+	};
+	starting.then(done, done);
+	while (!settled) {
+		vi.advanceTimersByTime(0);
+		await new Promise((resolve) => setImmediate(resolve));
+	}
+	await starting;
+}
+
+// Small steps keep the fake time a query takes close to the real time
+async function advance(db: TestDatabase, ms: number, until = () => false): Promise<void> {
+	for (let elapsed = 0; elapsed < ms && !until(); elapsed += 100) {
+		vi.advanceTimersByTime(100);
+		await db.sql`select 1`;
+	}
+}
+
+async function claimAsCrashedOrchestrator(db: TestDatabase, taskKey: string): Promise<string> {
+	const crashedId = await db.registerOrchestrator();
+	const { executions } = await db.client.getExecutions({
+		orchestratorId: crashedId,
+		queueName: "default",
+		batchSize: 1,
+		taskKeys: [taskKey],
+	});
+	expect(executions.length).toBe(1);
+	return crashedId;
+}
+
+async function missHeartbeats(db: TestDatabase, orchestratorId: string, seconds: number) {
+	await db.sql`
+		update pgconductor._private_orchestrators
+		set last_heartbeat_at = now() - ${seconds}::float8 * interval '1 second'
+		where id = ${orchestratorId}::uuid
+	`;
+}
+
+test("an orchestrator recovers executions of one that crashed before it started", async () => {
 	const db = await pool.child();
 	databases.push(db);
 
@@ -290,45 +335,109 @@ test("a live orchestrator recovers executions locked by a crashed one", async ()
 		runs++;
 	});
 
-	await db.client.setFakeTime({ date: new Date("2024-01-01T12:00:00Z") });
 	await db.client.registerWorker({
 		queueName: "default",
 		taskSpecs: [{ key: "orphaned-task", queue: "default", maxAttempts: 3 }],
 		cronSchedules: [],
 		eventSubscriptions: [],
 	});
-	const crashedId = await db.registerOrchestrator();
 	await conductor.invoke(taskDefinition, {});
-	const claimed = (
-		await db.client.getExecutions({
-			orchestratorId: crashedId,
-			queueName: "default",
-			batchSize: 1,
-			taskKeys: ["orphaned-task"],
-		})
-	).executions;
-	expect(claimed.length).toBe(1);
+	const crashedId = await claimAsCrashedOrchestrator(db, "orphaned-task");
+	await missHeartbeats(db, crashedId, 31);
 
-	await db.client.setFakeTime({ date: new Date("2024-01-01T12:10:00Z") });
+	await Orchestrator.create({ conductor, tasks: [task] }).drain();
+
+	expect(runs).toBe(1);
+});
+
+test("a live orchestrator recovers a crashed one within a heartbeat of the stale age", async () => {
+	const db = await pool.child();
+	databases.push(db);
+
+	const taskDefinition = defineTask({ name: "orphaned-task" });
+	const conductor = Conductor.create({
+		sql: db.sql,
+		tasks: TaskSchemas.fromSchema([taskDefinition]),
+		context: {},
+	});
+	await conductor.ensureInstalled();
+
+	let runs = 0;
+	const task = conductor.createTask(taskDefinition, { invocable: true }, async () => {
+		runs++;
+	});
 
 	vi.useFakeTimers();
 	const orch = Orchestrator.create({ conductor, tasks: [task] });
-	await orch.start();
-
-	// recovery runs every 8th heartbeat, one heartbeat per 30s
-	for (let seconds = 0; runs === 0 && seconds < 600; seconds++) {
+	await startWithFakeTimers(orch);
+	for (let seconds = 0; seconds < 30; seconds++) {
 		vi.advanceTimersByTime(1000);
 		await db.sql`select 1`;
 	}
+
+	// Registered after the live orchestrator started, so startup recovery does not see it
+	await conductor.invoke(taskDefinition, {});
+	const crashedId = await claimAsCrashedOrchestrator(db, "orphaned-task");
+	for (let seconds = 0; seconds < 10; seconds++) {
+		vi.advanceTimersByTime(1000);
+		await db.sql`select 1`;
+	}
+	expect(runs).toBe(0);
+
+	await missHeartbeats(db, crashedId, 30);
+	// the next heartbeat recovers it, and the next poll claims it
+	await advance(db, 7000, () => runs > 0);
 	expect(runs).toBe(1);
 
-	const crashed = await db.sql`
-		select id from pgconductor._private_orchestrators where id = ${crashedId}::uuid
-	`;
-	expect(crashed.length).toBe(0);
+	await orch.stop();
+});
+
+test("after missing heartbeats an orchestrator waits the stale age before recovering others", async () => {
+	const db = await pool.child();
+	databases.push(db);
+
+	const taskDefinition = defineTask({ name: "orphaned-task" });
+	const conductor = Conductor.create({
+		sql: db.sql,
+		tasks: TaskSchemas.fromSchema([taskDefinition]),
+		context: {},
+	});
+	await conductor.ensureInstalled();
+
+	let runs = 0;
+	const task = conductor.createTask(taskDefinition, { invocable: true }, async () => {
+		runs++;
+	});
+
+	// An outage of the database for the orchestrator's heartbeat connection
+	let unreachable = false;
+	const heartbeat = DatabaseClient.prototype.orchestratorHeartbeat;
+	vi.spyOn(DatabaseClient.prototype, "orchestratorHeartbeat").mockImplementation(
+		async function (this: DatabaseClient, args, opts) {
+			if (unreachable) throw new Error("connection refused");
+			return heartbeat.call(this, args, opts);
+		},
+	);
+
+	vi.useFakeTimers();
+	const orch = Orchestrator.create({ conductor, tasks: [task] });
+	await startWithFakeTimers(orch);
+	await advance(db, 30_000);
+
+	await conductor.invoke(taskDefinition, {});
+	const crashedId = await claimAsCrashedOrchestrator(db, "orphaned-task");
+	unreachable = true;
+	await advance(db, 20_000);
+	unreachable = false;
+	// Every other orchestrator looks stale, but may still be reconnecting
+	await missHeartbeats(db, crashedId, 60);
+	await advance(db, 25_000);
+	expect(runs).toBe(0);
+
+	await advance(db, 20_000, () => runs > 0);
+	expect(runs).toBe(1);
 
 	await orch.stop();
-	await db.client.clearFakeTime();
 });
 
 test("an orchestrator recovered as stale aborts its running handlers and stops", async () => {
@@ -355,7 +464,7 @@ test("an orchestrator recovered as stale aborts its running handlers and stops",
 
 	vi.useFakeTimers();
 	const orch = Orchestrator.create({ conductor, tasks: [task] });
-	await orch.start();
+	await startWithFakeTimers(orch);
 	await conductor.invoke(taskDefinition, {});
 
 	while (!handlerStarted.isSettled) {
@@ -363,12 +472,8 @@ test("an orchestrator recovered as stale aborts its running handlers and stops",
 		await db.sql`select 1`;
 	}
 
-	await db.sql`
-		update pgconductor._private_orchestrators
-		set last_heartbeat_at = now() - interval '1 hour'
-		where id = ${orch.info.id}::uuid
-	`;
-	await db.client.recoverStaleOrchestrators({ maxAge: "5 minutes" });
+	await missHeartbeats(db, orch.info.id, 3600);
+	await db.client.recoverStaleOrchestrators({ maxAge: "30 seconds" });
 
 	for (let seconds = 0; !orch.isStopped && seconds < 60; seconds++) {
 		vi.advanceTimersByTime(1000);
@@ -399,11 +504,9 @@ test.each(["stop()", "a shutdown signal"])(
 			await finishHandler.promise;
 		});
 
-		await db.client.setFakeTime({ date: new Date("2024-01-01T12:00:00Z") });
-
 		vi.useFakeTimers();
 		const orch = Orchestrator.create({ conductor, tasks: [task] });
-		await orch.start();
+		await startWithFakeTimers(orch);
 		await conductor.invoke(taskDefinition, {});
 
 		while (!handlerStarted.isSettled) {
@@ -420,26 +523,25 @@ test.each(["stop()", "a shutdown signal"])(
 				where id = ${orch.info.id}::uuid
 			`;
 		}
-		for (let seconds = 0; seconds < 30; seconds++) {
+		for (let seconds = 0; seconds < 10; seconds++) {
 			vi.advanceTimersByTime(1000);
 			await db.sql`select 1`;
 		}
 		expect(orch.isShuttingDown).toBe(true);
 
-		await db.client.setFakeTime({ date: new Date("2024-01-01T12:10:00Z") });
+		const lastHeartbeat = async () => {
+			const [row] = await db.sql<{ last_heartbeat_at: Date }[]>`
+				select last_heartbeat_at from pgconductor._private_orchestrators where id = ${orch.info.id}::uuid
+			`;
+			return row?.last_heartbeat_at.getTime() || 0;
+		};
+		const heartbeatAtShutdown = await lastHeartbeat();
+		// longer than the stale age
 		for (let seconds = 0; seconds < 60; seconds++) {
 			vi.advanceTimersByTime(1000);
 			await db.sql`select 1`;
 		}
-
-		const [row] = await db.sql<{ last_heartbeat_at: Date }[]>`
-			select last_heartbeat_at from pgconductor._private_orchestrators where id = ${orch.info.id}::uuid
-		`;
-		expect(row?.last_heartbeat_at.getTime()).toBeGreaterThanOrEqual(
-			new Date("2024-01-01T12:10:00Z").getTime(),
-		);
-
-		await db.client.recoverStaleOrchestrators({ maxAge: "5 minutes" });
+		expect(await lastHeartbeat()).toBeGreaterThan(heartbeatAtShutdown);
 		const locked = await db.sql`
 			select id from pgconductor._private_executions
 			where task_key = 'slow-task' and locked_by = ${orch.info.id}::uuid
@@ -458,7 +560,61 @@ test.each(["stop()", "a shutdown signal"])(
 			where task_key = 'slow-task'
 		`;
 		expect(execution?.completed).toBe(true);
-
-		await db.client.clearFakeTime();
 	},
 );
+
+test("heartbeats keep running while handlers hold every pool connection", async () => {
+	const db = await pool.child();
+	databases.push(db);
+
+	const taskDefinition = defineTask({ name: "holding-task" });
+	const conductor = Conductor.create({
+		sql: db.sql,
+		tasks: TaskSchemas.fromSchema([taskDefinition]),
+		context: {},
+	});
+	await conductor.ensureInstalled();
+
+	const handlerStarted = new Deferred<void>();
+	const finishHandler = new Deferred<void>();
+	const task = conductor.createTask(taskDefinition, { invocable: true }, async () => {
+		// the pool has one connection
+		await db.sql.begin(async () => {
+			handlerStarted.resolve();
+			await finishHandler.promise;
+		});
+	});
+
+	// connects before timers are faked
+	const observer = postgres(db.url, { max: 1 });
+	await observer`select 1`;
+
+	vi.useFakeTimers();
+	const orch = Orchestrator.create({ conductor, tasks: [task] });
+	await startWithFakeTimers(orch);
+	await conductor.invoke(taskDefinition, {});
+
+	while (!handlerStarted.isSettled) {
+		vi.advanceTimersByTime(1000);
+		await observer`select 1`;
+	}
+
+	const lastHeartbeat = async () => {
+		const [row] = await observer<{ last_heartbeat_at: Date }[]>`
+			select last_heartbeat_at from pgconductor._private_orchestrators where id = ${orch.info.id}::uuid
+		`;
+		return row?.last_heartbeat_at.getTime() || 0;
+	};
+	const before = await lastHeartbeat();
+	// longer than the stale age
+	for (let seconds = 0; seconds < 60; seconds++) {
+		vi.advanceTimersByTime(1000);
+		await observer`select 1`;
+	}
+	const after = await lastHeartbeat();
+	await observer.end();
+
+	finishHandler.resolve();
+	await orch.stop();
+	expect(after).toBeGreaterThan(before);
+});
