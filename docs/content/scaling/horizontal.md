@@ -78,6 +78,16 @@ The rule exists because registration owns the whole queue. When a worker starts,
 
 **Rolling deploys:** while old and new replicas overlap, an old replica that restarts registers the old task set again. That removes the cron schedules and event subscriptions that only the new version declares, until a replica of the new version starts again. If that happens after the rollout has finished, restart one replica of the new version.
 
+## Crash Recovery
+
+Every orchestrator heartbeats every 5 seconds. An orchestrator without a heartbeat for 30 seconds is stale: the next orchestrator to heartbeat removes it and releases its executions, which other workers then claim and retry. A crashed process's executions run again within about 35 seconds. An orchestrator also recovers stale ones when it starts, so this works when every process crashed too.
+
+Heartbeats run on a connection of the orchestrator's own, so handlers that hold every connection of the pool, such as long transactions, do not delay them. Each orchestrator keeps this one extra connection open.
+
+A heartbeat can still be late when the process is blocked: a handler that keeps the event loop busy for 30 seconds makes its orchestrator look stale. Other orchestrators then recover it, its handlers are aborted, its executions run again elsewhere, and it stops. Keep CPU-heavy work off the event loop, for example in worker threads.
+
+After a database outage, every orchestrator's last heartbeat is old. An orchestrator recovers others only once it has heartbeated without failure for 30 seconds, so the others have that long to reconnect.
+
 ## When to Scale Horizontally
 
 **Scale up (more processes) when:**

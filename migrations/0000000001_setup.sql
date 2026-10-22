@@ -392,6 +392,11 @@ begin
   )
   select array_agg(id) into v_ids from deleted;
 
+  -- recovery runs after every heartbeat and usually finds no one, so skip the scan of every partition
+  if v_ids is null then
+    return;
+  end if;
+
   -- cancelled executions are reclaimed and settled like any other result
   update pgconductor._private_executions e
   set

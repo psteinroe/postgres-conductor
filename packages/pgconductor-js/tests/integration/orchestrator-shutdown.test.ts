@@ -119,9 +119,9 @@ test("stop() waits for cleanup to complete", async () => {
 	let cleanupCompleted = false;
 
 	const originalCleanup = (orch as any).cleanup.bind(orch);
-	(orch as any).cleanup = async () => {
+	(orch as any).cleanup = async (...args: unknown[]) => {
 		cleanupStarted = true;
-		await originalCleanup();
+		await originalCleanup(...args);
 		cleanupCompleted = true;
 	};
 
@@ -154,6 +154,8 @@ test("stop() waits for an in-flight heartbeat and nothing runs after cleanup", a
 	const onUnhandled = (err: unknown) => unhandled.push(err);
 	process.on("unhandledRejection", onUnhandled);
 
+	// heartbeats run on the patched client
+	conductor.db.withOwnConnection = () => conductor.db;
 	const heartbeat = conductor.db.orchestratorHeartbeat.bind(conductor.db);
 	const heartbeatStarted = new Deferred<void>();
 	const releaseHeartbeat = new Deferred<void>();

@@ -1,4 +1,5 @@
 import postgres, { type Sql } from "postgres";
+import * as assert from "./lib/assert.js";
 import { waitFor } from "./lib/wait-for.js";
 import type { Migration } from "./migration-store.js";
 import {
@@ -293,7 +294,7 @@ const BACKOFF_MULTIPLIER = 2;
 
 type DatabaseClientOptions =
 	| { connectionString: string; sql?: never; logger: Logger }
-	| { sql: Sql; connectionString?: never; logger: Logger };
+	| { sql: Sql; connectionString?: never; logger: Logger; ownsSql?: boolean };
 
 type QueryOptions = {
 	label?: string;
@@ -306,6 +307,11 @@ type QueryOptions = {
 type QueryMethodOptions = Pick<QueryOptions, "signal">;
 
 type ErrorWithOptionalCode = Error & { code?: string };
+
+// postgres.js takes the options it parsed as they are, as it does for its own listen connection
+function isParsedOptions(options: object): options is postgres.Options<{}> {
+	return "shared" in options;
+}
 
 export type SetFakeTimeArgs = {
 	date: Date;
@@ -320,7 +326,7 @@ export class DatabaseClient {
 	constructor(options: DatabaseClientOptions) {
 		if ("sql" in options && options.sql) {
 			this.sql = options.sql;
-			this.ownsSql = false;
+			this.ownsSql = options.ownsSql || false;
 		} else if ("connectionString" in options && options.connectionString) {
 			this.sql = postgres(options.connectionString);
 			this.ownsSql = true;
@@ -334,6 +340,17 @@ export class DatabaseClient {
 			component: "DatabaseClient",
 		});
 		this.builder = new QueryBuilder(this.sql);
+	}
+
+	/** A client on a connection of its own, so its queries never wait for a busy pool; `close()` ends it */
+	withOwnConnection(): DatabaseClient {
+		const options: object = this.sql.options;
+		assert.ok(isParsedOptions(options));
+		return new DatabaseClient({
+			sql: postgres({ ...options, max: 1 }),
+			logger: this.logger,
+			ownsSql: true,
+		});
 	}
 
 	async close(): Promise<void> {
