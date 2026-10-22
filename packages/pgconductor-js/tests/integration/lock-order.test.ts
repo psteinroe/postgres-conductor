@@ -113,7 +113,6 @@ describe("lock order (Postgres integration)", () => {
 			settle(b.sql, ORCH_B, [
 				{
 					execution_id: C,
-					queue: "default",
 					task_key: "child",
 					claim_token: tokenC,
 					status: "completed",
@@ -133,7 +132,6 @@ describe("lock order (Postgres integration)", () => {
 			settle(b.sql, ORCH_B, [
 				{
 					execution_id: C,
-					queue: "default",
 					task_key: "child",
 					claim_token: tokenC,
 					status: "permanently_failed",
@@ -171,7 +169,6 @@ describe("lock order (Postgres integration)", () => {
 				settle(b.sql, ORCH_B, [
 					{
 						execution_id: C,
-						queue: "default",
 						task_key: "linked",
 						claim_token: tokenC,
 						status: "completed",
@@ -222,7 +219,6 @@ describe("lock order (Postgres integration)", () => {
 			settle(b.sql, ORCH_B, [
 				{
 					execution_id: Y,
-					queue: "default",
 					task_key: "child",
 					claim_token: tokenY,
 					status: "completed",

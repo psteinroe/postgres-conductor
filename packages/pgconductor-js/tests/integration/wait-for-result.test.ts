@@ -296,10 +296,10 @@ describe("ctx.waitForResult and execution branches (Postgres integration)", () =
 			await registered.promise;
 			const settling = database.client.returnExecutions({
 				orchestratorId,
+				queueName: "default",
 				results: [
 					{
 						execution_id: workId,
-						queue: "default",
 						task_key: "work",
 						claim_token: claimToken(workId),
 						status: "completed",
@@ -361,10 +361,10 @@ describe("ctx.waitForResult and execution branches (Postgres integration)", () =
 
 		await database.client.returnExecutions({
 			orchestratorId,
+			queueName: "default",
 			results: [
 				{
 					execution_id: waiterId,
-					queue: "default",
 					task_key: "work",
 					claim_token: claimToken(waiterId),
 					status: "completed",
@@ -372,7 +372,6 @@ describe("ctx.waitForResult and execution branches (Postgres integration)", () =
 				},
 				{
 					execution_id: awaitedId,
-					queue: "default",
 					task_key: "waiter",
 					claim_token: claimToken(awaitedId),
 					status: "completed",

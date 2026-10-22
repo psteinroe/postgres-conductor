@@ -113,9 +113,13 @@ export async function openSession(db: TestDatabase): Promise<Session> {
 	};
 }
 
-// The settlement statement a worker flushes, run on the given session
+// The settlement statement a worker of the default queue flushes, run on the given session
 export function settle(sql: Sql, orchestratorId: string, results: ExecutionResult[]) {
-	return new QueryBuilder(sql).buildReturnExecutions({ orchestratorId, results });
+	return new QueryBuilder(sql).buildReturnExecutions({
+		orchestratorId,
+		queueName: "default",
+		results,
+	});
 }
 
 // Barrier: resolves once `waiter` waits for a lock held by `holder`
