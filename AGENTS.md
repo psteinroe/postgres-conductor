@@ -237,6 +237,11 @@ Tables live in the `pgconductor` schema with a `_private_` prefix (`_private_exe
 - A database newer than the code makes `conductor.ensureInstalled()` throw and an orchestrator refuse to start
 - A breaking migration (`--!breaking`) signals older orchestrators to shut down and waits until none is registered (at most 4h). Its transaction then locks `_private_orchestrators` in share mode and is admitted only if still none is registered, so an older orchestrator registering concurrently waits for the commit, and `registerOrchestrator` then reports `newer_migration_detected`
 
+**Execution Status**
+- `getExecution` (`buildGetExecution`) derives `waiting` from existing columns: a child wait (`waiting_on_execution_id`), an event, result or signal wait (`waiting_step_key` without a child), or a sleep, while `run_at` is still ahead
+- A sleep stores its wake-up time as its step result (`{until}`, in settlement's `released_steps`), and an execution sleeps while its `run_at` equals it, so a retry, window release or re-invoke that moves `run_at` ends the sleep
+- `pgconductor.queue_stats` counts per queue from the partial indexes (`is_available`, active concurrency, `failed_at`), so its cost grows with unfinished executions, not history. It reads the time once in a materialized CTE and compares `failed_at` against a scalar subquery: a volatile `_private_current_time()` in a filter runs per row, and a joined time is no index condition
+
 **Infinity Pattern**
 - Postgres `'infinity'::timestamptz` for indefinite waiting
 - Used when `ctx.invokeAndWait()` is called without timeout

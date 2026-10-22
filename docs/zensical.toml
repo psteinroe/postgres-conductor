@@ -84,6 +84,7 @@ nav = [
     { "Horizontal Scaling" = "scaling/horizontal.md" },
     { "Live Migrations" = "scaling/live-migrations.md" },
     { "Maintenance Task" = "scaling/maintenance.md" },
+    { "Monitoring" = "scaling/monitoring.md" },
   ]},
   { "API Reference" = [
     { "Conductor" = "api/conductor.md" },

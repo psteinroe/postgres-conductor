@@ -42,7 +42,7 @@ describe("execution result types", () => {
 			Promise<ExecutionInfo<{ url: string }> | null>
 		>();
 		expectTypeOf<ExecutionInfo["status"]>().toEqualTypeOf<
-			"pending" | "running" | "completed" | "failed" | "cancelled"
+			"pending" | "running" | "waiting" | "completed" | "failed" | "cancelled"
 		>();
 		expectTypeOf<ExecutionInfo["result"]>().toEqualTypeOf<unknown>();
 	});
