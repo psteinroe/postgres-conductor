@@ -3,7 +3,7 @@ import type { ReturnExecutionsArgs } from "./database-client.js";
 import * as assert from "./lib/assert.js";
 import type { TraceContextCarrier } from "./telemetry.js";
 import type {
-	ExecutionInfo,
+	ExecutionInfoRow,
 	ExecutionSpec,
 	EventFilterTerm,
 	EventSubscriptionSpec,
@@ -698,7 +698,11 @@ export class QueryBuilder {
 			where status in ('failed', 'permanently_failed') or execution_cancelled
 		)`);
 		ctes.push(this.sql`released_results as (
-			select * from valid_results where status = 'released' and not execution_cancelled
+			select r.*,
+				case when r.reschedule_in_ms = -1 then 'infinity'::timestamptz
+					else nt.ts + coalesce(r.reschedule_in_ms, 0) * interval '1 millisecond' end as run_at
+			from valid_results r, now_ts nt
+			where r.status = 'released' and not r.execution_cancelled
 		)`);
 		ctes.push(this.sql`invoke_child_data as (
 			select * from valid_results where status = 'invoke_child' and not execution_cancelled
@@ -968,7 +972,7 @@ export class QueryBuilder {
 
 		ctes.push(this.sql`released_steps as (
 			insert into pgconductor._private_steps (execution_id, queue, key, result)
-			select execution_id, queue, step_key, null::jsonb from released_results
+			select execution_id, queue, step_key, jsonb_build_object('until', run_at) from released_results
 			where step_key is not null
 			on conflict (execution_id, key) do nothing
 			returning execution_id
@@ -976,10 +980,9 @@ export class QueryBuilder {
 		ctes.push(this.sql`updated_released as (
 			update pgconductor._private_executions e
 			set attempts = greatest(e.attempts - 1, 0),
-				run_at = case when r.reschedule_in_ms = -1 then 'infinity'::timestamptz
-					else nt.ts + coalesce(r.reschedule_in_ms, 0) * interval '1 millisecond' end,
+				run_at = r.run_at,
 				locked_by = null, locked_at = null
-			from now_ts nt, released_results r
+			from released_results r
 			where e.id = r.execution_id and e.queue = r.queue
 				and e.locked_by = ${orchestratorId}::uuid
 			returning e.id
@@ -1279,21 +1282,40 @@ export class QueryBuilder {
 		`;
 	}
 
-	buildGetExecution({ executionId, task }: GetExecutionArgs): PendingQuery<ExecutionInfo[]> {
-		return this.sql<ExecutionInfo[]>`
-			select id, task_key as "taskKey", queue,
+	buildGetExecution({ executionId, task }: GetExecutionArgs): PendingQuery<ExecutionInfoRow[]> {
+		return this.sql<ExecutionInfoRow[]>`
+			select e.id, e.task_key as "taskKey", e.queue,
 				case
-					when completed_at is not null then 'completed'
-					when failed_at is not null and cancelled then 'cancelled'
-					when failed_at is not null then 'failed'
-					when locked_by is not null then 'running'
+					when e.completed_at is not null then 'completed'
+					when e.failed_at is not null and e.cancelled then 'cancelled'
+					when e.failed_at is not null then 'failed'
+					when e.locked_by is not null then 'running'
+					when w.type is not null then 'waiting'
 					else 'pending'
 				end as status,
-				result, last_error as error, attempts, created_at as "createdAt",
-				completed_at as "completedAt", failed_at as "failedAt"
-			from pgconductor._private_executions
-			where id = ${executionId}::uuid
-				${task ? this.sql`and task_key = ${task.key}::text and queue = ${task.queue}::text` : this.sql``}
+				case when w.type is not null then jsonb_build_object(
+					'type', w.type, 'stepKey', w.step_key, 'executionId', e.waiting_on_execution_id
+				) end as "waitingFor",
+				case when w.type is not null then nullif(e.run_at, 'infinity') end as "waitingUntil",
+				e.result, e.last_error as error, e.attempts, e.created_at as "createdAt",
+				e.completed_at as "completedAt", e.failed_at as "failedAt"
+			from pgconductor._private_executions e
+			-- a sleep stores its wake-up time, so a later retry or release that moves run_at ends it
+			left join lateral (
+				select case when e.waiting_on_execution_id is not null then 'child' else 'wait' end as type,
+					e.waiting_step_key as step_key
+				where e.waiting_step_key is not null
+				union all
+				select 'sleep', s.key
+				from pgconductor._private_steps s
+				where e.waiting_step_key is null
+					and s.execution_id = e.id
+					and (s.result->>'until')::timestamptz = e.run_at
+				limit 1
+			) w on e.locked_by is null and e.completed_at is null and e.failed_at is null
+				and e.run_at > pgconductor._private_current_time()
+			where e.id = ${executionId}::uuid
+				${task ? this.sql`and e.task_key = ${task.key}::text and e.queue = ${task.queue}::text` : this.sql``}
 		`;
 	}
 

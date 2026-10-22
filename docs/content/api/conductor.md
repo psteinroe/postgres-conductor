@@ -262,7 +262,13 @@ Returns `null` if the ID is unknown or the execution was removed by its [retenti
   id: string;
   taskKey: string;
   queue: string;
-  status: "pending" | "running" | "completed" | "failed" | "cancelled";
+  status: "pending" | "running" | "waiting" | "completed" | "failed" | "cancelled";
+  waitingFor: {               // set while waiting
+    type: "sleep" | "child" | "wait";
+    stepKey: string;          // key of the ctx.sleep(), ctx.invokeAndWait() or wait call
+    executionId: string | null; // the awaited child of a "child" wait
+    until: Date | null;       // wake-up time or deadline, null without one
+  } | null;
   result: TResult | null;     // return value, set when completed
   error: string | null;       // last attempt's error, or the cancellation reason
   attempts: number;
@@ -272,7 +278,7 @@ Returns `null` if the ID is unknown or the execution was removed by its [retenti
 }
 ```
 
-`pending` covers executions that wait for their first attempt, a retry, a sleep, a child or an event. `cancelled` is reported once the cancellation has settled; until then a running execution stays `running`.
+`waiting` covers a suspended execution: `sleep` while it sleeps in `ctx.sleep()`, `child` while it waits on a child of `ctx.invokeAndWait()`, and `wait` while it waits in `ctx.waitForEvent()`, `ctx.waitForResult()` or `ctx.waitForAny()` for an event, a result or a signal. Once the sleep ends or the wait resolves or times out, it is `pending` until a worker claims it. `pending` covers everything else that has not started its next attempt: its first attempt, a retry after a backoff, a delayed start or a time window. `cancelled` is reported once the cancellation has settled; until then a running execution stays `running`.
 
 ## conductor.waitForResult()
 
@@ -290,7 +296,7 @@ const result = await conductor.waitForResult(
 );
 ```
 
-Resolves with the return value of a completed execution. The timeout also cancels a read in flight, so a blocked database cannot delay the rejection, and `timeout: 0` rejects at once. Rejects with the error message if the execution failed or was cancelled, and rejects if the execution does not exist. The result is only available while the execution exists: with `removeOnComplete: true` the execution is removed when it completes, so `waitForResult` rejects with a not found error.
+Resolves with the return value of a completed execution and keeps polling while it is pending, running or waiting. The timeout also cancels a read in flight, so a blocked database cannot delay the rejection, and `timeout: 0` rejects at once. Rejects with the error message if the execution failed or was cancelled, and rejects if the execution does not exist. The result is only available while the execution exists: with `removeOnComplete: true` the execution is removed when it completes, so `waitForResult` rejects with a not found error.
 
 Inside a task, use [`ctx.waitForResult()`](task-context.md#ctxwaitforresult) instead: it suspends the task rather than polling and returns failures and cancellations as values.
 

@@ -369,6 +369,49 @@ create trigger manage_queue_partition_trigger
 -- create default queue (trigger will create its partition)
 insert into pgconductor._private_queues (name) values ('default');
 
+-- execution counts per queue. each count reads one partial index per partition, so the cost
+-- grows with unfinished executions and failures of the last hour, not with history.
+-- suspended executions are available but scheduled later: sleeping, waiting on a child, event,
+-- result or signal, backing off before a retry, or delayed
+create view pgconductor.queue_stats as
+with clock as materialized (
+    select pgconductor._private_current_time() as ts
+),
+available as (
+    select e.queue,
+        count(*) filter (where e.run_at <= clock.ts) as ready,
+        min(e.run_at) filter (where e.run_at <= clock.ts) as oldest_ready_at,
+        count(*) filter (where e.run_at > clock.ts) as suspended
+    from pgconductor._private_executions e, clock
+    where e.is_available
+    group by e.queue
+),
+running as (
+    select e.queue, count(*)
+    from pgconductor._private_executions e
+    where e.locked_at is not null and e.failed_at is null and e.completed_at is null
+    group by e.queue
+),
+failed as (
+    select e.queue, count(*)
+    from pgconductor._private_executions e
+    where e.failed_at between (select ts from clock) - interval '1 hour' and (select ts from clock)
+      and not e.cancelled
+    group by e.queue
+)
+select
+    q.name as queue,
+    coalesce(available.ready, 0) as ready,
+    clock.ts - available.oldest_ready_at as oldest_ready_age,
+    coalesce(running.count, 0) as running,
+    coalesce(available.suspended, 0) as suspended,
+    coalesce(failed.count, 0) as failed_last_hour
+from pgconductor._private_queues q
+cross join clock
+left join available on available.queue = q.name
+left join running on running.queue = q.name
+left join failed on failed.queue = q.name;
+
 -- deletes an orchestrator by id, or those whose last heartbeat is older than p_max_age, and
 -- releases their executions. a claim locks its owner row, so the delete waits for claims in
 -- flight, and the release runs as a second statement whose snapshot includes them.

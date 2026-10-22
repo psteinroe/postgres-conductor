@@ -49,6 +49,7 @@ export type {
 	ExecutionInfo,
 	ExecutionOutcome,
 	ExecutionStatus,
+	ExecutionWait,
 	JsonValue,
 	Payload,
 } from "./database-client.js";

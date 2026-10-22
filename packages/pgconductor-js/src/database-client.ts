@@ -77,13 +77,32 @@ export type DeadLetterMetadata = {
 	failedAt: Date;
 };
 
-export type ExecutionStatus = "pending" | "running" | "completed" | "failed" | "cancelled";
+export type ExecutionStatus =
+	| "pending"
+	| "running"
+	| "waiting"
+	| "completed"
+	| "failed"
+	| "cancelled";
+
+/** What a waiting execution waits for */
+export type ExecutionWait = {
+	/** `wait` covers events, results and signals */
+	type: "sleep" | "child" | "wait";
+	stepKey: string;
+	/** The child of a `child` wait */
+	executionId: string | null;
+	/** Wake-up time or deadline, null without one */
+	until: Date | null;
+};
 
 export type ExecutionInfo<TResult = unknown> = {
 	id: string;
 	taskKey: string;
 	queue: string;
 	status: ExecutionStatus;
+	/** Set while the status is `waiting` */
+	waitingFor: ExecutionWait | null;
 	/** Return value of a completed execution */
 	result: TResult | null;
 	/** Error of the last failed attempt, or the cancellation reason */
@@ -92,6 +111,11 @@ export type ExecutionInfo<TResult = unknown> = {
 	createdAt: Date;
 	completedAt: Date | null;
 	failedAt: Date | null;
+};
+
+export type ExecutionInfoRow = Omit<ExecutionInfo, "waitingFor"> & {
+	waitingFor: Omit<ExecutionWait, "until"> | null;
+	waitingUntil: Date | null;
 };
 
 /** How an execution settled, as `ctx.waitForResult()` and `ctx.waitForAny()` return it. */
@@ -653,7 +677,9 @@ export class DatabaseClient {
 			},
 			{ label: "getExecution", ...opts },
 		);
-		return rows[0] || null;
+		if (!rows[0]) return null;
+		const { waitingFor, waitingUntil, ...execution } = rows[0];
+		return { ...execution, waitingFor: waitingFor && { ...waitingFor, until: waitingUntil } };
 	}
 
 	async returnExecutions(args: ReturnExecutionsArgs, opts?: QueryMethodOptions): Promise<void> {
