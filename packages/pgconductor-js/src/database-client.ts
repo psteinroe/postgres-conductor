@@ -133,12 +133,13 @@ export type ExecutionResult =
 
 export type ReturnExecutionsArgs = {
 	orchestratorId: string;
+	/** The queue of every settled execution */
+	queueName: string;
 	results: ExecutionResult[];
 };
 
 export type ExecutionCompleted = {
 	execution_id: string;
-	queue: string;
 	task_key: string;
 	claim_token: string;
 	status: "completed";
@@ -149,7 +150,6 @@ export type ExecutionCompleted = {
 
 export type ExecutionFailed = {
 	execution_id: string;
-	queue: string;
 	task_key: string;
 	claim_token: string;
 	status: "failed";
@@ -158,7 +158,6 @@ export type ExecutionFailed = {
 
 export type ExecutionReleased = {
 	execution_id: string;
-	queue: string;
 	task_key: string;
 	claim_token: string;
 	status: "released";
@@ -168,7 +167,6 @@ export type ExecutionReleased = {
 
 export type ExecutionPermamentlyFailed = {
 	execution_id: string;
-	queue: string;
 	task_key: string;
 	claim_token: string;
 	status: "permanently_failed";
@@ -178,7 +176,6 @@ export type ExecutionPermamentlyFailed = {
 export type ExecutionInvokeChild = {
 	group?: string | null;
 	execution_id: string;
-	queue: string;
 	task_key: string;
 	claim_token: string;
 	status: "invoke_child";

@@ -113,11 +113,11 @@ describe("event pipeline", () => {
 		`;
 		await db.client.returnExecutions({
 			orchestratorId,
+			queueName: INTERNAL_QUEUE,
 			results: [
 				{
 					execution_id: eventId,
 					claim_token: source?.claim_token || "",
-					queue: INTERNAL_QUEUE,
 					task_key: DISPATCH_TASK,
 					status: "completed",
 				},
@@ -1312,11 +1312,11 @@ describe("event pipeline", () => {
 		if (!failedDestination) throw new Error("destination was not claimed");
 		await db.client.returnExecutions({
 			orchestratorId: destinationOwner,
+			queueName: failedDestination.queue,
 			results: [
 				{
 					execution_id: failedDestination.id,
 					claim_token: failedDestination.claim_token,
-					queue: failedDestination.queue,
 					task_key: failedDestination.task_key,
 					status: "failed",
 					error: "destination failed",
@@ -1351,11 +1351,11 @@ describe("event pipeline", () => {
 		if (!completedDestination) throw new Error("second destination was not claimed");
 		await db.client.returnExecutions({
 			orchestratorId: completionOwner,
+			queueName: completedDestination.queue,
 			results: [
 				{
 					execution_id: completedDestination.id,
 					claim_token: completedDestination.claim_token,
-					queue: completedDestination.queue,
 					task_key: completedDestination.task_key,
 					status: "completed",
 				},

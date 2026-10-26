@@ -70,7 +70,6 @@ describe("cancellation cascades (Postgres integration)", () => {
 		await settle(a.sql, ORCH_A, [
 			{
 				execution_id: L,
-				queue: "default",
 				task_key: "linked",
 				claim_token: tokenL,
 				status: "invoke_child",
@@ -96,7 +95,6 @@ describe("cancellation cascades (Postgres integration)", () => {
 				settle(b.sql, ORCH_B, [
 					{
 						execution_id: P,
-						queue: "default",
 						task_key: "parent",
 						claim_token: tokenP,
 						status: "permanently_failed",
@@ -136,7 +134,6 @@ describe("cancellation cascades (Postgres integration)", () => {
 		await settle(db.sql, ORCH_A, [
 			{
 				execution_id: P,
-				queue: "default",
 				task_key: "parent",
 				claim_token: token,
 				status: "permanently_failed",
@@ -144,7 +141,6 @@ describe("cancellation cascades (Postgres integration)", () => {
 			},
 			{
 				execution_id: sleeping,
-				queue: "default",
 				task_key: "linked",
 				claim_token: token,
 				status: "released",
@@ -153,7 +149,6 @@ describe("cancellation cascades (Postgres integration)", () => {
 			},
 			{
 				execution_id: completing,
-				queue: "default",
 				task_key: "linked",
 				claim_token: token,
 				status: "completed",

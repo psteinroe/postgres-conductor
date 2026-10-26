@@ -33,11 +33,12 @@ describe("execution foundations", () => {
 	}
 
 	function grouped(
-		orchestratorId: string,
+		claimed: { locked_by: string; queue: string },
 		result: Parameters<TestDatabase["client"]["returnExecutions"]>[0]["results"][number],
 	) {
 		return {
-			orchestratorId,
+			orchestratorId: claimed.locked_by,
+			queueName: claimed.queue,
 			results: [result],
 		};
 	}
@@ -111,19 +112,17 @@ describe("execution foundations", () => {
 		if (!first || !second) throw new Error("expected both executions to be claimed");
 
 		await db.client.returnExecutions(
-			grouped(first.locked_by, {
+			grouped(first, {
 				execution_id: first.id,
 				claim_token: first.claim_token,
-				queue: first.queue,
 				task_key: first.task_key,
 				status: "completed",
 			}),
 		);
 		await db.client.returnExecutions(
-			grouped(second.locked_by, {
+			grouped(second, {
 				execution_id: second.id,
 				claim_token: second.claim_token,
-				queue: second.queue,
 				task_key: second.task_key,
 				status: "completed",
 			}),
@@ -322,11 +321,11 @@ describe("execution foundations", () => {
 
 		await db.client.returnExecutions({
 			orchestratorId: parent.locked_by,
+			queueName: parent.queue,
 			results: [
 				{
 					execution_id: parent.id,
 					claim_token: parent.claim_token,
-					queue: parent.queue,
 					task_key: parent.task_key,
 					status: "invoke_child",
 					timeout_ms: 5000,
@@ -357,11 +356,11 @@ describe("execution foundations", () => {
 
 		await db.client.returnExecutions({
 			orchestratorId: child.locked_by,
+			queueName: child.queue,
 			results: [
 				{
 					execution_id: child.id,
 					claim_token: child.claim_token,
-					queue: child.queue,
 					task_key: child.task_key,
 					status: "permanently_failed",
 					error: "child failed",
@@ -412,11 +411,11 @@ describe("execution foundations", () => {
 
 		await db.client.returnExecutions({
 			orchestratorId: parent.locked_by,
+			queueName: parent.queue,
 			results: [
 				{
 					execution_id: parent.id,
 					claim_token: parent.claim_token,
-					queue: parent.queue,
 					task_key: parent.task_key,
 					status: "invoke_child",
 					timeout_ms: "infinity",
@@ -439,11 +438,11 @@ describe("execution foundations", () => {
 		if (!child) throw new Error("expected child claim");
 		await db.client.returnExecutions({
 			orchestratorId: child.locked_by,
+			queueName: child.queue,
 			results: [
 				{
 					execution_id: child.id,
 					claim_token: child.claim_token,
-					queue: child.queue,
 					task_key: child.task_key,
 					status: "permanently_failed",
 					error: "child failed",
@@ -458,6 +457,100 @@ describe("execution foundations", () => {
 		`;
 		expect(outcome[0]?.failed_at).not.toBeNull();
 		expect(outcome[0]?.last_error).toBe("Child execution failed: child failed");
+	});
+
+	test("fails a completed child whose parent no longer waits on it", async () => {
+		const db = await database();
+		await db.client.registerWorker({
+			queueName: "parent-queue",
+			taskSpecs: [{ key: "parent", queue: "parent-queue" }],
+			cronSchedules: [],
+			eventSubscriptions: [],
+		});
+		await db.client.registerWorker({
+			queueName: "child-queue",
+			taskSpecs: [{ key: "child", queue: "child-queue" }],
+			cronSchedules: [],
+			eventSubscriptions: [],
+		});
+
+		const parentId = await db.client.invoke({ task_key: "parent", queue: "parent-queue" });
+		if (!parentId) throw new Error("expected parent execution");
+		const parent = (
+			await db.client.getExecutions({
+				orchestratorId: await db.registerOrchestrator(),
+				queueName: "parent-queue",
+				batchSize: 1,
+				taskKeys: ["parent"],
+			})
+		).executions[0];
+		if (!parent) throw new Error("expected parent claim");
+		await db.client.returnExecutions({
+			orchestratorId: parent.locked_by,
+			queueName: parent.queue,
+			results: [
+				{
+					execution_id: parent.id,
+					claim_token: parent.claim_token,
+					task_key: parent.task_key,
+					status: "invoke_child",
+					timeout_ms: "infinity",
+					step_key: "child-step",
+					child_task_name: "child",
+					child_task_queue: "child-queue",
+					child_payload: null,
+				},
+			],
+		});
+
+		const child = (
+			await db.client.getExecutions({
+				orchestratorId: await db.registerOrchestrator(),
+				queueName: "child-queue",
+				batchSize: 1,
+				taskKeys: ["child"],
+			})
+		).executions[0];
+		if (!child) throw new Error("expected child claim");
+		// the parent stopped waiting while the child ran
+		await db.sql`
+			update pgconductor._private_executions
+			set waiting_on_execution_id = null, waiting_step_key = null
+			where id = ${parentId}::uuid
+		`;
+		await db.client.returnExecutions({
+			orchestratorId: child.locked_by,
+			queueName: child.queue,
+			results: [
+				{
+					execution_id: child.id,
+					claim_token: child.claim_token,
+					task_key: child.task_key,
+					status: "completed",
+					result: { value: 1 },
+				},
+			],
+		});
+
+		const rows = await db.sql<
+			{ id: string; completed_at: Date | null; failed_at: Date | null; last_error: string | null }[]
+		>`
+			select id, completed_at, failed_at, last_error
+			from pgconductor._private_executions
+			where id in (${parentId}::uuid, ${child.id}::uuid)
+		`;
+		expect(rows.find((row) => row.id === child.id)).toMatchObject({
+			completed_at: null,
+			failed_at: expect.any(Date),
+			last_error: "Parent timed out before child completed",
+		});
+		expect(rows.find((row) => row.id === parentId)).toMatchObject({
+			completed_at: null,
+			failed_at: null,
+		});
+		expect(
+			await db.sql`select 1 from pgconductor._private_steps where execution_id = ${parentId}::uuid`,
+		).toHaveLength(0);
 	});
 
 	test("cancellation fences a buffered completion and does not retry it", async () => {
@@ -482,10 +575,9 @@ describe("execution foundations", () => {
 		if (!claimed) throw new Error("expected claim");
 		await db.client.cancelExecution(executionId, { reason: "cancelled before flush" });
 		await db.client.returnExecutions(
-			grouped(claimed.locked_by, {
+			grouped(claimed, {
 				execution_id: claimed.id,
 				claim_token: claimed.claim_token,
-				queue: claimed.queue,
 				task_key: claimed.task_key,
 				status: "completed",
 			}),
@@ -539,11 +631,11 @@ describe("execution foundations", () => {
 		const first = await claim();
 		const release = {
 			orchestratorId,
+			queueName: "replayed",
 			results: [
 				{
 					execution_id: first.id,
 					claim_token: first.claim_token,
-					queue: first.queue,
 					task_key: first.task_key,
 					status: "released" as const,
 					reschedule_in_ms: 0,
@@ -591,10 +683,9 @@ describe("execution foundations", () => {
 			await blockerSql`begin`;
 			await blockerSql`select 1 from pgconductor._private_executions where id = ${claimed.id}::uuid for update`;
 			const settled = settler.returnExecutions(
-				grouped(claimed.locked_by, {
+				grouped(claimed, {
 					execution_id: claimed.id,
 					claim_token: claimed.claim_token,
-					queue: claimed.queue,
 					task_key: claimed.task_key,
 					status: "completed",
 				}),
@@ -657,11 +748,11 @@ describe("execution foundations", () => {
 		if (!parent) throw new Error("expected parent claim");
 		await db.client.returnExecutions({
 			orchestratorId: parent.locked_by,
+			queueName: parent.queue,
 			results: [
 				{
 					execution_id: parent.id,
 					claim_token: parent.claim_token,
-					queue: parent.queue,
 					task_key: parent.task_key,
 					status: "invoke_child",
 					timeout_ms: "infinity",
@@ -796,11 +887,11 @@ describe("execution foundations", () => {
 		const staleBase = {
 			execution_id: executionId,
 			claim_token: oldClaim.claim_token,
-			queue: "fenced",
 			task_key: "fenced-task",
 		};
 		await db.client.returnExecutions({
 			orchestratorId: oldOrchestrator,
+			queueName: "fenced",
 			results: [
 				{ ...staleBase, status: "completed" },
 				{ ...staleBase, status: "failed", error: "stale" },
@@ -824,10 +915,9 @@ describe("execution foundations", () => {
 		expect(untouched[0]?.locked_by).toBe(newOrchestrator);
 
 		await db.client.returnExecutions(
-			grouped(currentClaim.locked_by, {
+			grouped(currentClaim, {
 				execution_id: currentClaim.id,
 				claim_token: currentClaim.claim_token,
-				queue: currentClaim.queue,
 				task_key: currentClaim.task_key,
 				status: "completed",
 			}),

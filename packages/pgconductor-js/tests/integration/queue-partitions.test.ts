@@ -70,6 +70,20 @@ describe("queue partitions", () => {
 		await executeOnEachQueue(db, [`${prefix}-first`, `${prefix}-second`]);
 	}, 30_000);
 
+	// settlement inlines the queue name as a literal
+	test("settles executions of queues whose names need quoting", async () => {
+		const db = await pool.child();
+		databases.push(db);
+		const queues = ["it's", "back\\'slash"];
+
+		await executeOnEachQueue(db, queues);
+
+		const rows = await db.sql<{ queue: string }[]>`
+			select queue from pgconductor._private_executions where completed_at is not null
+		`;
+		expect(rows.map((row) => row.queue).toSorted()).toEqual(queues.toSorted());
+	}, 30_000);
+
 	test("drop_queue drops only the partition of the given queue", async () => {
 		const db = await pool.child();
 		databases.push(db);
