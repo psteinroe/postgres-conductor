@@ -668,15 +668,16 @@ export class QueryBuilder {
 		)`);
 		// A completion must not drop signals the handler did not get. signal_count comes from the
 		// locked row, so it counts signals committed after this statement's snapshot, which the
-		// count below cannot see. Signals named by no listener of the attempt do not re-queue it.
+		// unlocked read of the row below does not. Signals named by no listener of the attempt do
+		// not re-queue it.
 		ctes.push(this.sql`signal_requeued as materialized (
 			select c.execution_id
 			from completed_candidates c
 			where c.execution_signal_count > 0
 				and (
 					c.execution_signal_count > (
-						select count(*) from pgconductor._private_execution_signals s
-						where s.execution_id = c.execution_id
+						select e.signal_count from pgconductor._private_executions e
+						where e.id = c.execution_id and e.queue = ${queue}
 					)
 					or exists (
 						select 1 from pgconductor._private_execution_signals s
@@ -936,6 +937,13 @@ export class QueryBuilder {
 			returning e.id
 		)`);
 
+		// Last in writes: the function reads with a fresh snapshot, so it also finds the steps,
+		// signals and waits stored while valid_results waited for the row locks or by this statement
+		ctes.push(this.sql`deleted_execution_data as (
+			select pgconductor._private_delete_execution_data(array_agg(d.id))
+			from (select id from deleted_completed union all select id from deleted_failed) d
+			having count(*) > 0
+		)`);
 		ctes.push(this.sql`writes as (
 			select 1 from orphaned_children
 			union all select 1 from failed_parents
@@ -952,6 +960,7 @@ export class QueryBuilder {
 			union all select 1 from updated_released
 			union all select 1 from inserted_children
 			union all select 1 from updated_invoke_parents
+			union all select 1 from deleted_execution_data
 		)`);
 
 		const combined = ctes.reduce((acc, cte, i) => (i === 0 ? cte : this.sql`${acc}, ${cte}`));
@@ -1019,9 +1028,12 @@ export class QueryBuilder {
 				delete from pgconductor._private_executions e
 				using batch
 				where e.id = batch.id and e.queue = batch.queue
-				returning 1
+				returning e.id
+			),
+			deleted_data as (
+				select pgconductor._private_delete_execution_data(array_agg(id)) from deleted
 			)
-			select count(*)::int as deleted_count from deleted
+			select count(*)::int as deleted_count from deleted, deleted_data
 		`;
 	}
 
@@ -1401,21 +1413,24 @@ export class QueryBuilder {
 			), cancelled_child as materialized (
 				select pgconductor.cancel_execution(child_id, 'Cancelled: parent timed out')
 				from timed_out
+			), cleared as (
+				update pgconductor._private_executions e
+				set waiting_on_execution_id = null, waiting_step_key = null
+				from (select count(*) from cancelled_child) c
+				where e.id = ${executionId}::uuid
+					and e.queue = ${queue}::text
+					and e.locked_by = ${orchestratorId}::uuid
+					and e.claim_token = ${claimToken}::uuid
+				returning e.id
 			), stored_timeout as (
+				-- after the update locked the execution, so it is not stored for a deleted one
 				insert into pgconductor._private_steps (execution_id, queue, key, result)
-				select ${executionId}::uuid, ${queue}::text, waiting_step_key,
+				select cleared.id, ${queue}::text, timed_out.waiting_step_key,
 					jsonb_build_object('status', 'timed_out')
-				from timed_out
+				from timed_out, cleared
 				on conflict (execution_id, key) do nothing
 			)
-			update pgconductor._private_executions e
-			set waiting_on_execution_id = null, waiting_step_key = null
-			from (select count(*) from cancelled_child) c
-			where e.id = ${executionId}::uuid
-				and e.queue = ${queue}::text
-				and e.locked_by = ${orchestratorId}::uuid
-				and e.claim_token = ${claimToken}::uuid
-			returning e.id
+			select id from cleared
 		`;
 	}
 
@@ -1458,20 +1473,25 @@ export class QueryBuilder {
 				from sources source
 				cross join lateral jsonb_each(source.event_payload) field
 			), event_prefixes as materialized (
+				-- every length between the field's shortest and longest prefix term, rather than
+				-- every distinct length among all its terms
 				select
 					event_value.event_id,
 					event_value.event_key,
 					event_value.field_name,
-					term.prefix_length,
-					left(event_value.value #>> '{}', term.prefix_length) as prefix_value
+					prefix_length,
+					left(event_value.value #>> '{}', prefix_length) as prefix_value
 				from event_values event_value
 				cross join lateral (
-					select distinct candidate.prefix_length
+					select min(candidate.prefix_length) as shortest, max(candidate.prefix_length) as longest
 					from pgconductor._private_event_filter_terms candidate
 					where candidate.operator = 'prefix'
 						and candidate.event_key collate "C" = event_value.event_key collate "C"
 						and candidate.field_name collate "C" = event_value.field_name collate "C"
 				) term
+				cross join generate_series(
+					term.shortest, least(term.longest, length(event_value.value #>> '{}'))
+				) prefix_length
 				where event_value.scalar_type = 'string'
 			), raw_matched_fields as (
 				select event_value.event_id, term.subscription_id, term.field_name
