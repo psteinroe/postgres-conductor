@@ -179,14 +179,16 @@ create table pgconductor._private_tasks (
     primary key (queue, key)
 );
 
+-- steps, signals and wait subscriptions have no foreign key into the executions table, which
+-- would check every insert; whatever deletes executions deletes them with
+-- _private_delete_execution_data()
 create table pgconductor._private_steps (
     execution_id uuid not null,
     key text not null,
     queue text not null,
     result jsonb,
     created_at timestamptz default pgconductor._private_current_time() not null,
-    primary key (execution_id, key),
-    constraint fk_execution foreign key (execution_id, queue) references pgconductor._private_executions(id, queue) on delete cascade
+    primary key (execution_id, key)
 );
 
 -- application signals of an execution. seq orders delivery; delivered_at is set once a handler
@@ -204,8 +206,7 @@ create table pgconductor._private_execution_signals (
     constraint chk_execution_signal_names check (
         btrim(id) <> '' and octet_length(id) <= 255
         and btrim(name) <> '' and octet_length(name) <= 255
-    ),
-    constraint fk_execution foreign key (execution_id, queue) references pgconductor._private_executions(id, queue) on delete cascade
+    )
 );
 
 create index idx_execution_signals_undelivered
@@ -298,13 +299,6 @@ begin
       v_partition_name
     );
 
-    -- index for task_key joins (used in return_executions)
-    execute format(
-      'create index %I on pgconductor.%I (task_key)',
-      'idx_' || v_partition_name || '_task_key',
-      v_partition_name
-    );
-
     -- covering index used to count active executions for soft task and group limits
     execute format(
       'create index %I on pgconductor.%I (task_key, "group") where locked_at is not null and failed_at is null and completed_at is null',
@@ -341,14 +335,10 @@ begin
       raise exception 'Deleting the default queue is not allowed';
     end if;
 
-    -- foreign keys into the partition block dropping it, so clear its rows (cascading to
-    -- steps and subscriptions) and detach it first
-    delete from pgconductor._private_executions where queue = old.name;
-
-    execute format(
-      'alter table pgconductor._private_executions detach partition pgconductor.%I',
-      v_partition_name
-    );
+    delete from pgconductor._private_steps where queue = old.name;
+    delete from pgconductor._private_execution_signals where queue = old.name;
+    delete from pgconductor._private_custom_event_subscriptions
+    where queue = old.name and kind = 'execution_wait';
 
     execute format(
       'drop table pgconductor.%I',
@@ -464,7 +454,7 @@ volatile
 set search_path to ''
 as $function$
 declare
-  v_resolved integer;
+  v_removed_ids uuid[];
 begin
   -- Upsert every required queue in a stable order (triggers partition
   -- creation).  Registrations may reference one another as dead-letter queues,
@@ -553,15 +543,18 @@ begin
         from unnest(p_cron_schedules) as spec
         where spec.dedupe_key is not null and spec.dedupe_key like 'scheduled::%'
       )
-    returning result_waiters
+    returning id, result_waiters
+  ), resolved as (
+    select pgconductor._private_resolve_result_waits(jsonb_agg(w.value || jsonb_build_object(
+      'outcome', jsonb_build_object('status', 'cancelled', 'reason', 'Schedule removed')
+    )))
+    from removed r
+    cross join lateral jsonb_array_elements(r.result_waiters) w
+    having count(*) > 0
   )
-  select pgconductor._private_resolve_result_waits(jsonb_agg(w.value || jsonb_build_object(
-    'outcome', jsonb_build_object('status', 'cancelled', 'reason', 'Schedule removed')
-  )))
-  into v_resolved
-  from removed r
-  cross join lateral jsonb_array_elements(r.result_waiters) w
-  having count(*) > 0;
+  select array_agg(r.id) into v_removed_ids from removed r left join resolved on true;
+
+  perform pgconductor._private_delete_execution_data(v_removed_ids);
 
   update pgconductor._private_executions
   set cancelled = true
@@ -608,7 +601,7 @@ volatile
 set search_path to ''
 as $function$
 declare
-  v_resolved integer;
+  v_removed_ids uuid[];
 begin
   perform 1 from pgconductor._private_queues queue where queue.name = p_queue for update;
 
@@ -621,15 +614,18 @@ begin
       and dedupe_key <> p_dedupe_key
       and cron_expression is not null
       and is_available
-    returning result_waiters
+    returning id, result_waiters
+  ), resolved as (
+    select pgconductor._private_resolve_result_waits(jsonb_agg(w.value || jsonb_build_object(
+      'outcome', jsonb_build_object('status', 'cancelled', 'reason', 'Schedule removed')
+    )))
+    from removed r
+    cross join lateral jsonb_array_elements(r.result_waiters) w
+    having count(*) > 0
   )
-  select pgconductor._private_resolve_result_waits(jsonb_agg(w.value || jsonb_build_object(
-    'outcome', jsonb_build_object('status', 'cancelled', 'reason', 'Schedule removed')
-  )))
-  into v_resolved
-  from removed r
-  cross join lateral jsonb_array_elements(r.result_waiters) w
-  having count(*) > 0;
+  select array_agg(r.id) into v_removed_ids from removed r left join resolved on true;
+
+  perform pgconductor._private_delete_execution_data(v_removed_ids);
 
   -- a running or settled occurrence is kept
   insert into pgconductor._private_executions as e (
@@ -663,7 +659,7 @@ volatile
 set search_path to ''
 as $function$
 declare
-  v_resolved integer;
+  v_removed_ids uuid[];
 begin
   perform 1 from pgconductor._private_queues queue where queue.name = p_queue for update;
 
@@ -675,15 +671,18 @@ begin
       and split_part(dedupe_key, '::', 2) = p_schedule_name
       and cron_expression is not null
       and is_available
-    returning result_waiters
+    returning id, result_waiters
+  ), resolved as (
+    select pgconductor._private_resolve_result_waits(jsonb_agg(w.value || jsonb_build_object(
+      'outcome', jsonb_build_object('status', 'cancelled', 'reason', 'Schedule removed')
+    )))
+    from removed r
+    cross join lateral jsonb_array_elements(r.result_waiters) w
+    having count(*) > 0
   )
-  select pgconductor._private_resolve_result_waits(jsonb_agg(w.value || jsonb_build_object(
-    'outcome', jsonb_build_object('status', 'cancelled', 'reason', 'Schedule removed')
-  )))
-  into v_resolved
-  from removed r
-  cross join lateral jsonb_array_elements(r.result_waiters) w
-  having count(*) > 0;
+  select array_agg(r.id) into v_removed_ids from removed r left join resolved on true;
+
+  perform pgconductor._private_delete_execution_data(v_removed_ids);
 
   -- A separate statement, so it also sees occurrences claimed while the delete ran
   update pgconductor._private_executions
@@ -787,6 +786,31 @@ as $function$
 declare
     spec pgconductor.execution_spec;
 begin
+    -- without dedupe, every spec inserts a new execution: one statement for the whole batch
+    if not exists (
+        select 1 from unnest(specs) s
+        where s.dedupe_key is not null or s.dedupe_seconds is not null
+    ) then
+        perform pgconductor._private_check_metadata(s.metadata) from unnest(specs) s;
+
+        return query
+        with batch as materialized (
+            select pgconductor._private_portable_uuidv7() as id, s.*
+            from unnest(specs) with ordinality s
+        ), inserted as (
+            insert into pgconductor._private_executions (
+                id, task_key, queue, payload, trace_context, metadata, run_at, cron_expression,
+                priority, "group"
+            )
+            select b.id, b.task_key, coalesce(b.queue, 'default'), b.payload, b.trace_context,
+                b.metadata, coalesce(b.run_at, pgconductor._private_current_time()),
+                b.cron_expression, coalesce(b.priority, 0), b."group"
+            from batch b
+        )
+        select b.id from batch b order by b.ordinality;
+        return;
+    end if;
+
     foreach spec in array specs loop
         return query select * from pgconductor.invoke(
             p_task_key := spec.task_key,
@@ -832,6 +856,7 @@ declare
     v_next_singleton_on timestamptz;
     v_run_at timestamptz;
     v_superseded_id uuid;
+    v_superseded_removed boolean;
 begin
   perform pgconductor._private_check_metadata(p_metadata);
   v_now := pgconductor._private_current_time();
@@ -875,10 +900,14 @@ begin
           cross join lateral jsonb_array_elements(s.result_waiters) w
           having count(*) > 0
       )
-      select s.id
-      into v_superseded_id
+      select s.id, s.should_remove
+      into v_superseded_id, v_superseded_removed
       from superseded s
       left join resolved on true;
+
+      if v_superseded_removed then
+          perform pgconductor._private_delete_execution_data(array[v_superseded_id]);
+      end if;
 
       if v_superseded_id is not null then
           perform pgconductor._private_cancel_linked_children(jsonb_build_array(jsonb_build_object(
@@ -1367,6 +1396,12 @@ begin
     using targets t
     where e.id = any(v_ancestors) and e.id = t.id and e.queue = t.queue
       and t.should_remove and e.locked_by is null
+    returning e.id
+  ),
+  removed_data as (
+    select pgconductor._private_delete_execution_data(array_agg(r.id))
+    from removed r
+    having count(*) > 0
   ),
   failed as (
     update pgconductor._private_executions e
@@ -1389,7 +1424,8 @@ begin
   select t.id, t.queue, t.task_key, t."group", t.payload, 'Child execution failed: ' || t.error,
     t.attempts, t.cancelled, t.dead_letter_queue, t.dead_letter_task_key, t.trace_context,
     t.metadata, t.result_waiters
-  from targets t;
+  from targets t
+  left join removed_data on true;
 end;
 $function$;
 
@@ -1411,6 +1447,7 @@ declare
   v_linked_ids uuid[];
   v_locked_ids uuid[];
   v_rows_affected integer;
+  v_removed_ids uuid[];
   v_resolved integer;
 begin
   -- a waiting execution is cancelled with the executions it waits on and its
@@ -1536,6 +1573,7 @@ begin
     delete from pgconductor._private_executions e
     using pending p
     where e.id = p.id and e.queue = p.queue and p.should_remove
+    returning e.id
   ),
   failed as (
     update pgconductor._private_executions e
@@ -1554,15 +1592,21 @@ begin
     where s.kind = 'execution_wait'
       and s.execution_id = p.id
   )
-  select pgconductor._private_resolve_result_waits(jsonb_agg(
-    w.value || jsonb_build_object('outcome', case when p.cancelled
-      then jsonb_build_object('status', 'cancelled', 'reason', p.error)
-      else jsonb_build_object('status', 'failed', 'error', p.error) end)
-  ))
-  into v_resolved
-  from pending p
-  cross join lateral jsonb_array_elements(p.result_waiters) w
-  having count(*) > 0;
+  select
+    (select array_agg(r.id) from removed r),
+    (
+      select pgconductor._private_resolve_result_waits(jsonb_agg(
+        w.value || jsonb_build_object('outcome', case when p.cancelled
+          then jsonb_build_object('status', 'cancelled', 'reason', p.error)
+          else jsonb_build_object('status', 'failed', 'error', p.error) end)
+      ))
+      from pending p
+      cross join lateral jsonb_array_elements(p.result_waiters) w
+      having count(*) > 0
+    )
+  into v_removed_ids, v_resolved;
+
+  perform pgconductor._private_delete_execution_data(v_removed_ids);
 
   perform pgconductor._private_cancel_linked_children(jsonb_agg(jsonb_build_object(
     'execution_id', id,
@@ -1617,11 +1661,7 @@ create table pgconductor._private_custom_event_subscriptions (
             and step_key is not null
             and payload_fields is null
             and num_nonnulls(event_key, awaited_execution_id, signal_name) = 1)
-    ),
-    constraint fk_custom_event_subscription_execution
-        foreign key (execution_id, queue)
-        references pgconductor._private_executions(id, queue)
-        on delete cascade
+    )
 );
 
 create index idx_custom_event_subscriptions_event
@@ -1631,10 +1671,19 @@ create index idx_custom_event_subscriptions_event
 create unique index idx_custom_event_subscription_execution_wait
     on pgconductor._private_custom_event_subscriptions (execution_id, step_key);
 
-create index idx_custom_event_subscription_wait_match
-    on pgconductor._private_custom_event_subscriptions
-       (event_key, created_at, expires_at, id)
-    where kind = 'execution_wait';
+-- deletes the steps, signals and wait subscriptions of deleted executions. its statements read
+-- with fresh snapshots, so called after the deletes, it also finds rows that were stored while
+-- they waited for the row locks; writers lock the execution row, so none are stored later
+create or replace function pgconductor._private_delete_execution_data(p_ids uuid[])
+returns void
+language sql
+volatile
+set search_path to ''
+as $function$
+  delete from pgconductor._private_steps where execution_id = any(p_ids);
+  delete from pgconductor._private_execution_signals where execution_id = any(p_ids);
+  delete from pgconductor._private_custom_event_subscriptions where execution_id = any(p_ids);
+$function$;
 
 -- drop a queue and everything that would write into its partition (the trigger drops the partition)
 create or replace function pgconductor.drop_queue(queue_name text)
