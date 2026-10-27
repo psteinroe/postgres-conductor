@@ -490,10 +490,20 @@ schedules again, which replaces the pending execution of `scheduleName`:
 await ctx.schedule(
   taskRef: { name: string, queue?: string },
   scheduleName: string,
-  cronOptions: { cron: string },
+  cronOptions: {
+    cron: string,
+    priority?: number,
+    group?: string,
+    metadata?: TMetadata | ((metadata: TMetadata | undefined) => TMetadata)
+  },
   payload?: TPayload
 ): Promise<void>
 ```
+
+Every occurrence runs with the payload, priority, group and metadata of the schedule. Metadata
+defaults to this execution's metadata; `metadata` overrides it as for `ctx.invoke()`. A function
+runs once, when scheduling. Scheduling `scheduleName` again replaces them for the pending and
+later occurrences; a running occurrence keeps its own.
 
 **Example:**
 
