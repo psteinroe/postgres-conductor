@@ -205,6 +205,19 @@ was dispatched. See [Deduplicating Emits](../crafting-tasks/triggers.md#deduplic
 
 See [Task Triggers](../crafting-tasks/triggers.md) for details on event-triggered tasks.
 
+## conductor.now()
+
+Read the database time:
+
+```typescript
+const now: Date = await conductor.now();
+```
+
+This is the time Postgres Conductor uses for run times, wait deadlines and event creation times
+(`emittedAt`), and it follows the test clock. Each call is a query and nothing is memoized.
+Inside a task, [`ctx.now()`](task-context.md#ctxnow) reads the worker's corrected local clock
+without a query.
+
 ## conductor.cancel()
 
 Cancel an execution:

@@ -159,6 +159,35 @@ test("running workers follow clock changes", async () => {
 	await orchestrator.stop();
 });
 
+test("conductor.now and ctx.now follow the clock", async () => {
+	const conductor = createConductor();
+	const seen: Date[] = [];
+	const report = conductor.createTask(
+		{ name: "report" },
+		{ invocable: true },
+		async (_event, ctx) => {
+			seen.push(ctx.now());
+		},
+	);
+	const orchestrator = Orchestrator.create({ conductor, tasks: [report] });
+	const start = new Date("2024-01-01T12:00:00Z").getTime();
+
+	const first = await conductor.now();
+	expect(first.getTime()).toBeGreaterThanOrEqual(start);
+	expect(first.getTime()).toBeLessThan(start + 60_000);
+
+	await clock.advance("1h");
+	const second = await conductor.now();
+	expect(second.getTime()).toBeGreaterThanOrEqual(start + 60 * 60_000);
+	expect(second.getTime()).toBeLessThan(start + 61 * 60_000);
+
+	await conductor.invoke({ name: "report" }, {});
+	await orchestrator.drain();
+	expect(seen).toHaveLength(1);
+	expect(seen[0]?.getTime()).toBeGreaterThanOrEqual(second.getTime());
+	expect(seen[0]?.getTime()).toBeLessThan(start + 61 * 60_000);
+});
+
 test("set keeps its own copy of the date", async () => {
 	const date = new Date("2024-06-01T00:00:00Z");
 	const setting = clock.set(date);

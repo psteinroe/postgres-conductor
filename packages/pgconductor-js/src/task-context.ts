@@ -4,9 +4,11 @@ import type {
 	Execution,
 	Payload,
 	DeadLetterMetadata,
+	EventRaceResult,
 	EventWaitResult,
 	ExecutionOutcome,
 	JsonValue,
+	StoredEvent,
 } from "./database-client.js";
 import { nextCronOccurrence } from "./lib/cron.js";
 import type { Clock } from "./lib/clock.js";
@@ -70,6 +72,18 @@ export class WaitForEventTimeoutError extends Error {
 		super(`Timed out waiting for event at step "${stepKey}"`);
 		this.name = "WaitForEventTimeoutError";
 	}
+}
+
+/** An event received by an event wait. */
+export type ReceivedEvent<TDef extends EventDefinition<string, any, any>> = {
+	name: TDef["name"];
+	payload: InferEventPayload<TDef>;
+	/** When the event was emitted, in database time. Replays return the same value. */
+	emittedAt: Date;
+};
+
+function receivedEvent(event: StoredEvent) {
+	return { ...event, emittedAt: new Date(event.emittedAt) };
 }
 
 /** A durable event subscription created by `ctx.subscribe()`. */
@@ -209,6 +223,16 @@ export class TaskContext<
 		return this.opts.signal;
 	}
 
+	/**
+	 * The worker's clock: local time corrected by the offset to database time, sampled when the
+	 * worker starts and every 10 minutes. Time windows and cron use the same clock. Reads no
+	 * database, so it can be off by the drift since the last sample; `conductor.now()` reads the
+	 * database. Not memoized: wrap it in `ctx.step()` for a value that is stable across replays.
+	 */
+	now(): Date {
+		return this.opts.clock.now();
+	}
+
 	/** Metadata of this execution, inherited from the event, parent or schedule that created it. */
 	get metadata(): Readonly<Metadata> | undefined {
 		return (this.opts.execution.metadata || undefined) as Readonly<Metadata> | undefined;
@@ -335,7 +359,7 @@ export class TaskContext<
 			filter?: FilterForEvent<TDef>;
 			timeout?: DurationInput;
 		},
-	): Promise<{ name: TDef["name"]; payload: InferEventPayload<TDef> }> {
+	): Promise<ReceivedEvent<TDef>> {
 		const cached = (await this.opts.db.loadStep(
 			{
 				executionId: this.opts.execution.id,
@@ -350,7 +374,7 @@ export class TaskContext<
 		if (result.status === "closed") {
 			throw new Error(`Event subscription "${stepKey}" was closed by ctx.waitForAny()`);
 		}
-		return result.event as { name: TDef["name"]; payload: InferEventPayload<TDef> };
+		return receivedEvent(result.event) as ReceivedEvent<TDef>;
 	}
 
 	/**
@@ -367,7 +391,7 @@ export class TaskContext<
 			event: TDef;
 			filter?: FilterForEvent<TDef>;
 		},
-	): Promise<EventSubscription<{ name: TDef["name"]; payload: InferEventPayload<TDef> }>> {
+	): Promise<EventSubscription<ReceivedEvent<TDef>>> {
 		await this.registerEventWait(stepKey, options, false);
 		return {
 			key: stepKey,
@@ -434,7 +458,10 @@ export class TaskContext<
 			);
 		});
 		if (!result) return this.abortAndHangup({ reason: "suspended" });
-		return result as WaitForAnyResult<TBranches, Tasks>;
+		const winner = result as EventRaceResult;
+		return (
+			winner.event ? { ...winner, event: receivedEvent(winner.event) } : winner
+		) as WaitForAnyResult<TBranches, Tasks>;
 	}
 
 	/**
