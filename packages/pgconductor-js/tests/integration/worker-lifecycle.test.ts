@@ -753,6 +753,8 @@ describe("flush", () => {
 		};
 		// Cleanup releases flush A, unless stop() waited for it
 		let flushADoneAtCleanup: boolean | null = null;
+		// cleanup runs on the patched client
+		t.conductor.db.withOwnConnection = () => t.conductor.db;
 		const orchestratorShutdown = t.conductor.db.orchestratorShutdown.bind(t.conductor.db);
 		t.conductor.db.orchestratorShutdown = async (args, opts) => {
 			flushADoneAtCleanup = flushADone;
@@ -821,6 +823,8 @@ describe("orchestrator cleanup", () => {
 			}),
 			context: {},
 		});
+		// cleanup runs on the failing connection
+		conductor.db.withOwnConnection = () => conductor.db;
 		await conductor.ensureInstalled();
 		return { orchestrator: Orchestrator.create({ conductor }), attempts: () => attempts };
 	}

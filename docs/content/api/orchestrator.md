@@ -52,6 +52,7 @@ await orchestrator.start();
 ```
 
 - Initializes database schema (if needed)
+- Opens a connection of its own for heartbeats and releases the executions of crashed orchestrators (see [Crash Recovery](../scaling/horizontal.md#crash-recovery))
 - Starts all workers
 - Sets up signal handlers (SIGTERM, SIGINT)
 - Begins polling for executions

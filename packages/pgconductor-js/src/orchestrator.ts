@@ -28,8 +28,9 @@ type InternalOrchestratorOptions = {
 	workers?: Worker[];
 };
 
-const HEARTBEAT_INTERVAL_MS = 30000; // 30 seconds
-const STALE_ORCHESTRATOR_MAX_AGE_MS = HEARTBEAT_INTERVAL_MS * 10;
+const HEARTBEAT_INTERVAL_MS = 5_000;
+// Six missed heartbeats, so a crashed orchestrator's executions are released within about 35 seconds
+const STALE_ORCHESTRATOR_MAX_AGE_MS = 30_000;
 // How long shutdown retries removing the orchestrator; stale recovery releases what it leaves behind
 const CLEANUP_TIMEOUT_MS = 10_000;
 
@@ -186,6 +187,9 @@ export class Orchestrator {
 		this._startDeferred = new Deferred<void>();
 		this._abortController = new AbortController();
 		this.registerSignalHandlers();
+		// Heartbeats run on a connection of their own, so handlers holding every pool connection cannot
+		// make the orchestrator look stale
+		const heartbeatDb = this.db.withOwnConnection();
 
 		(async () => {
 			let error: Error | undefined;
@@ -204,7 +208,7 @@ export class Orchestrator {
 					throw new Error("The database schema is newer than this version of Postgres Conductor");
 				}
 
-				const { shutdown_reason } = await this.db.registerOrchestrator(
+				const { shutdown_reason } = await heartbeatDb.registerOrchestrator(
 					{
 						orchestratorId: this.orchestratorId,
 						version: PACKAGE_VERSION,
@@ -217,8 +221,14 @@ export class Orchestrator {
 					throw new Error(`Received shutdown signal during startup: ${shutdown_reason}`);
 				}
 
+				// Release the executions of orchestrators that crashed before this one started
+				await heartbeatDb.recoverStaleOrchestrators(
+					{ maxAge: `${STALE_ORCHESTRATOR_MAX_AGE_MS} milliseconds` },
+					{ signal: this.signal },
+				);
+
 				this.heartbeatController = new AbortController();
-				this.heartbeats = this.runHeartbeats(this.heartbeatController.signal);
+				this.heartbeats = this.runHeartbeats(heartbeatDb, this.heartbeatController.signal);
 
 				const shutdown = this.waitForShutdownSignal();
 				const workerLifecycles: Promise<void>[] = [];
@@ -258,7 +268,7 @@ export class Orchestrator {
 				const stopDeferred = this._stopDeferred;
 
 				try {
-					await this.cleanup();
+					await this.cleanup(heartbeatDb);
 				} catch (cleanupErr) {
 					this.logger.error("Cleanup failed:", cleanupErr);
 					error = coerceError(cleanupErr);
@@ -309,24 +319,18 @@ export class Orchestrator {
 	 * - Updates last_heartbeat_at every heartbeat
 	 * - Stops when the database asks for a shutdown, such as for a newer migration
 	 * - Stops when another orchestrator recovered us as stale
-	 * - Recovers stale orchestrators periodically (every 8th heartbeat)
+	 * - Recovers stale orchestrators after every heartbeat once it has heartbeated for the stale age
 	 */
-	private async runHeartbeats(signal: AbortSignal): Promise<void> {
-		for (let heartbeatCount = 1; ; heartbeatCount++) {
+	private async runHeartbeats(db: DatabaseClient, signal: AbortSignal): Promise<void> {
+		// Registration heartbeated. Null after a failed heartbeat
+		let liveSince: number | null = Date.now();
+		while (true) {
 			await waitFor(HEARTBEAT_INTERVAL_MS, { signal });
 			if (signal.aborted) return;
 
+			const sentAt = Date.now();
 			try {
-				if (heartbeatCount % 8 === 0) {
-					await this.db.recoverStaleOrchestrators(
-						{
-							maxAge: `${STALE_ORCHESTRATOR_MAX_AGE_MS} milliseconds`,
-						},
-						{ signal },
-					);
-				}
-
-				const heartbeat = await this.db.orchestratorHeartbeat({
+				const heartbeat = await db.orchestratorHeartbeat({
 					orchestratorId: this.orchestratorId,
 				});
 
@@ -341,7 +345,19 @@ export class Orchestrator {
 					this.logger.info(`Received shutdown signal: ${heartbeat.shutdown_reason}`);
 					this.abortController.abort();
 				}
+
+				// The database may have been unreachable for the others as well, so after a failed or slow
+				// heartbeat they get the stale age to heartbeat again
+				const now = Date.now();
+				liveSince = now - sentAt > HEARTBEAT_INTERVAL_MS ? now : liveSince || now;
+				if (now - liveSince >= STALE_ORCHESTRATOR_MAX_AGE_MS) {
+					await db.recoverStaleOrchestrators(
+						{ maxAge: `${STALE_ORCHESTRATOR_MAX_AGE_MS} milliseconds` },
+						{ signal },
+					);
+				}
 			} catch (err) {
+				liveSince = null;
 				this.logger.error("Heartbeat error:", err);
 			}
 		}
@@ -434,7 +450,7 @@ export class Orchestrator {
 	 * - Stop heartbeat
 	 * - Remove orchestrator from database and release locked executions
 	 */
-	private async cleanup(): Promise<void> {
+	private async cleanup(heartbeatDb: DatabaseClient): Promise<void> {
 		try {
 			// Stop heartbeat and wait for one in flight
 			this.heartbeatController?.abort();
@@ -444,12 +460,16 @@ export class Orchestrator {
 			// deadline, which also ends a statement still waiting for a response
 			const deadline = AbortSignal.timeout(CLEANUP_TIMEOUT_MS);
 			await Promise.race([
-				this.db.orchestratorShutdown({ orchestratorId: this.orchestratorId }, { signal: deadline }),
+				heartbeatDb.orchestratorShutdown(
+					{ orchestratorId: this.orchestratorId },
+					{ signal: deadline },
+				),
 				new Promise<never>((_, reject) => {
 					deadline.addEventListener("abort", () => reject(deadline.reason));
 				}),
 			]);
 		} finally {
+			await heartbeatDb.close();
 			this.heartbeats = null;
 			this.heartbeatController = null;
 			this._stopDeferred = null;
