@@ -159,6 +159,17 @@ type ScheduleOptions = {
 	group?: string;
 };
 
+/**
+ * Every step key is one passed to a `TaskContext` method, except these:
+ * - `<stepKey>:<branch>` for the execution and signal branches of `waitForAny()`, so
+ *   `<stepKey>:result` for `waitForResult()`
+ * - `pgconductor.next-occurrence`, the next occurrence of a cron schedule
+ *
+ * Middleware that wraps the keyed methods to reject keys with a prefix reserves the prefix for its
+ * own keys if the prefix contains no `:` and does not start with `pgconductor.`.
+ */
+const branchStepKey = (stepKey: string, branch: string) => `${stepKey}:${branch}`;
+
 // second argument for tasks
 export class TaskContext<
 	Tasks extends readonly TaskDefinition<string, any, any, string>[] = readonly TaskDefinition<
@@ -241,7 +252,7 @@ export class TaskContext<
 		}
 
 		// After the read, so fn never starts once the attempt aborted
-		await this.checkpoint();
+		await this.hangUpIfStopped();
 
 		// Execute and save. A cache hit intentionally has no span.
 		return this.opts.telemetry.trace({
@@ -279,7 +290,11 @@ export class TaskContext<
 	 * Hang up if `ctx.signal` is aborted or the task is outside its time window. Saves nothing:
 	 * a released execution runs its handler again from the start.
 	 */
-	async checkpoint(): Promise<void> {
+	checkpoint(): Promise<void> {
+		return this.hangUpIfStopped();
+	}
+
+	private async hangUpIfStopped(): Promise<void> {
 		// Check abort signal
 		if (this.signal.aborted) {
 			return this.abortAndHangup({
@@ -336,6 +351,13 @@ export class TaskContext<
 			timeout?: DurationInput;
 		},
 	): Promise<{ name: TDef["name"]; payload: InferEventPayload<TDef> }> {
+		return this.eventWait(stepKey, options);
+	}
+
+	private async eventWait<TDef extends EventDefinition<string, any, any>>(
+		stepKey: string,
+		options: { event: TDef; filter?: unknown; timeout?: DurationInput },
+	): Promise<{ name: TDef["name"]; payload: InferEventPayload<TDef> }> {
 		const cached = (await this.opts.db.loadStep(
 			{
 				executionId: this.opts.execution.id,
@@ -371,7 +393,7 @@ export class TaskContext<
 		await this.registerEventWait(stepKey, options, false);
 		return {
 			key: stepKey,
-			wait: ({ timeout } = {}) => this.waitForEvent<TName, TDef>(stepKey, { ...options, timeout }),
+			wait: ({ timeout } = {}) => this.eventWait(stepKey, { ...options, timeout }),
 		};
 	}
 
@@ -392,6 +414,16 @@ export class TaskContext<
 	>(
 		stepKey: string,
 		branches: TBranches & { timeout?: never },
+		options: { timeout?: DurationInput } = {},
+	): Promise<WaitForAnyResult<TBranches, Tasks>> {
+		return this.race(stepKey, branches, options);
+	}
+
+	private async race<
+		TBranches extends Record<string, EventSubscription<unknown> | ExecutionBranch | SignalBranch>,
+	>(
+		stepKey: string,
+		branches: TBranches,
 		options: { timeout?: DurationInput } = {},
 	): Promise<WaitForAnyResult<TBranches, Tasks>> {
 		// From the call on, no signal handler starts, and the one running is passed along: a signal
@@ -416,13 +448,13 @@ export class TaskContext<
 						"execution" in branch
 							? {
 									key,
-									stepKey: `${stepKey}:${key}`,
+									stepKey: branchStepKey(stepKey, key),
 									executionId: branch.execution,
 									taskKey: branch.task?.name,
 									queue: branch.task?.queue || "default",
 								}
 							: "signal" in branch
-								? { key, stepKey: `${stepKey}:${key}`, signal: branch.signal }
+								? { key, stepKey: branchStepKey(stepKey, key), signal: branch.signal }
 								: { key, stepKey: branch.key },
 					),
 					timeoutMs: options.timeout === undefined ? null : parseDuration(options.timeout),
@@ -470,7 +502,7 @@ export class TaskContext<
 			typeof taskOrId === "string"
 				? [undefined, taskOrId, idOrOptions as { timeout?: DurationInput } | undefined]
 				: [taskOrId, idOrOptions as string, options];
-		const winner = await this.waitForAny(
+		const winner = await this.race(
 			stepKey,
 			{ result: { execution: executionId, task } },
 			waitOptions,
@@ -645,7 +677,10 @@ export class TaskContext<
 	>(
 		task: TaskIdentifier<TName, TQueue>,
 		scheduleName: string,
-		options: ScheduleOptions,
+		options: ScheduleOptions & {
+			/** Metadata of the occurrences. Defaults to the metadata of this execution. */
+			metadata?: Metadata | ((metadata: Readonly<Metadata> | undefined) => Metadata);
+		},
 		payload: InferPayload<TDef> = {} as InferPayload<TDef>,
 	): Promise<void> {
 		if (!scheduleName) {
@@ -672,7 +707,7 @@ export class TaskContext<
 				cron_expression: options.cron,
 				priority: options.priority || null,
 				group: options.group || null,
-				metadata: this.opts.execution.metadata,
+				metadata: await this.childMetadata(options.metadata),
 			},
 			scheduleName,
 		});
@@ -769,7 +804,7 @@ export class TaskContext<
 			metadata?: Metadata | ((metadata: Readonly<Metadata> | undefined) => Metadata);
 		},
 	): Promise<string> {
-		await this.checkpoint();
+		await this.hangUpIfStopped();
 		const metadata = await this.childMetadata(options.metadata);
 
 		const id = await this.opts.db.signalWithStartStep(

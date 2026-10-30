@@ -214,6 +214,8 @@ Tables live in the `pgconductor` schema with a `_private_` prefix (`_private_exe
 **Middleware**
 - `Conductor.create({ middleware })` wraps every attempt of non-batch, non-internal tasks in `worker.ts`
 - `next(added)` merges `added` into the attempt's `TaskContext` and resolves on suspension too; the worker's outer race against the abort promise keeps a suspension from becoming a result or failure
+- Wrapping context methods is a supported contract: `next({ invoke: wrapper })` replaces a method for later middleware and the handler, and must keep its signature (`next` takes `TNext & Partial<TContext>`; `AddedContext` omits overridden base keys). So a wrapper runs once per call, no public `TaskContext` method calls another through `this`; shared logic lives in private methods (`hangUpIfStopped`, `eventWait`, `race`)
+- Derived step keys (`<stepKey>:<branch>` via `branchStepKey`, `pgconductor.next-occurrence`) are documented in `task-context.ts` and the middleware guide, so applications can reserve key prefixes; a new derived key must be added there
 
 **Cancel With Parent**
 - `cancel_with_parent` on a child row links it to `parent_execution_id` without a waiting edge
