@@ -106,7 +106,7 @@ export class Orchestrator {
 			this.workers.push(
 				new Worker(
 					EVENT_DISPATCH_QUEUE,
-					[createEventDispatchTask(this.db)],
+					[createEventDispatchTask(this.db, options.conductor.options.eventRetention)],
 					this.db,
 					this.logger,
 					{

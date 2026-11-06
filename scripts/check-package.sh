@@ -20,7 +20,8 @@ cat > package.json <<'EOF'
 { "name": "consumer", "private": true, "type": "module" }
 EOF
 
-npm install --no-audit --no-fund ./pgconductor-js-*.tgz @opentelemetry/api typescript@5 @types/node postgres vitest@5 zod
+# The postgres pgconductor-js depends on: a consumer on another major has its own Sql type
+npm install --no-audit --no-fund ./pgconductor-js-*.tgz @opentelemetry/api typescript@5 @types/node postgres@3 vitest@5 zod
 
 if grep -q '"catalog:\|"workspace:' node_modules/pgconductor-js/package.json; then
 	echo "Packed package.json contains unresolved catalog: or workspace: specifiers"

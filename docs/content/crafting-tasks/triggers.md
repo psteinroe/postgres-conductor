@@ -84,6 +84,7 @@ const onUserCreated = conductor.createTask(
   async (event, ctx) => {
     // event.name === "user.created"
     // event.payload is fully typed!
+    // event.id is the event's id, as emit() returned it
     const { userId, email, name } = event.payload;
 
     await sendEmail({
@@ -116,7 +117,24 @@ const eventId = await conductor.emit("slack.mentioned", payload, {
 });
 ```
 
-`emit()` always returns the event ID that Postgres Conductor assigned; the `dedupe_key` is your own key and is never returned. Repeating a `dedupe_key` for the same event name stores nothing and returns the original event ID, even when two emits race. Keys are scoped per event name: the same `dedupe_key` under two event names emits two events. A key is remembered while its dispatch execution exists. Completed dispatches are kept for one day and removed by the daily maintenance run of the internal queue, so a key deduplicates for 1–2 days after its event was dispatched. Outside that window, the same `dedupe_key` emits a new event.
+`emit()` always returns the event ID that Postgres Conductor assigned; the `dedupe_key` is your own key and is never returned. Repeating a `dedupe_key` for the same event name stores nothing and returns the original event ID, even when two emits race. Keys are scoped per event name: the same `dedupe_key` under two event names emits two events. A key is remembered while its dispatch execution exists. Completed dispatches are kept for one day by default and removed by the daily maintenance run of the internal queue, so a key deduplicates for 1–2 days after its event was dispatched. Outside that window, the same `dedupe_key` emits a new event. `Conductor.create({ eventRetention: { days: 30 } })` keeps events, and their keys, longer.
+
+### Reading Events
+
+Emitted events stay readable while they are kept (`eventRetention`, default one day):
+
+```typescript
+const event = await conductor.getEvent(eventId);
+const thread = await conductor.listEvents({
+  name: "slack.message",
+  where: { channel: "C1", threadTs: "1.0" },
+  order: "desc",
+  limit: 20,
+});
+const count = await conductor.countEvents({ name: "slack.message", where: { channel: "C1" } });
+```
+
+See [`conductor.listEvents()`](../api/conductor.md#conductorlistevents).
 
 From SQL, pass the key as `p_dedupe_key`: `pgconductor.emit_event('slack.mentioned', payload, p_dedupe_key := 'slack:' || event_id)`.
 

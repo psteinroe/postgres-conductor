@@ -17,6 +17,8 @@ import {
 	type UnscheduleCronExecutionArgs,
 	type ScheduleNextCronExecutionArgs,
 	type GetExecutionArgs,
+	type EventFilterArgs,
+	type ListEventsArgs,
 	type LoadStepArgs,
 	type CountStepsArgs,
 	type SaveStepArgs,
@@ -94,6 +96,14 @@ export type ExecutionInfo<TResult = unknown> = {
 	failedAt: Date | null;
 };
 
+/** An emitted event, while retention keeps it. */
+export type EventInfo<TName extends string = string, TPayload = Payload> = {
+	id: string;
+	name: TName;
+	payload: TPayload;
+	createdAt: Date;
+};
+
 /** How an execution settled, as `ctx.waitForResult()` and `ctx.waitForAny()` return it. */
 export type ExecutionOutcome<TResult = unknown> =
 	| { status: "completed"; result: TResult }
@@ -115,6 +125,8 @@ export interface Execution {
 	cron_expression?: string | null;
 	group?: string | null;
 	subscription_id?: string | null;
+	/** The event of an event delivery (`subscription_id` set), or the parent of a child */
+	parent_execution_id?: string | null;
 	dead_letter?: (Omit<DeadLetterMetadata, "failedAt"> & { failedAt: string }) | null;
 	trace_context?: TraceContextCarrier | null;
 	metadata?: Payload | null;
@@ -651,6 +663,29 @@ export class DatabaseClient {
 			{ label: "getExecution", ...opts },
 		);
 		return rows[0] || null;
+	}
+
+	async getEvent(eventId: string, opts?: QueryMethodOptions): Promise<EventInfo | null> {
+		const rows = await this.query(() => this.builder.buildGetEvent(eventId), {
+			label: "getEvent",
+			...opts,
+		});
+		return rows[0] || null;
+	}
+
+	async listEvents(args: ListEventsArgs, opts?: QueryMethodOptions): Promise<EventInfo[]> {
+		return this.query(() => this.builder.buildListEvents(args), {
+			label: "listEvents",
+			...opts,
+		});
+	}
+
+	async countEvents(args: EventFilterArgs, opts?: QueryMethodOptions): Promise<number> {
+		const [row] = await this.query(() => this.builder.buildCountEvents(args), {
+			label: "countEvents",
+			...opts,
+		});
+		return row?.count ?? 0;
 	}
 
 	async returnExecutions(args: ReturnExecutionsArgs, opts?: QueryMethodOptions): Promise<void> {

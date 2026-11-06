@@ -3,6 +3,7 @@ import type { ReturnExecutionsArgs } from "./database-client.js";
 import * as assert from "./lib/assert.js";
 import type { TraceContextCarrier } from "./telemetry.js";
 import type {
+	EventInfo,
 	ExecutionInfo,
 	ExecutionSpec,
 	EventFilterTerm,
@@ -138,6 +139,24 @@ export type EmitEventArgs = {
 	traceContext?: TraceContextCarrier | null;
 	metadata?: Payload | null;
 	dedupeKey?: string;
+};
+
+export type EventFilterArgs = {
+	eventKey: string;
+	/** Payload fields the event's payload contains, as in `@>` */
+	where?: Payload;
+	/** Events stored after this one, which must still be kept */
+	after?: string;
+	/** Events stored before this one, which must still be kept */
+	before?: string;
+	/** Events stored after this time */
+	since?: Date;
+};
+
+export type ListEventsArgs = EventFilterArgs & {
+	order: "asc" | "desc";
+	limit: number;
+	offset: number;
 };
 
 export type AckSignalsArgs = {
@@ -541,7 +560,8 @@ export class QueryBuilder {
 				returning e.id, e.task_key, e.queue, e.payload, e.waiting_on_execution_id,
 					e.waiting_step_key, e.cancelled, e.last_error, e.dedupe_key, e.cron_expression,
 					e.locked_by, e.claim_token, e."group", e.priority, e.run_at, e.created_at,
-					e.subscription_id, e.trace_context, e.metadata, e.dead_letter, e.signal_count
+					e.subscription_id, e.parent_execution_id, e.trace_context, e.metadata, e.dead_letter,
+					e.signal_count
 			),${
 				held
 					? this.sql`
@@ -1221,6 +1241,49 @@ export class QueryBuilder {
 			where id = ${executionId}::uuid
 				${task ? this.sql`and task_key = ${task.key}::text and queue = ${task.queue}::text` : this.sql``}
 		`;
+	}
+
+	buildGetEvent(eventId: string): PendingQuery<EventInfo[]> {
+		// literals, not parameters: they select the partition and the partial event indexes
+		return this.sql<EventInfo[]>`
+			select id, payload->>'eventKey' as name, payload->'payload' as payload, created_at as "createdAt"
+			from pgconductor._private_executions
+			where queue = 'pgconductor.internal' and task_key = 'pgconductor.event-dispatch'
+				and id = ${eventId}::uuid
+		`;
+	}
+
+	buildListEvents(args: ListEventsArgs): PendingQuery<EventInfo[]> {
+		const direction = args.order === "desc" ? this.sql`desc` : this.sql`asc`;
+		return this.sql<EventInfo[]>`
+			select id, payload->>'eventKey' as name, payload->'payload' as payload, created_at as "createdAt"
+			from pgconductor._private_executions
+			where ${this.eventFilter(args)}
+			order by created_at ${direction}, id ${direction}
+			limit ${args.limit}::int offset ${args.offset}::int
+		`;
+	}
+
+	buildCountEvents(args: EventFilterArgs): PendingQuery<[{ count: number }]> {
+		return this.sql<[{ count: number }]>`
+			select count(*)::int as count from pgconductor._private_executions
+			where ${this.eventFilter(args)}
+		`;
+	}
+
+	/** Cursors compare (created_at, id), the order events are listed in. */
+	private eventFilter({ eventKey, where, after, before, since }: EventFilterArgs) {
+		const cursor = (id: string) => this.sql`(
+			select created_at, id from pgconductor._private_executions
+			where queue = 'pgconductor.internal' and task_key = 'pgconductor.event-dispatch'
+				and id = ${id}::uuid
+		)`;
+		return this.sql`queue = 'pgconductor.internal' and task_key = 'pgconductor.event-dispatch'
+			and payload->>'eventKey' = ${eventKey}::text
+			${where ? this.sql`and payload->'payload' @> ${this.sql.json(where as JsonValue)}::jsonb` : this.sql``}
+			${after ? this.sql`and (created_at, id) > ${cursor(after)}` : this.sql``}
+			${before ? this.sql`and (created_at, id) < ${cursor(before)}` : this.sql``}
+			${since ? this.sql`and created_at > ${since}::timestamptz` : this.sql``}`;
 	}
 
 	buildLoadStep({

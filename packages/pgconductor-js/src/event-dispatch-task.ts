@@ -1,6 +1,6 @@
 import type { DatabaseClient, Payload } from "./database-client.js";
 import type { BatchTaskContext, BatchTaskEvent } from "./task-context.js";
-import { Task } from "./task.js";
+import { type RetentionSettings, Task } from "./task.js";
 import * as assert from "./lib/assert.js";
 
 export const EVENT_DISPATCH_QUEUE = "pgconductor.internal";
@@ -15,7 +15,11 @@ type EventDispatchPayload = {
 type EventDispatchEvent = { name: "pgconductor.invoke"; payload: EventDispatchPayload };
 type EventDispatchDatabase = Pick<DatabaseClient, "dispatchCustomEvents">;
 
-export function createEventDispatchTask(db: EventDispatchDatabase) {
+/** `retention`: how long a dispatched event is kept, and its dedupe key remembered. */
+export function createEventDispatchTask(
+	db: EventDispatchDatabase,
+	retention: RetentionSettings = { days: 1 },
+) {
 	return Task.create<
 		typeof EVENT_DISPATCH_TASK,
 		typeof EVENT_DISPATCH_QUEUE,
@@ -28,7 +32,7 @@ export function createEventDispatchTask(db: EventDispatchDatabase) {
 			name: EVENT_DISPATCH_TASK,
 			queue: EVENT_DISPATCH_QUEUE,
 			maxAttempts: 3,
-			removeOnComplete: { days: 1 },
+			removeOnComplete: retention,
 			batch: { size: EVENT_DISPATCH_BATCH_SIZE, timeoutMs: 10 },
 		},
 		{ invocable: true },

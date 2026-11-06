@@ -82,6 +82,7 @@ describe("event triggers", () => {
 			expectTypeOf(event).toEqualTypeOf<{
 				name: "user.created";
 				payload: { userId: string; email: string };
+				id: string;
 			}>();
 		});
 	});

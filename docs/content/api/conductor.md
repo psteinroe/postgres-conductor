@@ -17,6 +17,7 @@ const conductor = Conductor.create({
   middleware?,          // Optional per-attempt middleware
   logger?,              // Optional custom logger
   events?,              // Optional event definitions
+  eventRetention?,      // Optional: how long emitted events are kept
   metadata?,            // Optional Standard Schema for execution metadata
   clock?,               // Optional time source, for tests
   telemetry?,           // Set to false to disable OpenTelemetry tracing
@@ -32,6 +33,7 @@ const conductor = Conductor.create({
 - `middleware`: (optional) Functions that run around every attempt of a non-batch task and can add to `ctx` (see [Middleware](../crafting-tasks/custom-context.md#middleware))
 - `logger`: (optional) Custom logger implementation
 - `events`: (optional) Array of event definitions from `defineEvent()` for typed custom events
+- `eventRetention`: (optional) How long emitted events are kept after dispatch, as a [retention policy](../crafting-tasks/retention.md); default `{ days: 1 }`. It bounds what [`conductor.listEvents()`](#conductorlistevents) reads and how long `dedupe_key`s are remembered
 - `metadata`: (optional) Standard Schema that types and validates execution metadata (see [Execution Metadata](../crafting-tasks/execution-metadata.md))
 - `clock`: (optional) Object with `now(): Date` that workers use instead of the system clock for cron schedules and time windows, still corrected to database time. Tests pass `createTestClock(sql)` (see [Testing](../crafting-tasks/testing.md))
 - `telemetry`: (optional) `false` disables OpenTelemetry spans and trace context propagation. Enabled by default, using the globally registered provider
@@ -200,8 +202,8 @@ Returns the event ID. Events trigger tasks with matching event triggers. Trigger
 inherit the event's `metadata`.
 
 `dedupe_key` deduplicates the emit: repeating it for the same event name emits nothing and returns
-the original event ID. Keys are scoped per event name and remembered for 1–2 days after the event
-was dispatched. See [Deduplicating Emits](../crafting-tasks/triggers.md#deduplicating-emits).
+the original event ID. Keys are scoped per event name and remembered while the event is kept: 1–2
+days after it was dispatched by default (`eventRetention`). See [Deduplicating Emits](../crafting-tasks/triggers.md#deduplicating-emits).
 
 See [Task Triggers](../crafting-tasks/triggers.md) for details on event-triggered tasks.
 
@@ -273,6 +275,38 @@ Returns `null` if the ID is unknown or the execution was removed by its [retenti
 ```
 
 `pending` covers executions that wait for their first attempt, a retry, a sleep, a child or an event. `cancelled` is reported once the cancellation has settled; until then a running execution stays `running`.
+
+## conductor.getEvent()
+
+Read an emitted event by ID:
+
+```typescript
+const event = await conductor.getEvent(eventId);
+// { id: string; name: string; payload: object; createdAt: Date }
+```
+
+Returns `null` if the ID is unknown or the event was removed by `eventRetention`.
+
+## conductor.listEvents()
+
+Read the kept events of one name, in the order they were stored:
+
+```typescript
+const thread = await conductor.listEvents({
+  name: "slack.message",
+  where: { channel: "C1", threadTs: "1.0" }, // payload contains these fields
+  order: "asc",                             // or "desc", newest first
+  limit: 100,                               // default 100
+  offset: 0,
+});
+```
+
+The payload is typed by the event's definition. Other filters:
+
+- `since`: only events stored after this `Date`
+- `after` / `before`: only events stored after or before a kept event, by ID. With `order: "desc"` and `limit: 1`, `before` reads the event just before it
+
+`conductor.countEvents()` takes the same query without `order`, `limit` and `offset` and returns how many events it matches. Events are kept for `eventRetention` (default one day), so only those are read. Reads by name and by payload fields use indexes that cover only events.
 
 ## conductor.waitForResult()
 

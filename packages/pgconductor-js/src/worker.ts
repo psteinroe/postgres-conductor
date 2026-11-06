@@ -54,7 +54,7 @@ export const DEFAULT_WORKER_CONFIG: WorkerConfig = {
 // How long the final flush retries settling results the worker still holds
 const FINAL_FLUSH_TIMEOUT_MS = 10_000;
 
-function taskEventFor(execution: Execution): { name: string; payload?: unknown } {
+function taskEventFor(execution: Execution): { name: string; payload?: unknown; id?: string } {
 	if (execution.cron_expression) {
 		const [prefix, scheduleName] = execution.dedupe_key?.split("::") || [];
 		// A dynamic schedule (ctx.schedule) runs its task like an invocation with its payload
@@ -70,6 +70,8 @@ function taskEventFor(execution: Execution): { name: string; payload?: unknown }
 		return {
 			name: execution.payload.event as string,
 			payload: execution.payload.payload,
+			// A delivery's parent is the event it delivers
+			id: execution.parent_execution_id as string,
 		};
 	}
 	return { name: "pgconductor.invoke", payload: execution.payload };
