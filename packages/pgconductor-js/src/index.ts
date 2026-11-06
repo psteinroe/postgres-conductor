@@ -1,5 +1,5 @@
 export { Conductor } from "./conductor.js";
-export type { ConductorOptions, WaitForResultOptions } from "./conductor.js";
+export type { ConductorOptions, EventQuery, WaitForResultOptions } from "./conductor.js";
 export { Orchestrator } from "./orchestrator.js";
 export type { OrchestratorOptions } from "./orchestrator.js";
 export type { WorkerConfig } from "./worker.js";
@@ -46,6 +46,7 @@ export type {
 } from "./event-definition.js";
 export { defineEvent } from "./event-definition.js";
 export type {
+	EventInfo,
 	ExecutionInfo,
 	ExecutionOutcome,
 	ExecutionStatus,

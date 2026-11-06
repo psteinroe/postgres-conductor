@@ -2,6 +2,7 @@ import type { Sql } from "postgres";
 import type { StandardSchemaV1 } from "@standard-schema/spec";
 import {
 	DatabaseClient,
+	type EventInfo,
 	type ExecutionInfo,
 	type ExecutionSpec,
 	type Payload,
@@ -16,6 +17,7 @@ import {
 	type ExecuteFunction,
 	type TaskIdentifier,
 	type ValidateDeadLetterConfiguration,
+	type RetentionSettings,
 } from "./task.js";
 import type {
 	TaskContext,
@@ -113,6 +115,32 @@ type ResolvedBatchTaskEvent<
 	TTriggers,
 > = BatchTaskEvent<ResolvedTaskEvent<Tasks, Events, TDef, TTriggers>>;
 
+/** Which kept events `conductor.listEvents()` reads. */
+export type EventQuery<TName extends string, TPayload> = {
+	name: TName;
+	/** Payload fields the event's payload contains */
+	where?: Partial<TPayload>;
+	/** Only events stored after this kept event */
+	after?: string;
+	/** Only events stored before this kept event */
+	before?: string;
+	/** Only events stored after this time */
+	since?: Date;
+	order?: "asc" | "desc";
+	limit?: number;
+	offset?: number;
+};
+
+function eventFilter(query: Omit<EventQuery<string, unknown>, "order" | "limit" | "offset">) {
+	return {
+		eventKey: query.name,
+		where: query.where as Payload | undefined,
+		after: query.after,
+		before: query.before,
+		since: query.since,
+	};
+}
+
 export type ConductorOptions<
 	TTaskSchemas extends TaskSchemas<any> | undefined,
 	TEventSchemas extends EventCatalog | undefined,
@@ -121,6 +149,12 @@ export type ConductorOptions<
 	tasks?: TTaskSchemas;
 
 	events?: TEventSchemas;
+
+	/**
+	 * How long emitted events are kept after dispatch, for `getEvent()` and `listEvents()` and to
+	 * remember `dedupe_key`s; default one day.
+	 */
+	eventRetention?: RetentionSettings;
 
 	context: ExtraContext;
 
@@ -193,6 +227,7 @@ export class Conductor<
 		options: ConnectionOptions & {
 			tasks?: TTaskSchemas;
 			events?: TEventSchemas;
+			eventRetention?: RetentionSettings;
 			context: TExtraContext;
 			metadata?: TMetadataSchema;
 			middleware?: {
@@ -448,6 +483,41 @@ export class Conductor<
 				return id;
 			},
 		});
+	}
+
+	/** Read an emitted event. Returns null for an unknown id or an event removed by retention. */
+	async getEvent(eventId: string): Promise<EventInfo | null> {
+		return this.db.getEvent(eventId);
+	}
+
+	/**
+	 * Read the kept events named `name`, in the order they were stored (`order: "desc"` for newest
+	 * first), optionally only those whose payload contains `where` or that were stored after
+	 * `since`, or after or before a kept event. Defaults to the first 100.
+	 */
+	async listEvents<
+		TName extends EventName<Events>,
+		TDef extends FindEventByIdentifier<Events, TName> = FindEventByIdentifier<Events, TName>,
+	>(
+		query: EventQuery<TName, InferEventPayload<TDef>>,
+	): Promise<EventInfo<TName, InferEventPayload<TDef>>[]> {
+		const events = await this.db.listEvents({
+			...eventFilter(query),
+			order: query.order ?? "asc",
+			limit: query.limit ?? 100,
+			offset: query.offset ?? 0,
+		});
+		return events as EventInfo<TName, InferEventPayload<TDef>>[];
+	}
+
+	/** Count the kept events `listEvents()` would read, without its order, limit and offset. */
+	async countEvents<
+		TName extends EventName<Events>,
+		TDef extends FindEventByIdentifier<Events, TName> = FindEventByIdentifier<Events, TName>,
+	>(
+		query: Omit<EventQuery<TName, InferEventPayload<TDef>>, "order" | "limit" | "offset">,
+	): Promise<number> {
+		return this.db.countEvents(eventFilter(query));
 	}
 
 	async cancel(executionId: string, options?: { reason?: string }): Promise<boolean> {

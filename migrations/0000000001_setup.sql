@@ -131,6 +131,14 @@ where singleton_on is not null and completed_at is null and failed_at is null an
 create unique index on pgconductor._private_executions (task_key, key, queue)
 where key is not null and completed_at is null and failed_at is null and cancelled = false;
 
+-- reading stored events (conductor.listEvents) by name in time order, and by payload fields. only
+-- event dispatch executions are indexed, so other executions pay nothing for them
+create index on pgconductor._private_executions ((payload->>'eventKey'), created_at, id)
+where task_key = 'pgconductor.event-dispatch';
+
+create index on pgconductor._private_executions using gin ((payload->'payload') jsonb_path_ops)
+where task_key = 'pgconductor.event-dispatch';
+
 create table pgconductor._private_tasks (
     key text not null,
 

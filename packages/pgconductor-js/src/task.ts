@@ -119,10 +119,12 @@ type CustomEventUnion<TTriggers, Events extends readonly EventDefinition<string,
 						? {
 								name: TName;
 								payload: SelectedRow<InferEventPayload<TEvent>, TFields>;
+								/** The event's id, as `emit()` returned it */
+								id: string;
 							}
-						: { name: TName; payload: InferEventPayload<TEvent> }
-					: { name: TName; payload: {} }
-				: { name: TName; payload: {} }
+						: { name: TName; payload: InferEventPayload<TEvent>; id: string }
+					: { name: TName; payload: {}; id: string }
+				: { name: TName; payload: {}; id: string }
 			: never
 		: never;
 
