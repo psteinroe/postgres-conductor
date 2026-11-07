@@ -1,5 +1,10 @@
 export { Conductor } from "./conductor.js";
-export type { ConductorOptions, EventQuery, WaitForResultOptions } from "./conductor.js";
+export type {
+	ConductorOptions,
+	EventQuery,
+	ExecutionQuery,
+	WaitForResultOptions,
+} from "./conductor.js";
 export { Orchestrator } from "./orchestrator.js";
 export type { OrchestratorOptions } from "./orchestrator.js";
 export type { WorkerConfig } from "./worker.js";

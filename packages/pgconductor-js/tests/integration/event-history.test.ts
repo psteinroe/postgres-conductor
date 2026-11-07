@@ -69,7 +69,7 @@ describe("event history", () => {
 			name: "history.message",
 			payload: { channel: "C1", thread: "t1", text: "one" },
 		});
-		expect(thread[0]!.createdAt).toBeInstanceOf(Date);
+		expect(thread[0]?.createdAt).toBeInstanceOf(Date);
 
 		expect(await conductor.countEvents({ name: "history.message", where: { thread: "t1" } })).toBe(
 			3,
@@ -110,7 +110,7 @@ describe("event history", () => {
 		expect(before?.payload.text).toBe("one");
 		expect(after?.payload.text).toBe("four");
 
-		const event = await conductor.getEvent(ids[1]!);
+		const event = await conductor.getEvent(ids[1] || "");
 		expect(event).toMatchObject({ id: ids[1], name: "history.message", payload: { text: "two" } });
 		expect(await conductor.getEvent("00000000-0000-7000-8000-000000000000")).toBeNull();
 	});
@@ -188,7 +188,7 @@ describe("event history", () => {
 			const id = await conductor.emit("history.other", { channel: "C1" });
 			await waitForCondition(() => received.length === 1);
 			expect(received).toEqual([id]);
-			expect((await conductor.getEvent(received[0]!))?.payload).toEqual({ channel: "C1" });
+			expect((await conductor.getEvent(id))?.payload).toEqual({ channel: "C1" });
 		} finally {
 			await orchestrator.stop();
 		}

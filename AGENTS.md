@@ -169,6 +169,9 @@ Tables live in the `pgconductor` schema with a `_private_` prefix (`_private_exe
 - Runs the internal event dispatch worker only when the conductor has `events` configured
 - One queue = one codebase: every orchestrator polling a queue runs the same task set, so worker registration owns the whole queue and replaces its cron schedules and trigger subscriptions
 
+**Reading executions**
+- `conductor.getExecution()` and `listExecutions()` return each execution's `payload`. `listExecutions` (`buildListExecutions`) reads one task's executions by payload containment and, with `open`, only non-terminal ones, through a partial index on `(task_key, queue, created_at, id)` where `completed_at is null and failed_at is null`
+
 **DatabaseClient** (`database-client.ts`)
 - All database access goes through this interface
 - Queries are built in `query-builder.ts` or call SQL functions from the migration

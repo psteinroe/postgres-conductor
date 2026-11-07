@@ -115,6 +115,17 @@ type ResolvedBatchTaskEvent<
 	TTriggers,
 > = BatchTaskEvent<ResolvedTaskEvent<Tasks, Events, TDef, TTriggers>>;
 
+/** Which executions `conductor.listExecutions()` reads. */
+export type ExecutionQuery<TName extends string, TQueue extends string, TPayload> = {
+	task: TaskIdentifier<TName, TQueue>;
+	/** Payload fields the execution's payload contains */
+	where?: Partial<TPayload>;
+	/** Only executions that have not completed, failed or been cancelled */
+	open?: boolean;
+	limit?: number;
+	offset?: number;
+};
+
 /** Which kept events `conductor.listEvents()` reads. */
 export type EventQuery<TName extends string, TPayload> = {
 	name: TName;
@@ -503,9 +514,9 @@ export class Conductor<
 	): Promise<EventInfo<TName, InferEventPayload<TDef>>[]> {
 		const events = await this.db.listEvents({
 			...eventFilter(query),
-			order: query.order ?? "asc",
-			limit: query.limit ?? 100,
-			offset: query.offset ?? 0,
+			order: query.order || "asc",
+			limit: query.limit || 100,
+			offset: query.offset || 0,
 		});
 		return events as EventInfo<TName, InferEventPayload<TDef>>[];
 	}
@@ -590,6 +601,29 @@ export class Conductor<
 		return this.db.getExecution({
 			executionId: executionId as string,
 			task: { key: taskOrId.name, queue: taskOrId.queue || "default" },
+		});
+	}
+
+	/**
+	 * List a task's executions in the order they were created, with their payloads: only open ones
+	 * (pending, waiting or running) with `open`, only those whose payload contains `where`. Executions
+	 * removed by retention are gone. Defaults to the first 100.
+	 */
+	async listExecutions<TName extends TaskName<Tasks>, TQueue extends string = "default">(
+		query: ExecutionQuery<TName, TQueue, InferPayload<FindTaskByIdentifier<Tasks, TName, TQueue>>>,
+	): Promise<
+		ExecutionInfo<
+			InferReturns<FindTaskByIdentifier<Tasks, TName, TQueue>>,
+			InferPayload<FindTaskByIdentifier<Tasks, TName, TQueue>>
+		>[]
+	>;
+	async listExecutions(query: ExecutionQuery<string, string, Payload>): Promise<ExecutionInfo[]> {
+		return this.db.listExecutions({
+			task: { key: query.task.name, queue: query.task.queue || "default" },
+			where: query.where,
+			open: query.open,
+			limit: query.limit || 100,
+			offset: query.offset || 0,
 		});
 	}
 

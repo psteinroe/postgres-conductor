@@ -18,6 +18,7 @@ export class MockDatabaseClient implements IDatabaseClient {
 	countActiveOrchestratorsBelow = vi.fn(async () => 0);
 	orchestratorShutdown = vi.fn(async () => {});
 	getExecution = vi.fn(async () => null);
+	listExecutions = vi.fn(async () => []);
 	getEvent = vi.fn(async () => null);
 	listEvents = vi.fn(async () => []);
 	countEvents = vi.fn(async () => 0);

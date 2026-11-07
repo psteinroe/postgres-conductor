@@ -265,6 +265,7 @@ Returns `null` if the ID is unknown or the execution was removed by its [retenti
   taskKey: string;
   queue: string;
   status: "pending" | "running" | "completed" | "failed" | "cancelled";
+  payload: TPayload;          // the execution's input
   result: TResult | null;     // return value, set when completed
   error: string | null;       // last attempt's error, or the cancellation reason
   attempts: number;
@@ -307,6 +308,22 @@ The payload is typed by the event's definition. Other filters:
 - `after` / `before`: only events stored after or before a kept event, by ID. With `order: "desc"` and `limit: 1`, `before` reads the event just before it
 
 `conductor.countEvents()` takes the same query without `order`, `limit` and `offset` and returns how many events it matches. Events are kept for `eventRetention` (default one day), so only those are read. Reads by name and by payload fields use indexes that cover only events.
+
+## conductor.listExecutions()
+
+List a task's executions, in the order they were created:
+
+```typescript
+const open = await conductor.listExecutions({
+  task: { name: "approval" },
+  where: { sessionId: "worker:w_1" }, // payload contains these fields
+  open: true,                          // only pending, waiting or running ones
+  limit: 100,                          // default 100
+  offset: 0,
+});
+```
+
+Each entry has the fields of [`conductor.getExecution()`](#conductorgetexecution), with `payload` and `result` typed by the task's definition. Executions removed by their [retention policy](../crafting-tasks/retention.md) are not listed. Listing open executions uses an index that covers only those; a task's settled ones are read through the `task_key` index and filtered.
 
 ## conductor.waitForResult()
 

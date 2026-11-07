@@ -153,6 +153,16 @@ export type EventFilterArgs = {
 	since?: Date;
 };
 
+export type ListExecutionsArgs = {
+	task: { key: string; queue: string };
+	/** Payload fields the execution's payload contains, as in `@>` */
+	where?: Partial<Payload>;
+	/** Only executions that have not completed, failed or been cancelled */
+	open?: boolean;
+	limit: number;
+	offset: number;
+};
+
 export type ListEventsArgs = EventFilterArgs & {
 	order: "asc" | "desc";
 	limit: number;
@@ -1235,11 +1245,38 @@ export class QueryBuilder {
 					when locked_by is not null then 'running'
 					else 'pending'
 				end as status,
-				result, last_error as error, attempts, created_at as "createdAt",
+				payload, result, last_error as error, attempts, created_at as "createdAt",
 				completed_at as "completedAt", failed_at as "failedAt"
 			from pgconductor._private_executions
 			where id = ${executionId}::uuid
 				${task ? this.sql`and task_key = ${task.key}::text and queue = ${task.queue}::text` : this.sql``}
+		`;
+	}
+
+	buildListExecutions({
+		task,
+		where,
+		open,
+		limit,
+		offset,
+	}: ListExecutionsArgs): PendingQuery<ExecutionInfo[]> {
+		return this.sql<ExecutionInfo[]>`
+			select id, task_key as "taskKey", queue,
+				case
+					when completed_at is not null then 'completed'
+					when failed_at is not null and cancelled then 'cancelled'
+					when failed_at is not null then 'failed'
+					when locked_by is not null then 'running'
+					else 'pending'
+				end as status,
+				payload, result, last_error as error, attempts, created_at as "createdAt",
+				completed_at as "completedAt", failed_at as "failedAt"
+			from pgconductor._private_executions
+			where task_key = ${task.key}::text and queue = ${task.queue}::text
+				${open ? this.sql`and completed_at is null and failed_at is null` : this.sql``}
+				${where ? this.sql`and payload @> ${this.sql.json(where as JsonValue)}::jsonb` : this.sql``}
+			order by created_at, id
+			limit ${limit}::int offset ${offset}::int
 		`;
 	}
 
