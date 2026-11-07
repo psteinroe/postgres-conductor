@@ -145,6 +145,10 @@ where singleton_on is not null and completed_at is null and failed_at is null an
 create unique index on pgconductor._private_executions (task_key, key, queue)
 where key is not null and completed_at is null and failed_at is null and cancelled = false;
 
+-- listing a task's open executions (conductor.listExecutions): pending, waiting or running
+create index on pgconductor._private_executions (task_key, queue, created_at, id)
+where completed_at is null and failed_at is null;
+
 -- reading stored events (conductor.listEvents) by name in time order, and by payload fields. only
 -- event dispatch executions are indexed, so other executions pay nothing for them
 create index on pgconductor._private_executions ((payload->>'eventKey'), created_at, id)

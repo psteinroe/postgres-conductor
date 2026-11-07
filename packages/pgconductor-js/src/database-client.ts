@@ -19,6 +19,7 @@ import {
 	type GetExecutionArgs,
 	type EventFilterArgs,
 	type ListEventsArgs,
+	type ListExecutionsArgs,
 	type LoadStepArgs,
 	type CountStepsArgs,
 	type SaveStepArgs,
@@ -81,11 +82,13 @@ export type DeadLetterMetadata = {
 
 export type ExecutionStatus = "pending" | "running" | "completed" | "failed" | "cancelled";
 
-export type ExecutionInfo<TResult = unknown> = {
+export type ExecutionInfo<TResult = unknown, TPayload = Payload> = {
 	id: string;
 	taskKey: string;
 	queue: string;
 	status: ExecutionStatus;
+	/** The execution's input */
+	payload: TPayload;
 	/** Return value of a completed execution */
 	result: TResult | null;
 	/** Error of the last failed attempt, or the cancellation reason */
@@ -665,6 +668,16 @@ export class DatabaseClient {
 		return rows[0] || null;
 	}
 
+	async listExecutions(
+		args: ListExecutionsArgs,
+		opts?: QueryMethodOptions,
+	): Promise<ExecutionInfo[]> {
+		return this.query(() => this.builder.buildListExecutions(args), {
+			label: "listExecutions",
+			...opts,
+		});
+	}
+
 	async getEvent(eventId: string, opts?: QueryMethodOptions): Promise<EventInfo | null> {
 		const rows = await this.query(() => this.builder.buildGetEvent(eventId), {
 			label: "getEvent",
@@ -685,7 +698,7 @@ export class DatabaseClient {
 			label: "countEvents",
 			...opts,
 		});
-		return row?.count ?? 0;
+		return row?.count || 0;
 	}
 
 	async returnExecutions(args: ReturnExecutionsArgs, opts?: QueryMethodOptions): Promise<void> {
