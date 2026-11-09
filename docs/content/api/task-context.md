@@ -443,9 +443,26 @@ Only in an [actor](../task-execution/actors.md): wake it at `at` once the activa
 ctx.setAlarm(new Date(Date.now() + 60 * 60 * 1000));
 ```
 
+## ctx.listen()
+
+Receive the events that match a filter as signals named after the event, until `ctx.unlisten()` or the end of the execution. The signal's payload is the event's, and its id the event's id. Listening again under a name replaces its listen, unless event and filter stay the same. Not memoized; it hangs up when the attempt no longer holds the execution. See [Listening for Events](../crafting-tasks/triggers.md#listening-for-events).
+
+```typescript
+ctx.onSignal("chat.message", (payload, { id }) => handle(id, payload));
+await ctx.listen("thread", { event: chatMessage, filter: { threadId: [threadId] } });
+```
+
+## ctx.unlisten()
+
+Remove the listen with this name, if there is one.
+
+```typescript
+await ctx.unlisten("thread");
+```
+
 ## ctx.setState()
 
-Replace what this execution tells others about itself, a JSON object or `null`. [`conductor.getExecution()`](conductor.md#conductorgetexecution) and `listExecutions()` return it, and `listExecutions({ state })` finds open executions whose state contains the given fields. The write happens at once and is not memoized, so a replay writes again; it hangs up when the attempt no longer holds the execution. `ctx.state` reads it back.
+Replace what this execution tells others about itself, a JSON object or `null`. [`conductor.getExecution()`](conductor.md#conductorgetexecution) and `listExecutions()` return it. The write happens at once and is not memoized, so a replay writes again; it hangs up when the attempt no longer holds the execution. `ctx.state` reads it back.
 
 ```typescript
 await ctx.setState({ status: "waiting", topics: ["billing"] });

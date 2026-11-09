@@ -136,6 +136,8 @@ export type CustomEventTrigger<
 	event: TName;
 	fields?: TFields;
 	filter?: TFilter;
+	/** Fire only for events that no execution listens for with `ctx.listen()` */
+	unlistened?: boolean;
 };
 
 export type Trigger = InvocableTrigger | CronTrigger | CustomEventTrigger;

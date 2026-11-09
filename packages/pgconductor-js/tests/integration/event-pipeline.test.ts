@@ -57,6 +57,7 @@ describe("event pipeline", () => {
 				task_key: subscription.taskKey,
 				event_key: subscription.eventKey,
 				payload_fields: subscription.payloadFields || null,
+				unlistened: false,
 				...compileEventFilter(subscription.eventKey, filter, [
 					{ name: subscription.eventKey, payload: undefined, filterable: Object.keys(filter) },
 				]),
@@ -1396,6 +1397,7 @@ describe("event pipeline", () => {
 							payload_fields: null,
 							required_field_count: 0,
 							terms: [],
+							unlistened: false,
 						},
 					],
 				});

@@ -242,6 +242,7 @@ const executionId = await conductor.signalWithStart({
   signal: { name: "input", id: requestId, payload },
   input: {}, // used only when it starts an execution (default: {})
   state: {}, // optional: its state (ctx.setState()), used only when it starts an execution
+  listen: { thread: { event: chatMessage, filter: { threadId: ["1"] } } }, // optional: ctx.listen()s when it starts one
   priority: 0, // optional
   metadata: {}, // optional
 });
@@ -321,14 +322,13 @@ const open = await conductor.listExecutions({
   task: { name: "approval" },
   where: { sessionId: "worker:w_1" }, // payload contains these fields
   open: true,                          // only pending, waiting or running ones
-  state: { status: "waiting" },        // state (ctx.setState()) contains these fields
   order: "asc",                        // or "desc", newest first
   limit: 100,                          // default 100
   offset: 0,
 });
 ```
 
-Each entry has the fields of [`conductor.getExecution()`](#conductorgetexecution), with `payload` and `result` typed by the task's definition. Executions removed by their [retention policy](../crafting-tasks/retention.md) are not listed. Listing open executions uses an index that covers only those; a task's settled ones are read through the `task_key` index and filtered. A `state` filter on open executions uses a GIN index on the state of open executions.
+Each entry has the fields of [`conductor.getExecution()`](#conductorgetexecution), with `payload` and `result` typed by the task's definition. Executions removed by their [retention policy](../crafting-tasks/retention.md) are not listed. Listing open executions uses an index that covers only those; a task's settled ones are read through the `task_key` index and filtered.
 
 ## conductor.waitForResult()
 

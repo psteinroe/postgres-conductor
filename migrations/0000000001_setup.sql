@@ -80,7 +80,7 @@ create table pgconductor._private_executions (
     completed_at timestamptz,
     payload jsonb,
     result jsonb,
-    -- what the execution tells others about itself (ctx.setState), queried by containment
+    -- what the execution tells others about itself (ctx.setState)
     state jsonb,
     trace_context jsonb,
     metadata jsonb,
@@ -136,10 +136,6 @@ where key is not null and completed_at is null and failed_at is null and cancell
 -- listing a task's open executions (conductor.listExecutions): pending, waiting or running
 create index on pgconductor._private_executions (task_key, queue, created_at, id)
 where completed_at is null and failed_at is null;
-
--- listing open executions by their state (conductor.listExecutions with state)
-create index on pgconductor._private_executions using gin (state jsonb_path_ops)
-where state is not null and completed_at is null and failed_at is null;
 
 -- reading stored events (conductor.listEvents) by name in time order, and by payload fields. only
 -- event dispatch executions are indexed, so other executions pay nothing for them
@@ -467,7 +463,8 @@ create type pgconductor.event_subscription_spec as (
     event_key text,
     payload_fields text[],
     required_field_count smallint,
-    terms jsonb
+    terms jsonb,
+    unlistened boolean
 );
 
 create or replace function pgconductor._private_register_worker(
@@ -1162,7 +1159,8 @@ create or replace function pgconductor.signal_with_start(
   p_trace_context jsonb default null,
   p_metadata jsonb default null,
   p_priority integer default null,
-  p_state jsonb default null
+  p_state jsonb default null,
+  p_listens jsonb default null
 )
 returns uuid
 language plpgsql
@@ -1210,6 +1208,10 @@ begin
       p_state
     )
     returning id into v_execution_id;
+
+    if p_listens is not null then
+      perform pgconductor._private_put_listens(v_execution_id, p_queue, p_task_key, p_listens);
+    end if;
   end if;
 
   perform pgconductor._private_store_signal(v_execution_id, p_queue, p_name, p_id, p_payload);
@@ -1618,11 +1620,13 @@ create table pgconductor._private_custom_event_subscriptions (
     awaited_execution_id uuid,
     -- a ctx.waitForAny() branch that a signal with this name wakes
     signal_name text,
+    -- a task trigger that fires only for events no execution listens for
+    unlistened boolean not null default false,
     constraint chk_custom_event_subscription_event_key check (
         btrim(event_key) <> '' and octet_length(event_key) between 1 and 255
     ),
     constraint chk_custom_event_subscription_kind check (
-        kind in ('task_trigger', 'execution_wait')
+        kind in ('task_trigger', 'execution_wait', 'execution_listen')
     ),
     constraint chk_custom_event_subscription_shape check (
         (kind = 'task_trigger'
@@ -1637,7 +1641,19 @@ create table pgconductor._private_custom_event_subscriptions (
             and execution_id is not null
             and step_key is not null
             and payload_fields is null
+            and not unlistened
             and num_nonnulls(event_key, awaited_execution_id, signal_name) = 1)
+        or
+        -- a ctx.listen(): step_key is 'pgconductor.listen:' and its name
+        (kind = 'execution_listen'
+            and event_key is not null
+            and execution_id is not null
+            and step_key is not null
+            and payload_fields is null
+            and expires_at is null
+            and awaited_execution_id is null
+            and signal_name is null
+            and not unlistened)
     ),
     constraint fk_custom_event_subscription_execution
         foreign key (execution_id, queue)
@@ -1846,6 +1862,159 @@ $function$;
 -- p_suspend the execution keeps running and dispatch stores a matching event
 -- as the step result; an existing subscription is left as it is. Returns the
 -- step result once the wait has settled.
+-- puts listens of an execution ([{name, event_key, required_field_count, terms}]): one
+-- subscription per name. a listen whose event and filter stay the same is kept, so the events
+-- stored since it was made keep reaching the execution; a changed one starts anew.
+create or replace function pgconductor._private_put_listens(
+    p_execution_id uuid,
+    p_queue text,
+    p_task_key text,
+    p_listens jsonb
+)
+returns void
+language plpgsql
+volatile
+set search_path to ''
+as $function$
+declare
+    v_listen record;
+    v_subscription_id uuid;
+begin
+    for v_listen in
+        select l.name, l.event_key, l.required_field_count, l.terms
+        from jsonb_to_recordset(p_listens)
+            as l(name text, event_key text, required_field_count smallint, terms jsonb)
+    loop
+        select subscription.id
+        into v_subscription_id
+        from pgconductor._private_custom_event_subscriptions subscription
+        where subscription.kind = 'execution_listen'
+          and subscription.execution_id = p_execution_id
+          and subscription.step_key = 'pgconductor.listen:' || v_listen.name
+          and subscription.event_key = v_listen.event_key
+          and subscription.required_field_count = v_listen.required_field_count
+          and (
+            select coalesce(jsonb_agg(jsonb_build_array(term.field_name, term.operator,
+                term.scalar_type, term.text_value, term.number_value, term.boolean_value,
+                term.number_range::text) order by term.term_number), '[]'::jsonb)
+            from pgconductor._private_event_filter_terms term
+            where term.subscription_id = subscription.id
+          ) = (
+            select coalesce(jsonb_agg(jsonb_build_array(term.field_name, term.operator,
+                term.scalar_type, term.text_value, term.number_value, term.boolean_value,
+                term.number_range::text) order by term.term_number), '[]'::jsonb)
+            from pgconductor._private_expand_event_filter_terms(
+                subscription.id, v_listen.event_key, v_listen.terms
+            ) term
+          );
+
+        continue when found;
+
+        delete from pgconductor._private_custom_event_subscriptions subscription
+        where subscription.kind = 'execution_listen'
+          and subscription.execution_id = p_execution_id
+          and subscription.step_key = 'pgconductor.listen:' || v_listen.name;
+
+        insert into pgconductor._private_custom_event_subscriptions (
+            event_key, task_key, queue, required_field_count, kind, execution_id, step_key
+        ) values (
+            v_listen.event_key, p_task_key, p_queue, v_listen.required_field_count,
+            'execution_listen', p_execution_id, 'pgconductor.listen:' || v_listen.name
+        )
+        returning id into v_subscription_id;
+
+        insert into pgconductor._private_event_filter_terms (
+            subscription_id, term_number, event_key, field_name, operator,
+            scalar_type, text_value, number_value, boolean_value, number_range
+        )
+        select *
+        from pgconductor._private_expand_event_filter_terms(
+            v_subscription_id, v_listen.event_key, v_listen.terms
+        );
+    end loop;
+end;
+$function$;
+
+-- ctx.listen() and ctx.unlisten() of a claimed execution: removes the listens named in
+-- p_unlisten, then puts p_listens. returns false when the claim is not held.
+create or replace function pgconductor._private_set_listens(
+    p_execution_id uuid,
+    p_queue text,
+    p_orchestrator_id uuid,
+    p_claim_token uuid,
+    p_listens jsonb,
+    p_unlisten text[]
+)
+returns boolean
+language plpgsql
+volatile
+set search_path to ''
+as $function$
+declare
+    v_task_key text;
+begin
+    -- the row lock senders take, so a dispatch delivering to this execution sees the change
+    select execution.task_key
+    into v_task_key
+    from pgconductor._private_executions execution
+    where execution.id = p_execution_id
+      and execution.queue = p_queue
+      and execution.locked_by = p_orchestrator_id
+      and execution.claim_token = p_claim_token
+    for update;
+
+    if not found then
+        return false;
+    end if;
+
+    delete from pgconductor._private_custom_event_subscriptions subscription
+    where subscription.kind = 'execution_listen'
+      and subscription.execution_id = p_execution_id
+      and subscription.step_key = any(
+        select 'pgconductor.listen:' || name from unnest(p_unlisten) name
+      );
+
+    perform pgconductor._private_put_listens(p_execution_id, p_queue, v_task_key, p_listens);
+    return true;
+end;
+$function$;
+
+-- stores the events that dispatch matched to listens ([{execution_id, queue, event_id,
+-- event_key, payload}]) as signals named after the event, with the event id as signal id, so
+-- an execution that listens for an event twice gets it once. executions that ended get nothing.
+create or replace function pgconductor._private_deliver_listens(p_deliveries jsonb)
+returns void
+language plpgsql
+volatile
+set search_path to ''
+as $function$
+declare
+    v_delivery record;
+begin
+    perform pgconductor._private_lock_executions(array(
+        select distinct d.execution_id
+        from jsonb_to_recordset(p_deliveries) as d(execution_id uuid)
+    ));
+
+    for v_delivery in
+        select d.execution_id, d.queue, d.event_id, d.event_key, d.payload
+        from jsonb_to_recordset(p_deliveries)
+            as d(execution_id uuid, queue text, event_id uuid, event_key text, payload jsonb)
+        join pgconductor._private_executions execution
+            on execution.id = d.execution_id and execution.queue = d.queue
+        where execution.completed_at is null
+          and execution.failed_at is null
+          and not execution.cancelled
+        order by d.execution_id, d.event_id
+    loop
+        perform pgconductor._private_store_signal(
+            v_delivery.execution_id, v_delivery.queue, v_delivery.event_key,
+            v_delivery.event_id::text, v_delivery.payload
+        );
+    end loop;
+end;
+$function$;
+
 create or replace function pgconductor._private_register_event_wait(
     p_execution_id uuid,
     p_queue text,
@@ -2347,10 +2516,10 @@ as $function$
     ), inserted_subscriptions as (
         insert into pgconductor._private_custom_event_subscriptions (
             id, event_key, task_key, queue, payload_fields,
-            required_field_count, kind
+            required_field_count, kind, unlistened
         )
         select id, event_key, task_key, p_queue_name,
-            payload_fields, required_field_count, 'task_trigger'
+            payload_fields, required_field_count, 'task_trigger', coalesce(unlistened, false)
         from prepared
         on conflict (id) do nothing
         returning id

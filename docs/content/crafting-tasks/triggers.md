@@ -268,6 +268,45 @@ const winner = await ctx.waitForAny(
 The other subscriptions are removed when one wins. See
 [ctx.waitForAny()](../api/task-context.md#ctxwaitforany).
 
+## Listening for Events
+
+A wait receives one event. An execution that should receive every matching event for a while,
+such as an [actor](../task-execution/actors.md) that follows a conversation, listens instead.
+`ctx.listen()` registers a listen under a name with the same filters as triggers, and each
+matching event arrives as a [signal](../task-execution/signals.md) named after the event, with the
+event's payload and its id as the signal id:
+
+```typescript
+ctx.onSignal("chat.message", (payload, { id }) => handle(id, payload));
+await ctx.listen("thread", { event: chatMessage, filter: { threadId: [threadId] } });
+
+// later, in this or another activation
+await ctx.unlisten("thread");
+```
+
+- A listen lasts across attempts and activations until `ctx.unlisten()` or the end of the
+  execution. A signal wakes an idle actor, so a listening actor sleeps until its events arrive
+- Events emitted after `listen()` resolves reach it. An event that matches several listens of one
+  execution arrives once
+- Listening again under a name replaces its listen, unless event and filter stay the same
+- `signalWithStart({ listen })` registers listens by name when it starts the execution, so events
+  emitted right after the start reach it before its first activation
+
+A trigger with `unlistened: true` fires only for the events no execution listens for, for example
+to route an event to whoever handles it, and the rest to a default handler:
+
+```typescript
+conductor.createTask(
+  { name: "route-message" },
+  { event: "chat.message", unlistened: true },
+  async (event) => startConversation(event.payload),
+);
+```
+
+Listens are matched when the event is dispatched, together with triggers and waits. The
+dispatcher stores the matched events as signals in a statement of its own, which locks the
+listening executions in one go, so it never waits on them while holding the waiting ones.
+
 ## Multiple Triggers
 
 Tasks can respond to multiple trigger types:

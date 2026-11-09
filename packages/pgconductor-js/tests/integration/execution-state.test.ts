@@ -32,7 +32,7 @@ describe("execution state", () => {
 		await pool?.destroy();
 	});
 
-	test("an execution sets its state, which others read and find it by", async () => {
+	test("an execution sets its state, which others read", async () => {
 		const db = await pool.child();
 		databases.push(db);
 		const conductor = Conductor.create({
@@ -75,13 +75,11 @@ describe("execution state", () => {
 			});
 		const ann = await send("w1", "ann", "billing");
 		const bea = await send("w2", "bea", "export");
-		await waitForCondition(async () => {
-			const executions = await conductor.listExecutions({
-				task: { name: "worker" },
-				state: { status: "busy" },
-			});
-			return executions.length === 2;
-		}, 5000);
+		const busy = async () =>
+			(await conductor.listExecutions({ task: { name: "worker" } })).filter(
+				(execution) => execution.state?.status === "busy",
+			);
+		await waitForCondition(async () => (await busy()).length === 2, 5000);
 
 		// The initial state is used only when signalWithStart starts the execution
 		expect(await send("w1", "ann", "invoices")).toBe(ann);
@@ -98,30 +96,13 @@ describe("execution state", () => {
 		expect(seen).toContainEqual({ status: "new", topics: [] });
 		expect(seen).toContainEqual({ status: "busy", topics: ["billing"] });
 
-		const billing = await conductor.listExecutions({
-			task: { name: "worker" },
-			open: true,
-			state: { topics: ["billing"] },
-		});
-		expect(billing.map((execution) => execution.id)).toEqual([ann]);
-		const busyBea = await conductor.listExecutions({
-			task: { name: "worker" },
-			where: { owner: "bea" },
-			state: { status: "busy" },
-		});
-		expect(busyBea.map((execution) => execution.id)).toEqual([bea]);
-
 		// An execution that ended keeps its state for reading, but is not open
 		await conductor.cancel(bea);
 		expect((await conductor.getExecution(bea))?.state).toEqual({
 			status: "busy",
 			topics: ["export"],
 		});
-		const open = await conductor.listExecutions({
-			task: { name: "worker" },
-			open: true,
-			state: { status: "busy" },
-		});
+		const open = await conductor.listExecutions({ task: { name: "worker" }, open: true });
 		expect(open.map((execution) => execution.id)).toEqual([ann]);
 	});
 });

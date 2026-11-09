@@ -1,5 +1,6 @@
 import type { EventFilterTerm } from "./database-client.js";
 import type { EventDefinition, EventFilterScalar } from "./event-definition.js";
+import type { ListenSpec } from "./query-builder.js";
 import type { Trigger } from "./task-definition.js";
 
 const MAX_FILTER_ALTERNATIVES = 4;
@@ -24,6 +25,7 @@ export type CompiledEventFilter = {
 export type CompiledEventTrigger = CompiledEventFilter & {
 	event_key: string;
 	payload_fields: string[] | null;
+	unlistened: boolean;
 };
 
 function scalarTerm(
@@ -144,6 +146,24 @@ export function compileEventFilter(
 	return { required_field_count: fields.length, terms };
 }
 
+/** A listen of an execution: matching events reach it as signals named after the event. */
+export type Listen = { event: { name: string }; filter?: unknown };
+
+/** Compiles listens by name, as `ctx.listen()` and `signalWithStart()` take them. */
+export function compileListens(
+	listens: Readonly<Record<string, Listen>>,
+	eventDefinitions: readonly EventDefinition<string, any, any>[],
+): ListenSpec[] {
+	return Object.entries(listens).map(([name, listen]) => {
+		if (!name) throw new Error("A listen needs a name");
+		return {
+			name,
+			event_key: listen.event.name,
+			...compileEventFilter(listen.event.name, listen.filter, eventDefinitions),
+		};
+	});
+}
+
 export function compileEventTriggers(
 	triggers: readonly Trigger[],
 	eventDefinitions: readonly EventDefinition<string, any, any>[],
@@ -157,6 +177,7 @@ export function compileEventTriggers(
 			{
 				event_key: trigger.event,
 				payload_fields: trigger.fields?.split(",").map((field) => field.trim()) || null,
+				unlistened: trigger.unlistened || false,
 				...compileEventFilter(trigger.event, trigger.filter, eventDefinitions),
 			},
 		];

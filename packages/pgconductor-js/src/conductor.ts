@@ -37,6 +37,7 @@ import {
 	type ValidateEventTriggers,
 } from "./task-definition.js";
 import { EVENT_DISPATCH_QUEUE, EVENT_DISPATCH_TASK } from "./event-dispatch-task.js";
+import { compileListens, type Listen } from "./event-trigger-validation.js";
 import { Worker, type WorkerConfig } from "./worker.js";
 import { DefaultLogger, type Logger } from "./lib/logger.js";
 import type { AddedContext, Middleware } from "./middleware.js";
@@ -122,8 +123,6 @@ export type ExecutionQuery<TName extends string, TQueue extends string, TPayload
 	where?: Partial<TPayload>;
 	/** Only executions that have not completed, failed or been cancelled */
 	open?: boolean;
-	/** State fields the execution's state (`ctx.setState()`) contains */
-	state?: Payload;
 	/** Oldest first (`asc`, the default) or newest first */
 	order?: "asc" | "desc";
 	limit?: number;
@@ -563,6 +562,8 @@ export class Conductor<
 		input?: InferPayload<FindTaskByIdentifier<Tasks, TName, TQueue>>;
 		/** State of the execution (see `ctx.setState()`), used only when it starts one */
 		state?: Payload;
+		/** Listens of the execution by name (see `ctx.listen()`), registered only when it starts one */
+		listen?: Record<string, Listen>;
 		priority?: number;
 		metadata?: Metadata;
 	}): Promise<string> {
@@ -579,6 +580,7 @@ export class Conductor<
 					signal: options.signal,
 					input: (options.input || {}) as Payload,
 					state: options.state,
+					listens: compileListens(options.listen || {}, this.events),
 					priority: options.priority,
 					traceContext: this.telemetry.traceContext(),
 					metadata,
@@ -613,9 +615,8 @@ export class Conductor<
 
 	/**
 	 * List a task's executions in the order they were created (or newest first with `order: "desc"`),
-	 * with their payloads and states: only
-	 * open ones (pending, waiting or running) with `open`, only those whose payload contains `where`
-	 * and whose state contains `state`. Executions removed by retention are gone. Defaults to the
+	 * with their payloads and states: only open ones (pending, waiting or running) with `open`, only
+	 * those whose payload contains `where`. Executions removed by retention are gone. Defaults to the
 	 * first 100.
 	 */
 	async listExecutions<TName extends TaskName<Tasks>, TQueue extends string = "default">(
@@ -631,7 +632,6 @@ export class Conductor<
 			task: { key: query.task.name, queue: query.task.queue || "default" },
 			where: query.where,
 			open: query.open,
-			state: query.state,
 			order: query.order,
 			limit: query.limit || 100,
 			offset: query.offset || 0,

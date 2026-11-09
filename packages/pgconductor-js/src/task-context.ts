@@ -32,7 +32,7 @@ import {
 	type InferEventPayload,
 	type FilterForEvent,
 } from "./event-definition.js";
-import { compileEventFilter } from "./event-trigger-validation.js";
+import { compileEventFilter, compileListens, type Listen } from "./event-trigger-validation.js";
 import { validateSchema } from "./lib/validate-schema.js";
 import type { SignalHandler, SignalInbox, SignalInfo } from "./signal-inbox.js";
 
@@ -759,6 +759,41 @@ export class TaskContext<
 	}
 
 	/**
+	 * Receive the events that match `filter` as signals, from now on and across attempts and
+	 * activations, until `ctx.unlisten(name)` or the execution ends. Each arrives as a signal named
+	 * after the event, with the event's payload and its id as signal id, so handle it with
+	 * `ctx.onSignal(event.name, ...)`; a signal also wakes an idle actor. Listening again under a
+	 * name replaces its listen, unless event and filter stay the same. Not memoized: a replay
+	 * listens again. Hangs up when this attempt no longer holds the execution.
+	 */
+	async listen<
+		TName extends EventName<Events>,
+		TDef extends FindEventByIdentifier<Events, TName> = FindEventByIdentifier<Events, TName>,
+	>(name: string, options: { event: TDef; filter?: FilterForEvent<TDef> }): Promise<void> {
+		await this.setListens({ [name]: options }, []);
+	}
+
+	/** Stop receiving the events of the listen `name`, if there is one. */
+	async unlisten(name: string): Promise<void> {
+		await this.setListens({}, [name]);
+	}
+
+	private async setListens(listens: Record<string, Listen>, unlisten: string[]): Promise<void> {
+		const claimed = await this.opts.db.setListens(
+			{
+				executionId: this.opts.execution.id,
+				queue: this.opts.execution.queue,
+				orchestratorId: this.opts.execution.locked_by,
+				claimToken: this.opts.execution.claim_token,
+				listens: compileListens(listens, this.opts.eventDefinitions),
+				unlisten,
+			},
+			{ signal: this.signal },
+		);
+		if (!claimed) return this.abortAndHangup({ reason: "suspended" });
+	}
+
+	/**
 	 * Replace what this execution tells others about itself: `conductor.getExecution()` and
 	 * `listExecutions()` return it, and `listExecutions({ state })` finds open executions by its
 	 * fields. Written at once and not memoized, so a replay writes it again. Hangs up when this
@@ -822,6 +857,8 @@ export class TaskContext<
 			input?: InferPayload<TDef>;
 			/** State of the execution (see `ctx.setState()`), used only when it starts one */
 			state?: Payload;
+			/** Listens of the execution by name (see `ctx.listen()`), registered only when it starts one */
+			listen?: Record<string, Listen>;
 			priority?: number;
 			/**
 			 * Metadata of the execution, used only when it starts one. Defaults to the metadata of
@@ -847,6 +884,7 @@ export class TaskContext<
 					signal: options.signal,
 					input: (options.input || {}) as Payload,
 					state: options.state,
+					listens: compileListens(options.listen || {}, this.opts.eventDefinitions),
 					priority: options.priority,
 					traceContext: this.opts.telemetry.traceContext(),
 					metadata,
