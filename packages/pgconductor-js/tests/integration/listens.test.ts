@@ -157,4 +157,30 @@ describe("Listens", () => {
 		expect(routed).toEqual(["after the end"]);
 		expect(received).toHaveLength(1);
 	});
+
+	test("listListeners finds the open executions an event would reach, with their listens", async () => {
+		const { conductor, command, idle } = await setup(async (activation, ctx) => {
+			if (activation > 1) return;
+			await ctx.listen("thread", { event: message, filter: { thread: ["1"] } });
+			await ctx.listen("all", { event: message });
+		});
+		const id = await command("start");
+		await idle(id);
+
+		const listeners = (thread: string) =>
+			conductor.listListeners({
+				event: "chat.message",
+				payload: { thread, text: "hi" },
+				task: { name: "thread" },
+			});
+		expect(await listeners("1")).toMatchObject([
+			{ id, taskKey: "thread", key: "t1", listens: ["all", "thread"] },
+		]);
+		expect((await listeners("2")).map((each) => each.listens)).toEqual([["all"]]);
+		// Nothing is emitted
+		expect(await conductor.listEvents({ name: "chat.message" })).toEqual([]);
+
+		await conductor.cancel(id);
+		expect(await listeners("1")).toEqual([]);
+	});
 });

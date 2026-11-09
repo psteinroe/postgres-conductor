@@ -33,6 +33,7 @@ import {
 	type SignalWithStartStepArgs,
 	type SetStateArgs,
 	type SetListensArgs,
+	type ListListenersArgs,
 	type RegisterEventRaceArgs,
 } from "./query-builder.js";
 import { makeChildLogger, type Logger } from "./lib/logger.js";
@@ -900,6 +901,16 @@ export class DatabaseClient {
 				...opts,
 			});
 		return sources.map((source) => source.event_id);
+	}
+
+	async listListeners(
+		args: ListListenersArgs,
+		opts?: QueryMethodOptions,
+	): Promise<(ExecutionInfo & { listens: string[] })[]> {
+		return this.query(() => this.builder.buildListListeners(args), {
+			label: "listListeners",
+			...opts,
+		});
 	}
 
 	/** Returns false when this worker no longer holds the execution. */
