@@ -64,6 +64,32 @@ export type DispatchCustomEventsArgs = {
 	orchestratorId: string;
 };
 
+/** An event dispatch matched to a listen of an execution, delivered as a signal. */
+export type ListenDelivery = {
+	execution_id: string;
+	queue: string;
+	event_id: string;
+	event_key: string;
+	payload: Payload;
+};
+
+/** A listen as `ctx.listen()` and `signalWithStart()` register it. */
+export type ListenSpec = {
+	name: string;
+	event_key: string;
+	required_field_count: number;
+	terms: EventFilterTerm[];
+};
+
+export type SetListensArgs = {
+	executionId: string;
+	queue: string;
+	orchestratorId: string;
+	claimToken: string;
+	listens: ListenSpec[];
+	unlisten: string[];
+};
+
 export type RegisterWorkerArgs = {
 	queueName: string;
 	taskSpecs: TaskSpec[];
@@ -116,6 +142,14 @@ export type SaveStepArgs = {
 	result: Payload | null;
 };
 
+export type SetStateArgs = {
+	executionId: string;
+	queue: string;
+	orchestratorId: string;
+	claimToken: string;
+	state: Payload | null;
+};
+
 export type StartExecutionArgs = {
 	executionId: string;
 	queue: string;
@@ -159,6 +193,7 @@ export type ListExecutionsArgs = {
 	where?: Partial<Payload>;
 	/** Only executions that have not completed, failed or been cancelled */
 	open?: boolean;
+	order?: "asc" | "desc";
 	limit: number;
 	offset: number;
 };
@@ -197,6 +232,10 @@ export type SignalWithStartArgs = {
 	priority?: number | null;
 	traceContext?: TraceContextCarrier | null;
 	metadata?: Payload | null;
+	/** State of the execution, used only when it starts one */
+	state?: Payload | null;
+	/** Listens of the execution, registered only when it starts one */
+	listens?: ListenSpec[] | null;
 };
 
 export type SignalWithStartStepArgs = {
@@ -330,6 +369,8 @@ export class QueryBuilder {
 		priority,
 		traceContext,
 		metadata,
+		state,
+		listens,
 	}: SignalWithStartArgs): PendingQuery<[{ id: string }]> {
 		return this.sql<[{ id: string }]>`
 			select pgconductor.signal_with_start(
@@ -342,7 +383,9 @@ export class QueryBuilder {
 				p_input := ${input ? this.sql.json(input) : null}::jsonb,
 				p_trace_context := ${traceContext ? this.sql.json(traceContext) : null}::jsonb,
 				p_metadata := ${metadata ? this.sql.json(metadata) : null}::jsonb,
-				p_priority := ${priority || null}::integer
+				p_priority := ${priority || null}::integer,
+				p_state := ${state ? this.sql.json(state) : null}::jsonb,
+				p_listens := ${listens?.length ? this.sql.json(listens) : null}::jsonb
 			) as id
 		`;
 	}
@@ -357,7 +400,7 @@ export class QueryBuilder {
 		key,
 		target,
 	}: SignalWithStartStepArgs): PendingQuery<{ id: string }[]> {
-		const { signal, input, priority, traceContext, metadata } = target;
+		const { signal, input, priority, traceContext, metadata, state, listens } = target;
 		return this.sql<{ id: string }[]>`
 			with claimed_execution as materialized (
 				select e.id, e.queue
@@ -382,7 +425,9 @@ export class QueryBuilder {
 					p_input := ${input ? this.sql.json(input) : null}::jsonb,
 					p_trace_context := ${traceContext ? this.sql.json(traceContext) : null}::jsonb,
 					p_metadata := ${metadata ? this.sql.json(metadata) : null}::jsonb,
-					p_priority := ${priority || null}::integer
+					p_priority := ${priority || null}::integer,
+					p_state := ${state ? this.sql.json(state) : null}::jsonb,
+					p_listens := ${listens?.length ? this.sql.json(listens) : null}::jsonb
 				) as id
 				from claimed_execution
 				where not exists (select from stored_step)
@@ -571,7 +616,7 @@ export class QueryBuilder {
 					e.waiting_step_key, e.cancelled, e.last_error, e.dedupe_key, e.cron_expression,
 					e.locked_by, e.claim_token, e."group", e.priority, e.run_at, e.created_at,
 					e.subscription_id, e.parent_execution_id, e.trace_context, e.metadata, e.dead_letter,
-					e.signal_count
+					e.signal_count, e.state
 			),${
 				held
 					? this.sql`
@@ -1123,6 +1168,7 @@ export class QueryBuilder {
 			payload_fields: spec.payload_fields,
 			required_field_count: spec.required_field_count,
 			terms: spec.terms,
+			unlistened: spec.unlistened,
 		}));
 
 		return this.sql`
@@ -1272,7 +1318,7 @@ export class QueryBuilder {
 					when locked_by is not null then 'running'
 					else 'pending'
 				end as status,
-				payload, result, last_error as error, attempts, created_at as "createdAt",
+				key, payload, state, result, last_error as error, attempts, created_at as "createdAt",
 				completed_at as "completedAt", failed_at as "failedAt"
 			from pgconductor._private_executions
 			where id = ${executionId}::uuid
@@ -1284,9 +1330,11 @@ export class QueryBuilder {
 		task,
 		where,
 		open,
+		order,
 		limit,
 		offset,
 	}: ListExecutionsArgs): PendingQuery<ExecutionInfo[]> {
+		const direction = order === "desc" ? this.sql`desc` : this.sql`asc`;
 		return this.sql<ExecutionInfo[]>`
 			select id, task_key as "taskKey", queue,
 				case
@@ -1296,13 +1344,13 @@ export class QueryBuilder {
 					when locked_by is not null then 'running'
 					else 'pending'
 				end as status,
-				payload, result, last_error as error, attempts, created_at as "createdAt",
+				key, payload, state, result, last_error as error, attempts, created_at as "createdAt",
 				completed_at as "completedAt", failed_at as "failedAt"
 			from pgconductor._private_executions
 			where task_key = ${task.key}::text and queue = ${task.queue}::text
 				${open ? this.sql`and completed_at is null and failed_at is null` : this.sql``}
 				${where ? this.sql`and payload @> ${this.sql.json(where as JsonValue)}::jsonb` : this.sql``}
-			order by created_at, id
+			order by created_at ${direction}, id ${direction}
 			limit ${limit}::int offset ${offset}::int
 		`;
 	}
@@ -1393,6 +1441,27 @@ export class QueryBuilder {
 				on conflict (execution_id, key) do nothing
 			)
 			select exists (select 1 from claimed_execution) as claimed
+		`;
+	}
+
+	buildSetState({
+		executionId,
+		queue,
+		orchestratorId,
+		claimToken,
+		state,
+	}: SetStateArgs): PendingQuery<[{ claimed: boolean }]> {
+		return this.sql<[{ claimed: boolean }]>`
+			with updated as (
+				update pgconductor._private_executions e
+				set state = ${state ? this.sql.json(state) : null}::jsonb
+				where e.id = ${executionId}::uuid
+					and e.queue = ${queue}::text
+					and e.locked_by = ${orchestratorId}::uuid
+					and e.claim_token = ${claimToken}::uuid
+				returning e.id
+			)
+			select exists (select 1 from updated) as claimed
 		`;
 	}
 
@@ -1559,8 +1628,8 @@ export class QueryBuilder {
 	buildDispatchCustomEvents({
 		eventIds,
 		orchestratorId,
-	}: DispatchCustomEventsArgs): PendingQuery<{ event_id: string }[]> {
-		return this.sql<{ event_id: string }[]>`
+	}: DispatchCustomEventsArgs): PendingQuery<{ event_id: string; listens: ListenDelivery[] }[]> {
+		return this.sql<{ event_id: string; listens: ListenDelivery[] }[]>`
 			with sources as materialized (
 				select
 					source.id as event_id,
@@ -1710,6 +1779,22 @@ export class QueryBuilder {
 				join pgconductor._private_custom_event_subscriptions subscription
 					on subscription.event_key = source.event_key
 					and subscription.required_field_count = 0
+			), listens as materialized (
+				-- delivered by a second statement, which locks the listening executions, so this
+				-- one locks no executions but the waits'
+				select distinct matched.event_id, subscription.execution_id, subscription.queue
+				from matched_subscriptions matched
+				join pgconductor._private_custom_event_subscriptions subscription
+					on subscription.id = matched.subscription_id
+					and subscription.kind = 'execution_listen'
+				join sources source on source.event_id = matched.event_id
+				join pgconductor._private_executions execution
+					on execution.id = subscription.execution_id
+					and execution.queue = subscription.queue
+				where source.created_at > subscription.created_at
+					and execution.completed_at is null
+					and execution.failed_at is null
+					and not execution.cancelled
 			), candidates as materialized (
 				select matched.event_id, subscription.id as subscription_id,
 					subscription.task_key, subscription.queue, subscription.payload_fields
@@ -1719,6 +1804,11 @@ export class QueryBuilder {
 					and subscription.kind = 'task_trigger'
 				join pgconductor._private_tasks task
 					on task.key = subscription.task_key and task.queue = subscription.queue
+				-- an unlistened trigger fires only for events no execution listens for
+				where not (
+					subscription.unlistened
+					and exists (select 1 from listens l where l.event_id = matched.event_id)
+				)
 			), inserted_destinations as (
 				insert into pgconductor._private_executions (
 					id, task_key, queue, payload, parent_execution_id, subscription_id, trace_context,
@@ -1821,9 +1911,45 @@ export class QueryBuilder {
 					and locked.suspended
 				returning execution.id
 			)
-			select source.event_id
+			select source.event_id, coalesce((
+				select jsonb_agg(jsonb_build_object(
+					'execution_id', l.execution_id,
+					'queue', l.queue,
+					'event_id', source.event_id,
+					'event_key', source.event_key,
+					'payload', source.event_payload
+				) order by l.execution_id)
+				from listens l
+				where l.event_id = source.event_id
+			), '[]'::jsonb) as listens
 			from sources source
 			order by source.event_id
+		`;
+	}
+
+	buildDeliverListens(deliveries: ListenDelivery[]): PendingQuery<[]> {
+		return this.sql<[]>`
+			select pgconductor._private_deliver_listens(${this.sql.json(deliveries)}::jsonb)
+		`;
+	}
+
+	buildSetListens({
+		executionId,
+		queue,
+		orchestratorId,
+		claimToken,
+		listens,
+		unlisten,
+	}: SetListensArgs): PendingQuery<[{ claimed: boolean }]> {
+		return this.sql<[{ claimed: boolean }]>`
+			select pgconductor._private_set_listens(
+				${executionId}::uuid,
+				${queue}::text,
+				${orchestratorId}::uuid,
+				${claimToken}::uuid,
+				${this.sql.json(listens)}::jsonb,
+				${this.sql.array(unlisten, 1009)}::text[]
+			) as claimed
 		`;
 	}
 

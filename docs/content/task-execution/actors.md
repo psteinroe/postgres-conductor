@@ -47,11 +47,19 @@ An activation usually opens something, such as a session, that its signal handle
 
 `ctx.setAlarm(at)` wakes the actor at `at` once the activation returned, unless a signal wakes it first. Each activation sets its own alarm; one that sets none sleeps until a signal. An alarm in the past starts the next activation at once.
 
+## State
+
+An actor can tell others what it is doing with [`ctx.setState()`](../api/task-context.md#ctxsetstate), for example its status. Others read it with `conductor.getExecution()` and `listExecutions()`. The state stays across activations, and `ctx.state` reads it at the start of the next one. `signalWithStart({ state })` sets it when it starts the actor.
+
+## Events
+
+An actor receives the events it [listens](../crafting-tasks/triggers.md#listening-for-events) for as signals, which wake it like any other. Listens last across activations, so an actor listens once, for example in its first activation or with `signalWithStart({ listen })`.
+
 ## Retries and Failures
 
 - A failed activation retries with the usual [backoff](retries.md). Its signals stay undelivered, so the retry receives them again
 - `maxAttempts` counts failed activations in a row: an activation that returns resets the count
-- When an actor fails for good, or is [cancelled](cancellation.md), its execution ends and the next `signalWithStart()` for its key starts a new one
+- When an actor fails for good, or is [cancelled](cancellation.md), its execution ends and the next `signalWithStart()` for its key starts a new one. An activation ends its own actor with `conductor.cancel(ctx.executionId, { reason })`
 
 ## Steps
 

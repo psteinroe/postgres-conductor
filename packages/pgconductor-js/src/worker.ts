@@ -365,6 +365,7 @@ export class Worker<
 				payload_fields: spec.payload_fields,
 				required_field_count: spec.required_field_count,
 				terms: spec.terms,
+				unlistened: spec.unlistened,
 			})),
 		);
 

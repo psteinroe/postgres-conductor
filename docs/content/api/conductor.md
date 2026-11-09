@@ -241,6 +241,8 @@ const executionId = await conductor.signalWithStart({
   key: "thread-1",
   signal: { name: "input", id: requestId, payload },
   input: {}, // used only when it starts an execution (default: {})
+  state: {}, // optional: its state (ctx.setState()), used only when it starts an execution
+  listen: { thread: { event: chatMessage, filter: { threadId: ["1"] } } }, // optional: ctx.listen()s when it starts one
   priority: 0, // optional
   metadata: {}, // optional
 });
@@ -265,7 +267,9 @@ Returns `null` if the ID is unknown or the execution was removed by its [retenti
   taskKey: string;
   queue: string;
   status: "pending" | "running" | "completed" | "failed" | "cancelled";
+  key: string | null;         // the key signalWithStart() addresses it by
   payload: TPayload;          // the execution's input
+  state: object | null;       // what it last set with ctx.setState()
   result: TResult | null;     // return value, set when completed
   error: string | null;       // last attempt's error, or the cancellation reason
   attempts: number;
@@ -311,13 +315,14 @@ The payload is typed by the event's definition. Other filters:
 
 ## conductor.listExecutions()
 
-List a task's executions, in the order they were created:
+List a task's executions, in the order they were created or newest first:
 
 ```typescript
 const open = await conductor.listExecutions({
   task: { name: "approval" },
   where: { sessionId: "worker:w_1" }, // payload contains these fields
   open: true,                          // only pending, waiting or running ones
+  order: "asc",                        // or "desc", newest first
   limit: 100,                          // default 100
   offset: 0,
 });

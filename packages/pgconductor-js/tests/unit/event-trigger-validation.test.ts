@@ -41,6 +41,7 @@ describe("event trigger compilation", () => {
 			{
 				event_key: "catalog.changed",
 				payload_fields: ["status", "score"],
+				unlistened: false,
 				required_field_count: 1,
 				terms: [
 					{ field_name: "a", operator: "exact", scalar_type: "string", text_value: "1" },

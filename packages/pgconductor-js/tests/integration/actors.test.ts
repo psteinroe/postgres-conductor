@@ -206,6 +206,25 @@ describe("Actors", () => {
 		await idle(next);
 	});
 
+	test("an activation that cancels its own execution ends the actor", async () => {
+		const { conductor, activations, send, row } = await setup(async (activation, ctx) => {
+			if (activation === 2) await conductor.cancel(ctx.executionId, { reason: "done for good" });
+		});
+
+		const id = await send("s1");
+		await waitForCondition(
+			async () => (await row(id))?.waiting_step_key === "pgconductor.idle",
+			5000,
+		);
+		await send("s2");
+		await waitForCondition(async () => (await row(id))?.failed_at != null, 5000);
+		expect(await conductor.getExecution(id)).toMatchObject({
+			status: "cancelled",
+			error: "done for good",
+		});
+		expect(activations()).toBe(2);
+	});
+
 	test("an actor cannot process batches", () => {
 		const conductor = Conductor.create({
 			connectionString: "postgres://localhost/unused",

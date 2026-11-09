@@ -80,6 +80,8 @@ describe("listing executions", () => {
 		expect(
 			await conductor.listExecutions({ task: { name: "request" }, offset: 1, limit: 1 }),
 		).toMatchObject([{ payload: { id: "r2" } }]);
+		const newest = await conductor.listExecutions({ task: { name: "request" }, order: "desc" });
+		expect(newest.map((execution) => execution.payload.id)).toEqual(["r3", "r2", "r1"]);
 		expect((await conductor.getExecution(first))?.payload).toEqual({
 			id: "r1",
 			owner: "ann",

@@ -31,6 +31,8 @@ import {
 	type SignalExecutionArgs,
 	type SignalWithStartArgs,
 	type SignalWithStartStepArgs,
+	type SetStateArgs,
+	type SetListensArgs,
 	type RegisterEventRaceArgs,
 } from "./query-builder.js";
 import { makeChildLogger, type Logger } from "./lib/logger.js";
@@ -87,8 +89,12 @@ export type ExecutionInfo<TResult = unknown, TPayload = Payload> = {
 	taskKey: string;
 	queue: string;
 	status: ExecutionStatus;
+	/** The key `signalWithStart()` addresses it by */
+	key: string | null;
 	/** The execution's input */
 	payload: TPayload;
+	/** What the execution last told others about itself with `ctx.setState()` */
+	state: Payload | null;
 	/** Return value of a completed execution */
 	result: TResult | null;
 	/** Error of the last failed attempt, or the cancellation reason */
@@ -133,6 +139,8 @@ export interface Execution {
 	dead_letter?: (Omit<DeadLetterMetadata, "failedAt"> & { failedAt: string }) | null;
 	trace_context?: TraceContextCarrier | null;
 	metadata?: Payload | null;
+	/** The state as of the claim, set by `ctx.setState()` or `signalWithStart()` */
+	state?: Payload | null;
 	/** Undelivered signals in stored order, read when the execution was claimed */
 	signals: StoredSignal[];
 }
@@ -272,6 +280,8 @@ export interface EventSubscriptionSpec {
 	payload_fields: string[] | null;
 	required_field_count: number;
 	terms: EventFilterTerm[];
+	/** Fires only for events no execution listens for */
+	unlistened: boolean;
 }
 
 const RETRYABLE_SQLSTATE_CODES = new Set([
@@ -808,6 +818,15 @@ export class DatabaseClient {
 		return row.claimed;
 	}
 
+	/** Returns false when this worker no longer holds the execution. */
+	async setState(args: SetStateArgs, opts?: QueryMethodOptions): Promise<boolean> {
+		const [row] = await this.query(() => this.builder.buildSetState(args), {
+			label: "setState",
+			...opts,
+		});
+		return row.claimed;
+	}
+
 	/** Returns null when this worker no longer holds the starting execution. */
 	async startExecution(
 		args: StartExecutionArgs,
@@ -861,6 +880,11 @@ export class DatabaseClient {
 		return rows[0]?.result || null;
 	}
 
+	/**
+	 * Dispatches claimed events and returns their ids. The events that matched listens are stored
+	 * as signals by a second statement, which locks the listening executions apart from the
+	 * waiting ones; a retried dispatch stores each once, by the event id.
+	 */
 	async dispatchCustomEvents(
 		args: DispatchCustomEventsArgs,
 		opts?: QueryMethodOptions,
@@ -869,7 +893,22 @@ export class DatabaseClient {
 			label: "dispatchCustomEvents",
 			...opts,
 		});
+		const listens = sources.flatMap((source) => source.listens);
+		if (listens.length > 0)
+			await this.query(() => this.builder.buildDeliverListens(listens), {
+				label: "deliverListens",
+				...opts,
+			});
 		return sources.map((source) => source.event_id);
+	}
+
+	/** Returns false when this worker no longer holds the execution. */
+	async setListens(args: SetListensArgs, opts?: QueryMethodOptions): Promise<boolean> {
+		const [row] = await this.query(() => this.builder.buildSetListens(args), {
+			label: "setListens",
+			...opts,
+		});
+		return row.claimed;
 	}
 
 	async emitEvent(args: EmitEventArgs, opts?: QueryMethodOptions): Promise<string> {
