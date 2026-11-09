@@ -80,6 +80,8 @@ create table pgconductor._private_executions (
     completed_at timestamptz,
     payload jsonb,
     result jsonb,
+    -- what the execution tells others about itself (ctx.setState), queried by containment
+    state jsonb,
     trace_context jsonb,
     metadata jsonb,
     run_at timestamptz default pgconductor._private_current_time() not null,
@@ -134,6 +136,10 @@ where key is not null and completed_at is null and failed_at is null and cancell
 -- listing a task's open executions (conductor.listExecutions): pending, waiting or running
 create index on pgconductor._private_executions (task_key, queue, created_at, id)
 where completed_at is null and failed_at is null;
+
+-- listing open executions by their state (conductor.listExecutions with state)
+create index on pgconductor._private_executions using gin (state jsonb_path_ops)
+where state is not null and completed_at is null and failed_at is null;
 
 -- reading stored events (conductor.listEvents) by name in time order, and by payload fields. only
 -- event dispatch executions are indexed, so other executions pay nothing for them
@@ -1155,7 +1161,8 @@ create or replace function pgconductor.signal_with_start(
   p_input jsonb default null,
   p_trace_context jsonb default null,
   p_metadata jsonb default null,
-  p_priority integer default null
+  p_priority integer default null,
+  p_state jsonb default null
 )
 returns uuid
 language plpgsql
@@ -1190,7 +1197,7 @@ begin
 
   if not found then
     insert into pgconductor._private_executions (
-      id, task_key, queue, payload, trace_context, metadata, key, priority
+      id, task_key, queue, payload, trace_context, metadata, key, priority, state
     ) values (
       pgconductor._private_portable_uuidv7(),
       p_task_key,
@@ -1199,7 +1206,8 @@ begin
       p_trace_context,
       p_metadata,
       p_key,
-      coalesce(p_priority, 0)
+      coalesce(p_priority, 0),
+      p_state
     )
     returning id into v_execution_id;
   end if;

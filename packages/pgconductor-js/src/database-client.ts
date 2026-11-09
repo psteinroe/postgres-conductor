@@ -31,6 +31,7 @@ import {
 	type SignalExecutionArgs,
 	type SignalWithStartArgs,
 	type SignalWithStartStepArgs,
+	type SetStateArgs,
 	type RegisterEventRaceArgs,
 } from "./query-builder.js";
 import { makeChildLogger, type Logger } from "./lib/logger.js";
@@ -87,8 +88,12 @@ export type ExecutionInfo<TResult = unknown, TPayload = Payload> = {
 	taskKey: string;
 	queue: string;
 	status: ExecutionStatus;
+	/** The key `signalWithStart()` addresses it by */
+	key: string | null;
 	/** The execution's input */
 	payload: TPayload;
+	/** What the execution last told others about itself with `ctx.setState()` */
+	state: Payload | null;
 	/** Return value of a completed execution */
 	result: TResult | null;
 	/** Error of the last failed attempt, or the cancellation reason */
@@ -133,6 +138,8 @@ export interface Execution {
 	dead_letter?: (Omit<DeadLetterMetadata, "failedAt"> & { failedAt: string }) | null;
 	trace_context?: TraceContextCarrier | null;
 	metadata?: Payload | null;
+	/** The state as of the claim, set by `ctx.setState()` or `signalWithStart()` */
+	state?: Payload | null;
 	/** Undelivered signals in stored order, read when the execution was claimed */
 	signals: StoredSignal[];
 }
@@ -803,6 +810,15 @@ export class DatabaseClient {
 	async saveStep(args: SaveStepArgs, opts?: QueryMethodOptions): Promise<boolean> {
 		const [row] = await this.query(() => this.builder.buildSaveStep(args), {
 			label: "saveStep",
+			...opts,
+		});
+		return row.claimed;
+	}
+
+	/** Returns false when this worker no longer holds the execution. */
+	async setState(args: SetStateArgs, opts?: QueryMethodOptions): Promise<boolean> {
+		const [row] = await this.query(() => this.builder.buildSetState(args), {
+			label: "setState",
 			...opts,
 		});
 		return row.claimed;

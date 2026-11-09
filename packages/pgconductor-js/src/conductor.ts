@@ -122,6 +122,10 @@ export type ExecutionQuery<TName extends string, TQueue extends string, TPayload
 	where?: Partial<TPayload>;
 	/** Only executions that have not completed, failed or been cancelled */
 	open?: boolean;
+	/** State fields the execution's state (`ctx.setState()`) contains */
+	state?: Payload;
+	/** Oldest first (`asc`, the default) or newest first */
+	order?: "asc" | "desc";
 	limit?: number;
 	offset?: number;
 };
@@ -557,6 +561,8 @@ export class Conductor<
 		signal: SignalMessage;
 		/** Payload of the execution, used only when it starts one */
 		input?: InferPayload<FindTaskByIdentifier<Tasks, TName, TQueue>>;
+		/** State of the execution (see `ctx.setState()`), used only when it starts one */
+		state?: Payload;
 		priority?: number;
 		metadata?: Metadata;
 	}): Promise<string> {
@@ -572,6 +578,7 @@ export class Conductor<
 					key: options.key,
 					signal: options.signal,
 					input: (options.input || {}) as Payload,
+					state: options.state,
 					priority: options.priority,
 					traceContext: this.telemetry.traceContext(),
 					metadata,
@@ -605,9 +612,11 @@ export class Conductor<
 	}
 
 	/**
-	 * List a task's executions in the order they were created, with their payloads: only open ones
-	 * (pending, waiting or running) with `open`, only those whose payload contains `where`. Executions
-	 * removed by retention are gone. Defaults to the first 100.
+	 * List a task's executions in the order they were created (or newest first with `order: "desc"`),
+	 * with their payloads and states: only
+	 * open ones (pending, waiting or running) with `open`, only those whose payload contains `where`
+	 * and whose state contains `state`. Executions removed by retention are gone. Defaults to the
+	 * first 100.
 	 */
 	async listExecutions<TName extends TaskName<Tasks>, TQueue extends string = "default">(
 		query: ExecutionQuery<TName, TQueue, InferPayload<FindTaskByIdentifier<Tasks, TName, TQueue>>>,
@@ -622,6 +631,8 @@ export class Conductor<
 			task: { key: query.task.name, queue: query.task.queue || "default" },
 			where: query.where,
 			open: query.open,
+			state: query.state,
+			order: query.order,
 			limit: query.limit || 100,
 			offset: query.offset || 0,
 		});

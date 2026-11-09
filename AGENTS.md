@@ -143,7 +143,7 @@ Tables live in the `pgconductor` schema with a `_private_` prefix (`_private_exe
 - Validates the payload of every invocation (any origin, including SQL and dead letters) and the return value against the task's Standard Schemas (`Task.schemas`, resolved from `TaskSchemas` in `createTask`) and passes their output on. Issues fail the execution as `permanently_failed`; a throwing validator fails the attempt. Batches validate per member
 
 **TaskContext** (`task-context.ts`)
-- Provides API to task functions: `step()`, `sleep()`, `invoke()`, `invokeAndWait()`, `waitForResult()`, `waitForEvent()`, `subscribe()`, `waitForAny()`, `onSignal()`, `untilIdle()`, `setAlarm()`, `sendSignal()`, `signalWithStart()`, plus `executionId` and `queue`
+- Provides API to task functions: `step()`, `sleep()`, `invoke()`, `invokeAndWait()`, `waitForResult()`, `waitForEvent()`, `subscribe()`, `waitForAny()`, `onSignal()`, `untilIdle()`, `setAlarm()`, `setState()`, `sendSignal()`, `signalWithStart()`, plus `executionId`, `queue` and `state`
 - `invoke()` inserts an independent execution and memoizes its id as a step in one statement. Only with `cancelWithParent` does it set `parent_execution_id`, together with `cancel_with_parent`; settlement fails a completed child that has a parent but neither a waiter nor that flag
 - Memoized by step key, so a replay returns the stored result: `step()`, `sleep()`, `invoke()`, `invokeAndWait()`, `waitForResult()`, `waitForEvent()`, `subscribe()`, `waitForAny()` and `signalWithStart()`. `emit()` (deduplicated only with a `dedupe_key`), `sendSignal()` (deduplicated by signal id), `schedule()` (replaces the pending occurrence), `unschedule()` and `cancel()` are not memoized and run again on every replay
 - `checkpoint()` hangs up when the abort signal fired or the time window closed; it persists nothing
@@ -170,7 +170,7 @@ Tables live in the `pgconductor` schema with a `_private_` prefix (`_private_exe
 - One queue = one codebase: every orchestrator polling a queue runs the same task set, so worker registration owns the whole queue and replaces its cron schedules and trigger subscriptions
 
 **Reading executions**
-- `conductor.getExecution()` and `listExecutions()` return each execution's `payload`. `listExecutions` (`buildListExecutions`) reads one task's executions by payload containment and, with `open`, only non-terminal ones, through a partial index on `(task_key, queue, created_at, id)` where `completed_at is null and failed_at is null`
+- `conductor.getExecution()` and `listExecutions()` return each execution's `key`, `payload` and `state`. `ctx.setState()` writes `state` at once, fenced by the claim token like `saveStep`, and not memoized; `signalWithStart({ state })` sets it only on insert. `listExecutions({ state })` filters by containment (`state @>`), using a GIN index on the state of open executions. `listExecutions` (`buildListExecutions`) reads one task's executions by payload containment and, with `open`, only non-terminal ones, through a partial index on `(task_key, queue, created_at, id)` where `completed_at is null and failed_at is null`
 
 **DatabaseClient** (`database-client.ts`)
 - All database access goes through this interface

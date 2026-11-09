@@ -443,6 +443,14 @@ Only in an [actor](../task-execution/actors.md): wake it at `at` once the activa
 ctx.setAlarm(new Date(Date.now() + 60 * 60 * 1000));
 ```
 
+## ctx.setState()
+
+Replace what this execution tells others about itself, a JSON object or `null`. [`conductor.getExecution()`](conductor.md#conductorgetexecution) and `listExecutions()` return it, and `listExecutions({ state })` finds open executions whose state contains the given fields. The write happens at once and is not memoized, so a replay writes again; it hangs up when the attempt no longer holds the execution. `ctx.state` reads it back.
+
+```typescript
+await ctx.setState({ status: "waiting", topics: ["billing"] });
+```
+
 ## ctx.sendSignal()
 
 Send a signal to an execution. Idempotent by signal id. Returns `false` if the execution is completed, failed, cancelled or unknown. It starts nothing, so it takes no `metadata`.
@@ -597,6 +605,14 @@ ctx.metadata: Readonly<Metadata> | undefined
 
 Children, emitted events and dynamic schedules created from this execution inherit it. See
 [Execution Metadata](../crafting-tasks/execution-metadata.md).
+
+## ctx.state
+
+The state of the current execution: the last `ctx.setState()`, also of an earlier attempt or activation, or the `state` that `signalWithStart()` started it with. `null` without one.
+
+```typescript
+ctx.state: Readonly<Payload> | null
+```
 
 ## ctx.executionId
 

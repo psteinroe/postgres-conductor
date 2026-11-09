@@ -216,6 +216,11 @@ export class TaskContext<
 		return (this.opts.execution.metadata || undefined) as Readonly<Metadata> | undefined;
 	}
 
+	/** What this execution tells others about itself: the last `ctx.setState()`, or its initial state. */
+	get state(): Readonly<Payload> | null {
+		return this.opts.execution.state || null;
+	}
+
 	/** Metadata describing the source execution when this is a DLQ delivery. */
 	get deadLetter(): DeadLetterMetadata | null {
 		const deadLetter = this.opts.execution.dead_letter;
@@ -754,6 +759,27 @@ export class TaskContext<
 	}
 
 	/**
+	 * Replace what this execution tells others about itself: `conductor.getExecution()` and
+	 * `listExecutions()` return it, and `listExecutions({ state })` finds open executions by its
+	 * fields. Written at once and not memoized, so a replay writes it again. Hangs up when this
+	 * attempt no longer holds the execution.
+	 */
+	async setState(state: Payload | null): Promise<void> {
+		const saved = await this.opts.db.setState(
+			{
+				executionId: this.opts.execution.id,
+				queue: this.opts.execution.queue,
+				orchestratorId: this.opts.execution.locked_by,
+				claimToken: this.opts.execution.claim_token,
+				state,
+			},
+			{ signal: this.signal },
+		);
+		if (!saved) return this.abortAndHangup({ reason: "suspended" });
+		this.opts.execution.state = state;
+	}
+
+	/**
 	 * Wake this actor at `at` once its activation returned, unless a signal wakes it earlier.
 	 * Each activation sets its own alarm; `null`, the default, sleeps until a signal.
 	 */
@@ -794,6 +820,8 @@ export class TaskContext<
 			signal: SignalMessage;
 			/** Payload of the execution, used only when it starts one */
 			input?: InferPayload<TDef>;
+			/** State of the execution (see `ctx.setState()`), used only when it starts one */
+			state?: Payload;
 			priority?: number;
 			/**
 			 * Metadata of the execution, used only when it starts one. Defaults to the metadata of
@@ -818,6 +846,7 @@ export class TaskContext<
 					key: options.key,
 					signal: options.signal,
 					input: (options.input || {}) as Payload,
+					state: options.state,
 					priority: options.priority,
 					traceContext: this.opts.telemetry.traceContext(),
 					metadata,
