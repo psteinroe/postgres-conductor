@@ -143,6 +143,7 @@ export type ExecutionResult =
 	| ExecutionCompleted
 	| ExecutionFailed
 	| ExecutionReleased
+	| ExecutionIdle
 	| ExecutionPermamentlyFailed
 	| ExecutionInvokeChild;
 
@@ -178,6 +179,17 @@ export type ExecutionReleased = {
 	status: "released";
 	reschedule_in_ms?: number | "infinity";
 	step_key?: string;
+};
+
+/** An activation of an actor ended: it sleeps until a signal, or until `reschedule_in_ms` passed */
+export type ExecutionIdle = {
+	execution_id: string;
+	task_key: string;
+	claim_token: string;
+	status: "idle";
+	reschedule_in_ms: number | "infinity";
+	/** Signal names the attempt listened for; undelivered ones start the next activation at once */
+	signal_names?: string[];
 };
 
 export type ExecutionPermamentlyFailed = {

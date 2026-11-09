@@ -143,7 +143,7 @@ Tables live in the `pgconductor` schema with a `_private_` prefix (`_private_exe
 - Validates the payload of every invocation (any origin, including SQL and dead letters) and the return value against the task's Standard Schemas (`Task.schemas`, resolved from `TaskSchemas` in `createTask`) and passes their output on. Issues fail the execution as `permanently_failed`; a throwing validator fails the attempt. Batches validate per member
 
 **TaskContext** (`task-context.ts`)
-- Provides API to task functions: `step()`, `sleep()`, `invoke()`, `invokeAndWait()`, `waitForResult()`, `waitForEvent()`, `subscribe()`, `waitForAny()`, `onSignal()`, `sendSignal()`, `signalWithStart()`, plus `executionId` and `queue`
+- Provides API to task functions: `step()`, `sleep()`, `invoke()`, `invokeAndWait()`, `waitForResult()`, `waitForEvent()`, `subscribe()`, `waitForAny()`, `onSignal()`, `untilIdle()`, `setAlarm()`, `sendSignal()`, `signalWithStart()`, plus `executionId` and `queue`
 - `invoke()` inserts an independent execution and memoizes its id as a step in one statement. Only with `cancelWithParent` does it set `parent_execution_id`, together with `cancel_with_parent`; settlement fails a completed child that has a parent but neither a waiter nor that flag
 - Memoized by step key, so a replay returns the stored result: `step()`, `sleep()`, `invoke()`, `invokeAndWait()`, `waitForResult()`, `waitForEvent()`, `subscribe()`, `waitForAny()` and `signalWithStart()`. `emit()` (deduplicated only with a `dedupe_key`), `sendSignal()` (deduplicated by signal id), `schedule()` (replaces the pending occurrence), `unschedule()` and `cancel()` are not memoized and run again on every replay
 - `checkpoint()` hangs up when the abort signal fired or the time window closed; it persists nothing
@@ -288,7 +288,14 @@ Tables live in the `pgconductor` schema with a `_private_` prefix (`_private_exe
 - A delivery failure (a throwing `ctx.onSignal` handler or a failed acknowledgement) aborts the attempt as `signal-failed`, except after the worker signal aborted: stopping ends acknowledgement retries, so the handler keeps its slot and the attempt is released once it returns
 - Re-queues are unbounded by design: each needs a signal stored after the previous attempt started, which the next attempt receives at claim time, so an execution re-runs only while signals keep arriving
 - `key` on `_private_executions` with a partial unique index makes at most one non-terminal, non-cancelled execution per `(task_key, key, queue)`; `signal_with_start()` takes a transaction advisory lock on the key, then signals the existing execution or inserts one
-- Signals wake an execution only when it is suspended at a `ctx.waitForAny()` with a `{ signal: name }` branch for their name. Such a branch is an `execution_wait` subscription with `signal_name` set. `_private_register_event_race` resolves it at once with an undelivered signal of that name, or with the one whose handler is running (`SignalInbox.hold()` starts no handler from the `waitForAny()` call until the race registered, and passes the running one, so only signals handled before the call do not count); otherwise it subscribes. It holds the execution's row lock, as senders do, so `_private_store_signal()` sees the subscription of a signal stored later: it stores `{status: 'resolved', signal: {id, name}}` under the branch's step key if the subscription has not expired and wakes the execution if suspended at a wait. The branch does not consume the signal; handlers receive it as usual
+- Signals wake an execution only when it is an idle actor (see Actors), or suspended at a `ctx.waitForAny()` with a `{ signal: name }` branch for their name. Such a branch is an `execution_wait` subscription with `signal_name` set. `_private_register_event_race` resolves it at once with an undelivered signal of that name, or with the one whose handler is running (`SignalInbox.hold()` starts no handler from the `waitForAny()` call until the race registered, and passes the running one, so only signals handled before the call do not count); otherwise it subscribes. It holds the execution's row lock, as senders do, so `_private_store_signal()` sees the subscription of a signal stored later: it stores `{status: 'resolved', signal: {id, name}}` under the branch's step key if the subscription has not expired and wakes the execution if suspended at a wait. The branch does not consume the signal; handlers receive it as usual
+
+**Actors**
+- A task with `actor: true` never completes. A returning handler ends an activation: the worker closes the inbox without draining it and settles the result as `idle`, with `reschedule_in_ms` from `ctx.setAlarm()` (`infinity` without one). An actor cannot be batched
+- Settlement (`updated_idle`) keeps the row non-terminal, so it still holds its key for `signal_with_start()`: it sets `attempts = 0`, `run_at` to the alarm and `waiting_step_key = 'pgconductor.idle'`. Idle results go through `signal_requeued` like completions, so undelivered signals for names the activation listened for start the next one at once
+- `_private_store_signal()` wakes an unlocked execution at `pgconductor.idle` like one suspended at a resolved signal branch; claiming clears the marker. A signal of any name wakes it, so one the actor never listens for costs one activation
+- `ctx.untilIdle(fn)` runs `fn` until it resolves with no handler started (`SignalInbox.started`) and every signal received handled, then stops the inbox (`stopIfQuiet`, synchronous after the check). Signals read later are ignored and stay undelivered for settlement
+- Steps are not cleared between activations
 
 ### Task Configuration Options
 
@@ -303,6 +310,7 @@ conductor.createTask(
     concurrency: 10,             // Max concurrent executions of this task
     batch: { size: 10, timeoutMs: 1000 }, // Process executions in batches
     removeOnComplete: { days: 7 },        // Retention
+    actor: false,                // Sleep instead of completing; signals and alarms wake it
   },
   { invocable: true },
   handler,

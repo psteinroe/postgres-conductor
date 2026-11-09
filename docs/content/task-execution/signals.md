@@ -91,6 +91,8 @@ const executionId = await conductor.signalWithStart({
 - A completed, failed or cancelled execution does not hold its key, so the next call starts a new execution
 - The call runs in one transaction under a lock on the task and key
 
+An execution that should live on for its key, sleeping between messages, is an [actor](actors.md).
+
 ## Sending from Tasks
 
 ```typescript

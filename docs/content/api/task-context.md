@@ -426,6 +426,23 @@ ctx.onSignal("input", async (payload, { id, name }) => {
 });
 ```
 
+## ctx.untilIdle()
+
+Wait until `fn` resolves while no signal is delivered, then stop delivering signals to this attempt. `fn` runs again whenever a signal handler started while it ran, or a signal already read still waits for its handler. Signals stored later stay undelivered: they re-queue the execution when it completes, or start an actor's next activation. See [Actors](../task-execution/actors.md#going-idle).
+
+```typescript
+await ctx.untilIdle(() => session.waitUntilIdle());
+await session.close(); // no signal handler runs any more
+```
+
+## ctx.setAlarm()
+
+Only in an [actor](../task-execution/actors.md): wake it at `at` once the activation returned, unless a signal wakes it earlier. Each activation sets its own alarm; `null`, the default, sleeps until a signal.
+
+```typescript
+ctx.setAlarm(new Date(Date.now() + 60 * 60 * 1000));
+```
+
 ## ctx.sendSignal()
 
 Send a signal to an execution. Idempotent by signal id. Returns `false` if the execution is completed, failed, cancelled or unknown. It starts nothing, so it takes no `metadata`.
