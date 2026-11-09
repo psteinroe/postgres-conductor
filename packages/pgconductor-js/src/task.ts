@@ -45,6 +45,11 @@ export type TaskConfiguration<
 	groupConcurrency?: number;
 	batch?: BatchConfig;
 	deadLetter?: DeadLetterConfiguration<TPayload>;
+	/**
+	 * Run the task as an actor: a returning handler ends an activation, and the execution sleeps
+	 * until a signal or its alarm (`ctx.setAlarm()`) starts the next one. It never completes.
+	 */
+	actor?: boolean;
 };
 
 /** Type-level validation for a dead-letter destination. */
@@ -172,6 +177,7 @@ export class Task<
 	public readonly groupConcurrency?: number;
 	public readonly batch?: BatchConfig;
 	public readonly deadLetter?: DeadLetterConfiguration<Payload>;
+	public readonly actor: boolean;
 
 	public readonly triggers: NonEmptyArray<Trigger>;
 	public readonly eventTriggers: CompiledEventTrigger[];
@@ -197,6 +203,10 @@ export class Task<
 		this.groupConcurrency = assert.positiveInteger(config.groupConcurrency, "groupConcurrency");
 		this.batch = config.batch;
 		this.deadLetter = config.deadLetter;
+		this.actor = config.actor || false;
+		if (this.actor && this.batch) {
+			throw new Error("An actor cannot process batches");
+		}
 		if (
 			this.deadLetter?.queue === this.queue &&
 			(this.deadLetter.task?.name || this.name) === this.name

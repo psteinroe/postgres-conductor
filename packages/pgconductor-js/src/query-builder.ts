@@ -643,7 +643,9 @@ export class QueryBuilder {
 
 		const toMs = (ms: number | "infinity" | undefined) => (ms === "infinity" ? -1 : ms);
 		const rows = results.map((r) => {
-			if (r.status === "released") return { ...r, reschedule_in_ms: toMs(r.reschedule_in_ms) };
+			if (r.status === "released" || r.status === "idle") {
+				return { ...r, reschedule_in_ms: toMs(r.reschedule_in_ms) };
+			}
 			if (r.status === "invoke_child") return { ...r, timeout_ms: toMs(r.timeout_ms) };
 			return r;
 		});
@@ -696,12 +698,20 @@ export class QueryBuilder {
 		ctes.push(this.sql`completed_candidates as (
 			select * from valid_results where status = 'completed' and not execution_cancelled
 		)`);
-		// A completion must not drop signals the handler did not get. signal_count comes from the
-		// locked row, so it counts signals committed after this statement's snapshot, which the
-		// count below cannot see. Signals named by no listener of the attempt do not re-queue it.
+		ctes.push(this.sql`idle_candidates as (
+			select * from valid_results where status = 'idle' and not execution_cancelled
+		)`);
+		// A completion, or an actor going idle, must not drop signals the handler did not get.
+		// signal_count comes from the locked row, so it counts signals committed after this
+		// statement's snapshot, which the count below cannot see. Signals named by no listener of
+		// the attempt do not re-queue it.
 		ctes.push(this.sql`signal_requeued as materialized (
 			select c.execution_id
-			from completed_candidates c
+			from (
+				select * from completed_candidates
+				union all
+				select * from idle_candidates
+			) c
 			where c.execution_signal_count > 0
 				and (
 					c.execution_signal_count > (
@@ -732,6 +742,22 @@ export class QueryBuilder {
 			from now_ts nt, signal_requeued q
 			where e.id = q.execution_id and e.queue = ${queue}
 				and e.locked_by = ${orchestratorId}::uuid
+			returning e.id
+		)`);
+		// An idle actor sleeps until its alarm, and a signal wakes it earlier (_private_store_signal).
+		// Each activation gets its own attempts.
+		ctes.push(this.sql`updated_idle as (
+			update pgconductor._private_executions e
+			set attempts = 0, waiting_step_key = 'pgconductor.idle',
+				run_at = case when r.reschedule_in_ms = -1 then 'infinity'::timestamptz
+					else nt.ts + r.reschedule_in_ms * interval '1 millisecond' end,
+				locked_by = null, locked_at = null
+			from now_ts nt, idle_candidates r
+			where e.id = r.execution_id and e.queue = ${queue}
+				and e.locked_by = ${orchestratorId}::uuid
+				and not exists (
+					select 1 from signal_requeued q where q.execution_id = r.execution_id
+				)
 			returning e.id
 		)`);
 		ctes.push(this.sql`failed_results as (
@@ -970,6 +996,7 @@ export class QueryBuilder {
 			select 1 from orphaned_children
 			union all select 1 from failed_parents
 			union all select 1 from updated_signal_requeued
+			union all select 1 from updated_idle
 			union all select 1 from deleted_completed
 			union all select 1 from updated_completed
 			union all select 1 from dead_lettered

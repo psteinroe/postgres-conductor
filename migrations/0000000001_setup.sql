@@ -1051,8 +1051,8 @@ $function$
 -- stores a signal for an execution whose row the caller has locked; an id stored before is
 -- ignored. the worker running the execution reads it with its next claim. a new signal resolves
 -- the ctx.waitForAny() signal branches listening for its name and wakes an execution suspended
--- at a wait, like dispatch does. registration holds the same row lock, so it either sees the
--- signal or its branch is resolved here.
+-- at a wait, like dispatch does, and an idle actor. registration holds the same row lock, so it
+-- either sees the signal or its branch is resolved here.
 create or replace function pgconductor._private_store_signal(
   p_execution_id uuid,
   p_queue text,
@@ -1098,13 +1098,14 @@ begin
       and subscription.execution_id = p_execution_id
       and subscription.step_key = step.key
   )
+  -- wakes an execution suspended at a signal branch of a wait, or an idle actor
   update pgconductor._private_executions e
   set run_at = pgconductor._private_current_time(), waiting_step_key = null
   where e.id = p_execution_id and e.queue = p_queue
     and e.locked_by is null
     and e.waiting_on_execution_id is null
-    and e.waiting_step_key is not null
-    and exists (select 1 from stored_steps);
+    and (e.waiting_step_key = 'pgconductor.idle'
+      or (e.waiting_step_key is not null and exists (select 1 from stored_steps)));
 end;
 $function$;
 

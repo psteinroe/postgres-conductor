@@ -596,6 +596,7 @@ export class Worker<
 
 		// Pass db and tasks as extra context to maintenance task, which skips middleware
 		const isMaintenance = task.name === "pgconductor.maintenance";
+		const actor: { alarm: Date | null } | undefined = task.actor ? { alarm: null } : undefined;
 		const extraContext = isMaintenance
 			? { ...this.extraContext, db: this.db, tasks: this.tasks }
 			: this.extraContext;
@@ -618,6 +619,7 @@ export class Worker<
 				telemetry: this.telemetry,
 				signals,
 				steps,
+				actor,
 			},
 			extraContext,
 		);
@@ -657,10 +659,11 @@ export class Worker<
 						run().then(async (output) => ({
 							output,
 							// Deliver the signals already read, still racing the abort. Ones stored later
-							// re-queue the execution.
+							// re-queue the execution. An activation of an actor ended with what it holds, so
+							// its next one gets them.
 							signalFailure: taskAbortController.signal.aborted
 								? null
-								: await signals.close({ drain: true }),
+								: await signals.close({ drain: !actor }),
 						})),
 						aborted,
 					]),
@@ -721,6 +724,17 @@ export class Worker<
 					...identity,
 					status: "failed",
 					error: outcome.signalFailure.message,
+				} as const;
+			}
+
+			if (actor) {
+				return {
+					...identity,
+					status: "idle",
+					reschedule_in_ms: actor.alarm
+						? Math.max(actor.alarm.getTime() - this.clock.now().getTime(), 0)
+						: "infinity",
+					signal_names: signals.names,
 				} as const;
 			}
 

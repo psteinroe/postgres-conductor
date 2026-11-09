@@ -143,6 +143,8 @@ export type TaskContextOptions = {
 	signals: SignalInbox;
 	/** Step callbacks and their saves in flight */
 	steps: Set<Promise<unknown>>;
+	/** The activation of an actor, with the alarm it set */
+	actor?: { alarm: Date | null };
 };
 
 /** A signal sent to an execution with `conductor.signal()` or `signalWithStart()`. */
@@ -729,6 +731,37 @@ export class TaskContext<
 	 */
 	onSignal<T extends JsonValue = JsonValue>(name: string, handler: SignalHandler<T>): void {
 		this.opts.signals.listen(name, handler as SignalHandler);
+	}
+
+	/**
+	 * Wait until `fn` resolves while no signal is delivered, then stop delivering signals to this
+	 * attempt. `fn` runs again whenever a signal handler started while it ran, or one is still to
+	 * run. Signals stored later stay undelivered: they re-queue the execution when the attempt
+	 * settles, or wake an actor's next activation.
+	 *
+	 * An actor uses it to know that it may release what its activation holds, since no handler
+	 * can use it any more.
+	 */
+	async untilIdle(fn: () => Promise<unknown>): Promise<void> {
+		const signals = this.opts.signals;
+		for (;;) {
+			const since = signals.started;
+			await fn();
+			await this.checkpoint();
+			if (signals.stopIfQuiet(since)) return;
+			await signals.whenQuiet();
+		}
+	}
+
+	/**
+	 * Wake this actor at `at` once its activation returned, unless a signal wakes it earlier.
+	 * Each activation sets its own alarm; `null`, the default, sleeps until a signal.
+	 */
+	setAlarm(at: Date | null): void {
+		if (!this.opts.actor) {
+			throw new Error("Only an actor can set an alarm");
+		}
+		this.opts.actor.alarm = at;
 	}
 
 	/**

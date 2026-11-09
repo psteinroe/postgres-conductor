@@ -33,12 +33,23 @@ export class SignalInbox {
 	private closed = false;
 	private stopped = false;
 	private failure: Error | null = null;
+	/** Signals received, and ones whose handler returned or that had no handler */
+	private received = 0;
+	private handled = 0;
+	/** Handlers started */
+	private _started = 0;
+	private quietWaiters: (() => void)[] = [];
 
 	constructor(private readonly opts: SignalInboxOptions) {}
 
 	/** Signal names this attempt listened for */
 	get names(): string[] {
 		return [...this.handlers.keys()];
+	}
+
+	/** Handlers started so far */
+	get started(): number {
+		return this._started;
 	}
 
 	/** Sequence number of the last signal received, or null while nothing is read for this inbox */
@@ -48,7 +59,7 @@ export class SignalInbox {
 
 	listen(name: string, handler: SignalHandler): void {
 		if (this.closed) {
-			throw new Error(`Cannot listen for signal "${name}" after the handler returned`);
+			throw new Error(`Cannot listen for signal "${name}" after signal delivery stopped`);
 		}
 		if (this.handlers.has(name)) {
 			throw new Error(`A handler for signal "${name}" is already registered`);
@@ -59,9 +70,38 @@ export class SignalInbox {
 
 	/** Add an undelivered signal, in stored order; one received before is skipped */
 	push(signal: StoredSignal): void {
-		if (signal.seq <= this.lastSeq) return;
+		if (signal.seq <= this.lastSeq || this.closed) return;
 		this.lastSeq = signal.seq;
+		this.received++;
 		void this.queue.push(signal);
+	}
+
+	/**
+	 * Stop delivering if no handler started since `started` was `since`, and every signal received
+	 * was handled; signals received later stay undelivered. Returns whether it stopped.
+	 */
+	stopIfQuiet(since: number): boolean {
+		if (this.consuming && (this._started !== since || !this.quiet)) return false;
+		this.closed = true;
+		this.stopped = true;
+		this.queue.close();
+		this.resume?.();
+		this.notifyQuiet();
+		return true;
+	}
+
+	/** Resolves once every signal received was handled, or delivery stopped */
+	whenQuiet(): Promise<void> {
+		if (this.quiet || this.closed) return Promise.resolve();
+		return new Promise((resolve) => this.quietWaiters.push(resolve));
+	}
+
+	private get quiet(): boolean {
+		return this.handled === this.received;
+	}
+
+	private notifyQuiet(): void {
+		for (const resolve of this.quietWaiters.splice(0)) resolve();
 	}
 
 	/**
@@ -87,6 +127,7 @@ export class SignalInbox {
 		this.stopped = !drain;
 		this.queue.close();
 		this.resume?.();
+		this.notifyQuiet();
 		await this.consuming;
 		return this.failure;
 	}
@@ -98,8 +139,12 @@ export class SignalInbox {
 			}
 			if (this.stopped) return;
 			const handler = this.handlers.get(signal.name);
-			if (!handler) continue;
+			if (!handler) {
+				this.markHandled();
+				continue;
+			}
 
+			this._started++;
 			this.delivering = { id: signal.id, name: signal.name };
 			try {
 				await handler(signal.payload, { id: signal.id, name: signal.name });
@@ -117,7 +162,13 @@ export class SignalInbox {
 				return;
 			}
 			this.delivering = null;
+			this.markHandled();
 		}
+	}
+
+	private markHandled(): void {
+		this.handled++;
+		if (this.quiet) this.notifyQuiet();
 	}
 
 	private fail(error: Error): void {
@@ -125,5 +176,6 @@ export class SignalInbox {
 		// once closed, the error is returned by close() instead
 		if (!this.closed) this.opts.onError(error);
 		this.closed = true;
+		this.notifyQuiet();
 	}
 }
