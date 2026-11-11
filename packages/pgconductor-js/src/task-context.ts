@@ -795,8 +795,7 @@ export class TaskContext<
 
 	/**
 	 * Replace what this execution tells others about itself: `conductor.getExecution()` and
-	 * `listExecutions()` return it, and `listExecutions({ state })` finds open executions by its
-	 * fields. Written at once and not memoized, so a replay writes it again. Hangs up when this
+	 * `listExecutions()` return it. Written at once and not memoized, so a replay writes it again. Hangs up when this
 	 * attempt no longer holds the execution.
 	 */
 	async setState(state: Payload | null): Promise<void> {

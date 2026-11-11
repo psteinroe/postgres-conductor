@@ -14,6 +14,7 @@ import type {
 	EventRaceResult,
 	Payload,
 	ClaimResult,
+	Contained,
 	TaskSpec,
 } from "./database-client.js";
 
@@ -185,7 +186,7 @@ export type EmitEventArgs = {
 export type EventFilterArgs = {
 	eventKey: string;
 	/** Payload fields the event's payload contains, as in `@>` */
-	where?: Payload;
+	where?: Contained<Payload>;
 	/** Events stored after this one, which must still be kept */
 	after?: string;
 	/** Events stored before this one, which must still be kept */
@@ -197,7 +198,7 @@ export type EventFilterArgs = {
 export type ListExecutionsArgs = {
 	task: { key: string; queue: string };
 	/** Payload fields the execution's payload contains, as in `@>` */
-	where?: Partial<Payload>;
+	where?: Contained<Payload>;
 	/** Only executions that have not completed, failed or been cancelled */
 	open?: boolean;
 	order?: "asc" | "desc";

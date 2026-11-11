@@ -1,7 +1,7 @@
 import { test, expect, describe } from "vitest";
 import { expectTypeOf } from "expect-type";
 import { Conductor } from "../../src/conductor";
-import { defineTask, type TaskDefinition } from "../../src/task-definition";
+import { type DefineTask, defineTask, type TaskDefinition } from "../../src/task-definition";
 import { defineEvent } from "../../src/event-definition";
 import { TaskSchemas } from "../../src/schemas";
 import type { Payload } from "../../src/database-client";
@@ -326,5 +326,24 @@ describe("task event types", () => {
 			expectTypeOf(event.payload).toEqualTypeOf<{ value: number }>();
 		});
 		const _emit = () => conductor.emit("known", { value: 1 });
+	});
+	test("listExecutions matches nested payload fields", () => {
+		type Worker = DefineTask<{
+			name: "worker";
+			payload: { worker: { id: string; owner: string }; tags: string[] };
+		}>;
+		const conductor = Conductor.create({
+			sql: {} as never,
+			tasks: TaskSchemas.fromUnion<Worker>(),
+			context: {},
+		});
+		const _list = () =>
+			conductor.listExecutions({ task: { name: "worker" }, where: { worker: { id: "w1" } } });
+		const _wrong = () =>
+			conductor.listExecutions({
+				task: { name: "worker" },
+				// @ts-expect-error - not a field of the payload
+				where: { worker: { name: "w1" } },
+			});
 	});
 });
