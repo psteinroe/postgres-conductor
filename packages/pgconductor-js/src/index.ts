@@ -50,6 +50,7 @@ export type {
 	InferEventPayload,
 } from "./event-definition.js";
 export { defineEvent } from "./event-definition.js";
+export type { Listen } from "./event-trigger-validation.js";
 export type {
 	EventInfo,
 	ExecutionInfo,

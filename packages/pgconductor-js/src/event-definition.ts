@@ -102,7 +102,14 @@ export type EventName<TEvents extends readonly EventDefinition<string, any, any>
 export type FindEventByIdentifier<
 	TEvents extends readonly EventDefinition<string, any, any>[],
 	TName extends string,
-> = Extract<TEvents[number], { name: TName }>;
+> = FindEvent<TEvents[number], TName>;
+
+/** The events whose name type includes `TName`, like `FindTaskByIdentifier`. */
+type FindEvent<TEvent, TName extends string> = TEvent extends { name: infer N }
+	? TName extends N
+		? TEvent
+		: never
+	: never;
 
 export type InferEventPayload<T> =
 	T extends EventDefinition<string, infer P, any> ? EventPayload<P> : never;

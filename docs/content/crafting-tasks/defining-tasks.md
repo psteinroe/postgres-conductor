@@ -92,6 +92,24 @@ Workers validate every execution of a task defined with `defineTask()` against i
 
 Type-only definitions (`DefineTask` with `TaskSchemas.fromUnion()`) have no runtime schema and are never validated.
 
+A catalog made at runtime, such as one task per configured integration, can type its tasks by any name: names typed `string` match every literal name, and a task returning `unknown` may return any object or nothing.
+
+```typescript
+type RuntimeTask = TaskDefinition<string, Payload, unknown, "default">;
+
+const conductor = Conductor.create({
+  sql,
+  tasks: TaskSchemas.fromUnion<RuntimeTask>(),
+  context: {},
+});
+
+for (const name of names) {
+  conductor.createTask({ name }, { invocable: true }, async (event) => {
+    // event.payload is a Payload: validate it yourself
+  });
+}
+```
+
 ## Event Definitions
 
 Events enable reactive, event-driven patterns.

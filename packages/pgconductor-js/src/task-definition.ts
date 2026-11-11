@@ -107,11 +107,13 @@ export type InferPayload<T> =
 
 export type InferReturns<T> =
 	T extends TaskDefinition<string, any, infer R, string>
-		? R extends undefined
-			? void
-			: R extends StandardSchemaV1<any, infer O>
-				? EnsureObject<O>
-				: EnsureObject<R> // Plain type (type-only definition)
+		? unknown extends R
+			? object | void // Any object or nothing, like the tasks of a catalog built at runtime
+			: R extends undefined
+				? void
+				: R extends StandardSchemaV1<any, infer O>
+					? EnsureObject<O>
+					: EnsureObject<R> // Plain type (type-only definition)
 		: never;
 
 export type TaskName<TTasks extends readonly TaskDefinition<string, any, any, string>[]> =
@@ -121,7 +123,22 @@ export type FindTaskByIdentifier<
 	TTasks extends readonly TaskDefinition<string, any, any, string>[],
 	TName extends string,
 	TQueue extends string = "default",
-> = Extract<TTasks[number], { name: TName; queue: TQueue }>;
+> = FindTask<TTasks[number], TName, TQueue>;
+
+/**
+ * The tasks whose name and queue types include `TName` and `TQueue`: the task of that literal name,
+ * or every task of a catalog typed by `string` names, as one made at runtime.
+ */
+type FindTask<TTask, TName extends string, TQueue extends string> = TTask extends {
+	name: infer N;
+	queue: infer Q;
+}
+	? TName extends N
+		? TQueue extends Q
+			? TTask
+			: never
+		: never
+	: never;
 
 // Trigger types
 export type InvocableTrigger = { invocable: true };
@@ -228,7 +245,7 @@ type TaskIdentifierIsDefined<
 	Tasks extends readonly TaskDefinition<string, any, any, string>[],
 	TName extends string,
 	TQueue extends string,
-> = Extract<Tasks[number], { name: TName; queue: TQueue }> extends never ? false : true;
+> = [FindTaskByIdentifier<Tasks, TName, TQueue>] extends [never] ? false : true;
 
 // Validate triggers based on whether task is defined
 // Rules:
