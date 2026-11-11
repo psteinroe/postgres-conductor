@@ -1,6 +1,7 @@
 import type { Sql } from "postgres";
 import type { StandardSchemaV1 } from "@standard-schema/spec";
 import {
+	type Contained,
 	DatabaseClient,
 	type EventInfo,
 	type ExecutionInfo,
@@ -119,8 +120,8 @@ type ResolvedBatchTaskEvent<
 /** Which executions `conductor.listExecutions()` reads. */
 export type ExecutionQuery<TName extends string, TQueue extends string, TPayload> = {
 	task: TaskIdentifier<TName, TQueue>;
-	/** Payload fields the execution's payload contains */
-	where?: Partial<TPayload>;
+	/** Payload fields the execution's payload contains, nested objects by their own fields */
+	where?: Contained<TPayload>;
 	/** Only executions that have not completed, failed or been cancelled */
 	open?: boolean;
 	/** Oldest first (`asc`, the default) or newest first */
@@ -132,8 +133,8 @@ export type ExecutionQuery<TName extends string, TQueue extends string, TPayload
 /** Which kept events `conductor.listEvents()` reads. */
 export type EventQuery<TName extends string, TPayload> = {
 	name: TName;
-	/** Payload fields the event's payload contains */
-	where?: Partial<TPayload>;
+	/** Payload fields the event's payload contains, nested objects by their own fields */
+	where?: Contained<TPayload>;
 	/** Only events stored after this kept event */
 	after?: string;
 	/** Only events stored before this kept event */

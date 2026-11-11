@@ -43,6 +43,16 @@ import type { TraceContextCarrier } from "./telemetry.js";
 export type JsonValue = string | number | boolean | null | Payload | JsonValue[];
 export type Payload = { [key: string]: JsonValue };
 
+/**
+ * The fields a payload contains, as a jsonb containment (`@>`) matches them: any of an object's
+ * fields, also of nested objects; arrays and scalars as they are.
+ */
+export type Contained<T> = T extends readonly unknown[]
+	? T
+	: T extends object
+		? { [K in keyof T]?: Contained<T[K]> }
+		: T;
+
 export interface ExecutionSpec {
 	task_key: string;
 	queue: string;
