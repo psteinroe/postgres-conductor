@@ -1,9 +1,10 @@
 import { test, expect, describe } from "vitest";
 import { expectTypeOf } from "expect-type";
 import { Conductor } from "../../src/conductor";
-import { defineTask } from "../../src/task-definition";
-// import { defineEvent } from "../../src/event-definition";
+import { defineTask, type TaskDefinition } from "../../src/task-definition";
+import { defineEvent } from "../../src/event-definition";
 import { TaskSchemas } from "../../src/schemas";
+import type { Payload } from "../../src/database-client";
 import { z } from "zod";
 import type { Database } from "../database.types";
 
@@ -300,4 +301,30 @@ describe("task event types", () => {
 	// 		async (_event, _ctx) => {},
 	// 	);
 	// });
+	test("a catalog made at runtime types its tasks by any name", () => {
+		const names: string[] = ["a", "known"];
+		const conductor = Conductor.create({
+			sql: {} as never,
+			tasks: TaskSchemas.fromUnion<TaskDefinition<string, Payload, unknown, "default">>(),
+			events: names.map((name) => defineEvent({ name, payload: z.object({ value: z.number() }) })),
+			context: {},
+		});
+		for (const name of names) {
+			// Returns anything, or nothing
+			conductor.createTask({ name }, { invocable: true }, async (event) => {
+				expectTypeOf(event.payload).toEqualTypeOf<Payload>();
+				if (event.payload.skip) return;
+				return { done: name };
+			});
+			conductor.createTask({ name, actor: true }, { invocable: true }, async () => {});
+			const _invoke = () => conductor.invoke({ name }, { value: 1 });
+		}
+		// Literal names too
+		conductor.createTask({ name: "known" }, { invocable: true }, async () => {});
+		const _invoke = () => conductor.invoke({ name: "known" }, { value: 1 });
+		conductor.createTask({ name: "on-known" }, { event: "known" }, async (event) => {
+			expectTypeOf(event.payload).toEqualTypeOf<{ value: number }>();
+		});
+		const _emit = () => conductor.emit("known", { value: 1 });
+	});
 });
