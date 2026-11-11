@@ -639,6 +639,26 @@ export class Conductor<
 	}
 
 	/**
+	 * The open executions an event named `event` with `payload` would reach through their listens
+	 * (`ctx.listen()`), each with the names of the listens it would reach, in the order they were
+	 * created. Matches as dispatch does, and emits nothing. Pass `task` to read only its
+	 * executions. Defaults to the first 100.
+	 */
+	async listListeners(query: {
+		event: EventName<Events>;
+		payload: Payload;
+		task?: TaskIdentifier<string, string>;
+		limit?: number;
+	}): Promise<(ExecutionInfo & { listens: string[] })[]> {
+		return this.db.listListeners({
+			event: query.event,
+			payload: query.payload,
+			task: query.task && { key: query.task.name, queue: query.task.queue || "default" },
+			limit: query.limit || 100,
+		});
+	}
+
+	/**
 	 * Poll an execution until it settles. Resolves with the result of a completed execution and
 	 * rejects if it failed, was cancelled, does not exist, or the timeout or signal fires first.
 	 * Pass the task to type the result.

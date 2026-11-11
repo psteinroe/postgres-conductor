@@ -330,6 +330,19 @@ const open = await conductor.listExecutions({
 
 Each entry has the fields of [`conductor.getExecution()`](#conductorgetexecution), with `payload` and `result` typed by the task's definition. Executions removed by their [retention policy](../crafting-tasks/retention.md) are not listed. Listing open executions uses an index that covers only those; a task's settled ones are read through the `task_key` index and filtered.
 
+## conductor.listListeners()
+
+The open executions an event would reach through their [listens](../crafting-tasks/triggers.md#listening-for-events), matched as dispatch matches them, without emitting anything. Each entry has the fields of [`conductor.getExecution()`](#conductorgetexecution) and `listens`, the names of the listens the event matches:
+
+```typescript
+const listeners = await conductor.listListeners({
+  event: "chat.message",
+  payload: { threadId: "1" },
+  task: { name: "conversation" }, // optional: only this task's executions
+  limit: 100,                      // default 100
+});
+```
+
 ## conductor.waitForResult()
 
 Poll an execution until it settles and return its result:

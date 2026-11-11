@@ -52,6 +52,7 @@ export class MockDatabaseClient implements IDatabaseClient {
 	emitEvent = vi.fn(async () => "mock-event-id");
 	dispatchCustomEvents = vi.fn(async ({ eventIds }: { eventIds: string[] }) => eventIds);
 	setListens = vi.fn(async () => true);
+	listListeners = vi.fn(async () => []);
 
 	constructor(overrides: Partial<IDatabaseClient> = {}) {
 		Object.assign(this, overrides);

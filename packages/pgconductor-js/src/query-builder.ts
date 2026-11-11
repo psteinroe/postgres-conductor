@@ -81,6 +81,13 @@ export type ListenSpec = {
 	terms: EventFilterTerm[];
 };
 
+export type ListListenersArgs = {
+	event: string;
+	payload: Payload;
+	task?: { key: string; queue: string };
+	limit: number;
+};
+
 export type SetListensArgs = {
 	executionId: string;
 	queue: string;
@@ -1648,138 +1655,7 @@ export class QueryBuilder {
 					and not source.cancelled
 				order by source.id
 				for update of source
-			), event_values as materialized (
-				select source.event_id, source.event_key, field.key as field_name,
-					field.value, jsonb_typeof(field.value) as scalar_type
-				from sources source
-				cross join lateral jsonb_each(source.event_payload) field
-			), event_prefixes as materialized (
-				select
-					event_value.event_id,
-					event_value.event_key,
-					event_value.field_name,
-					term.prefix_length,
-					left(event_value.value #>> '{}', term.prefix_length) as prefix_value
-				from event_values event_value
-				cross join lateral (
-					select distinct candidate.prefix_length
-					from pgconductor._private_event_filter_terms candidate
-					where candidate.operator = 'prefix'
-						and candidate.event_key collate "C" = event_value.event_key collate "C"
-						and candidate.field_name collate "C" = event_value.field_name collate "C"
-				) term
-				where event_value.scalar_type = 'string'
-			), raw_matched_fields as (
-				select event_value.event_id, term.subscription_id, term.field_name
-				from event_values event_value
-				join pgconductor._private_event_filter_terms term
-					on term.operator = 'exact'
-					and term.scalar_type = 'string'
-					and event_value.scalar_type = 'string'
-					and term.event_key collate "C" = event_value.event_key collate "C"
-					and term.field_name collate "C" = event_value.field_name collate "C"
-					and term.text_value collate "C" = (event_value.value #>> '{}') collate "C"
-				union all
-				select event_value.event_id, term.subscription_id, term.field_name
-				from event_values event_value
-				join pgconductor._private_event_filter_terms term
-					on term.operator = 'exact'
-					and term.scalar_type = 'number'
-					and event_value.scalar_type = 'number'
-					and term.event_key = event_value.event_key
-					and term.field_name = event_value.field_name
-					and term.number_value = case when event_value.scalar_type = 'number'
-						then (event_value.value #>> '{}')::numeric end
-				union all
-				select event_value.event_id, term.subscription_id, term.field_name
-				from event_values event_value
-				join pgconductor._private_event_filter_terms term
-					on term.operator = 'exact'
-					and term.scalar_type = 'boolean'
-					and event_value.scalar_type = 'boolean'
-					and term.event_key = event_value.event_key
-					and term.field_name = event_value.field_name
-					and term.boolean_value = case when event_value.scalar_type = 'boolean'
-						then (event_value.value #>> '{}')::boolean end
-				union all
-				select event_value.event_id, term.subscription_id, term.field_name
-				from event_values event_value
-				join pgconductor._private_event_filter_terms term
-					on term.operator = 'exact'
-					and term.scalar_type = 'null'
-					and event_value.scalar_type = 'null'
-					and term.event_key = event_value.event_key
-					and term.field_name = event_value.field_name
-				union all
-				select event_prefix.event_id, term.subscription_id, term.field_name
-				from event_prefixes event_prefix
-				join pgconductor._private_event_filter_terms term
-					on term.operator = 'prefix'
-					and term.event_key collate "C" = event_prefix.event_key collate "C"
-					and term.field_name collate "C" = event_prefix.field_name collate "C"
-					and term.prefix_length = event_prefix.prefix_length
-					and term.text_value collate "C" = event_prefix.prefix_value collate "C"
-				union all
-				select event_value.event_id, term.subscription_id, term.field_name
-				from event_values event_value
-				join pgconductor._private_event_filter_terms term
-					on term.operator = 'numeric_range'
-					and event_value.scalar_type = 'number'
-					and term.event_key = event_value.event_key
-					and term.field_name = event_value.field_name
-					and term.number_range @> case when event_value.scalar_type = 'number'
-						then (event_value.value #>> '{}')::numeric end
-				union all
-				select event_value.event_id, term.subscription_id, term.field_name
-				from event_values event_value
-				join pgconductor._private_event_filter_terms term
-					on term.event_key = event_value.event_key
-					and term.field_name = event_value.field_name
-					and term.operator = 'exists'
-					and term.boolean_value
-				union all
-				select source.event_id, term.subscription_id, term.field_name
-				from sources source
-				join pgconductor._private_event_filter_terms term
-					on term.event_key = source.event_key
-					and term.operator = 'exists'
-					and not term.boolean_value
-				where not source.event_payload ? term.field_name
-				union all
-				select event_value.event_id, term.subscription_id, term.field_name
-				from event_values event_value
-				join pgconductor._private_event_filter_terms term
-					on term.event_key = event_value.event_key
-					and term.field_name = event_value.field_name
-					and term.operator = 'anything_but'
-				where event_value.scalar_type in ('string', 'number', 'boolean', 'null')
-					and case term.scalar_type
-					when 'string' then event_value.scalar_type <> 'string'
-						or term.text_value collate "C" <> (event_value.value #>> '{}') collate "C"
-					when 'number' then event_value.scalar_type <> 'number'
-						or term.number_value <> case when event_value.scalar_type = 'number'
-							then (event_value.value #>> '{}')::numeric end
-					when 'boolean' then event_value.scalar_type <> 'boolean'
-						or term.boolean_value <> case when event_value.scalar_type = 'boolean'
-							then (event_value.value #>> '{}')::boolean end
-					when 'null' then event_value.scalar_type <> 'null'
-					else false
-				end
-			), matched_subscriptions as materialized (
-				select matched.event_id, matched.subscription_id
-				from raw_matched_fields matched
-				join pgconductor._private_custom_event_subscriptions subscription
-					on subscription.id = matched.subscription_id
-				group by matched.event_id, matched.subscription_id,
-					subscription.required_field_count
-				having count(distinct matched.field_name) = subscription.required_field_count
-				union all
-				select source.event_id, subscription.id
-				from sources source
-				join pgconductor._private_custom_event_subscriptions subscription
-					on subscription.event_key = source.event_key
-					and subscription.required_field_count = 0
-			), listens as materialized (
+			), ${this.matchSubscriptions()}, listens as materialized (
 				-- delivered by a second statement, which locks the listening executions, so this
 				-- one locks no executions but the waits'
 				select distinct matched.event_id, subscription.execution_id, subscription.queue
@@ -1924,6 +1800,182 @@ export class QueryBuilder {
 			), '[]'::jsonb) as listens
 			from sources source
 			order by source.event_id
+		`;
+	}
+
+	/**
+	 * The CTEs that match the events of a `sources` CTE (`event_id`, `event_key`, `event_payload`)
+	 * to subscriptions through their typed filter terms, ending in `matched_subscriptions`
+	 * (`event_id`, `subscription_id`) of every kind. Dispatch and `listListeners` share them, so
+	 * a listener they find is one dispatch delivers to.
+	 */
+	private matchSubscriptions(): PendingQuery<Row[]> {
+		return this.sql`event_values as materialized (
+				select source.event_id, source.event_key, field.key as field_name,
+					field.value, jsonb_typeof(field.value) as scalar_type
+				from sources source
+				cross join lateral jsonb_each(source.event_payload) field
+			), event_prefixes as materialized (
+				select
+					event_value.event_id,
+					event_value.event_key,
+					event_value.field_name,
+					term.prefix_length,
+					left(event_value.value #>> '{}', term.prefix_length) as prefix_value
+				from event_values event_value
+				cross join lateral (
+					select distinct candidate.prefix_length
+					from pgconductor._private_event_filter_terms candidate
+					where candidate.operator = 'prefix'
+						and candidate.event_key collate "C" = event_value.event_key collate "C"
+						and candidate.field_name collate "C" = event_value.field_name collate "C"
+				) term
+				where event_value.scalar_type = 'string'
+			), raw_matched_fields as (
+				select event_value.event_id, term.subscription_id, term.field_name
+				from event_values event_value
+				join pgconductor._private_event_filter_terms term
+					on term.operator = 'exact'
+					and term.scalar_type = 'string'
+					and event_value.scalar_type = 'string'
+					and term.event_key collate "C" = event_value.event_key collate "C"
+					and term.field_name collate "C" = event_value.field_name collate "C"
+					and term.text_value collate "C" = (event_value.value #>> '{}') collate "C"
+				union all
+				select event_value.event_id, term.subscription_id, term.field_name
+				from event_values event_value
+				join pgconductor._private_event_filter_terms term
+					on term.operator = 'exact'
+					and term.scalar_type = 'number'
+					and event_value.scalar_type = 'number'
+					and term.event_key = event_value.event_key
+					and term.field_name = event_value.field_name
+					and term.number_value = case when event_value.scalar_type = 'number'
+						then (event_value.value #>> '{}')::numeric end
+				union all
+				select event_value.event_id, term.subscription_id, term.field_name
+				from event_values event_value
+				join pgconductor._private_event_filter_terms term
+					on term.operator = 'exact'
+					and term.scalar_type = 'boolean'
+					and event_value.scalar_type = 'boolean'
+					and term.event_key = event_value.event_key
+					and term.field_name = event_value.field_name
+					and term.boolean_value = case when event_value.scalar_type = 'boolean'
+						then (event_value.value #>> '{}')::boolean end
+				union all
+				select event_value.event_id, term.subscription_id, term.field_name
+				from event_values event_value
+				join pgconductor._private_event_filter_terms term
+					on term.operator = 'exact'
+					and term.scalar_type = 'null'
+					and event_value.scalar_type = 'null'
+					and term.event_key = event_value.event_key
+					and term.field_name = event_value.field_name
+				union all
+				select event_prefix.event_id, term.subscription_id, term.field_name
+				from event_prefixes event_prefix
+				join pgconductor._private_event_filter_terms term
+					on term.operator = 'prefix'
+					and term.event_key collate "C" = event_prefix.event_key collate "C"
+					and term.field_name collate "C" = event_prefix.field_name collate "C"
+					and term.prefix_length = event_prefix.prefix_length
+					and term.text_value collate "C" = event_prefix.prefix_value collate "C"
+				union all
+				select event_value.event_id, term.subscription_id, term.field_name
+				from event_values event_value
+				join pgconductor._private_event_filter_terms term
+					on term.operator = 'numeric_range'
+					and event_value.scalar_type = 'number'
+					and term.event_key = event_value.event_key
+					and term.field_name = event_value.field_name
+					and term.number_range @> case when event_value.scalar_type = 'number'
+						then (event_value.value #>> '{}')::numeric end
+				union all
+				select event_value.event_id, term.subscription_id, term.field_name
+				from event_values event_value
+				join pgconductor._private_event_filter_terms term
+					on term.event_key = event_value.event_key
+					and term.field_name = event_value.field_name
+					and term.operator = 'exists'
+					and term.boolean_value
+				union all
+				select source.event_id, term.subscription_id, term.field_name
+				from sources source
+				join pgconductor._private_event_filter_terms term
+					on term.event_key = source.event_key
+					and term.operator = 'exists'
+					and not term.boolean_value
+				where not source.event_payload ? term.field_name
+				union all
+				select event_value.event_id, term.subscription_id, term.field_name
+				from event_values event_value
+				join pgconductor._private_event_filter_terms term
+					on term.event_key = event_value.event_key
+					and term.field_name = event_value.field_name
+					and term.operator = 'anything_but'
+				where event_value.scalar_type in ('string', 'number', 'boolean', 'null')
+					and case term.scalar_type
+					when 'string' then event_value.scalar_type <> 'string'
+						or term.text_value collate "C" <> (event_value.value #>> '{}') collate "C"
+					when 'number' then event_value.scalar_type <> 'number'
+						or term.number_value <> case when event_value.scalar_type = 'number'
+							then (event_value.value #>> '{}')::numeric end
+					when 'boolean' then event_value.scalar_type <> 'boolean'
+						or term.boolean_value <> case when event_value.scalar_type = 'boolean'
+							then (event_value.value #>> '{}')::boolean end
+					when 'null' then event_value.scalar_type <> 'null'
+					else false
+				end
+			), matched_subscriptions as materialized (
+				select matched.event_id, matched.subscription_id
+				from raw_matched_fields matched
+				join pgconductor._private_custom_event_subscriptions subscription
+					on subscription.id = matched.subscription_id
+				group by matched.event_id, matched.subscription_id,
+					subscription.required_field_count
+				having count(distinct matched.field_name) = subscription.required_field_count
+				union all
+				select source.event_id, subscription.id
+				from sources source
+				join pgconductor._private_custom_event_subscriptions subscription
+					on subscription.event_key = source.event_key
+					and subscription.required_field_count = 0
+			)`;
+	}
+
+	buildListListeners({
+		event,
+		payload,
+		task,
+		limit,
+	}: ListListenersArgs): PendingQuery<(ExecutionInfo & { listens: string[] })[]> {
+		return this.sql<(ExecutionInfo & { listens: string[] })[]>`
+			with sources as materialized (
+				select '00000000-0000-0000-0000-000000000000'::uuid as event_id,
+					${event}::text as event_key, ${this.sql.json(payload)}::jsonb as event_payload
+			), ${this.matchSubscriptions()}
+			select e.id, e.task_key as "taskKey", e.queue,
+				case when e.locked_by is not null then 'running' else 'pending' end as status,
+				e.key, e.payload, e.state, e.result, e.last_error as error, e.attempts,
+				e.created_at as "createdAt", e.completed_at as "completedAt", e.failed_at as "failedAt",
+				array_agg(
+					substr(subscription.step_key, length('pgconductor.listen:') + 1)
+					order by subscription.step_key
+				) as listens
+			from matched_subscriptions matched
+			join pgconductor._private_custom_event_subscriptions subscription
+				on subscription.id = matched.subscription_id
+				and subscription.kind = 'execution_listen'
+			join pgconductor._private_executions e
+				on e.id = subscription.execution_id and e.queue = subscription.queue
+			where e.completed_at is null
+				and e.failed_at is null
+				and not e.cancelled
+				${task ? this.sql`and e.task_key = ${task.key}::text and e.queue = ${task.queue}::text` : this.sql``}
+			group by e.id, e.queue
+			order by e.created_at, e.id
+			limit ${limit}::int
 		`;
 	}
 

@@ -303,6 +303,18 @@ conductor.createTask(
 );
 ```
 
+`conductor.listListeners()` finds the open executions an event would reach, with the names of
+their listens it matches, without emitting it:
+
+```typescript
+const listeners = await conductor.listListeners({
+  event: "chat.message",
+  payload: { threadId: "1" },
+  task: { name: "conversation" }, // optional
+});
+// [{ id, taskKey, key, payload, state, ..., listens: ["thread"] }]
+```
+
 Listens are matched when the event is dispatched, together with triggers and waits. The
 dispatcher stores the matched events as signals in a statement of its own, which locks the
 listening executions in one go, so it never waits on them while holding the waiting ones.
