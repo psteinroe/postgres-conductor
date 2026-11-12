@@ -2,6 +2,7 @@ export { Conductor } from "./conductor.js";
 export type {
 	ConductorOptions,
 	EventQuery,
+	ExecutionLookup,
 	ExecutionQuery,
 	WaitForResultOptions,
 } from "./conductor.js";
@@ -25,6 +26,7 @@ export type {
 	BatchTaskEvent,
 	EventSubscription,
 	ExecutionBranch,
+	KeyedExecution,
 	SignalBranch,
 	SignalMessage,
 	WaitForAnyResult,

@@ -224,11 +224,19 @@ Executions it waits on with `ctx.invokeAndWait()` and executions it started with
 
 ## conductor.signal()
 
-Send a signal to an execution. Returns `false` if the execution is completed, failed, cancelled or unknown. Sending a signal id again stores it once. See [Signals](../task-execution/signals.md).
+Send a signal to an execution by ID, or to the non-terminal execution of a task that holds a key (the key [`signalWithStart()`](#conductorsignalwithstart) addresses it by). Returns `false` if the execution is completed, failed, cancelled or unknown, or no non-terminal execution holds the key. Sending a signal id again stores it once. See [Signals](../task-execution/signals.md#sending-signals).
 
 ```typescript
 await conductor.signal(executionId, { name: "input", id: requestId, payload: { text: "hi" } });
+
+// by key: starts nothing
+await conductor.signal(
+  { task: { name: "session", queue: "default" }, key: "thread-1" }, // queue is optional
+  { name: "stop", id: requestId },
+);
 ```
+
+By key, the lookup and the signal run in one transaction under the lock `signalWithStart()` takes on the task and key, so a signal sent while `signalWithStart()` starts the execution for that key waits for it and reaches the new execution.
 
 ## conductor.signalWithStart()
 
@@ -250,16 +258,26 @@ const executionId = await conductor.signalWithStart({
 
 ## conductor.getExecution()
 
-Read an execution by ID:
+Read an execution by ID, by key or by dedupe key:
 
 ```typescript
 const execution = await conductor.getExecution(executionId);
 
 // pass the task to type the result
 const execution = await conductor.getExecution({ name: "send-email" }, executionId);
+
+// the non-terminal execution that holds a key (see signalWithStart())
+const session = await conductor.getExecution({ task: { name: "session" }, key: "thread-1" });
+
+// the execution invoked with a dedupe_key
+const order = await conductor.getExecution({ task: { name: "process-order" }, dedupeKey: "order-123" });
 ```
 
-Returns `null` if the ID is unknown or the execution was removed by its [retention policy](../crafting-tasks/retention.md). Otherwise:
+- By key, it reads only a pending or running execution: a completed, failed or cancelled one no longer holds its key
+- By dedupe key, it reads the execution that holds the `dedupe_key`, whatever its status, until retention removes it. Throttled and debounced executions are keyed by their time slot, so a key may have several of them, and this lookup does not read them
+- Both read the task's unique index on the key, and both type the result by the task
+
+Returns `null` if nothing matches or the execution was removed by its [retention policy](../crafting-tasks/retention.md). Otherwise:
 
 ```typescript
 {

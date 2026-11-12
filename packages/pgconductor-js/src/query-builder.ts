@@ -125,10 +125,11 @@ export type ScheduleNextCronExecutionArgs = {
 	dedupeKey: string;
 };
 
-export type GetExecutionArgs = {
-	executionId: string;
-	task?: { key: string; queue: string };
-};
+/** An execution by id (of `task` when given), the open one holding `key`, or the one with `dedupeKey` */
+export type GetExecutionArgs =
+	| { executionId: string; task?: { key: string; queue: string } }
+	| { task: { key: string; queue: string }; key: string }
+	| { task: { key: string; queue: string }; dedupeKey: string };
 
 export type LoadStepArgs = {
 	executionId: string;
@@ -226,8 +227,11 @@ export type SignalArgs = {
 	payload?: JsonValue;
 };
 
-export type SignalExecutionArgs = {
-	executionId: string;
+/** Signals an execution by id, or the open execution of `task` holding `key` */
+export type SignalExecutionArgs = (
+	| { executionId: string }
+	| { task: { key: string; queue: string }; key: string }
+) & {
 	signal: SignalArgs;
 };
 
@@ -354,16 +358,27 @@ export class QueryBuilder {
 		`;
 	}
 
-	buildSignalExecution({
-		executionId,
-		signal,
-	}: SignalExecutionArgs): PendingQuery<[{ stored: boolean }]> {
+	buildSignalExecution(args: SignalExecutionArgs): PendingQuery<[{ stored: boolean }]> {
+		const { signal } = args;
+		const payload = signal.payload === undefined ? null : this.sql.json(signal.payload);
+		if ("executionId" in args) {
+			return this.sql<[{ stored: boolean }]>`
+				select pgconductor.signal_execution(
+					${args.executionId}::uuid,
+					${signal.name}::text,
+					${signal.id}::text,
+					${payload}::jsonb
+				) as stored
+			`;
+		}
 		return this.sql<[{ stored: boolean }]>`
-			select pgconductor.signal_execution(
-				${executionId}::uuid,
+			select pgconductor.signal_execution_by_key(
+				${args.task.key}::text,
+				${args.task.queue}::text,
+				${args.key}::text,
 				${signal.name}::text,
 				${signal.id}::text,
-				${signal.payload === undefined ? null : this.sql.json(signal.payload)}::jsonb
+				${payload}::jsonb
 			) as stored
 		`;
 	}
@@ -1316,7 +1331,7 @@ export class QueryBuilder {
 		`;
 	}
 
-	buildGetExecution({ executionId, task }: GetExecutionArgs): PendingQuery<ExecutionInfo[]> {
+	buildGetExecution(args: GetExecutionArgs): PendingQuery<ExecutionInfo[]> {
 		return this.sql<ExecutionInfo[]>`
 			select id, task_key as "taskKey", queue,
 				case
@@ -1329,9 +1344,26 @@ export class QueryBuilder {
 				key, payload, state, result, last_error as error, attempts, created_at as "createdAt",
 				completed_at as "completedAt", failed_at as "failedAt"
 			from pgconductor._private_executions
-			where id = ${executionId}::uuid
-				${task ? this.sql`and task_key = ${task.key}::text and queue = ${task.queue}::text` : this.sql``}
+			where ${this.executionLookup(args)}
 		`;
+	}
+
+	/**
+	 * The predicates repeat those of the partial unique indexes on (task_key, key, queue) and
+	 * (task_key, dedupe_key, queue), so a lookup by either key reads one of them.
+	 */
+	private executionLookup(args: GetExecutionArgs) {
+		if ("executionId" in args) {
+			const { task } = args;
+			return this.sql`id = ${args.executionId}::uuid
+				${task ? this.sql`and task_key = ${task.key}::text and queue = ${task.queue}::text` : this.sql``}`;
+		}
+		const task = this.sql`task_key = ${args.task.key}::text and queue = ${args.task.queue}::text`;
+		if ("key" in args) {
+			return this.sql`${task} and key = ${args.key}::text
+				and completed_at is null and failed_at is null and cancelled = false`;
+		}
+		return this.sql`${task} and dedupe_key = ${args.dedupeKey}::text and singleton_on is null`;
 	}
 
 	buildListExecutions({

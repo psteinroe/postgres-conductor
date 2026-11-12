@@ -155,6 +155,23 @@ export type SignalMessage = {
 	payload?: JsonValue;
 };
 
+/** The open execution of a task holding `key`: the key `signalWithStart()` addresses it by. */
+export type KeyedExecution<TName extends string = string, TQueue extends string = string> = {
+	task: TaskIdentifier<TName, TQueue>;
+	key: string;
+};
+
+/** @internal Addresses a signal by execution id or by key. */
+export function signalTarget(
+	target: string | KeyedExecution<string, string>,
+): { executionId: string } | { task: { key: string; queue: string }; key: string } {
+	if (typeof target === "string") return { executionId: target };
+	return {
+		task: { key: target.task.name, queue: target.task.queue || "default" },
+		key: target.key,
+	};
+}
+
 type ScheduleOptions = {
 	cron: string;
 	priority?: number;
@@ -825,11 +842,19 @@ export class TaskContext<
 	}
 
 	/**
-	 * Signal an execution. Idempotent by signal id: resending an id stores the signal once.
-	 * @returns false if the execution is completed, failed, cancelled or unknown
+	 * Signal an execution by id, or the open execution of `{ task, key }` that holds the key.
+	 * Idempotent by signal id: resending an id stores the signal once.
+	 * @returns false if the execution is completed, failed, cancelled or unknown, or no open
+	 * execution holds the key
 	 */
-	async sendSignal(executionId: string, signal: SignalMessage): Promise<boolean> {
-		return this.opts.db.signalExecution({ executionId, signal }, { signal: this.signal });
+	async sendSignal<TName extends TaskName<Tasks>, TQueue extends string = "default">(
+		target: string | KeyedExecution<TName, TQueue>,
+		signal: SignalMessage,
+	): Promise<boolean> {
+		return this.opts.db.signalExecution(
+			{ ...signalTarget(target), signal },
+			{ signal: this.signal },
+		);
 	}
 
 	/**

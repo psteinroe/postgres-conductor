@@ -74,6 +74,24 @@ const stored = await conductor.signal(executionId, {
 
 Each signal has an `id`. Sending an id again stores it once, so a retried send is safe.
 
+### By Key
+
+An execution started by [`signalWithStart()`](#signal-or-start) holds its key while it is pending or running. Signal it by its task and key, without reading its ID first:
+
+```typescript
+const stopped = await conductor.signal(
+  { task: { name: "agent-worker" }, key: workerId },
+  { name: "stop", id: stopRequestId },
+);
+// false if no pending or running execution of the task holds the key
+```
+
+- It starts nothing. A completed, failed or cancelled execution no longer holds its key, so the call returns `false`
+- The key is scoped to the task and its queue (`task: { name, queue }`, `queue` defaults to `"default"`)
+- The lookup and the signal run in one transaction under the lock `signalWithStart()` takes on the task and key. A signal sent while `signalWithStart()` starts the execution for the key waits for it and reaches the new execution
+
+`conductor.getExecution({ task, key })` reads the execution that holds a key.
+
 ## Signal or Start
 
 `signalWithStart()` makes a task execution addressable by a key. It signals the execution of the task for that key, or starts one that receives the signal first:
@@ -97,6 +115,7 @@ An execution that should live on for its key, sleeping between messages, is an [
 
 ```typescript
 await ctx.sendSignal(executionId, { name: "input", id: "report-1", payload });
+await ctx.sendSignal({ task: { name: "session" }, key: threadKey }, { name: "stop", id: "stop-1" });
 
 // memoized by the step key like other context operations
 const sessionId = await ctx.signalWithStart("start-session", {

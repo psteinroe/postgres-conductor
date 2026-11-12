@@ -47,6 +47,42 @@ describe("execution result types", () => {
 		expectTypeOf<ExecutionInfo["result"]>().toEqualTypeOf<unknown>();
 	});
 
+	test("getExecution by key and dedupe key types the result by task", () => {
+		expectTypeOf(conductor.getExecution({ task: { name: "add" }, key: "k" })).toEqualTypeOf<
+			Promise<ExecutionInfo<{ sum: number }> | null>
+		>();
+		expectTypeOf(
+			conductor.getExecution({ task: { name: "report", queue: "reports" }, dedupeKey: "d" }),
+		).toEqualTypeOf<Promise<ExecutionInfo<{ url: string }> | null>>();
+
+		if (false) {
+			// @ts-expect-error - unknown task
+			conductor.getExecution({ task: { name: "missing" }, key: "k" });
+
+			// @ts-expect-error - a key or a dedupe key, not both
+			conductor.getExecution({ task: { name: "add" }, key: "k", dedupeKey: "d" });
+
+			// @ts-expect-error - a key or a dedupe key is required
+			conductor.getExecution({ task: { name: "add" } });
+		}
+	});
+
+	test("signal addresses an execution by id or by key", () => {
+		const signal = { name: "stop", id: "s1" };
+		expectTypeOf(conductor.signal("id", signal)).toEqualTypeOf<Promise<boolean>>();
+		expectTypeOf(
+			conductor.signal({ task: { name: "report", queue: "reports" }, key: "k" }, signal),
+		).toEqualTypeOf<Promise<boolean>>();
+
+		if (false) {
+			// @ts-expect-error - unknown task
+			conductor.signal({ task: { name: "missing" }, key: "k" }, signal);
+
+			// @ts-expect-error - the key is required
+			conductor.signal({ task: { name: "add" } }, signal);
+		}
+	});
+
 	test("waitForResult types the result by task", () => {
 		expectTypeOf(conductor.waitForResult("id")).toEqualTypeOf<Promise<unknown>>();
 		expectTypeOf(conductor.waitForResult({ name: "add" }, "id")).toEqualTypeOf<
