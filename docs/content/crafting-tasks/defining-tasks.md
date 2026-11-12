@@ -92,6 +92,31 @@ Workers validate every execution of a task defined with `defineTask()` against i
 
 Type-only definitions (`DefineTask` with `TaskSchemas.fromUnion()`) have no runtime schema and are never validated.
 
+### Execution State
+
+A task can declare the schema of its executions' [state](../api/task-context.md#ctxsetstate), what an execution tells others about itself. `DefineTask` takes a `state` type instead:
+
+```typescript
+export const agentTask = defineTask({
+  name: "agent",
+  payload: z.object({ owner: z.string() }),
+  state: z.object({
+    status: z.enum(["idle", "busy"]),
+    topics: z.array(z.string()),
+  }),
+});
+
+type Agent = DefineTask<{
+  name: "agent";
+  payload: { owner: string };
+  state: { status: "idle" | "busy"; topics: string[] };
+}>;
+```
+
+`ctx.state` is then typed (`State | null`), and so are `ctx.setState()`, `ctx.updateState()`, the `state` of `signalWithStart()` for the task, and the `state` that `getExecution(task, id)` and `listExecutions({ task })` return. Without a state schema or type, state is any JSON object, as before.
+
+State is validated where it enters, against the task's state schema: `ctx.setState()`, `ctx.updateState()`, and `signalWithStart({ state })` from the Conductor or a task context. An invalid state throws at the call site with the issues, for example `Invalid state for task "agent": status: Invalid option`, and writes nothing; `signalWithStart()` then sends no signal and starts no execution. The schema's output is written, so transforms and defaults apply. `null` clears the state and is not validated. Reads are not validated: `ctx.state` and the executions the Conductor reads return the state as stored.
+
 A catalog made at runtime, such as one task per configured integration, can type its tasks by any name: names typed `string` match every literal name, and a task returning `unknown` may return any object or nothing.
 
 ```typescript

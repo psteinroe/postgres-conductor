@@ -6,6 +6,8 @@ import type {
 	InferEventPayload,
 } from "./event-definition.js";
 import type { ValidateColumns } from "./select-columns.js";
+import type { Payload } from "./database-client.js";
+import { validateSchema } from "./lib/validate-schema.js";
 
 type ObjectSchema = StandardSchemaV1<unknown, object>;
 
@@ -14,11 +16,14 @@ export type TaskDefinition<
 	Payload = undefined,
 	Returns = undefined,
 	Queue extends string = "default",
+	State = unknown,
 > = {
 	readonly name: Name;
 	readonly queue: Queue;
 	readonly payload: Payload;
 	readonly returns: Returns;
+	/** Schema (or, in `DefineTask`, type) of the execution's state; untyped without one */
+	readonly state?: State;
 };
 
 /**
@@ -30,6 +35,7 @@ export type TaskDefinition<
  *   queue: "notifications";
  *   payload: { to: string };
  *   returns: { sent: boolean };
+ *   state: { attempts: number };
  * }>;
  */
 export type DefineTask<
@@ -38,12 +44,14 @@ export type DefineTask<
 		queue?: string;
 		payload?: unknown;
 		returns?: unknown;
+		state?: unknown;
 	},
 > = TaskDefinition<
 	T["name"],
 	T extends { payload: infer P } ? P : undefined,
 	T extends { returns: infer R } ? R : undefined,
-	T extends { queue: infer Q extends string } ? Q : "default"
+	T extends { queue: infer Q extends string } ? Q : "default",
+	T extends { state: infer S } ? S : undefined
 >;
 
 export function defineTask<Name extends string, Queue extends string>(def: {
@@ -72,23 +80,29 @@ export function defineTask<
 	Name extends string,
 	Queue extends string,
 	Payload extends ObjectSchema,
-	Returns extends ObjectSchema,
+	// Unset when only state routes a definition here
+	Returns extends ObjectSchema | undefined = undefined,
+	State extends ObjectSchema | undefined = undefined,
 >(def: {
 	name: Name;
 	queue: Queue;
 	payload?: Payload;
 	returns?: Returns;
-}): TaskDefinition<Name, Payload, Returns, Queue>;
+	state?: State;
+}): TaskDefinition<Name, Payload, Returns, Queue, State>;
 export function defineTask<
 	Name extends string,
 	Payload extends ObjectSchema,
-	Returns extends ObjectSchema,
+	// Unset when only state routes a definition here
+	Returns extends ObjectSchema | undefined = undefined,
+	State extends ObjectSchema | undefined = undefined,
 >(def: {
 	name: Name;
 	queue?: never;
 	payload?: Payload;
 	returns?: Returns;
-}): TaskDefinition<Name, Payload, Returns, "default">;
+	state?: State;
+}): TaskDefinition<Name, Payload, Returns, "default", State>;
 
 export function defineTask(def: any) {
 	return { ...def, queue: def.queue || "default" };
@@ -115,6 +129,44 @@ export type InferReturns<T> =
 					? EnsureObject<O>
 					: EnsureObject<R> // Plain type (type-only definition)
 		: never;
+
+/**
+ * The state of the task's executions: the output of its state schema, its `DefineTask` state type,
+ * or any JSON object without either.
+ */
+export type InferState<T> =
+	T extends TaskDefinition<string, any, any, string, infer S>
+		? unknown extends S
+			? Payload
+			: [S] extends [undefined]
+				? Payload
+				: S extends StandardSchemaV1<any, infer O>
+					? EnsureObject<O>
+					: EnsureObject<S> // Plain type (type-only definition)
+		: never;
+
+/**
+ * Validate a state written to an execution of `task` against the task's state schema, and return
+ * the schema's output. Throws on issues; a task without a state schema takes any state.
+ */
+export async function validateState(
+	definitions: readonly TaskDefinition<string, unknown, unknown, string>[],
+	task: { name: string; queue: string },
+	state: unknown,
+): Promise<Payload> {
+	const schema = definitions.find(
+		(definition) => definition.name === task.name && definition.queue === task.queue,
+	)?.state;
+	return (await validateSchema(
+		isStandardSchema(schema) ? schema : undefined,
+		state,
+		`state for task "${task.name}"`,
+	)) as Payload;
+}
+
+function isStandardSchema(value: unknown): value is StandardSchemaV1 {
+	return typeof value === "object" && value !== null && "~standard" in value;
+}
 
 export type TaskName<TTasks extends readonly TaskDefinition<string, any, any, string>[]> =
 	TTasks[number]["name"];

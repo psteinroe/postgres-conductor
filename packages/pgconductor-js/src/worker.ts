@@ -616,6 +616,8 @@ export class Worker<
 				}),
 				eventDefinitions: task.eventDefinitions,
 				metadataSchema: task.metadataSchema,
+				stateSchema: task.schemas.state,
+				taskDefinitions: task.taskDefinitions,
 				window: task.window,
 				telemetry: this.telemetry,
 				signals,

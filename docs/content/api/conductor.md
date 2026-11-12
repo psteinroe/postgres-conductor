@@ -249,7 +249,7 @@ const executionId = await conductor.signalWithStart({
   key: "thread-1",
   signal: { name: "input", id: requestId, payload },
   input: {}, // used only when it starts an execution (default: {})
-  state: {}, // optional: its state (ctx.setState()), used only when it starts an execution
+  state: {}, // optional: its state (ctx.setState()), used only when it starts an execution; validated against the task's state schema
   listen: { thread: { event: chatMessage, filter: { threadId: ["1"] } } }, // optional: ctx.listen()s when it starts one
   priority: 0, // optional
   metadata: {}, // optional
@@ -287,7 +287,7 @@ Returns `null` if nothing matches or the execution was removed by its [retention
   status: "pending" | "running" | "completed" | "failed" | "cancelled";
   key: string | null;         // the key signalWithStart() addresses it by
   payload: TPayload;          // the execution's input
-  state: object | null;       // what it last set with ctx.setState()
+  state: TState | null;       // what it last set with ctx.setState(), typed by the task's state schema
   result: TResult | null;     // return value, set when completed
   error: string | null;       // last attempt's error, or the cancellation reason
   attempts: number;

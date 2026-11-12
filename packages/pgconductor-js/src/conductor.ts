@@ -32,12 +32,14 @@ import {
 	type FindTaskByIdentifier,
 	type InferPayload,
 	type InferReturns,
+	type InferState,
 	type NonEmptyArray,
 	type TaskDefinition,
 	type TaskName,
 	type Trigger,
 	type ValidateTriggers,
 	type ValidateEventTriggers,
+	validateState,
 } from "./task-definition.js";
 import { EVENT_DISPATCH_QUEUE, EVENT_DISPATCH_TASK } from "./event-dispatch-task.js";
 import { compileListens, type Listen } from "./event-trigger-validation.js";
@@ -104,6 +106,18 @@ type ResolvedReturns<
 	Tasks extends readonly TaskDefinition<string, any, any, string>[],
 	TDef extends { readonly name: string; readonly queue?: string },
 > = TDef["name"] extends TaskName<Tasks> ? InferReturns<ResolvedTaskDef<Tasks, TDef>> : void;
+
+type ResolvedState<
+	Tasks extends readonly TaskDefinition<string, any, any, string>[],
+	TDef extends { readonly name: string; readonly queue?: string },
+> = TDef["name"] extends TaskName<Tasks> ? InferState<ResolvedTaskDef<Tasks, TDef>> : Payload;
+
+type ResolvedContext<
+	Tasks extends readonly TaskDefinition<string, any, any, string>[],
+	Events extends readonly EventDefinition<string, any, any>[],
+	Metadata extends object,
+	TDef extends { readonly name: string; readonly queue?: string },
+> = TaskContext<Tasks, Events, Metadata, ResolvedState<Tasks, TDef>>;
 
 type ResolvedTaskEvent<
 	Tasks extends readonly TaskDefinition<string, any, any, string>[],
@@ -328,14 +342,14 @@ export class Conductor<
 					) => Promise<Array<ResolvedReturns<Tasks, TDef>>>
 			: (
 					event: ResolvedTaskEvent<Tasks, Events, TDef, TTriggers>,
-					ctx: TaskContext<Tasks, Events, Metadata> & ExtraContext & MiddlewareContext,
+					ctx: ResolvedContext<Tasks, Events, Metadata, TDef> & ExtraContext & MiddlewareContext,
 				) => Promise<ResolvedReturns<Tasks, TDef>>,
 	): Task<
 		TDef["name"],
 		ResolvedQueue<TDef>,
 		ResolvedPayload<Tasks, TDef>,
 		ResolvedReturns<Tasks, TDef>,
-		TaskContext<Tasks, Events, Metadata> & ExtraContext & MiddlewareContext,
+		ResolvedContext<Tasks, Events, Metadata, TDef> & ExtraContext & MiddlewareContext,
 		TaskEventFromTriggers<TTriggers, ResolvedPayload<Tasks, TDef>, Events>
 	> {
 		const queue = definition.queue || "default";
@@ -348,7 +362,7 @@ export class Conductor<
 			ResolvedQueue<TDef>,
 			ResolvedPayload<Tasks, TDef>,
 			ResolvedReturns<Tasks, TDef>,
-			TaskContext<Tasks, Events, Metadata> & ExtraContext & MiddlewareContext,
+			ResolvedContext<Tasks, Events, Metadata, TDef> & ExtraContext & MiddlewareContext,
 			TaskEventFromTriggers<TTriggers, ResolvedPayload<Tasks, TDef>, Events>
 		>(
 			definition as TaskConfiguration<
@@ -360,11 +374,12 @@ export class Conductor<
 			fn as ExecuteFunction<
 				TaskEventFromTriggers<TTriggers, ResolvedPayload<Tasks, TDef>, Events>,
 				ResolvedReturns<Tasks, TDef>,
-				TaskContext<Tasks, Events, Metadata> & ExtraContext & MiddlewareContext
+				ResolvedContext<Tasks, Events, Metadata, TDef> & ExtraContext & MiddlewareContext
 			>,
 			this.events,
 			this.options.metadata,
 			schemas,
+			this.options.tasks?.definitions,
 		);
 	}
 
@@ -578,8 +593,11 @@ export class Conductor<
 		signal: SignalMessage;
 		/** Payload of the execution, used only when it starts one */
 		input?: InferPayload<FindTaskByIdentifier<Tasks, TName, TQueue>>;
-		/** State of the execution (see `ctx.setState()`), used only when it starts one */
-		state?: Payload;
+		/**
+		 * State of the execution (see `ctx.setState()`), used only when it starts one. Validated
+		 * against the task's state schema.
+		 */
+		state?: InferState<FindTaskByIdentifier<Tasks, TName, TQueue>>;
 		/** Listens of the execution by name (see `ctx.listen()`), registered only when it starts one */
 		listen?: Record<string, Listen>;
 		priority?: number;
@@ -587,6 +605,13 @@ export class Conductor<
 	}): Promise<string> {
 		const queue = options.queue || "default";
 		const metadata = await this.validateMetadata(options.metadata);
+		const state =
+			options.state &&
+			(await validateState(
+				this.options.tasks?.definitions || [],
+				{ name: options.task, queue },
+				options.state,
+			));
 		return this.telemetry.send({
 			taskKey: options.task,
 			queue,
@@ -597,7 +622,7 @@ export class Conductor<
 					key: options.key,
 					signal: options.signal,
 					input: (options.input || {}) as Payload,
-					state: options.state,
+					state,
 					listens: compileListens(options.listen || {}, this.events),
 					priority: options.priority,
 					traceContext: this.telemetry.traceContext(),
@@ -619,10 +644,18 @@ export class Conductor<
 	async getExecution<TName extends TaskName<Tasks>, TQueue extends string = "default">(
 		task: TaskIdentifier<TName, TQueue>,
 		executionId: string,
-	): Promise<ExecutionInfo<InferReturns<FindTaskByIdentifier<Tasks, TName, TQueue>>> | null>;
+	): Promise<ExecutionInfo<
+		InferReturns<FindTaskByIdentifier<Tasks, TName, TQueue>>,
+		Payload,
+		InferState<FindTaskByIdentifier<Tasks, TName, TQueue>>
+	> | null>;
 	async getExecution<TName extends TaskName<Tasks>, TQueue extends string = "default">(
 		lookup: ExecutionLookup<TName, TQueue>,
-	): Promise<ExecutionInfo<InferReturns<FindTaskByIdentifier<Tasks, TName, TQueue>>> | null>;
+	): Promise<ExecutionInfo<
+		InferReturns<FindTaskByIdentifier<Tasks, TName, TQueue>>,
+		Payload,
+		InferState<FindTaskByIdentifier<Tasks, TName, TQueue>>
+	> | null>;
 	async getExecution(
 		target: TaskIdentifier<string, string> | ExecutionLookup<string, string> | string,
 		executionId?: string,
@@ -655,7 +688,8 @@ export class Conductor<
 	): Promise<
 		ExecutionInfo<
 			InferReturns<FindTaskByIdentifier<Tasks, TName, TQueue>>,
-			InferPayload<FindTaskByIdentifier<Tasks, TName, TQueue>>
+			InferPayload<FindTaskByIdentifier<Tasks, TName, TQueue>>,
+			InferState<FindTaskByIdentifier<Tasks, TName, TQueue>>
 		>[]
 	>;
 	async listExecutions(query: ExecutionQuery<string, string, Payload>): Promise<ExecutionInfo[]> {

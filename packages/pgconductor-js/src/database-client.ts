@@ -95,7 +95,7 @@ export type DeadLetterMetadata = {
 
 export type ExecutionStatus = "pending" | "running" | "completed" | "failed" | "cancelled";
 
-export type ExecutionInfo<TResult = unknown, TPayload = Payload> = {
+export type ExecutionInfo<TResult = unknown, TPayload = Payload, TState = Payload> = {
 	id: string;
 	taskKey: string;
 	queue: string;
@@ -105,7 +105,7 @@ export type ExecutionInfo<TResult = unknown, TPayload = Payload> = {
 	/** The execution's input */
 	payload: TPayload;
 	/** What the execution last told others about itself with `ctx.setState()` */
-	state: Payload | null;
+	state: TState | null;
 	/** Return value of a completed execution */
 	result: TResult | null;
 	/** Error of the last failed attempt, or the cancellation reason */
