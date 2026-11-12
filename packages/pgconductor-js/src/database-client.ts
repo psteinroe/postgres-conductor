@@ -282,7 +282,7 @@ export type EventRaceResult = {
 	key: string;
 	event?: { name: string; payload: Payload };
 	outcome?: ExecutionOutcome;
-	signal?: { id: string; name: string };
+	signal?: { id: string; name: string; payload: JsonValue };
 };
 
 export interface EventSubscriptionSpec {

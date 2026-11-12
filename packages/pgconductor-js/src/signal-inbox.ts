@@ -4,6 +4,13 @@ import { coerceError } from "./lib/coerce-error.js";
 
 export type SignalInfo = { id: string; name: string };
 
+/** The signal that won a `{ signal: name }` branch of `ctx.waitForAny()`, with its payload. */
+export type ReceivedSignal<T extends JsonValue = JsonValue> = {
+	id: string;
+	name: string;
+	payload: T;
+};
+
 export type SignalHandler<T extends JsonValue = JsonValue> = (
 	payload: T,
 	info: SignalInfo,

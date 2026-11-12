@@ -36,7 +36,7 @@ import {
 } from "./event-definition.js";
 import { compileEventFilter, compileListens, type Listen } from "./event-trigger-validation.js";
 import { validateSchema } from "./lib/validate-schema.js";
-import type { SignalHandler, SignalInbox, SignalInfo } from "./signal-inbox.js";
+import type { ReceivedSignal, SignalHandler, SignalInbox } from "./signal-inbox.js";
 
 /** Why an attempt was aborted, read from its abort controller and never from handler output */
 export type TaskAbortReasons =
@@ -91,11 +91,27 @@ export type EventSubscription<TEvent> = {
  */
 export type ExecutionBranch = { execution: string; task?: TaskIdentifier<string, string> };
 
+declare const signalPayload: unique symbol;
+
 /**
  * A `ctx.waitForAny()` branch that waits for a signal with this name. It does not consume the
- * signal: `ctx.onSignal()` handlers still receive it.
+ * signal: `ctx.onSignal()` handlers still receive it. The winner carries the signal's payload;
+ * annotate the branch as `SignalBranch<T>` to type it, which is not checked, like the type of a
+ * `ctx.onSignal<T>()` handler.
  */
-export type SignalBranch = { signal: string };
+export type SignalBranch<TPayload extends JsonValue = JsonValue> = {
+	signal: string;
+	/** Type only: the payload type of the signal that wins this branch */
+	readonly [signalPayload]?: TPayload;
+};
+
+type SignalBranchPayload<TBranch> = TBranch extends {
+	readonly [signalPayload]?: infer TPayload extends JsonValue;
+}
+	? unknown extends TPayload
+		? JsonValue
+		: TPayload
+	: JsonValue;
 
 type ExecutionBranchResult<
 	TBranch,
@@ -126,7 +142,7 @@ export type WaitForAnyResult<
 				: TBranches[K] extends ExecutionBranch
 					? { key: K; outcome: ExecutionOutcome<ExecutionBranchResult<TBranches[K], Tasks>> }
 					: TBranches[K] extends SignalBranch
-						? { key: K; signal: SignalInfo }
+						? { key: K; signal: ReceivedSignal<SignalBranchPayload<TBranches[K]>> }
 						: never;
 	  }[keyof TBranches & string]
 	| { key: "timeout" };

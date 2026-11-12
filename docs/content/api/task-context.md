@@ -142,13 +142,13 @@ const winner = await ctx.waitForAny(
     string,
     | EventSubscription
     | { execution: string, task?: { name: string, queue?: string } }
-    | { signal: string }
+    | SignalBranch<T> // { signal: string }
   >,
   options?: { timeout?: DurationInput }
 ): Promise<
   | { key: string, event }
   | { key: string, outcome: ExecutionOutcome }
-  | { key: string, signal: { id: string, name: string } }
+  | { key: string, signal: { id: string, name: string, payload: T } }
   | { key: "timeout" }
 >
 ```
@@ -205,7 +205,22 @@ for (let n = 0; ; n++) {
     { timeout: "1h" },
   );
   if (winner.key !== "input") break;
-  // winner.signal: { id, name } of the signal that won
+  // winner.signal: { id, name, payload } of the signal that won
+}
+```
+
+The payload is memoized with the winner, so a replay returns it. Annotate a branch as
+`SignalBranch<T>` to type `winner.signal.payload`; it is not checked, like the type of a
+`ctx.onSignal<T>()` handler. Without it, the payload is a `JsonValue`, and `null` for a signal
+sent without one:
+
+```typescript
+const decision: SignalBranch<{ status: "approved" | "rejected"; by: string }> = {
+  signal: "decision",
+};
+const winner = await ctx.waitForAny("decided", { decision, withdrawn: { signal: "withdrawn" } });
+if (winner.key === "decision") {
+  // winner.signal.payload: { status: "approved" | "rejected"; by: string }
 }
 ```
 

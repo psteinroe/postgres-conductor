@@ -55,8 +55,43 @@ const session = conductor.createTask(
 ```
 
 - The branch wins at once when the execution holds a signal with that name whose handler has not returned, including one stored before the wait. Otherwise the next signal with that name, from `conductor.signal()`, `ctx.sendSignal()` or `signalWithStart()`, wakes the execution
-- The wait does not consume the signal. The next attempt delivers it to `ctx.onSignal()` handlers as usual; `winner.signal` only holds its `id` and `name`
+- `winner.signal` holds the signal's `id`, `name` and `payload` (`null` when it was sent without one). The winner is memoized under the step key, so a replay returns the same signal and payload
+- The wait does not consume the signal. The next attempt delivers it to `ctx.onSignal()` handlers as usual
 - Signals for other names are kept and do not wake the execution
+- Annotate a branch as `SignalBranch<T>` to type `winner.signal.payload`; like the type of a `ctx.onSignal<T>()` handler, it is not checked. An unannotated branch's payload is a `JsonValue`
+
+Since the payload is memoized with the winner, the signal itself can carry what the execution waits for. An approval request that waits for the first decision, a withdrawal or its expiry does not have to persist decisions from a handler:
+
+```typescript
+type Decision = { status: "approved" | "rejected"; comment?: string; by: string };
+
+const approval = conductor.createTask(
+  { name: "approval" },
+  { invocable: true },
+  async (event, ctx) => {
+    ctx.onSignal("decision", () => {});
+    ctx.onSignal("withdrawn", () => {});
+    const decision: SignalBranch<Decision> = { signal: "decision" };
+
+    const winner = await ctx.waitForAny(
+      "decided",
+      { decision, withdrawn: { signal: "withdrawn" } },
+      { timeout: "7d" },
+    );
+    if (winner.key === "decision") {
+      const { status, comment, by } = winner.signal.payload;
+      await ctx.step("record", () => recordDecision(event.payload.requestId, status, comment, by));
+    }
+  },
+);
+
+// From the Slack and Linear webhooks: a fixed signal id per request makes the first decision win
+await conductor.signal(approvalExecutionId, {
+  name: "decision",
+  id: `decision:${requestId}`,
+  payload: { status: "approved", comment: "ship it", by: userId },
+});
+```
 - A signal stays undelivered until a handler for its name returns, so register a handler for every signal branch. Without one, the signal wins every later wait at once
 
 ## Sending Signals
