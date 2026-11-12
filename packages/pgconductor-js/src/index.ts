@@ -31,7 +31,7 @@ export type {
 	SignalMessage,
 	WaitForAnyResult,
 } from "./task-context.js";
-export type { SignalHandler, SignalInfo } from "./signal-inbox.js";
+export type { ReceivedSignal, SignalHandler, SignalInfo } from "./signal-inbox.js";
 export type { Middleware, MiddlewareExecution, MiddlewareResult } from "./middleware.js";
 export { defineTask } from "./task-definition.js";
 export type {

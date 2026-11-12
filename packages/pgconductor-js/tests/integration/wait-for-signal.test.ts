@@ -186,7 +186,9 @@ describe("ctx.waitForAny signal branches (Postgres integration)", () => {
 		await conductor.waitForResult(sessionId, { pollIntervalMs: 10 });
 
 		expect(entered).toBe(1);
-		expect(winners).toEqual([{ key: "input", signal: { id: "first", name: "input" } }]);
+		expect(winners).toEqual([
+			{ key: "input", signal: { id: "first", name: "input", payload: null } },
+		]);
 		expect(await waits(database)).toBe(0);
 	});
 
@@ -215,7 +217,9 @@ describe("ctx.waitForAny signal branches (Postgres integration)", () => {
 		await conductor.waitForResult(sessionId, { pollIntervalMs: 10 });
 
 		expect(received).toEqual(["first"]);
-		expect(winners).toEqual([{ key: "input", signal: { id: "first", name: "input" } }]);
+		expect(winners).toEqual([
+			{ key: "input", signal: { id: "first", name: "input", payload: null } },
+		]);
 	});
 
 	test("a signal whose handler returns while the wait reads its step still wins", async () => {
@@ -251,7 +255,9 @@ describe("ctx.waitForAny signal branches (Postgres integration)", () => {
 		await conductor.signal(sessionId, { name: "input", id: "first" });
 		await conductor.waitForResult(sessionId, { pollIntervalMs: 10 });
 
-		expect(winners).toEqual([{ key: "input", signal: { id: "first", name: "input" } }]);
+		expect(winners).toEqual([
+			{ key: "input", signal: { id: "first", name: "input", payload: null } },
+		]);
 	});
 
 	test("a signal wakes a suspended wait, and replays return the memoized winner", async () => {
@@ -276,7 +282,7 @@ describe("ctx.waitForAny signal branches (Postgres integration)", () => {
 		);
 		await conductor.waitForResult(sessionId, { pollIntervalMs: 10 });
 
-		const winner = { key: "input", signal: { id: "first", name: "input" } };
+		const winner = { key: "input", signal: { id: "first", name: "input", payload: 1 } };
 		expect(winners).toEqual([winner, winner]);
 		expect(await step(database, sessionId, "idle")).toEqual(winner);
 		// the wait does not consume the signal
@@ -326,7 +332,7 @@ describe("ctx.waitForAny signal branches (Postgres integration)", () => {
 
 		expect(await step(database, sessionId, "idle:input")).toEqual({
 			status: "resolved",
-			signal: { id: "first", name: "input" },
+			signal: { id: "first", name: "input", payload: null },
 		});
 		expect(await awake(database, sessionId)).toEqual({ waiting_step_key: null, due: true });
 		expect(await waits(database)).toBe(0);
@@ -364,7 +370,7 @@ describe("ctx.waitForAny signal branches (Postgres integration)", () => {
 			await signalling;
 			expect((await registering)[0]?.result).toEqual({
 				key: "input",
-				signal: { id: "first", name: "input" },
+				signal: { id: "first", name: "input", payload: null },
 			});
 		} finally {
 			await registration.end();
@@ -469,7 +475,7 @@ describe("ctx.waitForAny signal branches (Postgres integration)", () => {
 		expect(await start("second")).toBe(sessionId);
 		expect(await step(database, sessionId, `${idle}:input`)).toEqual({
 			status: "resolved",
-			signal: { id: "second", name: "input" },
+			signal: { id: "second", name: "input", payload: null },
 		});
 		await waitForCondition(() => inputs.includes("second"));
 		await suspended(sessionId);
@@ -478,11 +484,116 @@ describe("ctx.waitForAny signal branches (Postgres integration)", () => {
 
 		expect(await step(database, sessionId, idle)).toEqual({
 			key: "input",
-			signal: { id: "second", name: "input" },
+			signal: { id: "second", name: "input", payload: null },
 		});
 		expect(winners.at(-1)?.key).toBe("tool");
 		expect(new Set(inputs)).toEqual(new Set(["first", "second"]));
 		expect(await waits(database)).toBe(0);
+	});
+
+	test("a signal held before the wait wins with its payload", async () => {
+		const database = await db();
+		const winners: unknown[] = [];
+		const received: unknown[] = [];
+		const { conductor, start } = await setup(database, {
+			session: async (_id, ctx) => {
+				ctx.onSignal("decision", (payload: unknown) => {
+					received.push(payload);
+				});
+				winners.push(await ctx.waitForAny("approval", { decision: { signal: "decision" } }));
+			},
+			orchestratorCount: 0,
+		});
+
+		const sessionId = await conductor.invoke({ name: "session" }, { id: "held" });
+		const approved = { status: "approved", comment: "ship it", by: "U123" };
+		await conductor.signal(sessionId, { name: "decision", id: "slack:1", payload: approved });
+		await conductor.signal(sessionId, {
+			name: "decision",
+			id: "linear:1",
+			payload: { status: "rejected", by: "U456" },
+		});
+		await start();
+		await conductor.waitForResult(sessionId, { pollIntervalMs: 10 });
+
+		const winner = {
+			key: "decision",
+			signal: { id: "slack:1", name: "decision", payload: approved },
+		};
+		expect(winners).toEqual([winner]);
+		expect(await step(database, sessionId, "approval")).toEqual(winner);
+		expect(await step(database, sessionId, "approval:decision")).toEqual({
+			status: "resolved",
+			signal: winner.signal,
+		});
+		// the wait does not consume the signals
+		expect(received).toEqual([approved, { status: "rejected", by: "U456" }]);
+	});
+
+	test("a signal sent while suspended wins with its payload, and a replay returns it", async () => {
+		const database = await db();
+		const winners: unknown[] = [];
+		const received: string[] = [];
+		const { conductor } = await setup(database, {
+			session: async (_id, ctx) => {
+				ctx.onSignal("decision", (_payload: unknown, { id }: { id: string }) => {
+					received.push(id);
+				});
+				winners.push(
+					await ctx.waitForAny("approval", {
+						decision: { signal: "decision" },
+						withdrawn: { signal: "withdrawn" },
+					}),
+				);
+				// the next attempt replays the wait after the signal was delivered
+				await ctx.sleep("pause", 0);
+			},
+		});
+
+		const sessionId = await conductor.invoke({ name: "session" }, { id: "suspended" });
+		await suspendedAt(database, sessionId, "approval");
+		const approved = { status: "approved", comment: "ship it", by: "U123" };
+		await conductor.signal(sessionId, { name: "decision", id: "slack:1", payload: approved });
+		await conductor.waitForResult(sessionId, { pollIntervalMs: 10 });
+
+		const winner = {
+			key: "decision",
+			signal: { id: "slack:1", name: "decision", payload: approved },
+		};
+		expect(winners).toEqual([winner, winner]);
+		expect(await step(database, sessionId, "approval")).toEqual(winner);
+		const [signal] = await database.sql<{ delivered: boolean }[]>`
+			select delivered_at is not null as delivered from pgconductor._private_execution_signals
+			where execution_id = ${sessionId}::uuid and id = 'slack:1'
+		`;
+		expect(signal?.delivered).toBe(true);
+		expect([...new Set(received)]).toEqual(["slack:1"]);
+		expect(await waits(database)).toBe(0);
+	});
+
+	test("a signal without payload wins with a null payload", async () => {
+		const database = await db();
+		const winners: unknown[] = [];
+		const { conductor } = await setup(database, {
+			session: async (_id, ctx) => {
+				ctx.onSignal("withdrawn", () => {});
+				winners.push(
+					await ctx.waitForAny("approval", {
+						decision: { signal: "decision" },
+						withdrawn: { signal: "withdrawn" },
+					}),
+				);
+			},
+		});
+
+		const sessionId = await conductor.invoke({ name: "session" }, { id: "withdrawn" });
+		await suspendedAt(database, sessionId, "approval");
+		await conductor.signal(sessionId, { name: "withdrawn", id: "w1" });
+		await conductor.waitForResult(sessionId, { pollIntervalMs: 10 });
+
+		const winner = { key: "withdrawn", signal: { id: "w1", name: "withdrawn", payload: null } };
+		expect(winners).toEqual([winner]);
+		expect(await step(database, sessionId, "approval")).toEqual(winner);
 	});
 
 	test("a signal for another name does not wake the wait", async () => {
@@ -508,7 +619,7 @@ describe("ctx.waitForAny signal branches (Postgres integration)", () => {
 		await conductor.waitForResult(sessionId, { pollIntervalMs: 10 });
 		expect(await step(database, sessionId, "idle")).toEqual({
 			key: "input",
-			signal: { id: "i1", name: "input" },
+			signal: { id: "i1", name: "input", payload: null },
 		});
 	});
 
@@ -528,7 +639,7 @@ describe("ctx.waitForAny signal branches (Postgres integration)", () => {
 		await conductor.waitForResult(woken, { pollIntervalMs: 10 });
 		expect(await step(database, woken, "idle")).toEqual({
 			key: "input",
-			signal: { id: "i1", name: "input" },
+			signal: { id: "i1", name: "input", payload: null },
 		});
 
 		const late = await conductor.invoke({ name: "session" }, { id: "late" });

@@ -1053,9 +1053,9 @@ $function$
 
 -- stores a signal for an execution whose row the caller has locked; an id stored before is
 -- ignored. the worker running the execution reads it with its next claim. a new signal resolves
--- the ctx.waitForAny() signal branches listening for its name and wakes an execution suspended
--- at a wait, like dispatch does, and an idle actor. registration holds the same row lock, so it
--- either sees the signal or its branch is resolved here.
+-- the ctx.waitForAny() signal branches listening for its name with its id, name and payload, and
+-- wakes an execution suspended at a wait, like dispatch does, and an idle actor. registration
+-- holds the same row lock, so it either sees the signal or its branch is resolved here.
 create or replace function pgconductor._private_store_signal(
   p_execution_id uuid,
   p_queue text,
@@ -1084,7 +1084,8 @@ begin
   with stored_steps as (
     insert into pgconductor._private_steps (execution_id, queue, key, result)
     select p_execution_id, p_queue, subscription.step_key, jsonb_build_object(
-      'status', 'resolved', 'signal', jsonb_build_object('id', p_id, 'name', p_name)
+      'status', 'resolved',
+      'signal', jsonb_build_object('id', p_id, 'name', p_name, 'payload', p_payload)
     )
     from pgconductor._private_custom_event_subscriptions subscription
     where subscription.kind = 'execution_wait'
@@ -2447,7 +2448,7 @@ begin
               where step.execution_id = p_execution_id and step.key = branch->>'stepKey'
           )
     ), received as (
-        select distinct on (b.step_key) b.step_key, s.id, s.name
+        select distinct on (b.step_key) b.step_key, s.id, s.name, s.payload
         from branches b
         join pgconductor._private_execution_signals s
             on s.execution_id = p_execution_id
@@ -2463,7 +2464,8 @@ begin
     ), settled as (
         insert into pgconductor._private_steps (execution_id, queue, key, result)
         select p_execution_id, p_queue, r.step_key, jsonb_build_object(
-            'status', 'resolved', 'signal', jsonb_build_object('id', r.id, 'name', r.name)
+            'status', 'resolved',
+            'signal', jsonb_build_object('id', r.id, 'name', r.name, 'payload', r.payload)
         )
         from received r
     )

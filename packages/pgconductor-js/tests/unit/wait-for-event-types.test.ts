@@ -9,7 +9,8 @@ import {
 	WaitForEventTimeoutError,
 	type EventSubscription,
 	type ExecutionOutcome,
-	type SignalInfo,
+	type JsonValue,
+	type SignalBranch,
 } from "../../src/index";
 
 describe("waitForEvent API", () => {
@@ -106,10 +107,22 @@ describe("waitForEvent API", () => {
 			expectTypeOf(
 				await ctx.waitForAny("idle", { input: { signal: "input" }, tool: { execution: "id" } }),
 			).toEqualTypeOf<
-				| { key: "input"; signal: SignalInfo }
+				| { key: "input"; signal: { id: string; name: string; payload: JsonValue } }
 				| { key: "tool"; outcome: ExecutionOutcome }
 				| { key: "timeout" }
 			>();
+			type Decision = { status: "approved" | "rejected"; by: string };
+			const decision: SignalBranch<Decision> = { signal: "decision" };
+			expectTypeOf(
+				await ctx.waitForAny("approval", { decision, withdrawn: { signal: "withdrawn" } }),
+			).toEqualTypeOf<
+				| { key: "decision"; signal: { id: string; name: string; payload: Decision } }
+				| { key: "withdrawn"; signal: { id: string; name: string; payload: JsonValue } }
+				| { key: "timeout" }
+			>();
+			// @ts-expect-error a payload type is JSON
+			const invalid: SignalBranch<{ at: Date }> = { signal: "invalid" };
+			expect(invalid).toBeDefined();
 			expectTypeOf(ctx.executionId).toEqualTypeOf<string>();
 			expectTypeOf(ctx.queue).toEqualTypeOf<string>();
 		});
