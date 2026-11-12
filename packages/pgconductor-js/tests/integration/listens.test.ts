@@ -158,7 +158,7 @@ describe("Listens", () => {
 		expect(received).toHaveLength(1);
 	});
 
-	test("listListeners finds the open executions an event would reach, with their listens", async () => {
+	test("listListeners finds the open executions an event would reach, with the listens it matches", async () => {
 		const { conductor, command, idle } = await setup(async (activation, ctx) => {
 			if (activation > 1) return;
 			await ctx.listen("thread", { event: message, filter: { thread: ["1"] } });
@@ -173,14 +173,84 @@ describe("Listens", () => {
 				payload: { thread, text: "hi" },
 				task: { name: "thread" },
 			});
+		// `matched` names the listens the event reaches, `listens` all of them, in creation order
 		expect(await listeners("1")).toMatchObject([
-			{ id, taskKey: "thread", key: "t1", listens: ["all", "thread"] },
+			{ id, taskKey: "thread", key: "t1", listens: ["thread", "all"], matched: ["thread", "all"] },
 		]);
-		expect((await listeners("2")).map((each) => each.listens)).toEqual([["all"]]);
+		expect(await listeners("2")).toMatchObject([{ listens: ["thread", "all"], matched: ["all"] }]);
 		// Nothing is emitted
 		expect(await conductor.listEvents({ name: "chat.message" })).toEqual([]);
 
 		await conductor.cancel(id);
 		expect(await listeners("1")).toEqual([]);
+	});
+
+	test("getExecution and listExecutions read the listens signalWithStart and the execution set", async () => {
+		const seen: { activation: number; listens: readonly string[] }[] = [];
+		const { conductor, command, idle } = await setup(async (activation, ctx) => {
+			seen.push({ activation, listens: ctx.listens });
+			if (activation === 1) {
+				await ctx.listen("all", { event: message });
+				// Unchanged: keeps its place
+				await ctx.listen("thread", { event: message, filter: { thread: ["1"] } });
+				await ctx.listen("other", { event: message, filter: { thread: ["2"] } });
+			}
+			if (activation === 2) {
+				await ctx.unlisten("all");
+				// Changed: starts anew, after the others
+				await ctx.listen("thread", { event: message, filter: { thread: ["3"] } });
+			}
+			seen.push({ activation, listens: ctx.listens });
+		});
+
+		const id = await command("start", {
+			thread: { event: message, filter: { thread: ["1"] } },
+		});
+		const read = async () => (await conductor.getExecution(id))?.listens;
+		expect(await read()).toEqual(["thread"]);
+
+		await waitForCondition(() => seen.length === 2, 5000);
+		await idle(id);
+		expect(await read()).toEqual(["thread", "all", "other"]);
+		expect(await conductor.listExecutions({ task: { name: "thread" }, open: true })).toMatchObject([
+			{ id, listens: ["thread", "all", "other"] },
+		]);
+
+		await command("second");
+		await waitForCondition(() => seen.length === 4, 5000);
+		await idle(id);
+		await command("third");
+		await waitForCondition(() => seen.length === 6, 5000);
+		await idle(id);
+		// ctx.listens is current after the activation's own calls, and the next activation reads it
+		expect(seen).toEqual([
+			{ activation: 1, listens: ["thread"] },
+			{ activation: 1, listens: ["thread", "all", "other"] },
+			{ activation: 2, listens: ["thread", "all", "other"] },
+			{ activation: 2, listens: ["other", "thread"] },
+			{ activation: 3, listens: ["other", "thread"] },
+			{ activation: 3, listens: ["other", "thread"] },
+		]);
+		expect(await read()).toEqual(["other", "thread"]);
+
+		// An ended execution keeps the listens it ended with
+		await conductor.cancel(id);
+		await waitForCondition(
+			async () => (await conductor.getExecution(id))?.status === "cancelled",
+			5000,
+		);
+		expect(await read()).toEqual(["other", "thread"]);
+		expect(await conductor.listExecutions({ task: { name: "thread" } })).toMatchObject([
+			{ id, status: "cancelled", listens: ["other", "thread"] },
+		]);
+	});
+
+	test("an execution without listens reads none", async () => {
+		const { conductor, command, idle } = await setup(async (_, ctx) => {
+			expect(ctx.listens).toEqual([]);
+		});
+		const id = await command("start");
+		await idle(id);
+		expect(await conductor.getExecution(id)).toMatchObject({ listens: [] });
 	});
 });

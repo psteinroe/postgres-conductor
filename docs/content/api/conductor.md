@@ -288,6 +288,7 @@ Returns `null` if nothing matches or the execution was removed by its [retention
   key: string | null;         // the key signalWithStart() addresses it by
   payload: TPayload;          // the execution's input
   state: TState | null;       // what it last set with ctx.setState(), typed by the task's state schema
+  listens: string[];          // names of its ctx.listen()s, in the order they were created
   result: TResult | null;     // return value, set when completed
   error: string | null;       // last attempt's error, or the cancellation reason
   attempts: number;
@@ -298,6 +299,8 @@ Returns `null` if nothing matches or the execution was removed by its [retention
 ```
 
 `pending` covers executions that wait for their first attempt, a retry, a sleep, a child or an event. `cancelled` is reported once the cancellation has settled; until then a running execution stays `running`.
+
+`listens` names the [listens](../crafting-tasks/triggers.md#listening-for-events) set by `ctx.listen()` and `signalWithStart({ listen })` and not removed by `ctx.unlisten()`. Listening again under a name with another event or filter creates it anew, so it moves to the end. An execution that ended keeps the listens it ended with, but no event reaches them any more.
 
 ## conductor.getEvent()
 
@@ -346,11 +349,11 @@ const open = await conductor.listExecutions({
 });
 ```
 
-Each entry has the fields of [`conductor.getExecution()`](#conductorgetexecution), with `payload` and `result` typed by the task's definition. Executions removed by their [retention policy](../crafting-tasks/retention.md) are not listed. Listing open executions uses an index that covers only those; a task's settled ones are read through the `task_key` index and filtered.
+Each entry has the fields of [`conductor.getExecution()`](#conductorgetexecution), with `payload` and `result` typed by the task's definition. `listens` is read only for the entries returned. Executions removed by their [retention policy](../crafting-tasks/retention.md) are not listed. Listing open executions uses an index that covers only those; a task's settled ones are read through the `task_key` index and filtered.
 
 ## conductor.listListeners()
 
-The open executions an event would reach through their [listens](../crafting-tasks/triggers.md#listening-for-events), matched as dispatch matches them, without emitting anything. Each entry has the fields of [`conductor.getExecution()`](#conductorgetexecution) and `listens`, the names of the listens the event matches:
+The open executions an event would reach through their [listens](../crafting-tasks/triggers.md#listening-for-events), matched as dispatch matches them, without emitting anything. Each entry has the fields of [`conductor.getExecution()`](#conductorgetexecution), whose `listens` names all of its listens, and `matched`, the names of the listens the event matches, in the order they were created:
 
 ```typescript
 const listeners = await conductor.listListeners({
