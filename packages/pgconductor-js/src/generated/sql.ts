@@ -1161,6 +1161,69 @@ begin
 end;
 $function$;
 
+-- serializes the transactions that address an execution by (task, key) until they commit:
+-- signal_with_start() and signal_execution_by_key()
+create or replace function pgconductor._private_lock_key(
+  p_task_key text,
+  p_queue text,
+  p_key text
+)
+returns void
+language sql
+volatile
+set search_path to ''
+as $function$
+  select pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(
+    'pgconductor.key:' || p_queue || ':' || p_task_key || ':' || p_key, 0
+  ));
+$function$;
+
+-- signal the non-terminal execution of (task, key). returns false when no execution holds the
+-- key. the key lock makes it wait for a signal_with_start() that may be starting the execution
+create or replace function pgconductor.signal_execution_by_key(
+  p_task_key text,
+  p_queue text,
+  p_key text,
+  p_name text,
+  p_id text,
+  p_payload jsonb default null
+)
+returns boolean
+language plpgsql
+volatile
+set search_path to ''
+as $function$
+declare
+  v_execution_id uuid;
+begin
+  if p_key is null then
+    return false;
+  end if;
+
+  perform pgconductor._private_lock_key(p_task_key, p_queue, p_key);
+
+  -- reads through the partial unique index on (task_key, key, queue). a concurrent settlement
+  -- holding the row is waited for; if it ended the execution, the row no longer matches
+  select e.id
+  into v_execution_id
+  from pgconductor._private_executions e
+  where e.task_key = p_task_key
+    and e.queue = p_queue
+    and e.key = p_key
+    and e.completed_at is null
+    and e.failed_at is null
+    and e.cancelled = false
+  for update;
+
+  if not found then
+    return false;
+  end if;
+
+  perform pgconductor._private_store_signal(v_execution_id, p_queue, p_name, p_id, p_payload);
+  return true;
+end;
+$function$;
+
 -- signal the non-terminal execution of (task, key), or start one with the signal stored
 create or replace function pgconductor.signal_with_start(
   p_task_key text,
@@ -1190,9 +1253,7 @@ begin
 
   perform pgconductor._private_check_metadata(p_metadata);
 
-  perform pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(
-    'pgconductor.key:' || p_queue || ':' || p_task_key || ':' || p_key, 0
-  ));
+  perform pgconductor._private_lock_key(p_task_key, p_queue, p_key);
 
   -- a concurrent settlement holding the row is waited for; if it completed the execution, the
   -- row no longer matches and a new execution starts

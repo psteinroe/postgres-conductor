@@ -470,10 +470,11 @@ await ctx.setState({ status: "waiting", topics: ["billing"] });
 
 ## ctx.sendSignal()
 
-Send a signal to an execution. Idempotent by signal id. Returns `false` if the execution is completed, failed, cancelled or unknown. It starts nothing, so it takes no `metadata`.
+Send a signal to an execution by ID, or to the non-terminal execution of a task that holds a key, like [`conductor.signal()`](conductor.md#conductorsignal). Idempotent by signal id. Returns `false` if the execution is completed, failed, cancelled or unknown, or no non-terminal execution holds the key. It starts nothing, so it takes no `metadata`.
 
 ```typescript
 await ctx.sendSignal(executionId, { name: "input", id: "report-1", payload });
+await ctx.sendSignal({ task: { name: "session" }, key: threadKey }, { name: "stop", id: "stop-1" });
 ```
 
 ## ctx.signalWithStart()

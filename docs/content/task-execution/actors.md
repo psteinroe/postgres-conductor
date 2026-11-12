@@ -29,7 +29,7 @@ await conductor.signalWithStart({
 ```
 
 - Each run of the handler is an **activation**. When it returns, the execution does not complete: it sleeps until a signal is stored for it or its alarm is due, then the handler runs again from the start
-- The execution, its id and its key stay the same across activations, so `signalWithStart()` keeps addressing it and `conductor.signal()` reaches it by id
+- The execution, its id and its key stay the same across activations, so `signalWithStart()` keeps addressing it and `conductor.signal()` reaches it by id or by key
 - An activation that returns does not wait for signals it has read but not delivered: they start the next activation at once
 - An actor returns no result, and its `returns` schema is not checked
 

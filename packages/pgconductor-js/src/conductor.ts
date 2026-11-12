@@ -20,11 +20,13 @@ import {
 	type ValidateDeadLetterConfiguration,
 	type RetentionSettings,
 } from "./task.js";
-import type {
-	TaskContext,
-	BatchTaskContext,
-	BatchTaskEvent,
-	SignalMessage,
+import {
+	signalTarget,
+	type TaskContext,
+	type BatchTaskContext,
+	type BatchTaskEvent,
+	type KeyedExecution,
+	type SignalMessage,
 } from "./task-context.js";
 import {
 	type FindTaskByIdentifier,
@@ -129,6 +131,14 @@ export type ExecutionQuery<TName extends string, TQueue extends string, TPayload
 	limit?: number;
 	offset?: number;
 };
+
+/**
+ * An execution `conductor.getExecution()` reads by key: the open execution of the task holding
+ * `key` (see `signalWithStart()`), or the execution invoked with `dedupeKey`.
+ */
+export type ExecutionLookup<TName extends string, TQueue extends string> =
+	| { task: TaskIdentifier<TName, TQueue>; key: string; dedupeKey?: never }
+	| { task: TaskIdentifier<TName, TQueue>; dedupeKey: string; key?: never };
 
 /** Which kept events `conductor.listEvents()` reads. */
 export type EventQuery<TName extends string, TPayload> = {
@@ -540,12 +550,19 @@ export class Conductor<
 	}
 
 	/**
-	 * Signal an execution. A running execution receives it right away in `ctx.onSignal`, any other
+	 * Signal an execution by id, or the open execution of `{ task, key }` that holds the key (see
+	 * `signalWithStart()`). A running execution receives it right away in `ctx.onSignal`, any other
 	 * when its handler next runs. Idempotent by signal id: resending an id stores the signal once.
-	 * @returns false if the execution is completed, failed, cancelled or unknown
+	 * By key, it runs under the lock `signalWithStart()` takes, so it waits for one starting the
+	 * execution for that key.
+	 * @returns false if the execution is completed, failed, cancelled or unknown, or no open
+	 * execution holds the key
 	 */
-	async signal(executionId: string, signal: SignalMessage): Promise<boolean> {
-		return this.db.signalExecution({ executionId, signal });
+	async signal<TName extends TaskName<Tasks>, TQueue extends string = "default">(
+		target: string | KeyedExecution<TName, TQueue>,
+		signal: SignalMessage,
+	): Promise<boolean> {
+		return this.db.signalExecution({ ...signalTarget(target), signal });
 	}
 
 	/**
@@ -593,24 +610,37 @@ export class Conductor<
 	}
 
 	/**
-	 * Read an execution. Returns null for an unknown id or an execution removed by retention.
-	 * Pass the task to type the result.
+	 * Read an execution by id, the open execution of a task holding a key (`{ task, key }`, see
+	 * `signalWithStart()`), or the execution of a task invoked with a dedupe key
+	 * (`{ task, dedupeKey }`). Returns null when none matches or the execution was removed by
+	 * retention. Pass the task to type the result.
 	 */
 	async getExecution(executionId: string): Promise<ExecutionInfo | null>;
 	async getExecution<TName extends TaskName<Tasks>, TQueue extends string = "default">(
 		task: TaskIdentifier<TName, TQueue>,
 		executionId: string,
 	): Promise<ExecutionInfo<InferReturns<FindTaskByIdentifier<Tasks, TName, TQueue>>> | null>;
+	async getExecution<TName extends TaskName<Tasks>, TQueue extends string = "default">(
+		lookup: ExecutionLookup<TName, TQueue>,
+	): Promise<ExecutionInfo<InferReturns<FindTaskByIdentifier<Tasks, TName, TQueue>>> | null>;
 	async getExecution(
-		taskOrId: TaskIdentifier<string, string> | string,
+		target: TaskIdentifier<string, string> | ExecutionLookup<string, string> | string,
 		executionId?: string,
 	): Promise<ExecutionInfo | null> {
-		if (typeof taskOrId === "string") {
-			return this.db.getExecution({ executionId: taskOrId });
+		if (typeof target === "string") {
+			return this.db.getExecution({ executionId: target });
+		}
+		if ("task" in target) {
+			const task = { key: target.task.name, queue: target.task.queue || "default" };
+			return this.db.getExecution(
+				target.key === undefined
+					? { task, dedupeKey: target.dedupeKey }
+					: { task, key: target.key },
+			);
 		}
 		return this.db.getExecution({
 			executionId: executionId as string,
-			task: { key: taskOrId.name, queue: taskOrId.queue || "default" },
+			task: { key: target.name, queue: target.queue || "default" },
 		});
 	}
 

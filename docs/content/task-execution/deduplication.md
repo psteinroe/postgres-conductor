@@ -34,6 +34,15 @@ What a repeated invoke does depends on the execution that holds the key:
 
 A key stays taken as long as its execution is stored. Once [retention](../crafting-tasks/retention.md) removes a completed or failed execution, the next invoke with that key creates a new execution.
 
+Read the execution that holds a key with [`conductor.getExecution()`](../api/conductor.md#conductorgetexecution):
+
+```typescript
+const execution = await conductor.getExecution({
+  task: { name: "process-order" },
+  dedupeKey: "order-123",
+});
+```
+
 ## Deduplication Scope
 
 Deduplication is per-task and per-queue:
