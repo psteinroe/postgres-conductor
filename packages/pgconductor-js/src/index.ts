@@ -39,6 +39,7 @@ export type {
 	DefineTask,
 	InferPayload,
 	InferReturns,
+	InferState,
 	Trigger,
 	InvocableTrigger,
 	CronTrigger,

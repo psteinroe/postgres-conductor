@@ -6,6 +6,7 @@ import type {
 	HasCron,
 	HasCustomEvent,
 	CronTrigger,
+	TaskDefinition,
 } from "./task-definition.js";
 import type {
 	EventDefinition,
@@ -82,10 +83,14 @@ export type ValidateDeadLetterConfiguration<T, TPayload extends object> = T exte
 
 export type RetentionSettings = boolean | { days: number };
 
-/** Standard Schemas the worker validates the payload and return value of every execution with. */
+/**
+ * Standard Schemas the worker validates the payload and return value of every execution with,
+ * and `ctx.setState()` and `ctx.updateState()` the state.
+ */
 export type TaskRuntimeSchemas = {
 	readonly payload?: StandardSchemaV1;
 	readonly returns?: StandardSchemaV1;
+	readonly state?: StandardSchemaV1;
 };
 
 export type TaskEvent<P extends object = object> =
@@ -189,6 +194,13 @@ export class Task<
 		public readonly eventDefinitions: readonly EventDefinition<string, any, any>[] = [],
 		public readonly metadataSchema?: StandardSchemaV1<unknown, object>,
 		public readonly schemas: TaskRuntimeSchemas = {},
+		/** The conductor's task catalog, for the state schemas of the tasks `ctx.signalWithStart()` targets */
+		public readonly taskDefinitions: readonly TaskDefinition<
+			string,
+			unknown,
+			unknown,
+			string
+		>[] = [],
 	) {
 		const { name, queue, ...config } = definition;
 		this.name = name;
@@ -232,6 +244,7 @@ export class Task<
 		eventDefinitions: readonly EventDefinition<string, any, any>[] = [],
 		metadataSchema?: StandardSchemaV1<unknown, object>,
 		schemas: TaskRuntimeSchemas = {},
+		taskDefinitions: readonly TaskDefinition<string, unknown, unknown, string>[] = [],
 	): Task<Key, Queue, Payload, Returns, Context, EventType> {
 		return new Task<Key, Queue, Payload, Returns, Context, EventType>(
 			definition,
@@ -240,6 +253,7 @@ export class Task<
 			eventDefinitions,
 			metadataSchema,
 			schemas,
+			taskDefinitions,
 		);
 	}
 }

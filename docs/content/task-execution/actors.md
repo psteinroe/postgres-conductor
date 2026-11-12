@@ -51,6 +51,17 @@ An activation usually opens something, such as a session, that its signal handle
 
 An actor can tell others what it is doing with [`ctx.setState()`](../api/task-context.md#ctxsetstate), for example its status. Others read it with `conductor.getExecution()` and `listExecutions()`. The state stays across activations, and `ctx.state` reads it at the start of the next one. `signalWithStart({ state })` sets it when it starts the actor.
 
+Declare a [state schema](../crafting-tasks/defining-tasks.md#execution-state) on the task to type `ctx.state` and validate every write. When several handlers of an activation change the state at once, for example signal handlers and tool calls, [`ctx.updateState()`](../api/task-context.md#ctxupdatestate) applies their changes one after another, so none is lost:
+
+```typescript
+ctx.onSignal("topic", async (topic) => {
+  await ctx.updateState((state) => ({
+    status: "busy",
+    topics: [...(state?.topics || []), String(topic)],
+  }));
+});
+```
+
 ## Events
 
 An actor receives the events it [listens](../crafting-tasks/triggers.md#listening-for-events) for as signals, which wake it like any other. Listens last across activations, so an actor listens once, for example in its first activation or with `signalWithStart({ listen })`.

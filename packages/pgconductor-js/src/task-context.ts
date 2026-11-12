@@ -16,7 +16,9 @@ import type {
 	FindTaskByIdentifier,
 	InferPayload,
 	InferReturns,
+	InferState,
 } from "./task-definition.js";
+import { validateState } from "./task-definition.js";
 import type { TaskIdentifier } from "./task.js";
 import type { Logger } from "./lib/logger.js";
 import { WindowChecker } from "./lib/window-checker.js";
@@ -138,6 +140,10 @@ export type TaskContextOptions = {
 	logger: Logger;
 	eventDefinitions: readonly EventDefinition<string, any, any>[];
 	metadataSchema?: StandardSchemaV1<unknown, object>;
+	/** Schema of this execution's state, validated by `ctx.setState()` and `ctx.updateState()` */
+	stateSchema?: StandardSchemaV1;
+	/** The conductor's task catalog, for the state schemas of the tasks `ctx.signalWithStart()` targets */
+	taskDefinitions?: readonly TaskDefinition<string, unknown, unknown, string>[];
 	window?: [string, string];
 	telemetry: Telemetry;
 	signals: SignalInbox;
@@ -192,8 +198,11 @@ export class TaskContext<
 		any
 	>[],
 	Metadata extends object = Payload,
+	State extends object = Payload,
 > {
 	private readonly windowChecker?: WindowChecker;
+	/** The last state write of this attempt: writes run one after another */
+	private stateWrites: Promise<unknown> = Promise.resolve();
 
 	constructor(private readonly opts: TaskContextOptions) {
 		if (opts.window) {
@@ -233,9 +242,12 @@ export class TaskContext<
 		return (this.opts.execution.metadata || undefined) as Readonly<Metadata> | undefined;
 	}
 
-	/** What this execution tells others about itself: the last `ctx.setState()`, or its initial state. */
-	get state(): Readonly<Payload> | null {
-		return this.opts.execution.state || null;
+	/**
+	 * What this execution tells others about itself: the last `ctx.setState()` or
+	 * `ctx.updateState()`, or its initial state. Read as stored, not validated.
+	 */
+	get state(): Readonly<State> | null {
+		return (this.opts.execution.state || null) as Readonly<State> | null;
 	}
 
 	/** Metadata describing the source execution when this is a DLQ delivery. */
@@ -812,22 +824,63 @@ export class TaskContext<
 
 	/**
 	 * Replace what this execution tells others about itself: `conductor.getExecution()` and
-	 * `listExecutions()` return it. Written at once and not memoized, so a replay writes it again. Hangs up when this
-	 * attempt no longer holds the execution.
+	 * `listExecutions()` return it. Validated against the task's state schema, which throws on
+	 * issues and writes nothing; the schema's output is written. `null` clears the state.
+	 * Written at once and not memoized, so a replay writes it again. Runs after the state writes
+	 * this attempt started before. Hangs up when this attempt no longer holds the execution.
 	 */
-	async setState(state: Payload | null): Promise<void> {
+	async setState(state: State | null): Promise<void> {
+		await this.queueStateWrite(() => this.writeState(state));
+	}
+
+	/**
+	 * Apply `fn` to the current state and write what it returns like `ctx.setState()`; returning
+	 * `undefined` writes nothing. Runs after the state writes this attempt started before, so each
+	 * `fn` sees the state the previous one left, and concurrent updates (from signal handlers, say)
+	 * are not lost. `fn` must not write the state itself, or it waits for itself.
+	 * @returns The state written, as the schema output it, or `undefined` if `fn` wrote nothing
+	 */
+	async updateState(
+		fn: (
+			state: Readonly<State> | null,
+		) => State | null | undefined | Promise<State | null | undefined>,
+	): Promise<State | null | undefined> {
+		return this.queueStateWrite(async () => {
+			const state = await fn(this.state);
+			if (state === undefined) return undefined;
+			await this.writeState(state);
+			return this.state as State | null;
+		});
+	}
+
+	private queueStateWrite<T>(write: () => Promise<T>): Promise<T> {
+		const queued = this.stateWrites.then(write);
+		// A failed write leaves the state as it was, and the next one runs
+		this.stateWrites = queued.catch(() => {});
+		return queued;
+	}
+
+	private async writeState(state: State | null): Promise<void> {
+		const validated =
+			state === null
+				? null
+				: ((await validateSchema(
+						this.opts.stateSchema,
+						state,
+						`state for task "${this.opts.execution.task_key}"`,
+					)) as Payload);
 		const saved = await this.opts.db.setState(
 			{
 				executionId: this.opts.execution.id,
 				queue: this.opts.execution.queue,
 				orchestratorId: this.opts.execution.locked_by,
 				claimToken: this.opts.execution.claim_token,
-				state,
+				state: validated,
 			},
 			{ signal: this.signal },
 		);
 		if (!saved) return this.abortAndHangup({ reason: "suspended" });
-		this.opts.execution.state = state;
+		this.opts.execution.state = validated;
 	}
 
 	/**
@@ -879,8 +932,11 @@ export class TaskContext<
 			signal: SignalMessage;
 			/** Payload of the execution, used only when it starts one */
 			input?: InferPayload<TDef>;
-			/** State of the execution (see `ctx.setState()`), used only when it starts one */
-			state?: Payload;
+			/**
+			 * State of the execution (see `ctx.setState()`), used only when it starts one. Validated
+			 * against the task's state schema.
+			 */
+			state?: InferState<TDef>;
 			/** Listens of the execution by name (see `ctx.listen()`), registered only when it starts one */
 			listen?: Record<string, Listen>;
 			priority?: number;
@@ -893,6 +949,14 @@ export class TaskContext<
 	): Promise<string> {
 		await this.checkpoint();
 		const metadata = await this.childMetadata(options.metadata);
+		const queue = options.queue || "default";
+		const state =
+			options.state &&
+			(await validateState(
+				this.opts.taskDefinitions || [],
+				{ name: options.task, queue },
+				options.state,
+			));
 
 		const id = await this.opts.db.signalWithStartStep(
 			{
@@ -903,11 +967,11 @@ export class TaskContext<
 				key: stepKey,
 				target: {
 					taskKey: options.task,
-					queue: options.queue || "default",
+					queue,
 					key: options.key,
 					signal: options.signal,
 					input: (options.input || {}) as Payload,
-					state: options.state,
+					state,
 					listens: compileListens(options.listen || {}, this.opts.eventDefinitions),
 					priority: options.priority,
 					traceContext: this.opts.telemetry.traceContext(),

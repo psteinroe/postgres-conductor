@@ -464,9 +464,24 @@ await ctx.unlisten("thread");
 
 Replace what this execution tells others about itself, a JSON object or `null`. [`conductor.getExecution()`](conductor.md#conductorgetexecution) and `listExecutions()` return it. The write happens at once and is not memoized, so a replay writes again; it hangs up when the attempt no longer holds the execution. `ctx.state` reads it back.
 
+With a [state schema](../crafting-tasks/defining-tasks.md#execution-state), the state is typed and validated: an invalid state throws with its issues and writes nothing, and the schema's output is written. `null` clears the state. State writes of an attempt run one after another, so `setState()` waits for the `updateState()` calls started before it.
+
 ```typescript
 await ctx.setState({ status: "waiting", topics: ["billing"] });
 ```
+
+## ctx.updateState()
+
+Apply `fn` to the current state and write what it returns, like `ctx.setState()`; returning `undefined` writes nothing. Returns the state written (the schema's output), or `undefined` if nothing was written.
+
+```typescript
+const state = await ctx.updateState((state) => ({
+  status: "busy",
+  topics: [...(state?.topics || []), topic],
+}));
+```
+
+The state writes of an attempt run one after another, in the order they were called: each `fn` sees the state the previous write left, so concurrent callers, such as signal handlers and tool calls running at once, do not lose updates. `fn` may be async; if it throws, or its result is invalid, the call rejects, nothing is written and later writes still run. `fn` must not write the state itself (`setState()` or `updateState()`), since that write waits for `fn`. Like `setState()`, it is not memoized and writes again on a replay.
 
 ## ctx.sendSignal()
 
@@ -479,7 +494,7 @@ await ctx.sendSignal({ task: { name: "session" }, key: threadKey }, { name: "sto
 
 ## ctx.signalWithStart()
 
-Like `conductor.signalWithStart()`. Sends the signal and memoizes the execution ID under the step key in one statement, so retries and resumes return that ID, also after the execution completed. An execution it starts inherits this execution's metadata unless `metadata` overrides it, as for `ctx.invoke()`. `metadata` applies only when the call starts the execution: a running one keeps its metadata.
+Like `conductor.signalWithStart()`, and validates `state` against the target task's state schema the same way. Sends the signal and memoizes the execution ID under the step key in one statement, so retries and resumes return that ID, also after the execution completed. An execution it starts inherits this execution's metadata unless `metadata` overrides it, as for `ctx.invoke()`. `metadata` applies only when the call starts the execution: a running one keeps its metadata.
 
 ```typescript
 const sessionId = await ctx.signalWithStart("start-session", {
@@ -626,10 +641,10 @@ Children, emitted events and dynamic schedules created from this execution inher
 
 ## ctx.state
 
-The state of the current execution: the last `ctx.setState()`, also of an earlier attempt or activation, or the `state` that `signalWithStart()` started it with. `null` without one.
+The state of the current execution: the last `ctx.setState()` or `ctx.updateState()`, also of an earlier attempt or activation, or the `state` that `signalWithStart()` started it with. `null` without one. Typed by the task's [state schema](../crafting-tasks/defining-tasks.md#execution-state), any JSON object without one, and read as stored.
 
 ```typescript
-ctx.state: Readonly<Payload> | null
+ctx.state: Readonly<State> | null
 ```
 
 ## ctx.executionId
