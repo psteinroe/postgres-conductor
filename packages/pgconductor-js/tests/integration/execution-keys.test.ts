@@ -307,7 +307,10 @@ describe("Executions by key", () => {
 			status: "pending",
 			payload: { workerId: "w1" },
 		});
-		expectTypeOf(execution).toEqualTypeOf<ExecutionInfo<{ stopped: boolean }> | null>();
+		expectTypeOf(execution).toEqualTypeOf<ExecutionInfo<
+			{ stopped: boolean },
+			{ workerId: string }
+		> | null>();
 
 		expect(await conductor.getExecution({ task: worker, key: "w2" })).toBeNull();
 		expect(await conductor.getExecution({ task: approval, key: "w1" })).toBeNull();
@@ -319,7 +322,10 @@ describe("Executions by key", () => {
 
 		const execution = await conductor.getExecution({ task: approval, dedupeKey: "r1" });
 		expect(execution).toMatchObject({ id, queue: "approvals", payload: { requestId: "r1" } });
-		expectTypeOf(execution).toEqualTypeOf<ExecutionInfo<{ approved: boolean }> | null>();
+		expectTypeOf(execution).toEqualTypeOf<ExecutionInfo<
+			{ approved: boolean },
+			{ requestId: string }
+		> | null>();
 
 		// a settled execution keeps its dedupe key
 		await db.sql`

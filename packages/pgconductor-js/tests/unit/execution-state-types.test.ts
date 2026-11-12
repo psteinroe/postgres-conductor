@@ -161,13 +161,13 @@ describe("execution state types", () => {
 	test("getExecution and listExecutions type the state by task", () => {
 		expectTypeOf(conductor.getExecution("id")).toEqualTypeOf<Promise<ExecutionInfo | null>>();
 		expectTypeOf(conductor.getExecution({ name: "agent" }, "id")).toEqualTypeOf<
-			Promise<ExecutionInfo<void, Payload, AgentState> | null>
+			Promise<ExecutionInfo<void, { owner: string }, AgentState> | null>
 		>();
 		expectTypeOf(conductor.getExecution({ name: "report", queue: "reports" }, "id")).toEqualTypeOf<
-			Promise<ExecutionInfo<{ url: string }, Payload, { progress: number }> | null>
+			Promise<ExecutionInfo<{ url: string }, object, { progress: number }> | null>
 		>();
 		expectTypeOf(conductor.getExecution({ name: "plain" }, "id")).toEqualTypeOf<
-			Promise<ExecutionInfo<void, Payload, Payload> | null>
+			Promise<ExecutionInfo<void, { id: string }, Payload> | null>
 		>();
 		expectTypeOf(conductor.listExecutions({ task: { name: "counter" } })).toEqualTypeOf<
 			Promise<ExecutionInfo<void, { start: number }, { count: number }>[]>
