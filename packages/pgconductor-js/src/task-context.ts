@@ -1,7 +1,10 @@
 import type { StandardSchemaV1 } from "@standard-schema/spec";
 import type {
 	DatabaseClient,
+	EventInfo,
 	Execution,
+	ExecutionInfo,
+	ListenerInfo,
 	Payload,
 	DeadLetterMetadata,
 	EventWaitResult,
@@ -37,6 +40,18 @@ import {
 import { compileEventFilter, compileListens, type Listen } from "./event-trigger-validation.js";
 import { validateSchema } from "./lib/validate-schema.js";
 import type { ReceivedSignal, SignalHandler, SignalInbox } from "./signal-inbox.js";
+import {
+	eventFilter,
+	readEvents,
+	readExecution,
+	readExecutions,
+	readListeners,
+	type EventQuery,
+	type ExecutionLookup,
+	type ExecutionQuery,
+	type TaskExecutionInfo,
+	type TaskListenerInfo,
+} from "./reads.js";
 
 /** Why an attempt was aborted, read from its abort controller and never from handler output */
 export type TaskAbortReasons =
@@ -774,6 +789,83 @@ export class TaskContext<
 			...options,
 			signal: this.signal,
 		});
+	}
+
+	/*
+	 * Reads, as `conductor`'s: they read the current rows on every call and are not memoized like
+	 * steps. A read that decides what a durable step does belongs inside that step.
+	 */
+
+	/** Like `conductor.getExecution()`: an execution by id, by task and id, or by key or dedupe key. */
+	async getExecution(executionId: string): Promise<ExecutionInfo | null>;
+	async getExecution<TName extends TaskName<Tasks>, TQueue extends string = "default">(
+		task: TaskIdentifier<TName, TQueue>,
+		executionId: string,
+	): Promise<TaskExecutionInfo<FindTaskByIdentifier<Tasks, TName, TQueue>> | null>;
+	async getExecution<TName extends TaskName<Tasks>, TQueue extends string = "default">(
+		lookup: ExecutionLookup<TName, TQueue>,
+	): Promise<TaskExecutionInfo<FindTaskByIdentifier<Tasks, TName, TQueue>> | null>;
+	async getExecution(
+		target: TaskIdentifier<string, string> | ExecutionLookup<string, string> | string,
+		executionId?: string,
+	): Promise<ExecutionInfo | null> {
+		return readExecution(this.opts.db, target, executionId, { signal: this.signal });
+	}
+
+	/** Like `conductor.listExecutions()`: a task's executions, typed by the task. */
+	async listExecutions<TName extends TaskName<Tasks>, TQueue extends string = "default">(
+		query: ExecutionQuery<TName, TQueue, InferPayload<FindTaskByIdentifier<Tasks, TName, TQueue>>>,
+	): Promise<TaskExecutionInfo<FindTaskByIdentifier<Tasks, TName, TQueue>>[]>;
+	async listExecutions(query: ExecutionQuery<string, string, Payload>): Promise<ExecutionInfo[]> {
+		return readExecutions(this.opts.db, query, { signal: this.signal });
+	}
+
+	/** Like `conductor.listListeners()`: the open executions an event would reach. */
+	async listListeners<TName extends TaskName<Tasks>, TQueue extends string = "default">(query: {
+		event: EventName<Events>;
+		payload: Payload;
+		task: TaskIdentifier<TName, TQueue>;
+		limit?: number;
+	}): Promise<TaskListenerInfo<FindTaskByIdentifier<Tasks, TName, TQueue>>[]>;
+	async listListeners(query: {
+		event: EventName<Events>;
+		payload: Payload;
+		task?: undefined;
+		limit?: number;
+	}): Promise<ListenerInfo[]>;
+	async listListeners(query: {
+		event: string;
+		payload: Payload;
+		task?: TaskIdentifier<string, string>;
+		limit?: number;
+	}): Promise<ListenerInfo[]> {
+		return readListeners(this.opts.db, query, { signal: this.signal });
+	}
+
+	/** Like `conductor.getEvent()`: an emitted event, or null once retention removed it. */
+	async getEvent(eventId: string): Promise<EventInfo | null> {
+		return this.opts.db.getEvent(eventId, { signal: this.signal });
+	}
+
+	/** Like `conductor.listEvents()`: the kept events named `name`. */
+	async listEvents<
+		TName extends EventName<Events>,
+		TDef extends FindEventByIdentifier<Events, TName> = FindEventByIdentifier<Events, TName>,
+	>(
+		query: EventQuery<TName, InferEventPayload<TDef>>,
+	): Promise<EventInfo<TName, InferEventPayload<TDef>>[]> {
+		const events = await readEvents(this.opts.db, query, { signal: this.signal });
+		return events as EventInfo<TName, InferEventPayload<TDef>>[];
+	}
+
+	/** Like `conductor.countEvents()`: how many kept events `listEvents()` would read. */
+	async countEvents<
+		TName extends EventName<Events>,
+		TDef extends FindEventByIdentifier<Events, TName> = FindEventByIdentifier<Events, TName>,
+	>(
+		query: Omit<EventQuery<TName, InferEventPayload<TDef>>, "order" | "limit" | "offset">,
+	): Promise<number> {
+		return this.opts.db.countEvents(eventFilter(query), { signal: this.signal });
 	}
 
 	/**

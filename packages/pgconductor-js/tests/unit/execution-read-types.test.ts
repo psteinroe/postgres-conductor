@@ -159,4 +159,35 @@ describe("execution read types", () => {
 			await conductor.listListeners({ event: "chat.missing", payload, task: { name: "worker" } });
 		}
 	});
+
+	test("a task's ctx reads with the same types as the conductor", () => {
+		conductor.createTask({ name: "untyped" }, { invocable: true }, async (_event, ctx) => {
+			expectTypeOf(ctx.getExecution("id")).toEqualTypeOf<Promise<ExecutionInfo | null>>();
+			expectTypeOf(
+				ctx.getExecution({ task: { name: "approval", queue: "approvals" }, dedupeKey: "r1" }),
+			).toEqualTypeOf<Promise<ExecutionInfo<{ approved: boolean }, Request, Payload> | null>>();
+			expectTypeOf(ctx.getExecution({ name: "session" }, "id")).toEqualTypeOf<
+				Promise<ExecutionInfo<{ summary: string }, { threadId: string }, { turns: number }> | null>
+			>();
+			expectTypeOf(ctx.listExecutions({ task: { name: "worker" } })).toEqualTypeOf<
+				Promise<ExecutionInfo<void, { workerId: string }, WorkerState>[]>
+			>();
+			const event = "chat.message";
+			const payload = { threadId: "1" };
+			expectTypeOf(ctx.listListeners({ event, payload, task: { name: "worker" } })).toEqualTypeOf<
+				Promise<ListenerInfo<void, { workerId: string }, WorkerState>[]>
+			>();
+			expectTypeOf(ctx.listListeners({ event, payload })).toEqualTypeOf<Promise<ListenerInfo[]>>();
+			const messages = await ctx.listEvents({ name: "chat.message" });
+			expectTypeOf(messages[0]?.payload.threadId).toEqualTypeOf<string | undefined>();
+			expectTypeOf(ctx.countEvents({ name: "chat.message" })).toEqualTypeOf<Promise<number>>();
+
+			if (false) {
+				// @ts-expect-error - unknown task
+				await ctx.getExecution({ task: { name: "missing" }, dedupeKey: "d" });
+				// @ts-expect-error - unknown event
+				await ctx.listEvents({ name: "chat.missing" });
+			}
+		});
+	});
 });
