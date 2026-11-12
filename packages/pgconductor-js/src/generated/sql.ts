@@ -2012,7 +2012,8 @@ end;
 $function$;
 
 -- ctx.listen() and ctx.unlisten() of a claimed execution: removes the listens named in
--- p_unlisten, then puts p_listens. returns false when the claim is not held.
+-- p_unlisten, then puts p_listens. returns the names of the execution's listens in the order
+-- they were created, or null when the claim is not held.
 create or replace function pgconductor._private_set_listens(
     p_execution_id uuid,
     p_queue text,
@@ -2021,7 +2022,7 @@ create or replace function pgconductor._private_set_listens(
     p_listens jsonb,
     p_unlisten text[]
 )
-returns boolean
+returns text[]
 language plpgsql
 volatile
 set search_path to ''
@@ -2040,7 +2041,7 @@ begin
     for update;
 
     if not found then
-        return false;
+        return null;
     end if;
 
     delete from pgconductor._private_custom_event_subscriptions subscription
@@ -2051,7 +2052,14 @@ begin
       );
 
     perform pgconductor._private_put_listens(p_execution_id, p_queue, v_task_key, p_listens);
-    return true;
+
+    return array(
+        select substr(subscription.step_key, length('pgconductor.listen:') + 1)
+        from pgconductor._private_custom_event_subscriptions subscription
+        where subscription.execution_id = p_execution_id
+          and subscription.kind = 'execution_listen'
+        order by subscription.created_at, subscription.id
+    );
 end;
 $function$;
 

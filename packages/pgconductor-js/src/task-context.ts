@@ -219,6 +219,7 @@ export class TaskContext<
 	private readonly windowChecker?: WindowChecker;
 	/** The last state write of this attempt: writes run one after another */
 	private stateWrites: Promise<unknown> = Promise.resolve();
+	private listensWrite: Promise<unknown> = Promise.resolve();
 
 	constructor(private readonly opts: TaskContextOptions) {
 		if (opts.window) {
@@ -264,6 +265,14 @@ export class TaskContext<
 	 */
 	get state(): Readonly<State> | null {
 		return (this.opts.execution.state || null) as Readonly<State> | null;
+	}
+
+	/**
+	 * Names of this execution's listens in the order they were created: the ones it had when the
+	 * attempt started, then as this attempt's `ctx.listen()` and `ctx.unlisten()` left them.
+	 */
+	get listens(): readonly string[] {
+		return this.opts.execution.listens;
 	}
 
 	/** Metadata describing the source execution when this is a DLQ delivery. */
@@ -823,8 +832,18 @@ export class TaskContext<
 		await this.setListens({}, [name]);
 	}
 
-	private async setListens(listens: Record<string, Listen>, unlisten: string[]): Promise<void> {
-		const claimed = await this.opts.db.setListens(
+	/**
+	 * One write at a time, so `ctx.listens` is the list the last write returned even when an
+	 * attempt listens concurrently.
+	 */
+	private setListens(listens: Record<string, Listen>, unlisten: string[]): Promise<void> {
+		const write = this.listensWrite.then(() => this.writeListens(listens, unlisten));
+		this.listensWrite = write.catch(() => {});
+		return write;
+	}
+
+	private async writeListens(listens: Record<string, Listen>, unlisten: string[]): Promise<void> {
+		const current = await this.opts.db.setListens(
 			{
 				executionId: this.opts.execution.id,
 				queue: this.opts.execution.queue,
@@ -835,7 +854,8 @@ export class TaskContext<
 			},
 			{ signal: this.signal },
 		);
-		if (!claimed) return this.abortAndHangup({ reason: "suspended" });
+		if (!current) return this.abortAndHangup({ reason: "suspended" });
+		this.opts.execution.listens = current;
 	}
 
 	/**

@@ -5,6 +5,7 @@ import type { TraceContextCarrier } from "./telemetry.js";
 import type {
 	EventInfo,
 	ExecutionInfo,
+	ListenerInfo,
 	ExecutionSpec,
 	EventFilterTerm,
 	EventSubscriptionSpec,
@@ -689,6 +690,7 @@ export class QueryBuilder {
 							from pgconductor._private_execution_signals s
 							where s.execution_id = c.id and s.delivered_at is null
 						), '[]'::jsonb) else '[]'::jsonb end)
+						|| jsonb_build_object('listens', to_jsonb(${this.listensOf(this.sql`c.id`)}))
 						order by c.priority asc, c.run_at asc, c.created_at asc, c.id asc
 					)
 					from claimed c
@@ -1341,9 +1343,10 @@ export class QueryBuilder {
 					when locked_by is not null then 'running'
 					else 'pending'
 				end as status,
-				key, payload, state, result, last_error as error, attempts, created_at as "createdAt",
+				key, payload, state, ${this.listensOf(this.sql`execution.id`)} as listens, result,
+				last_error as error, attempts, created_at as "createdAt",
 				completed_at as "completedAt", failed_at as "failedAt"
-			from pgconductor._private_executions
+			from pgconductor._private_executions execution
 			where ${this.executionLookup(args)}
 		`;
 	}
@@ -1375,23 +1378,30 @@ export class QueryBuilder {
 		offset,
 	}: ListExecutionsArgs): PendingQuery<ExecutionInfo[]> {
 		const direction = order === "desc" ? this.sql`desc` : this.sql`asc`;
+		// Listens are read for the page only, not for the rows the offset skips. Materialized, so the
+		// page is planned on its own, as a statement with a limit, and keeps its index scan.
 		return this.sql<ExecutionInfo[]>`
-			select id, task_key as "taskKey", queue,
-				case
-					when completed_at is not null then 'completed'
-					when failed_at is not null and cancelled then 'cancelled'
-					when failed_at is not null then 'failed'
-					when locked_by is not null then 'running'
-					else 'pending'
-				end as status,
-				key, payload, state, result, last_error as error, attempts, created_at as "createdAt",
-				completed_at as "completedAt", failed_at as "failedAt"
-			from pgconductor._private_executions
-			where task_key = ${task.key}::text and queue = ${task.queue}::text
-				${open ? this.sql`and completed_at is null and failed_at is null` : this.sql``}
-				${where ? this.sql`and payload @> ${this.sql.json(where as JsonValue)}::jsonb` : this.sql``}
-			order by created_at ${direction}, id ${direction}
-			limit ${limit}::int offset ${offset}::int
+			with page as materialized (
+				select id, task_key as "taskKey", queue,
+					case
+						when completed_at is not null then 'completed'
+						when failed_at is not null and cancelled then 'cancelled'
+						when failed_at is not null then 'failed'
+						when locked_by is not null then 'running'
+						else 'pending'
+					end as status,
+					key, payload, state, result, last_error as error, attempts,
+					created_at as "createdAt", completed_at as "completedAt", failed_at as "failedAt"
+				from pgconductor._private_executions
+				where task_key = ${task.key}::text and queue = ${task.queue}::text
+					${open ? this.sql`and completed_at is null and failed_at is null` : this.sql``}
+					${where ? this.sql`and payload @> ${this.sql.json(where as JsonValue)}::jsonb` : this.sql``}
+				order by created_at ${direction}, id ${direction}
+				limit ${limit}::int offset ${offset}::int
+			)
+			select page.*, ${this.listensOf(this.sql`page.id`)} as listens
+			from page
+			order by page."createdAt" ${direction}, page.id ${direction}
 		`;
 	}
 
@@ -1982,20 +1992,21 @@ export class QueryBuilder {
 		payload,
 		task,
 		limit,
-	}: ListListenersArgs): PendingQuery<(ExecutionInfo & { listens: string[] })[]> {
-		return this.sql<(ExecutionInfo & { listens: string[] })[]>`
+	}: ListListenersArgs): PendingQuery<ListenerInfo[]> {
+		return this.sql<ListenerInfo[]>`
 			with sources as materialized (
 				select '00000000-0000-0000-0000-000000000000'::uuid as event_id,
 					${event}::text as event_key, ${this.sql.json(payload)}::jsonb as event_payload
 			), ${this.matchSubscriptions()}
 			select e.id, e.task_key as "taskKey", e.queue,
 				case when e.locked_by is not null then 'running' else 'pending' end as status,
-				e.key, e.payload, e.state, e.result, e.last_error as error, e.attempts,
-				e.created_at as "createdAt", e.completed_at as "completedAt", e.failed_at as "failedAt",
+				e.key, e.payload, e.state, ${this.listensOf(this.sql`e.id`)} as listens, e.result,
+				e.last_error as error, e.attempts, e.created_at as "createdAt",
+				e.completed_at as "completedAt", e.failed_at as "failedAt",
 				array_agg(
 					substr(subscription.step_key, length('pgconductor.listen:') + 1)
-					order by subscription.step_key
-				) as listens
+					order by subscription.created_at, subscription.id
+				) as matched
 			from matched_subscriptions matched
 			join pgconductor._private_custom_event_subscriptions subscription
 				on subscription.id = matched.subscription_id
@@ -2012,6 +2023,20 @@ export class QueryBuilder {
 		`;
 	}
 
+	/**
+	 * The names of an execution's listens in the order they were created, as a `text[]`. Looks
+	 * them up by the subscriptions' `(execution_id, step_key)` index.
+	 */
+	private listensOf(executionId: PendingQuery<Row[]>) {
+		return this.sql`array(
+			select substr(subscription.step_key, length('pgconductor.listen:') + 1)
+			from pgconductor._private_custom_event_subscriptions subscription
+			where subscription.execution_id = ${executionId}
+				and subscription.kind = 'execution_listen'
+			order by subscription.created_at, subscription.id
+		)`;
+	}
+
 	buildDeliverListens(deliveries: ListenDelivery[]): PendingQuery<[]> {
 		return this.sql<[]>`
 			select pgconductor._private_deliver_listens(${this.sql.json(deliveries)}::jsonb)
@@ -2025,8 +2050,8 @@ export class QueryBuilder {
 		claimToken,
 		listens,
 		unlisten,
-	}: SetListensArgs): PendingQuery<[{ claimed: boolean }]> {
-		return this.sql<[{ claimed: boolean }]>`
+	}: SetListensArgs): PendingQuery<[{ listens: string[] | null }]> {
+		return this.sql<[{ listens: string[] | null }]>`
 			select pgconductor._private_set_listens(
 				${executionId}::uuid,
 				${queue}::text,
@@ -2034,7 +2059,7 @@ export class QueryBuilder {
 				${claimToken}::uuid,
 				${this.sql.json(listens)}::jsonb,
 				${this.sql.array(unlisten, 1009)}::text[]
-			) as claimed
+			) as listens
 		`;
 	}
 

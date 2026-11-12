@@ -5,6 +5,7 @@ import {
 	DatabaseClient,
 	type EventInfo,
 	type ExecutionInfo,
+	type ListenerInfo,
 	type ExecutionSpec,
 	type Payload,
 } from "./database-client.js";
@@ -705,8 +706,8 @@ export class Conductor<
 
 	/**
 	 * The open executions an event named `event` with `payload` would reach through their listens
-	 * (`ctx.listen()`), each with the names of the listens it would reach, in the order they were
-	 * created. Matches as dispatch does, and emits nothing. Pass `task` to read only its
+	 * (`ctx.listen()`), each with `matched`, the names of the listens it would reach, in the order
+	 * they were created. Matches as dispatch does, and emits nothing. Pass `task` to read only its
 	 * executions. Defaults to the first 100.
 	 */
 	async listListeners(query: {
@@ -714,7 +715,7 @@ export class Conductor<
 		payload: Payload;
 		task?: TaskIdentifier<string, string>;
 		limit?: number;
-	}): Promise<(ExecutionInfo & { listens: string[] })[]> {
+	}): Promise<ListenerInfo[]> {
 		return this.db.listListeners({
 			event: query.event,
 			payload: query.payload,

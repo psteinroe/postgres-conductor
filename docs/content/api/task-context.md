@@ -475,6 +475,8 @@ Remove the listen with this name, if there is one.
 await ctx.unlisten("thread");
 ```
 
+`ctx.listens` reads the names of the execution's listens.
+
 ## ctx.setState()
 
 Replace what this execution tells others about itself, a JSON object or `null`. [`conductor.getExecution()`](conductor.md#conductorgetexecution) and `listExecutions()` return it. The write happens at once and is not memoized, so a replay writes again; it hangs up when the attempt no longer holds the execution. `ctx.state` reads it back.
@@ -660,6 +662,14 @@ The state of the current execution: the last `ctx.setState()` or `ctx.updateStat
 
 ```typescript
 ctx.state: Readonly<State> | null
+```
+
+## ctx.listens
+
+The names of the current execution's [listens](../crafting-tasks/triggers.md#listening-for-events) in the order they were created: the ones it had when the attempt started, including those of earlier attempts or activations and of `signalWithStart({ listen })`, then as this attempt's `ctx.listen()` and `ctx.unlisten()` left them.
+
+```typescript
+ctx.listens: readonly string[]
 ```
 
 ## ctx.executionId

@@ -106,6 +106,11 @@ export type ExecutionInfo<TResult = unknown, TPayload = Payload, TState = Payloa
 	payload: TPayload;
 	/** What the execution last told others about itself with `ctx.setState()` */
 	state: TState | null;
+	/**
+	 * Names of its listens (`ctx.listen()`, `signalWithStart({ listen })`) in the order they were
+	 * created. An ended execution keeps the ones it ended with, which no event reaches any more.
+	 */
+	listens: string[];
 	/** Return value of a completed execution */
 	result: TResult | null;
 	/** Error of the last failed attempt, or the cancellation reason */
@@ -114,6 +119,12 @@ export type ExecutionInfo<TResult = unknown, TPayload = Payload, TState = Payloa
 	createdAt: Date;
 	completedAt: Date | null;
 	failedAt: Date | null;
+};
+
+/** An open execution an event would reach, as `conductor.listListeners()` returns it. */
+export type ListenerInfo = ExecutionInfo & {
+	/** Names of the listens the event matches, in the order they were created */
+	matched: string[];
 };
 
 /** An emitted event, while retention keeps it. */
@@ -154,6 +165,8 @@ export interface Execution {
 	state?: Payload | null;
 	/** Undelivered signals in stored order, read when the execution was claimed */
 	signals: StoredSignal[];
+	/** Names of its listens in the order they were created, read when the execution was claimed */
+	listens: string[];
 }
 
 // todo: move all of this to query-builder too or create new types.ts file
@@ -913,23 +926,23 @@ export class DatabaseClient {
 		return sources.map((source) => source.event_id);
 	}
 
-	async listListeners(
-		args: ListListenersArgs,
-		opts?: QueryMethodOptions,
-	): Promise<(ExecutionInfo & { listens: string[] })[]> {
+	async listListeners(args: ListListenersArgs, opts?: QueryMethodOptions): Promise<ListenerInfo[]> {
 		return this.query(() => this.builder.buildListListeners(args), {
 			label: "listListeners",
 			...opts,
 		});
 	}
 
-	/** Returns false when this worker no longer holds the execution. */
-	async setListens(args: SetListensArgs, opts?: QueryMethodOptions): Promise<boolean> {
+	/**
+	 * Returns the names of the execution's listens in the order they were created, or null when
+	 * this worker no longer holds the execution.
+	 */
+	async setListens(args: SetListensArgs, opts?: QueryMethodOptions): Promise<string[] | null> {
 		const [row] = await this.query(() => this.builder.buildSetListens(args), {
 			label: "setListens",
 			...opts,
 		});
-		return row.claimed;
+		return row.listens;
 	}
 
 	async emitEvent(args: EmitEventArgs, opts?: QueryMethodOptions): Promise<string> {

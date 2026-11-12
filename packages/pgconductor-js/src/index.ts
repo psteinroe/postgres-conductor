@@ -60,6 +60,7 @@ export type {
 	ExecutionOutcome,
 	ExecutionStatus,
 	JsonValue,
+	ListenerInfo,
 	Payload,
 } from "./database-client.js";
 export type { Logger, LogArg } from "./lib/logger.js";

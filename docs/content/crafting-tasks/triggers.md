@@ -303,8 +303,10 @@ conductor.createTask(
 );
 ```
 
-`conductor.listListeners()` finds the open executions an event would reach, with the names of
-their listens it matches, without emitting it:
+`conductor.getExecution()`, `listExecutions()` and `ctx.listens` read the names of an
+execution's listens, in the order they were created, so others can see what it follows without
+copying the names into its state. `conductor.listListeners()` finds the open executions an event
+would reach, with the names of their listens it matches (`matched`), without emitting it:
 
 ```typescript
 const listeners = await conductor.listListeners({
@@ -312,7 +314,7 @@ const listeners = await conductor.listListeners({
   payload: { threadId: "1" },
   task: { name: "conversation" }, // optional
 });
-// [{ id, taskKey, key, payload, state, ..., listens: ["thread"] }]
+// [{ id, taskKey, key, payload, state, listens: ["thread", "all"], ..., matched: ["thread"] }]
 ```
 
 Listens are matched when the event is dispatched, together with triggers and waits. The
