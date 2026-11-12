@@ -122,7 +122,11 @@ export type ExecutionInfo<TResult = unknown, TPayload = Payload, TState = Payloa
 };
 
 /** An open execution an event would reach, as `conductor.listListeners()` returns it. */
-export type ListenerInfo = ExecutionInfo & {
+export type ListenerInfo<TResult = unknown, TPayload = Payload, TState = Payload> = ExecutionInfo<
+	TResult,
+	TPayload,
+	TState
+> & {
 	/** Names of the listens the event matches, in the order they were created */
 	matched: string[];
 };

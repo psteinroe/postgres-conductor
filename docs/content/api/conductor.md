@@ -263,7 +263,7 @@ Read an execution by ID, by key or by dedupe key:
 ```typescript
 const execution = await conductor.getExecution(executionId);
 
-// pass the task to type the result
+// pass the task to type the payload, state and result
 const execution = await conductor.getExecution({ name: "send-email" }, executionId);
 
 // the non-terminal execution that holds a key (see signalWithStart())
@@ -275,9 +275,9 @@ const order = await conductor.getExecution({ task: { name: "process-order" }, de
 
 - By key, it reads only a pending or running execution: a completed, failed or cancelled one no longer holds its key
 - By dedupe key, it reads the execution that holds the `dedupe_key`, whatever its status, until retention removes it. Throttled and debounced executions are keyed by their time slot, so a key may have several of them, and this lookup does not read them
-- Both read the task's unique index on the key, and both type the result by the task
+- Both read the task's unique index on the key, and both type the execution by the task
 
-Returns `null` if nothing matches or the execution was removed by its [retention policy](../crafting-tasks/retention.md). Otherwise:
+Returns `null` if nothing matches or the execution was removed by its [retention policy](../crafting-tasks/retention.md). Otherwise the execution below. Read with a task, `payload`, `state` and `result` are typed by the task's definition; by ID alone, `payload` and `state` are any JSON object and `result` is `unknown`:
 
 ```typescript
 {
@@ -287,7 +287,7 @@ Returns `null` if nothing matches or the execution was removed by its [retention
   status: "pending" | "running" | "completed" | "failed" | "cancelled";
   key: string | null;         // the key signalWithStart() addresses it by
   payload: TPayload;          // the execution's input
-  state: TState | null;       // what it last set with ctx.setState(), typed by the task's state schema
+  state: TState | null;       // what it last set with ctx.setState()
   listens: string[];          // names of its ctx.listen()s, in the order they were created
   result: TResult | null;     // return value, set when completed
   error: string | null;       // last attempt's error, or the cancellation reason
@@ -349,7 +349,7 @@ const open = await conductor.listExecutions({
 });
 ```
 
-Each entry has the fields of [`conductor.getExecution()`](#conductorgetexecution), with `payload` and `result` typed by the task's definition. `listens` is read only for the entries returned. Executions removed by their [retention policy](../crafting-tasks/retention.md) are not listed. Listing open executions uses an index that covers only those; a task's settled ones are read through the `task_key` index and filtered.
+Each entry has the fields of [`conductor.getExecution()`](#conductorgetexecution), with `payload`, `state` and `result` typed by the task's definition. `listens` is read only for the entries returned. Executions removed by their [retention policy](../crafting-tasks/retention.md) are not listed. Listing open executions uses an index that covers only those; a task's settled ones are read through the `task_key` index and filtered.
 
 ## conductor.listListeners()
 
@@ -363,6 +363,8 @@ const listeners = await conductor.listListeners({
   limit: 100,                      // default 100
 });
 ```
+
+With `task`, each entry's `payload`, `state` and `result` are typed by the task's definition, as `listExecutions()` types them. Without it, the entries may belong to any task and are typed as by `getExecution(executionId)`.
 
 ## conductor.waitForResult()
 

@@ -36,10 +36,10 @@ describe("execution result types", () => {
 	test("getExecution types the result by task", () => {
 		expectTypeOf(conductor.getExecution("id")).toEqualTypeOf<Promise<ExecutionInfo | null>>();
 		expectTypeOf(conductor.getExecution({ name: "add" }, "id")).toEqualTypeOf<
-			Promise<ExecutionInfo<{ sum: number }> | null>
+			Promise<ExecutionInfo<{ sum: number }, { a: number; b: number }> | null>
 		>();
 		expectTypeOf(conductor.getExecution({ name: "report", queue: "reports" }, "id")).toEqualTypeOf<
-			Promise<ExecutionInfo<{ url: string }> | null>
+			Promise<ExecutionInfo<{ url: string }, object> | null>
 		>();
 		expectTypeOf<ExecutionInfo["status"]>().toEqualTypeOf<
 			"pending" | "running" | "completed" | "failed" | "cancelled"
@@ -49,11 +49,11 @@ describe("execution result types", () => {
 
 	test("getExecution by key and dedupe key types the result by task", () => {
 		expectTypeOf(conductor.getExecution({ task: { name: "add" }, key: "k" })).toEqualTypeOf<
-			Promise<ExecutionInfo<{ sum: number }> | null>
+			Promise<ExecutionInfo<{ sum: number }, { a: number; b: number }> | null>
 		>();
 		expectTypeOf(
 			conductor.getExecution({ task: { name: "report", queue: "reports" }, dedupeKey: "d" }),
-		).toEqualTypeOf<Promise<ExecutionInfo<{ url: string }> | null>>();
+		).toEqualTypeOf<Promise<ExecutionInfo<{ url: string }, object> | null>>();
 
 		if (false) {
 			// @ts-expect-error - unknown task

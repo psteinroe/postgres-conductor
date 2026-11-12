@@ -134,6 +134,20 @@ type ResolvedBatchTaskEvent<
 	TTriggers,
 > = BatchTaskEvent<ResolvedTaskEvent<Tasks, Events, TDef, TTriggers>>;
 
+/** An execution of a task, its payload, state and result typed by the task's definition. */
+type TaskExecutionInfo<TTask> = ExecutionInfo<
+	InferReturns<TTask>,
+	InferPayload<TTask>,
+	InferState<TTask>
+>;
+
+/** An execution of a task an event would reach, typed by the task's definition. */
+type TaskListenerInfo<TTask> = ListenerInfo<
+	InferReturns<TTask>,
+	InferPayload<TTask>,
+	InferState<TTask>
+>;
+
 /** Which executions `conductor.listExecutions()` reads. */
 export type ExecutionQuery<TName extends string, TQueue extends string, TPayload> = {
 	task: TaskIdentifier<TName, TQueue>;
@@ -639,24 +653,16 @@ export class Conductor<
 	 * Read an execution by id, the open execution of a task holding a key (`{ task, key }`, see
 	 * `signalWithStart()`), or the execution of a task invoked with a dedupe key
 	 * (`{ task, dedupeKey }`). Returns null when none matches or the execution was removed by
-	 * retention. Pass the task to type the result.
+	 * retention. Pass the task to type its payload, state and result.
 	 */
 	async getExecution(executionId: string): Promise<ExecutionInfo | null>;
 	async getExecution<TName extends TaskName<Tasks>, TQueue extends string = "default">(
 		task: TaskIdentifier<TName, TQueue>,
 		executionId: string,
-	): Promise<ExecutionInfo<
-		InferReturns<FindTaskByIdentifier<Tasks, TName, TQueue>>,
-		Payload,
-		InferState<FindTaskByIdentifier<Tasks, TName, TQueue>>
-	> | null>;
+	): Promise<TaskExecutionInfo<FindTaskByIdentifier<Tasks, TName, TQueue>> | null>;
 	async getExecution<TName extends TaskName<Tasks>, TQueue extends string = "default">(
 		lookup: ExecutionLookup<TName, TQueue>,
-	): Promise<ExecutionInfo<
-		InferReturns<FindTaskByIdentifier<Tasks, TName, TQueue>>,
-		Payload,
-		InferState<FindTaskByIdentifier<Tasks, TName, TQueue>>
-	> | null>;
+	): Promise<TaskExecutionInfo<FindTaskByIdentifier<Tasks, TName, TQueue>> | null>;
 	async getExecution(
 		target: TaskIdentifier<string, string> | ExecutionLookup<string, string> | string,
 		executionId?: string,
@@ -686,13 +692,7 @@ export class Conductor<
 	 */
 	async listExecutions<TName extends TaskName<Tasks>, TQueue extends string = "default">(
 		query: ExecutionQuery<TName, TQueue, InferPayload<FindTaskByIdentifier<Tasks, TName, TQueue>>>,
-	): Promise<
-		ExecutionInfo<
-			InferReturns<FindTaskByIdentifier<Tasks, TName, TQueue>>,
-			InferPayload<FindTaskByIdentifier<Tasks, TName, TQueue>>,
-			InferState<FindTaskByIdentifier<Tasks, TName, TQueue>>
-		>[]
-	>;
+	): Promise<TaskExecutionInfo<FindTaskByIdentifier<Tasks, TName, TQueue>>[]>;
 	async listExecutions(query: ExecutionQuery<string, string, Payload>): Promise<ExecutionInfo[]> {
 		return this.db.listExecutions({
 			task: { key: query.task.name, queue: query.task.queue || "default" },
@@ -708,10 +708,22 @@ export class Conductor<
 	 * The open executions an event named `event` with `payload` would reach through their listens
 	 * (`ctx.listen()`), each with `matched`, the names of the listens it would reach, in the order
 	 * they were created. Matches as dispatch does, and emits nothing. Pass `task` to read only its
-	 * executions. Defaults to the first 100.
+	 * executions, typed by its definition. Defaults to the first 100.
 	 */
+	async listListeners<TName extends TaskName<Tasks>, TQueue extends string = "default">(query: {
+		event: EventName<Events>;
+		payload: Payload;
+		task: TaskIdentifier<TName, TQueue>;
+		limit?: number;
+	}): Promise<TaskListenerInfo<FindTaskByIdentifier<Tasks, TName, TQueue>>[]>;
 	async listListeners(query: {
 		event: EventName<Events>;
+		payload: Payload;
+		task?: undefined;
+		limit?: number;
+	}): Promise<ListenerInfo[]>;
+	async listListeners(query: {
+		event: string;
 		payload: Payload;
 		task?: TaskIdentifier<string, string>;
 		limit?: number;
