@@ -383,17 +383,11 @@ test("a live orchestrator recovers a crashed one within a heartbeat of the stale
 	vi.useFakeTimers();
 	const orch = Orchestrator.create({ conductor, tasks: [task] });
 	await startWithFakeTimers(orch);
-	for (let seconds = 0; seconds < 30; seconds++) {
-		vi.advanceTimersByTime(1000);
-		await db.sql`select 1`;
-	}
+	await advance(db, 30_000);
 
 	await conductor.invoke(taskDefinition, {});
 	const crashedId = await claimAsCrashedOrchestrator(db, "orphaned-task");
-	for (let seconds = 0; seconds < 10; seconds++) {
-		vi.advanceTimersByTime(1000);
-		await db.sql`select 1`;
-	}
+	await advance(db, 10_000);
 	expect(runs).toBe(0);
 
 	await missHeartbeats(db, crashedId, 30);
@@ -581,10 +575,7 @@ test.each(["stop()", "a shutdown signal"])(
 				where id = ${orch.info.id}::uuid
 			`;
 		}
-		for (let seconds = 0; seconds < 10; seconds++) {
-			vi.advanceTimersByTime(1000);
-			await db.sql`select 1`;
-		}
+		await advance(db, 10_000);
 		expect(orch.isShuttingDown).toBe(true);
 
 		const lastHeartbeat = async () => {
@@ -595,10 +586,7 @@ test.each(["stop()", "a shutdown signal"])(
 		};
 		const heartbeatAtShutdown = await lastHeartbeat();
 		// longer than the stale age
-		for (let seconds = 0; seconds < 60; seconds++) {
-			vi.advanceTimersByTime(1000);
-			await db.sql`select 1`;
-		}
+		await advance(db, 60_000);
 		expect(await lastHeartbeat()).toBeGreaterThan(heartbeatAtShutdown);
 		const locked = await db.sql`
 			select id from pgconductor._private_executions
