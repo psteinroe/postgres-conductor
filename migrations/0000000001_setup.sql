@@ -181,6 +181,10 @@ create table pgconductor._private_tasks (
     dead_letter_queue text,
     dead_letter_task_key text,
 
+    -- set when a registration of the queue left the task out, cleared when one includes it again.
+    -- maintenance fails pending executions of a task unregistered for a day
+    unregistered_at timestamptz,
+
     constraint positive_concurrency_limits check (
         (concurrency_limit is null or concurrency_limit > 0) and
         (group_concurrency_limit is null or group_concurrency_limit > 0)
@@ -541,7 +545,15 @@ begin
     concurrency_limit = excluded.concurrency_limit,
     group_concurrency_limit = excluded.group_concurrency_limit,
     dead_letter_queue = excluded.dead_letter_queue,
-    dead_letter_task_key = excluded.dead_letter_task_key;
+    dead_letter_task_key = excluded.dead_letter_task_key,
+    unregistered_at = null;
+
+  -- A registration owns the queue's task set, so a task it leaves out was removed.
+  update pgconductor._private_tasks
+  set unregistered_at = pgconductor._private_current_time()
+  where queue = p_queue_name
+    and unregistered_at is null
+    and key not in (select spec.key from unnest(p_task_specs) as spec);
 
   -- Insert scheduled cron executions.
   insert into pgconductor._private_executions (task_key, queue, payload, run_at, dedupe_key, cron_expression, priority, "group")
@@ -1493,7 +1505,9 @@ begin
       t.remove_on_fail_days = 0 as should_remove,
       t.dead_letter_queue, t.dead_letter_task_key
     from pgconductor._private_executions parent
-    join pgconductor._private_tasks t on t.key = parent.task_key and t.queue = parent.queue
+    -- an ancestor of a task without a row (maintenance fails those) fails too, kept and not
+    -- dead-lettered
+    left join pgconductor._private_tasks t on t.key = parent.task_key and t.queue = parent.queue
     where parent.id = any(v_ancestors)
       and parent.completed_at is null and parent.failed_at is null and parent.locked_by is null
     order by array_position(v_ancestors, parent.id)

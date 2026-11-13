@@ -96,6 +96,7 @@ ctx.onSignal("stop", async (payload) => {
 - A failed activation retries with the usual [backoff](retries.md). Its signals stay undelivered, so the retry receives them again
 - `maxAttempts` counts failed activations in a row: an activation that returns resets the count
 - When an actor fails for good, or is [cancelled](cancellation.md), its execution ends and the next `signalWithStart()` for its key starts a new one
+- When a deploy removes the actor's task, [maintenance](../scaling/maintenance.md#executions-of-removed-tasks) fails its sleeping actors a day later, which ends their listens and frees their keys
 
 ## Steps
 

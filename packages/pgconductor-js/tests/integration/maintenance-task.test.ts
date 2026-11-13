@@ -8,6 +8,8 @@ import type { TestDatabase } from "../fixtures/test-database";
 import { TaskSchemas } from "../../src/schemas";
 import { createMaintenanceTask } from "../../src/maintenance-task";
 import { nextCronOccurrence } from "../../src/lib/cron";
+import { defineEvent } from "../../src/event-definition";
+import { waitForCondition } from "../test-utils";
 
 describe("Maintenance Task", () => {
 	let pool: TestDatabasePool;
@@ -508,4 +510,226 @@ describe("Maintenance Task", () => {
 		`;
 		expect(exec.length).toBe(1);
 	}, 30000);
+
+	describe("executions of unregistered tasks", () => {
+		const note = defineEvent({ name: "note", payload: z.object({}) });
+		const definitions = [
+			defineTask({ name: "removed", payload: z.object({}) }),
+			defineTask({ name: "kept", payload: z.object({}) }),
+			defineTask({ name: "added", payload: z.object({}) }),
+			defineTask({ name: "actor", payload: z.object({}) }),
+			defineTask({ name: "parent", payload: z.object({}) }),
+			defineTask({ name: "waiter", payload: z.object({ id: z.string() }) }),
+		];
+
+		async function setup() {
+			const db = await pool.child();
+			databases.push(db);
+			const conductor = Conductor.create({
+				sql: db.sql,
+				tasks: TaskSchemas.fromSchema(definitions),
+				events: [note],
+				context: {},
+				clock: db.clock,
+			});
+			await conductor.ensureInstalled();
+			const outcomes: unknown[] = [];
+			const kept = conductor.createTask({ name: "kept" }, { invocable: true }, async () => {});
+			const tasks = {
+				kept,
+				removed: conductor.createTask(
+					{ name: "removed", deadLetter: { queue: "default", task: kept } },
+					{ invocable: true },
+					async () => {},
+				),
+				added: conductor.createTask({ name: "added" }, { invocable: true }, async () => {}),
+				actor: conductor.createTask(
+					{ name: "actor", actor: true },
+					{ invocable: true },
+					async (_, ctx) => {
+						ctx.onSignal("command", () => {});
+					},
+				),
+				parent: conductor.createTask({ name: "parent" }, { invocable: true }, async (_, ctx) => {
+					await ctx.invokeAndWait("child", { name: "removed" }, {});
+				}),
+				waiter: conductor.createTask(
+					{ name: "waiter" },
+					{ invocable: true },
+					async (event, ctx) => {
+						if (event.name === "pgconductor.invoke") {
+							outcomes.push(await ctx.waitForResult("result", event.payload.id));
+						}
+					},
+				),
+			};
+			const orchestrator = (registered: (keyof typeof tasks)[]) =>
+				Orchestrator.create({
+					conductor,
+					tasks: registered.map((name) => tasks[name]),
+					defaultWorker: { pollIntervalMs: 50, flushIntervalMs: 50 },
+				});
+			const drain = (registered: (keyof typeof tasks)[]) => orchestrator(registered).drain();
+			const maintain = async (registered: (keyof typeof tasks)[]) => {
+				// @ts-expect-error - maintenance task is not in conductor's task registry
+				await conductor.invoke({ name: "pgconductor.maintenance" }, {});
+				await drain(registered);
+			};
+			const state = async (id: string) => {
+				const [row] = await db.sql<{ failed: boolean; last_error: string | null }[]>`
+					select failed_at is not null as failed, last_error
+					from pgconductor._private_executions where id = ${id}::uuid
+				`;
+				return row;
+			};
+			return { db, conductor, outcomes, orchestrator, drain, maintain, state };
+		}
+
+		const later = { run_at: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000) };
+
+		test("fails them a day after a registration left their task out", async () => {
+			const { db, conductor, outcomes, drain, maintain, state } = await setup();
+			await drain(["removed", "kept", "parent", "waiter"]);
+			const removedId = await conductor.invoke({ name: "removed" }, {}, later);
+			const parentId = await conductor.invoke({ name: "parent" }, {});
+			const waiterId = await conductor.invoke({ name: "waiter" }, { id: removedId });
+			await drain(["kept", "parent", "waiter"]);
+			const [child] = await db.sql<{ id: string }[]>`
+				select id from pgconductor._private_executions
+				where task_key = 'removed' and parent_execution_id = ${parentId}::uuid
+			`;
+			if (!child) throw new Error("expected the parent's child");
+
+			await maintain(["kept", "parent", "waiter"]);
+			expect(await state(removedId)).toEqual({ failed: false, last_error: null });
+			expect(await state(child.id)).toEqual({ failed: false, last_error: null });
+
+			await db.clock.advance("25h");
+			await maintain(["kept", "parent", "waiter"]);
+
+			const error = "task removed is not registered on queue default";
+			expect(await state(removedId)).toEqual({ failed: true, last_error: error });
+			expect(await state(child.id)).toEqual({ failed: true, last_error: error });
+			expect(await state(parentId)).toEqual({
+				failed: true,
+				last_error: `Child execution failed: ${error}`,
+			});
+			expect(outcomes).toEqual([{ status: "failed", error }]);
+			expect(await state(waiterId)).toMatchObject({ failed: false });
+			const deadLetters = await db.sql<{ source: string; error: string }[]>`
+				select dead_letter->>'sourceExecutionId' as source, dead_letter->>'error' as error
+				from pgconductor._private_executions
+				where task_key = 'kept' and dead_letter is not null
+				order by source
+			`;
+			expect(deadLetters).toEqual(
+				[removedId, child.id].sort().map((source) => ({ source, error })),
+			);
+		}, 30000);
+
+		test("keeps them when a later registration includes their task again", async () => {
+			const { db, conductor, drain, maintain, state } = await setup();
+			await drain(["removed", "kept"]);
+			const id = await conductor.invoke({ name: "removed" }, {}, later);
+			await drain(["kept"]);
+			await drain(["removed", "kept"]);
+
+			await db.clock.advance("25h");
+			await maintain(["kept"]);
+
+			expect(await state(id)).toEqual({ failed: false, last_error: null });
+		}, 30000);
+
+		test("fails them a day after they were created when their task was never registered", async () => {
+			const { db, maintain, state } = await setup();
+			const [{ id }] = await db.sql<[{ id: string }]>`
+				select id from pgconductor.invoke(
+					p_task_key := 'ghost',
+					p_run_at := pgconductor._private_current_time() + interval '7 days'
+				)
+			`;
+
+			await maintain(["kept"]);
+			expect(await state(id)).toEqual({ failed: false, last_error: null });
+
+			await db.clock.advance("25h");
+			await maintain(["kept"]);
+
+			expect(await state(id)).toEqual({
+				failed: true,
+				last_error: "task ghost is not registered on queue default",
+			});
+		}, 30000);
+
+		test("fails idle actors of a removed task, which ends their listens and frees their keys", async () => {
+			const { db, conductor, outcomes, drain, maintain, state } = await setup();
+			const start = () =>
+				conductor.signalWithStart({
+					task: "actor",
+					key: "a1",
+					signal: { name: "command", id: "start" },
+					listen: { notes: { event: note } },
+				});
+			const { id } = await start();
+			const waiterId = await conductor.invoke({ name: "waiter" }, { id });
+			await drain(["actor", "kept", "waiter"]);
+			const [idle] = await db.sql<{ waiting_step_key: string | null; sleeps: boolean }[]>`
+				select waiting_step_key, run_at = 'infinity' as sleeps
+				from pgconductor._private_executions where id = ${id}::uuid
+			`;
+			expect(idle).toEqual({ waiting_step_key: "pgconductor.idle", sleeps: true });
+			const listeners = () =>
+				conductor.listListeners({ event: "note", payload: {}, task: { name: "actor" } });
+			expect(await listeners()).toMatchObject([{ id, listens: ["notes"] }]);
+
+			await drain(["kept", "waiter"]);
+			await db.clock.advance("25h");
+			await maintain(["kept", "waiter"]);
+
+			const error = "task actor is not registered on queue default";
+			expect(await state(id)).toEqual({ failed: true, last_error: error });
+			expect(await listeners()).toEqual([]);
+			const subscriptions = await db.sql`
+				select 1 from pgconductor._private_custom_event_subscriptions where execution_id = ${id}::uuid
+			`;
+			expect(subscriptions).toHaveLength(0);
+			expect(outcomes).toEqual([{ status: "failed", error }]);
+			expect(await state(waiterId)).toMatchObject({ failed: false });
+			// The key is free again
+			const restarted = await start();
+			expect(restarted.started).toBe(true);
+			expect(restarted.id).not.toBe(id);
+		}, 30000);
+
+		test("keeps executions of its own tasks when a replica of an older version registered last", async () => {
+			const { db, conductor, orchestrator, drain, state } = await setup();
+			const current = orchestrator(["kept", "added"]);
+			await current.start();
+			try {
+				const id = await conductor.invoke({ name: "added" }, {}, later);
+				// A replica of the previous version, without the task, restarts during the deploy
+				await drain(["kept"]);
+				const [task] = await db.sql<{ unregistered: boolean }[]>`
+					select unregistered_at is not null as unregistered
+					from pgconductor._private_tasks where key = 'added'
+				`;
+				expect(task).toEqual({ unregistered: true });
+
+				await db.clock.advance("25h");
+				// @ts-expect-error - maintenance task is not in conductor's task registry
+				const maintenanceId = await conductor.invoke({ name: "pgconductor.maintenance" }, {});
+				await waitForCondition(async () => {
+					const [row] = await db.sql<{ done: boolean }[]>`
+						select completed_at is not null as done
+						from pgconductor._private_executions where id = ${maintenanceId}::uuid
+					`;
+					return row?.done === true;
+				}, 10000);
+
+				expect(await state(id)).toEqual({ failed: false, last_error: null });
+			} finally {
+				await current.stop();
+			}
+		}, 30000);
+	});
 });

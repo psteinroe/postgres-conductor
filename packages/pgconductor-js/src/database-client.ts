@@ -11,6 +11,7 @@ import {
 	type CountActiveOrchestratorsBelowArgs,
 	type GetExecutionsArgs,
 	type RemoveExecutionsArgs,
+	type ClaimUnregisteredExecutionsArgs,
 	type DispatchCustomEventsArgs,
 	type RegisterWorkerArgs,
 	type ScheduleCronExecutionArgs,
@@ -817,6 +818,36 @@ export class DatabaseClient {
 
 		const deletedCount = result[0]?.deleted_count ?? 0;
 		return deletedCount >= args.batchSize;
+	}
+
+	// Fails the claimed executions through settlement, like a worker would, so they dead-letter,
+	// resolve their result waiters, fail the executions waiting on them and end their listens
+	async failUnregisteredExecutions(
+		args: Omit<ClaimUnregisteredExecutionsArgs, "claimant">,
+		opts?: QueryMethodOptions,
+	): Promise<boolean> {
+		const claimed = await this.query(
+			(sql) =>
+				sql.begin(async (tx) => {
+					const builder = new QueryBuilder(tx);
+					const claimant = crypto.randomUUID();
+					const executions = await builder.buildClaimUnregisteredExecutions({ ...args, claimant });
+					await builder.buildReturnExecutions({
+						orchestratorId: claimant,
+						queueName: args.queueName,
+						results: executions.map((execution) => ({
+							execution_id: execution.id,
+							task_key: execution.task_key,
+							claim_token: execution.claim_token,
+							status: "permanently_failed",
+							error: `task ${execution.task_key} is not registered on queue ${args.queueName}`,
+						})),
+					});
+					return executions.length;
+				}),
+			{ label: "failUnregisteredExecutions", ...opts },
+		);
+		return claimed >= args.batchSize;
 	}
 
 	async registerWorker(args: RegisterWorkerArgs, opts?: QueryMethodOptions): Promise<void> {
