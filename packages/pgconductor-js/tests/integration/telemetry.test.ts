@@ -557,4 +557,80 @@ describe("trace propagation across internal executions", () => {
 		await db.destroy();
 		await cleanup(provider);
 	}, 30000);
+
+	test("signal handlers continue the trace of the sender, or of the event a listen got", async () => {
+		const { exporter, provider } = installProvider();
+		const db = await pool.child();
+		const message = defineEvent({
+			name: "trace.message",
+			payload: z.object({ thread: z.string() }),
+			filterable: ["thread"],
+		});
+		const conductor = Conductor.create({
+			sql: db.sql,
+			tasks: TaskSchemas.fromSchema([defineTask({ name: "trace-actor" })]),
+			events: [message],
+			context: {},
+		});
+		const handled: { signal: string; traceId: string | undefined }[] = [];
+		const record = (signal: string) => () => {
+			handled.push({ signal, traceId: trace.getActiveSpan()?.spanContext().traceId });
+		};
+		const actor = conductor.createTask(
+			{ name: "trace-actor", actor: true },
+			{ invocable: true },
+			async (_event, ctx) => {
+				ctx.onSignal("start", record("start"));
+				ctx.onSignal("ping", record("ping"));
+				ctx.onSignal("trace.message", record("trace.message"));
+				if (ctx.listens.length === 0)
+					await ctx.listen("thread", { event: message, filter: { thread: ["1"] } });
+			},
+		);
+		const orchestrator = Orchestrator.create({
+			conductor,
+			tasks: [actor],
+			defaultWorker: { pollIntervalMs: 10, flushIntervalMs: 10 },
+		});
+		await orchestrator.start();
+		await conductor.signalWithStart({
+			task: "trace-actor",
+			key: "a",
+			signal: { name: "start", id: "start" },
+		});
+		await waitForCondition(async () => {
+			const [listen] = await db.sql`
+				select 1 from pgconductor._private_custom_event_subscriptions
+				where kind = 'execution_listen'
+			`;
+			return Boolean(listen);
+		});
+
+		const tracer = trace.getTracer("test");
+		const sent = tracer.startSpan("send ping");
+		await context.with(trace.setSpan(ROOT_CONTEXT, sent), () =>
+			conductor.signal({ task: { name: "trace-actor" }, key: "a" }, { name: "ping", id: "ping" }),
+		);
+		sent.end();
+		const emitted = tracer.startSpan("emit message");
+		await context.with(trace.setSpan(ROOT_CONTEXT, emitted), () =>
+			conductor.emit("trace.message", { thread: "1" }),
+		);
+		emitted.end();
+		await waitForCondition(() => handled.length === 3);
+		await orchestrator.stop();
+
+		expect(handled).toEqual([
+			{ signal: "start", traceId: expect.any(String) },
+			{ signal: "ping", traceId: sent.spanContext().traceId },
+			{ signal: "trace.message", traceId: emitted.spanContext().traceId },
+		]);
+		// A handler's span is the sender's child, linked to the activation that ran it
+		const [ping] = spans(exporter, "signal ping");
+		expect(ping?.parentSpanId).toBe(sent.spanContext().spanId);
+		expect(ping?.links).toHaveLength(1);
+		expect(spans(exporter, "signal trace.message")).toHaveLength(1);
+		await db.destroy();
+		await cleanup(provider);
+	}, 30000);
 });

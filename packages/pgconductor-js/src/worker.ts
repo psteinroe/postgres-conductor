@@ -586,6 +586,14 @@ export class Worker<
 				if (this.signal.aborted) return;
 				taskAbortController.abort({ reason: "signal-failed", error: error.message });
 			},
+			run: (signal, handle) =>
+				this.telemetry.signal({
+					queue: exec.queue,
+					name: signal.name,
+					id: signal.id,
+					traceContext: signal.trace_context,
+					run: handle,
+				}),
 		});
 		// A completion validates the result first. One by ctx.complete() is final: undelivered
 		// signals do not re-queue it

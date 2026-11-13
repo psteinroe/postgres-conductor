@@ -30,6 +30,7 @@ The second argument of a handler holds the signal's `id`, its `name` and `listen
 - A signal counts as delivered once its handler returns
 - Register listeners before the handler awaits anything. A signal reached while its name has no listener is skipped; if a listener for it registers later in the attempt, the execution is re-queued and the next attempt receives it
 - One listener per name and attempt. The handler re-runs from the top on every attempt, so register listeners again each time
+- With OpenTelemetry, a handler runs in a `signal <name>` span in the trace of whoever sent the signal (or emitted the event a listen got), linked to the execution's own span, so what the handler does stays in that trace
 
 ## Waiting for a Signal
 

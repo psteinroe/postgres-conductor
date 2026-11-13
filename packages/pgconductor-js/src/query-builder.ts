@@ -75,6 +75,8 @@ export type ListenDelivery = {
 	payload: Payload;
 	/** Names of the listens the event matched */
 	listens: string[];
+	/** The event's trace */
+	trace_context: TraceContextCarrier | null;
 };
 
 /** A listen as `ctx.listen()` and `signalWithStart()` register it. */
@@ -235,8 +237,14 @@ export type SignalArgs = {
 	payload?: JsonValue;
 };
 
-/** A signal sent by `conductor.signal()` or `ctx.sendSignal()`, delivered at `at` when given */
-export type SentSignalArgs = SignalArgs & { at?: Date | null };
+/**
+ * A signal sent by `conductor.signal()` or `ctx.sendSignal()`, delivered at `at` when given, with
+ * the sender's trace
+ */
+export type SentSignalArgs = SignalArgs & {
+	at?: Date | null;
+	traceContext?: TraceContextCarrier | null;
+};
 
 /** Signals an execution by id, or the open execution of `task` holding `key` */
 export type SignalExecutionArgs = (
@@ -373,6 +381,7 @@ export class QueryBuilder {
 		const { signal } = args;
 		const payload = signal.payload === undefined ? null : this.sql.json(signal.payload);
 		const at = signal.at ? signal.at.toISOString() : null;
+		const trace = signal.traceContext ? this.sql.json(signal.traceContext) : null;
 		if ("executionId" in args) {
 			return this.sql<[{ stored: boolean }]>`
 				select pgconductor.signal_execution(
@@ -380,7 +389,8 @@ export class QueryBuilder {
 					${signal.name}::text,
 					${signal.id}::text,
 					${payload}::jsonb,
-					${at}::timestamptz
+					${at}::timestamptz,
+					${trace}::jsonb
 				) as stored
 			`;
 		}
@@ -392,7 +402,8 @@ export class QueryBuilder {
 				${signal.name}::text,
 				${signal.id}::text,
 				${payload}::jsonb,
-				${at}::timestamptz
+				${at}::timestamptz,
+				${trace}::jsonb
 			) as stored
 		`;
 	}
@@ -720,7 +731,7 @@ export class QueryBuilder {
 			), running_signals as (
 				-- an execution that listens for no signal has a null after_seq. A delayed signal is
 				-- read once due, whatever its seq, until it is delivered; the inbox skips ids it has
-				select s.execution_id, s.seq, s.id, s.name, s.payload, s.listens
+				select s.execution_id, s.seq, s.id, s.name, s.payload, s.listens, s.trace_context
 				from running r
 				join pgconductor._private_execution_signals s
 					on s.execution_id = r.id
@@ -743,7 +754,7 @@ export class QueryBuilder {
 							select jsonb_agg(
 								jsonb_build_object(
 									'seq', s.seq, 'id', s.id, 'name', s.name, 'payload', s.payload,
-									'listens', s.listens
+									'listens', s.listens, 'trace_context', s.trace_context
 								)
 								order by s.seq
 							)
@@ -1918,7 +1929,8 @@ export class QueryBuilder {
 					'event_id', source.event_id,
 					'event_key', source.event_key,
 					'payload', source.event_payload,
-					'listens', l.names
+					'listens', l.names,
+					'trace_context', source.trace_context
 				) order by l.execution_id)
 				from listens l
 				where l.event_id = source.event_id

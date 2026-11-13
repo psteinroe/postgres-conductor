@@ -277,6 +277,8 @@ export type StoredSignal = {
 	payload: JsonValue;
 	/** Names of the execution's listens the event of this signal matched; empty for others */
 	listens: string[];
+	/** The sender's trace, or the event's for a listen; its handler continues it */
+	trace_context?: TraceContextCarrier | null;
 };
 
 /** SQLSTATE `_private_put_listens()` raises for an exclusive listen another execution holds */

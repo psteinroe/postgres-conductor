@@ -1074,7 +1074,10 @@ export class TaskContext<
 		options: SignalOptions = {},
 	): Promise<boolean> {
 		return this.opts.db.signalExecution(
-			{ ...signalTarget(target), signal: { ...signal, at: options.at } },
+			{
+				...signalTarget(target),
+				signal: { ...signal, at: options.at, traceContext: this.opts.telemetry.traceContext() },
+			},
 			{ signal: this.signal },
 		);
 	}

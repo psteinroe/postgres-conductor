@@ -29,6 +29,8 @@ export type SignalInboxOptions = {
 	ack: (id: string) => Promise<void>;
 	/** A handler threw, or a signal could not be acknowledged, while the inbox was open */
 	onError: (error: Error) => void;
+	/** Runs a handler, e.g. in the trace the signal carries */
+	run?: <T>(signal: StoredSignal, handle: () => Promise<T>) => Promise<T>;
 };
 
 /**
@@ -169,7 +171,10 @@ export class SignalInbox {
 			const info = { id: signal.id, name: signal.name, listens: signal.listens || [] };
 			this.delivering = info;
 			try {
-				await handler(signal.payload, info);
+				const handle = async () => {
+					await handler(signal.payload, info);
+				};
+				await (this.opts.run ? this.opts.run(signal, handle) : handle());
 			} catch (err) {
 				this.fail(
 					new Error(`Signal handler for "${signal.name}" failed: ${coerceError(err).message}`),

@@ -232,6 +232,8 @@ create table pgconductor._private_execution_signals (
     deliver_at timestamptz,
     -- names of the listens of the execution that the event of this signal matched
     listens text[] not null default '{}',
+    -- the trace of the sender, or of the event a listen got; its handler continues it
+    trace_context jsonb,
     delivered_at timestamptz,
     primary key (execution_id, id),
     constraint chk_execution_signal_names check (
@@ -1084,7 +1086,7 @@ $function$
 -- a signal delivered at p_deliver_at, a later time, is only stored: an idle actor, or an execution
 -- suspended at a wait with a signal branch for its name, wakes at that time instead, and the
 -- worker running the execution reads it once it is due. p_listens names the listens of the
--- execution that the event the signal carries matched.
+-- execution that the event the signal carries matched. p_trace_context is the trace of the sender.
 create or replace function pgconductor._private_store_signal(
   p_execution_id uuid,
   p_queue text,
@@ -1092,7 +1094,8 @@ create or replace function pgconductor._private_store_signal(
   p_id text,
   p_payload jsonb,
   p_deliver_at timestamptz default null,
-  p_listens text[] default null
+  p_listens text[] default null,
+  p_trace_context jsonb default null
 )
 returns void
 language plpgsql
@@ -1104,10 +1107,11 @@ declare
   v_deliver_at timestamptz := case when p_deliver_at > v_now then p_deliver_at end;
 begin
   insert into pgconductor._private_execution_signals (
-    execution_id, queue, id, name, payload, deliver_at, listens
+    execution_id, queue, id, name, payload, deliver_at, listens, trace_context
   )
   values (
-    p_execution_id, p_queue, p_id, p_name, p_payload, v_deliver_at, coalesce(p_listens, '{}')
+    p_execution_id, p_queue, p_id, p_name, p_payload, v_deliver_at, coalesce(p_listens, '{}'),
+    p_trace_context
   )
   on conflict (execution_id, id) do nothing;
 
@@ -1175,7 +1179,8 @@ create or replace function pgconductor.signal_execution(
   p_name text,
   p_id text,
   p_payload jsonb default null,
-  p_deliver_at timestamptz default null
+  p_deliver_at timestamptz default null,
+  p_trace_context jsonb default null
 )
 returns boolean
 language plpgsql
@@ -1201,7 +1206,7 @@ begin
   end if;
 
   perform pgconductor._private_store_signal(
-    p_execution_id, v_queue, p_name, p_id, p_payload, p_deliver_at
+    p_execution_id, v_queue, p_name, p_id, p_payload, p_deliver_at, null, p_trace_context
   );
   return true;
 end;
@@ -1234,7 +1239,8 @@ create or replace function pgconductor.signal_execution_by_key(
   p_name text,
   p_id text,
   p_payload jsonb default null,
-  p_deliver_at timestamptz default null
+  p_deliver_at timestamptz default null,
+  p_trace_context jsonb default null
 )
 returns boolean
 language plpgsql
@@ -1268,7 +1274,7 @@ begin
   end if;
 
   perform pgconductor._private_store_signal(
-    v_execution_id, p_queue, p_name, p_id, p_payload, p_deliver_at
+    v_execution_id, p_queue, p_name, p_id, p_payload, p_deliver_at, null, p_trace_context
   );
   return true;
 end;
@@ -1343,7 +1349,9 @@ begin
     end if;
   end if;
 
-  perform pgconductor._private_store_signal(v_execution_id, p_queue, p_name, p_id, p_payload);
+  perform pgconductor._private_store_signal(
+    v_execution_id, p_queue, p_name, p_id, p_payload, null, null, p_trace_context
+  );
   return query select v_execution_id, v_started;
 end;
 $function$;
@@ -2166,9 +2174,9 @@ end;
 $function$;
 
 -- stores the events that dispatch matched to listens ([{execution_id, queue, event_id,
--- event_key, payload, listens}]) as signals named after the event, with the event id as signal
--- id and the names of the matched listens, so an execution that listens for an event twice gets
--- it once. executions that ended get nothing.
+-- event_key, payload, listens, trace_context}]) as signals named after the event, with the event
+-- id as signal id, the names of the matched listens and the event's trace, so an execution that
+-- listens for an event twice gets it once. executions that ended get nothing.
 create or replace function pgconductor._private_deliver_listens(p_deliveries jsonb)
 returns void
 language plpgsql
@@ -2184,10 +2192,11 @@ begin
     ));
 
     for v_delivery in
-        select d.execution_id, d.queue, d.event_id, d.event_key, d.payload, d.listens
+        select d.execution_id, d.queue, d.event_id, d.event_key, d.payload, d.listens,
+            d.trace_context
         from jsonb_to_recordset(p_deliveries)
             as d(execution_id uuid, queue text, event_id uuid, event_key text, payload jsonb,
-                listens text[])
+                listens text[], trace_context jsonb)
         join pgconductor._private_executions execution
             on execution.id = d.execution_id and execution.queue = d.queue
         where execution.completed_at is null
@@ -2197,7 +2206,8 @@ begin
     loop
         perform pgconductor._private_store_signal(
             v_delivery.execution_id, v_delivery.queue, v_delivery.event_key,
-            v_delivery.event_id::text, v_delivery.payload, null, v_delivery.listens
+            v_delivery.event_id::text, v_delivery.payload, null, v_delivery.listens,
+            v_delivery.trace_context
         );
     end loop;
 end;
