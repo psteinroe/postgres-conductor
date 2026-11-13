@@ -549,7 +549,7 @@ export class Conductor<
 	): Promise<boolean> {
 		return this.db.signalExecution({
 			...signalTarget(target),
-			signal: { ...signal, at: options.at },
+			signal: { ...signal, at: options.at, traceContext: this.telemetry.traceContext() },
 		});
 	}
 

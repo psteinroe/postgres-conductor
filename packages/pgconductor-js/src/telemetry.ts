@@ -41,6 +41,14 @@ type ProcessOptions<T> = {
 	run: () => Promise<T>;
 };
 
+type SignalOptions<T> = {
+	queue: string;
+	name: string;
+	id: string;
+	traceContext: TraceContextCarrier | null | undefined;
+	run: () => Promise<T>;
+};
+
 type SettleOptions<T> = {
 	queue: string;
 	batchMessageCount: number;
@@ -131,6 +139,27 @@ export class Telemetry {
 			},
 			parent: batchMessageCount === undefined ? parents[0] || ROOT_CONTEXT : ROOT_CONTEXT,
 			links,
+			run,
+		});
+	}
+
+	/**
+	 * Runs a signal's handler in the trace of its sender (or of the event a listen got), linked to
+	 * the activation that handles it; without a stored trace, inside the activation's
+	 */
+	signal<T>({ queue, name, id, traceContext, run }: SignalOptions<T>): Promise<T> {
+		const activation = trace.getSpanContext(context.active());
+		const parent = traceContext ? propagation.extract(ROOT_CONTEXT, traceContext) : undefined;
+		return this.trace({
+			name: `signal ${name}`,
+			kind: SpanKind.CONSUMER,
+			attributes: {
+				...messaging(queue, "process"),
+				"messaging.message.id": id,
+				"pgconductor.signal.name": name,
+			},
+			parent,
+			links: parent && activation ? [{ context: activation }] : undefined,
 			run,
 		});
 	}
