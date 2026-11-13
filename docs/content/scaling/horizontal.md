@@ -82,7 +82,7 @@ The rule exists because registration owns the whole queue. When a worker starts,
 
 **Scale up (more processes) when:**
 
-- Queue depth is consistently high
+- Queue depth is consistently high (`ready` and `oldest_ready_age` in [`pgconductor.queue_stats`](monitoring.md))
 - Workers are CPU-bound
 
 **Scale out (more queues) when:**
