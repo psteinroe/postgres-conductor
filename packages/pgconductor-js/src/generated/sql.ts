@@ -407,6 +407,8 @@ insert into pgconductor._private_queues (name) values ('default');
 -- deletes an orchestrator by id, or those whose last heartbeat is older than p_max_age, and
 -- releases their executions. a claim locks its owner row, so the delete waits for claims in
 -- flight, and the release runs as a second statement whose snapshot includes them.
+-- liveness runs in real time (clock_timestamp(), as heartbeats write it), never in fake time:
+-- orchestrators heartbeat on connections of their own, which the fake_offset setting does not reach.
 create or replace function pgconductor._private_remove_orchestrators(
     p_id uuid default null,
     p_max_age interval default null
@@ -422,10 +424,15 @@ begin
   with deleted as (
     delete from pgconductor._private_orchestrators o
     where o.id = p_id
-      or o.last_heartbeat_at < pgconductor._private_current_time() - p_max_age
+      or o.last_heartbeat_at < clock_timestamp() - p_max_age
     returning o.id
   )
   select array_agg(id) into v_ids from deleted;
+
+  -- recovery runs after every heartbeat and usually finds no one, so skip the scan of every partition
+  if v_ids is null then
+    return;
+  end if;
 
   -- cancelled executions are reclaimed and settled like any other result
   update pgconductor._private_executions e

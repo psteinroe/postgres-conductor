@@ -323,7 +323,8 @@ export class QueryBuilder {
 				${orchestratorId}::uuid,
 				${version}::text,
 				${migrationNumber}::integer,
-				pgconductor._private_current_time()
+				-- liveness runs in real time, see _private_remove_orchestrators()
+				clock_timestamp()
 			)
 			on conflict (id) do update
 			set last_heartbeat_at = excluded.last_heartbeat_at
@@ -341,7 +342,7 @@ export class QueryBuilder {
 	}: OrchestratorHeartbeatArgs): PendingQuery<{ shutdown_reason: string | null }[]> {
 		return this.sql<{ shutdown_reason: string | null }[]>`
 			update pgconductor._private_orchestrators o
-			set last_heartbeat_at = pgconductor._private_current_time()
+			set last_heartbeat_at = clock_timestamp()
 			where o.id = ${orchestratorId}::uuid
 			returning coalesce(
 				o.shutdown_reason,

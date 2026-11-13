@@ -31,7 +31,7 @@ JavaScript cannot stop a running function. A handler that ignores `ctx.signal` k
 
 During shutdown, `stop()` waits for running handlers. The timeout still applies, so a handler that ignores `ctx.signal` delays shutdown by at most `timeoutMs`.
 
-The timeout is enforced by the worker that runs the handler. If the worker process dies, the execution stays locked until stale orchestrator recovery releases it.
+The timeout is enforced by the worker that runs the handler. If the worker process dies, the execution stays locked until stale orchestrator recovery releases it, within about 35 seconds (see [Crash Recovery](../scaling/horizontal.md#crash-recovery)).
 
 ## Child Invocation Timeout
 
