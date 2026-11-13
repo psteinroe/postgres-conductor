@@ -78,6 +78,31 @@ The rule exists because registration owns the whole queue. When a worker starts,
 
 **Rolling deploys:** while old and new replicas overlap, an old replica that restarts registers the old task set again. That removes the cron schedules and event subscriptions that only the new version declares, until a replica of the new version starts again. Maintenance does not fail executions of the new version's tasks meanwhile, as long as a replica of the new version runs it. If that happens after the rollout has finished, restart one replica of the new version.
 
+## Crash Recovery
+
+Every orchestrator heartbeats every 5 seconds. An orchestrator without a heartbeat for 30 seconds is stale: the next orchestrator to heartbeat removes it and releases its executions, which other workers then claim and retry. A crashed process's executions run again within about 35 seconds while another orchestrator is running. When every process crashed, the first one to start again releases them about 35 seconds after it started (see the outage guard below).
+
+Heartbeats run on a connection of the orchestrator's own, so handlers that hold every connection of the pool, such as long transactions, do not delay them. Each orchestrator keeps this one extra connection open; like the connection postgres.js uses for `listen`, it is not closed for being idle or old.
+
+Both durations are options of the orchestrator. Use the same values on every orchestrator of a database:
+
+```typescript
+const orchestrator = Orchestrator.create({
+  conductor,
+  tasks,
+  heartbeatIntervalMs: 5_000, // default
+  staleAfterMs: 30_000, // default; at least twice heartbeatIntervalMs
+});
+```
+
+A shorter stale age releases a crashed process's work sooner, but makes a process that is briefly blocked or disconnected look crashed sooner.
+
+A heartbeat can still be late when the process is blocked: a handler that keeps the event loop busy for 30 seconds makes its orchestrator look stale. Other orchestrators then recover it, its handlers are aborted, its executions run again elsewhere, and it stops. Keep CPU-heavy work off the event loop, for example in worker threads.
+
+After a database outage, every orchestrator's last heartbeat is old. An orchestrator recovers others only once its heartbeats have succeeded for the stale age (30 seconds), counting from when it registered or from its last failed or slow heartbeat. This holds for an orchestrator that just started too, so the others have that long to reconnect: an orchestrator that was removed stops for good.
+
+Liveness uses the database's real time, so the fake time of [tests](../crafting-tasks/testing.md#controlling-time) does not make orchestrators stale.
+
 ## When to Scale Horizontally
 
 **Scale up (more processes) when:**

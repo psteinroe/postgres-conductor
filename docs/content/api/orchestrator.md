@@ -13,7 +13,9 @@ const orchestrator = Orchestrator.create({
   conductor,            // Conductor instance
   tasks?,               // Tasks for default worker
   workers?,             // Custom workers
-  defaultWorker?        // Default worker config
+  defaultWorker?,       // Default worker config
+  heartbeatIntervalMs?, // Heartbeat interval (default: 5000)
+  staleAfterMs?         // Stale age (default: 30000)
 });
 ```
 
@@ -23,6 +25,8 @@ const orchestrator = Orchestrator.create({
 - `tasks`: (optional) Array of tasks on the `default` queue, run by the default worker. A task on another queue throws; run it on a worker from `conductor.createWorker()`
 - `workers`: (optional) Array of custom workers from `conductor.createWorker()`
 - `defaultWorker`: (optional) Configuration for default worker
+- `heartbeatIntervalMs`: (optional) How often the orchestrator heartbeats. Default `5000`
+- `staleAfterMs`: (optional) How long an orchestrator may go without a heartbeat before other orchestrators remove it and release its executions. Default `30000`; at least twice `heartbeatIntervalMs`, and the same on every orchestrator of a database. See [Crash Recovery](../scaling/horizontal.md#crash-recovery)
 
 The Orchestrator is the registration authority for its workers. Configure at
 most one worker for each queue (including the implicit `default` worker); put
@@ -52,6 +56,7 @@ await orchestrator.start();
 ```
 
 - Initializes database schema (if needed)
+- Opens a connection of its own for heartbeats; once its heartbeats have succeeded for `staleAfterMs`, it releases the executions of crashed orchestrators (see [Crash Recovery](../scaling/horizontal.md#crash-recovery))
 - Starts all workers
 - Sets up signal handlers (SIGTERM, SIGINT)
 - Begins polling for executions

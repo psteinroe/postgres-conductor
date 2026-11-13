@@ -55,7 +55,7 @@ export class TestDatabase {
 
 		const master = postgres(this.masterUrl, { max: 1, onnotice: () => {} });
 		try {
-			await master.unsafe(`DROP DATABASE IF EXISTS ${this.name}`);
+			await master.unsafe(`DROP DATABASE IF EXISTS ${this.name} WITH (FORCE)`);
 		} finally {
 			await master.end();
 		}
@@ -102,7 +102,9 @@ export class TestDatabasePool {
 		const master = postgres(this.masterUrl, { max: 1, onnotice: () => {} });
 		try {
 			await Promise.all(
-				this.children.map((child) => master.unsafe(`DROP DATABASE IF EXISTS ${child.name}`)),
+				this.children.map((child) =>
+					master.unsafe(`DROP DATABASE IF EXISTS ${child.name} WITH (FORCE)`),
+				),
 			);
 		} finally {
 			await master.end();

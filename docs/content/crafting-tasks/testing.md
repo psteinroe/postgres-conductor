@@ -103,6 +103,8 @@ Postgres Conductor reads time from `pgconductor._private_current_time()`, which 
 
 A single connection runs one query at a time. A transaction on `sql` holds the connection until it ends, so do not wait inside it for a query that runs on `sql` outside the transaction. A second connection to the same database sees real time.
 
+Orchestrator heartbeats use the database's real time, so fake time neither makes orchestrators stale nor keeps them live (see [Crash Recovery](../scaling/horizontal.md#crash-recovery)).
+
 ## Mocking Services
 
 Mock external services by passing them in the context:
