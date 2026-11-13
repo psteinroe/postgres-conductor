@@ -120,9 +120,10 @@ describe("execution state types", () => {
 				ctx.signalWithStart("start", { task: "agent", key: "k", signal: { name: "go", id: "1" } }),
 			).toEqualTypeOf<Promise<{ id: string; started: boolean }>>();
 		});
-		expectTypeOf(
-			conductor.signalWithStart({ task: "agent", key: "k", signal: { name: "go", id: "1" } }),
-		).toEqualTypeOf<Promise<{ id: string; started: boolean }>>();
+		// Typed only: never called
+		const start = () =>
+			conductor.signalWithStart({ task: "agent", key: "k", signal: { name: "go", id: "1" } });
+		expectTypeOf(start).returns.toEqualTypeOf<Promise<{ id: string; started: boolean }>>();
 	});
 
 	test("without a state schema, state stays any JSON object", () => {
