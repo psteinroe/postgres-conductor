@@ -192,7 +192,7 @@ describe("ctx.waitForResult and execution branches (Postgres integration)", () =
 		const ids: string[] = [];
 		const conductor = await setup(database, {
 			waiter: async (_id, ctx) => {
-				const id = await ctx.invoke("start", { name: "work" }, { value: 2 });
+				const { id } = await ctx.invoke("start", { name: "work" }, { value: 2 });
 				ids.push(id);
 				outcomes.push(await ctx.waitForResult("result", id));
 				await ctx.sleep("pause", 0);
@@ -217,7 +217,7 @@ describe("ctx.waitForResult and execution branches (Postgres integration)", () =
 		const outcomes: unknown[] = [];
 		const conductor = await setup(database, {
 			waiter: async (_id, ctx) => {
-				const id = await ctx.invoke("start", { name: "work" }, { value: 1 });
+				const { id } = await ctx.invoke("start", { name: "work" }, { value: 1 });
 				outcomes.push(await ctx.waitForResult("result", id));
 			},
 			work: async () => {
@@ -247,7 +247,7 @@ describe("ctx.waitForResult and execution branches (Postgres integration)", () =
 		const outcomes: unknown[] = [];
 		const conductor = await setup(database, {
 			waiter: async (_id, ctx) => {
-				const id = await ctx.invoke("start", { name: "work" }, { value: 1 });
+				const { id } = await ctx.invoke("start", { name: "work" }, { value: 1 });
 				outcomes.push(await ctx.waitForResult("result", id));
 			},
 			work: (_value, ctx) => ctx.invokeAndWait("leaf", { name: "leaf" }),
@@ -391,7 +391,7 @@ describe("ctx.waitForResult and execution branches (Postgres integration)", () =
 		const ids: string[] = [];
 		const conductor = await setup(database, {
 			waiter: async (_id, ctx) => {
-				const id = await ctx.invoke(
+				const { id } = await ctx.invoke(
 					"start",
 					{ name: "work" },
 					{ value: 1 },
@@ -417,7 +417,7 @@ describe("ctx.waitForResult and execution branches (Postgres integration)", () =
 		const ids: string[] = [];
 		const conductor = await setup(database, {
 			waiter: async (_id, ctx) => {
-				const id = await ctx.invoke("start", { name: "work" }, { value: 1 });
+				const { id } = await ctx.invoke("start", { name: "work" }, { value: 1 });
 				ids.push(id);
 				outcomes.push(await ctx.waitForResult("result", id));
 			},
@@ -443,7 +443,7 @@ describe("ctx.waitForResult and execution branches (Postgres integration)", () =
 		const conductor = await setup(database, {
 			waiter: async (_id, ctx) => {
 				entered++;
-				const id = await ctx.invoke("start", { name: "work" }, { value: 3 });
+				const { id } = await ctx.invoke("start", { name: "work" }, { value: 3 });
 				await ctx.step("await-work", () => completed(database, id));
 				outcomes.push(await ctx.waitForResult("result", id));
 			},
@@ -464,7 +464,7 @@ describe("ctx.waitForResult and execution branches (Postgres integration)", () =
 		const ids: string[] = [];
 		const conductor = await setup(database, {
 			waiter: async (_id, ctx) => {
-				const id = await ctx.invoke("start", { name: "work" }, { value: 5 });
+				const { id } = await ctx.invoke("start", { name: "work" }, { value: 5 });
 				ids.push(id);
 				outcomes.push(await ctx.waitForResult("result", id));
 			},
@@ -506,7 +506,7 @@ describe("ctx.waitForResult and execution branches (Postgres integration)", () =
 		const ids: string[] = [];
 		const conductor = await setup(database, {
 			waiter: async (_id, ctx) => {
-				const id = await ctx.invoke("start", { name: "work" }, { value: 1 });
+				const { id } = await ctx.invoke("start", { name: "work" }, { value: 1 });
 				ids.push(id);
 				outcomes.push(await ctx.waitForResult("result", id, { timeout: "1s" }));
 			},
@@ -533,7 +533,7 @@ describe("ctx.waitForResult and execution branches (Postgres integration)", () =
 		const ids: string[] = [];
 		const conductor = await setup(database, {
 			waiter: async (_id, ctx) => {
-				const id = await ctx.invoke("start", { name: "work" }, { value: 4 });
+				const { id } = await ctx.invoke("start", { name: "work" }, { value: 4 });
 				ids.push(id);
 				const clicked = await ctx.subscribe("click", { event: click, filter: { id: [id] } });
 				winners.push(await ctx.waitForAny("any", { work: { execution: id }, click: clicked }));
@@ -567,7 +567,7 @@ describe("ctx.waitForResult and execution branches (Postgres integration)", () =
 		const ids: string[] = [];
 		const conductor = await setup(database, {
 			waiter: async (_id, ctx) => {
-				const id = await ctx.invoke("start", { name: "work" }, { value: 4 });
+				const { id } = await ctx.invoke("start", { name: "work" }, { value: 4 });
 				ids.push(id);
 				const clicked = await ctx.subscribe("click", { event: click, filter: { id: [id] } });
 				winners.push(await ctx.waitForAny("any", { work: { execution: id }, click: clicked }));
@@ -597,7 +597,7 @@ describe("ctx.waitForResult and execution branches (Postgres integration)", () =
 		const works = new Map<string, string>();
 		const conductor = await setup(database, {
 			waiter: async (id, ctx) => {
-				const workId = await ctx.invoke("start", { name: "work" }, { value: 1 });
+				const { id: workId } = await ctx.invoke("start", { name: "work" }, { value: 1 });
 				works.set(id, workId);
 				const clicked = await ctx.subscribe("click", { event: click, filter: { id: [workId] } });
 				const winner = await ctx.waitForAny("any", { work: { execution: workId }, click: clicked });
@@ -635,7 +635,7 @@ describe("ctx.waitForResult and execution branches (Postgres integration)", () =
 		const conductor = await setup(database, {
 			waiter: async (_id, ctx) => {
 				entered++;
-				const id = await ctx.invoke("start", { name: "work" }, { value: 3 });
+				const { id } = await ctx.invoke("start", { name: "work" }, { value: 3 });
 				const clicked = await ctx.subscribe("click", { event: click, filter: { id: [id] } });
 				await ctx.step("await-work", () => completed(database, id));
 				winners.push(
@@ -664,7 +664,7 @@ describe("ctx.waitForResult and execution branches (Postgres integration)", () =
 		const ids: string[] = [];
 		const conductor = await setup(database, {
 			waiter: async (_id, ctx) => {
-				const id = await ctx.invoke("start", { name: "work" }, { value: 1 });
+				const { id } = await ctx.invoke("start", { name: "work" }, { value: 1 });
 				ids.push(id);
 				winners.push(await ctx.waitForAny("any", { work: { execution: id } }, { timeout: "1s" }));
 			},
@@ -690,7 +690,7 @@ describe("ctx.waitForResult and execution branches (Postgres integration)", () =
 		const ids: string[] = [];
 		const conductor = await setup(database, {
 			waiter: async (_id, ctx) => {
-				const id = await ctx.invoke("start", { name: "work" }, { value: 2 });
+				const { id } = await ctx.invoke("start", { name: "work" }, { value: 2 });
 				ids.push(id);
 				await ctx.waitForResult("other", { name: "leaf" }, id).catch((error: Error) => {
 					errors.add(error.message);
@@ -828,7 +828,7 @@ describe("ctx.waitForResult and execution branches (Postgres integration)", () =
 				outcomes.push(await ctx.waitForResult("parent", id));
 			},
 			work: async (_value, ctx) => {
-				const childId = await ctx.invoke(
+				const { id: childId } = await ctx.invoke(
 					"child",
 					{ name: "waiter" },
 					{ id: ctx.executionId },
@@ -864,13 +864,13 @@ describe("ctx.waitForResult and execution branches (Postgres integration)", () =
 			},
 			work: async (value, ctx) => {
 				if (value === 2) return;
-				const childId = await ctx.invoke(
+				const { id: childId } = await ctx.invoke(
 					"child",
 					{ name: "work" },
 					{ value: 2 },
 					{ cancelWithParent: true, run_at: new Date(Date.now() + 3_600_000) },
 				);
-				ids.push(await ctx.invoke("waiter", { name: "waiter" }, { id: childId }));
+				ids.push((await ctx.invoke("waiter", { name: "waiter" }, { id: childId })).id);
 				await suspendedAt(database, ids[0] || "", "result");
 				throw new Error("parent failed");
 			},

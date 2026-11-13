@@ -48,7 +48,8 @@ export type TaskConfiguration<
 	deadLetter?: DeadLetterConfiguration<TPayload>;
 	/**
 	 * Run the task as an actor: a returning handler ends an activation, and the execution sleeps
-	 * until a signal or its alarm (`ctx.setAlarm()`) starts the next one. It never completes.
+	 * until a signal or its alarm (`ctx.setAlarm()`) starts the next one. It completes only
+	 * through `ctx.complete()`.
 	 */
 	actor?: boolean;
 };

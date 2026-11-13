@@ -27,7 +27,9 @@ import {
 	type BatchTaskEvent,
 	type KeyedExecution,
 	type SignalMessage,
+	type SignalOptions,
 } from "./task-context.js";
+import type { StartedExecution } from "./query-builder.js";
 import {
 	type FindTaskByIdentifier,
 	type InferPayload,
@@ -131,7 +133,7 @@ type ResolvedContext<
 	Events extends readonly EventDefinition<string, any, any>[],
 	Metadata extends object,
 	TDef extends { readonly name: string; readonly queue?: string },
-> = TaskContext<Tasks, Events, Metadata, ResolvedState<Tasks, TDef>>;
+> = TaskContext<Tasks, Events, Metadata, ResolvedState<Tasks, TDef>, ResolvedReturns<Tasks, TDef>>;
 
 type ResolvedTaskEvent<
 	Tasks extends readonly TaskDefinition<string, any, any, string>[],
@@ -290,6 +292,7 @@ export class Conductor<
 			readonly name: string;
 			readonly queue?: string;
 			readonly batch?: BatchConfig;
+			readonly actor?: boolean;
 		},
 		const TTriggers extends object | readonly object[],
 	>(
@@ -310,7 +313,8 @@ export class Conductor<
 			: (
 					event: ResolvedTaskEvent<Tasks, Events, TDef, TTriggers>,
 					ctx: ResolvedContext<Tasks, Events, Metadata, TDef> & ExtraContext & MiddlewareContext,
-				) => Promise<ResolvedReturns<Tasks, TDef>>,
+					// An activation of an actor returns nothing: it completes with ctx.complete()
+				) => Promise<TDef extends { readonly actor: true } ? void : ResolvedReturns<Tasks, TDef>>,
 	): Task<
 		TDef["name"],
 		ResolvedQueue<TDef>,
@@ -532,21 +536,30 @@ export class Conductor<
 	 * when its handler next runs. Idempotent by signal id: resending an id stores the signal once.
 	 * By key, it runs under the lock `signalWithStart()` takes, so it waits for one starting the
 	 * execution for that key.
+	 *
+	 * With `at`, the signal is stored now and delivered at that time: a running execution receives
+	 * it with the first poll after it, an idle actor wakes then (or at its alarm, if earlier).
 	 * @returns false if the execution is completed, failed, cancelled or unknown, or no open
 	 * execution holds the key
 	 */
 	async signal<TName extends TaskName<Tasks>, TQueue extends string = "default">(
 		target: string | KeyedExecution<TName, TQueue>,
 		signal: SignalMessage,
+		options: SignalOptions = {},
 	): Promise<boolean> {
-		return this.db.signalExecution({ ...signalTarget(target), signal });
+		return this.db.signalExecution({
+			...signalTarget(target),
+			signal: { ...signal, at: options.at },
+		});
 	}
 
 	/**
 	 * Signal the non-terminal execution of a task for `key`, or start one that receives the signal
 	 * first. Runs in one transaction under a lock on (task, key), so concurrent calls for a key
 	 * start at most one execution. A completed, failed or cancelled execution does not hold the key.
-	 * @returns ID of the execution that received the signal
+	 * An exclusive listen in `listen` whose name another open execution of the task holds throws a
+	 * `ListenHeldError` and starts nothing.
+	 * @returns ID of the execution that received the signal, and whether this call started it
 	 */
 	async signalWithStart<TName extends TaskName<Tasks>, TQueue extends string = "default">(options: {
 		task: TName;
@@ -564,7 +577,7 @@ export class Conductor<
 		listen?: Record<string, Listen>;
 		priority?: number;
 		metadata?: Metadata;
-	}): Promise<string> {
+	}): Promise<StartedExecution> {
 		const queue = options.queue || "default";
 		const metadata = await this.validateMetadata(options.metadata);
 		const state =
@@ -578,7 +591,7 @@ export class Conductor<
 			taskKey: options.task,
 			queue,
 			run: async (span) => {
-				const id = await this.db.signalWithStart({
+				const started = await this.db.signalWithStart({
 					taskKey: options.task,
 					queue,
 					key: options.key,
@@ -590,8 +603,8 @@ export class Conductor<
 					traceContext: this.telemetry.traceContext(),
 					metadata,
 				});
-				span?.setAttribute("messaging.message.id", id);
-				return id;
+				span?.setAttribute("messaging.message.id", started.id);
+				return started;
 			},
 		});
 	}

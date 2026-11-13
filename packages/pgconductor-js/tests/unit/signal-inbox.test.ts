@@ -10,7 +10,7 @@ function store() {
 		signals,
 		acked,
 		add(name: string, id: string) {
-			signals.push({ seq: signals.length + 1, id, name, payload: id });
+			signals.push({ seq: signals.length + 1, id, name, payload: id, listens: [] });
 		},
 		/** what a worker poll reads for an inbox */
 		poll(inbox: SignalInbox) {
@@ -221,7 +221,7 @@ describe("SignalInbox", () => {
 		s.poll(inbox);
 		await flush();
 		await inbox.hold(async (delivering) => {
-			expect(delivering).toEqual({ id: "a", name: "input" });
+			expect(delivering).toEqual({ id: "a", name: "input", listens: [] });
 			release.resolve();
 			await flush();
 			expect(s.acked).toEqual(["a"]);

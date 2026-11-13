@@ -228,7 +228,7 @@ describe("Signals", () => {
 		const sender = createConductor(db, sql);
 
 		await orchestrator.start();
-		const ids = await Promise.all(
+		const starts = await Promise.all(
 			Array.from({ length: total }, (_, n) =>
 				sender.signalWithStart({
 					task: "session",
@@ -238,8 +238,11 @@ describe("Signals", () => {
 				}),
 			),
 		);
+		const ids = starts.map((start) => start.id);
 
 		expect(new Set(ids).size).toBe(1);
+		// exactly one call started it
+		expect(starts.filter((start) => start.started)).toHaveLength(1);
 		await done.promise;
 		const [executionId] = ids;
 		await waitForCondition(async () => !!(await executionRow(db, executionId!))?.completed_at);
@@ -256,7 +259,8 @@ describe("Signals", () => {
 			key: "thread-1",
 			signal: { name: "input", id: "later" },
 		});
-		expect(next).not.toBe(executionId);
+		expect(next.started).toBe(true);
+		expect(next.id).not.toBe(executionId);
 	});
 
 	test("a signal committed while settlement waits for the execution re-queues it", async () => {
@@ -500,7 +504,9 @@ describe("Signals", () => {
 					key: "k",
 					signal: { name: "input", id: "never" },
 				});
-				expect(again).toBe(first);
+				// memoized with whether the first call started it
+				expect(first.started).toBe(true);
+				expect(again).toEqual(first);
 			},
 		);
 		await conductor.ensureInstalled();
@@ -565,13 +571,12 @@ describe("Signals", () => {
 				{ name: "sender", queue: "senders", maxAttempts: 2 },
 				{ invocable: true },
 				async (_event, ctx) => {
-					targets.push(
-						await ctx.signalWithStart("start", {
-							task: "session",
-							key: "k",
-							signal: { name: "input", id: "s1" },
-						}),
-					);
+					const { id } = await ctx.signalWithStart("start", {
+						task: "session",
+						key: "k",
+						signal: { name: "input", id: "s1" },
+					});
+					targets.push(id);
 				},
 			);
 			await conductor.ensureInstalled();
@@ -715,6 +720,7 @@ describe("Signals", () => {
 			key: "k",
 			signal: { name: "input", id: "after-cancel" },
 		});
-		expect(next).not.toBe(keyed?.id);
+		expect(next.started).toBe(true);
+		expect(next.id).not.toBe(keyed?.id);
 	});
 });

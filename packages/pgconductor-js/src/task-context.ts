@@ -38,6 +38,7 @@ import {
 	type FilterForEvent,
 } from "./event-definition.js";
 import { compileEventFilter, compileListens, type Listen } from "./event-trigger-validation.js";
+import type { StartedExecution } from "./query-builder.js";
 import { validateSchema } from "./lib/validate-schema.js";
 import type { ReceivedSignal, SignalHandler, SignalInbox } from "./signal-inbox.js";
 import {
@@ -69,6 +70,8 @@ export type TaskAbortReasons =
 	| { reason: "timed-out" }
 	// a signal handler threw
 	| { reason: "signal-failed"; error: string }
+	// the handler completed the execution with ctx.complete()
+	| { reason: "completed"; result: unknown }
 	// the task invoked a child
 	| {
 			reason: "child-invocation";
@@ -192,6 +195,15 @@ export type SignalMessage = {
 	payload?: JsonValue;
 };
 
+/** Options of `conductor.signal()` and `ctx.sendSignal()`. */
+export type SignalOptions = {
+	/**
+	 * Deliver the signal at this time: it is stored now, but neither reaches a handler nor wakes the
+	 * execution before. A time that passed delivers it at once.
+	 */
+	at?: Date;
+};
+
 /** The open execution of a task holding `key`: the key `signalWithStart()` addresses it by. */
 export type KeyedExecution<TName extends string = string, TQueue extends string = string> = {
 	task: TaskIdentifier<TName, TQueue>;
@@ -230,6 +242,7 @@ export class TaskContext<
 	>[],
 	Metadata extends object = Payload,
 	State extends object = Payload,
+	Returns = unknown,
 > {
 	private readonly windowChecker?: WindowChecker;
 	/** The last state write of this attempt: writes run one after another */
@@ -263,6 +276,11 @@ export class TaskContext<
 	/** Queue of this execution. */
 	get queue(): string {
 		return this.opts.execution.queue;
+	}
+
+	/** When this execution was created. */
+	get createdAt(): Date {
+		return new Date(this.opts.execution.created_at);
 	}
 
 	get signal(): AbortSignal {
@@ -630,8 +648,9 @@ export class TaskContext<
 	}
 
 	/**
-	 * Start an execution and return its id without waiting for it.
-	 * Memoized by the step key: retries and resumes return the same execution.
+	 * Start an execution without waiting for it, and return its id and whether this call started it
+	 * (`started: false` when an execution held the dedupe key).
+	 * Memoized by the step key: retries and resumes return the same execution and `started`.
 	 * Its outcome does not affect this execution. It is not cancelled with this one unless
 	 * `cancelWithParent` is set.
 	 */
@@ -671,7 +690,7 @@ export class TaskContext<
 			 */
 			cancelWithParent?: boolean;
 		} = {},
-	): Promise<string> {
+	): Promise<StartedExecution> {
 		const cached = await this.opts.db.loadStep(
 			{
 				executionId: this.opts.execution.id,
@@ -682,10 +701,11 @@ export class TaskContext<
 		);
 
 		if (cached !== undefined) {
-			return (cached as { id: string }).id;
+			const stored = cached as { id: string; started?: boolean };
+			return { id: stored.id, started: stored.started === true };
 		}
 
-		const id = await this.opts.db.startExecution(
+		const started = await this.opts.db.startExecution(
 			{
 				executionId: this.opts.execution.id,
 				queue: this.opts.execution.queue,
@@ -707,7 +727,7 @@ export class TaskContext<
 			},
 			{ signal: this.signal },
 		);
-		return id || this.abortAndHangup({ reason: "suspended" });
+		return started || this.abortAndHangup({ reason: "suspended" });
 	}
 
 	async schedule<
@@ -907,15 +927,22 @@ export class TaskContext<
 	/**
 	 * Receive the events that match `filter` as signals, from now on and across attempts and
 	 * activations, until `ctx.unlisten(name)` or the execution ends. Each arrives as a signal named
-	 * after the event, with the event's payload and its id as signal id, so handle it with
-	 * `ctx.onSignal(event.name, ...)`; a signal also wakes an idle actor. Listening again under a
-	 * name replaces its listen, unless event and filter stay the same. Not memoized: a replay
-	 * listens again. Hangs up when this attempt no longer holds the execution.
+	 * after the event, with the event's payload and its id as signal id, and the names of the
+	 * listens it matched as `listens`, so handle it with `ctx.onSignal(event.name, ...)`; a signal
+	 * also wakes an idle actor. Listening again under a name replaces its listen, unless event,
+	 * filter and `exclusive` stay the same. Not memoized: a replay listens again. Hangs up when this
+	 * attempt no longer holds the execution.
+	 *
+	 * An `exclusive` listen holds its name among the open executions of this task: while another
+	 * one holds it, this throws a `ListenHeldError` naming that execution and listens for nothing.
 	 */
 	async listen<
 		TName extends EventName<Events>,
 		TDef extends FindEventByIdentifier<Events, TName> = FindEventByIdentifier<Events, TName>,
-	>(name: string, options: { event: TDef; filter?: FilterForEvent<TDef> }): Promise<void> {
+	>(
+		name: string,
+		options: { event: TDef; filter?: FilterForEvent<TDef>; exclusive?: boolean },
+	): Promise<void> {
 		await this.setListens({ [name]: options }, []);
 	}
 
@@ -1023,25 +1050,40 @@ export class TaskContext<
 	}
 
 	/**
+	 * Complete this execution with `result`, validated like a returned one, and hang up. It is how
+	 * an actor ends: the execution is completed for good, waiters get the result, its listens end
+	 * and signals stored meanwhile or later are not delivered. Also ends an attempt from within an
+	 * `ctx.onSignal()` handler or `ctx.untilIdle()`. Steps still running save before it settles.
+	 */
+	complete(
+		...[result]: undefined extends Returns ? [result?: Returns] : [result: Returns]
+	): Promise<never> {
+		return this.abortAndHangup({ reason: "completed", result });
+	}
+
+	/**
 	 * Signal an execution by id, or the open execution of `{ task, key }` that holds the key.
-	 * Idempotent by signal id: resending an id stores the signal once.
+	 * Idempotent by signal id: resending an id stores the signal once. With `at`, the signal is
+	 * delivered at that time (see `conductor.signal()`).
 	 * @returns false if the execution is completed, failed, cancelled or unknown, or no open
 	 * execution holds the key
 	 */
 	async sendSignal<TName extends TaskName<Tasks>, TQueue extends string = "default">(
 		target: string | KeyedExecution<TName, TQueue>,
 		signal: SignalMessage,
+		options: SignalOptions = {},
 	): Promise<boolean> {
 		return this.opts.db.signalExecution(
-			{ ...signalTarget(target), signal },
+			{ ...signalTarget(target), signal: { ...signal, at: options.at } },
 			{ signal: this.signal },
 		);
 	}
 
 	/**
 	 * Signal the non-terminal execution of a task for `key`, or start one that receives the
-	 * signal first. Memoized by the step key.
-	 * @returns ID of the execution that received the signal
+	 * signal first. Memoized by the step key. An exclusive listen in `listen` whose name another
+	 * open execution of the task holds throws a `ListenHeldError` and starts nothing.
+	 * @returns ID of the execution that received the signal, and whether this call started it
 	 */
 	async signalWithStart<
 		TName extends TaskName<Tasks>,
@@ -1074,7 +1116,7 @@ export class TaskContext<
 			 */
 			metadata?: Metadata | ((metadata: Readonly<Metadata> | undefined) => Metadata);
 		},
-	): Promise<string> {
+	): Promise<StartedExecution> {
 		await this.checkpoint();
 		const metadata = await this.childMetadata(options.metadata);
 		const queue = options.queue || "default";
@@ -1086,7 +1128,7 @@ export class TaskContext<
 				options.state,
 			));
 
-		const id = await this.opts.db.signalWithStartStep(
+		const started = await this.opts.db.signalWithStartStep(
 			{
 				executionId: this.opts.execution.id,
 				queue: this.opts.execution.queue,
@@ -1108,7 +1150,7 @@ export class TaskContext<
 			},
 			{ signal: this.signal },
 		);
-		return id || this.abortAndHangup({ reason: "suspended" });
+		return started || this.abortAndHangup({ reason: "suspended" });
 	}
 
 	/**

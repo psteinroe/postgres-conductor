@@ -286,11 +286,42 @@ await ctx.unlisten("thread");
 
 - A listen lasts across attempts and activations until `ctx.unlisten()` or the end of the
   execution. A signal wakes an idle actor, so a listening actor sleeps until its events arrive
+- Listens end with their execution: once it completes, fails or is cancelled, they are removed,
+  and reads no longer return them
 - Events emitted after `listen()` resolves reach it. An event that matches several listens of one
-  execution arrives once
-- Listening again under a name replaces its listen, unless event and filter stay the same
+  execution arrives once, and the handler's second argument names them all (`listens`)
+- Listening again under a name replaces its listen, unless event, filter and `exclusive` stay the
+  same
 - `signalWithStart({ listen })` registers listens by name when it starts the execution, so events
   emitted right after the start reach it before its first activation
+
+### Exclusive Listens
+
+An exclusive listen holds its name: while an open execution of the task listens exclusively under
+a name, no other execution of the task can. Use it for "one execution per conversation":
+
+```typescript
+try {
+  await conductor.signalWithStart({
+    task: "conversation",
+    key: workerId,
+    signal: { name: "start", id: `start:${workerId}` },
+    listen: { [threadKey]: { event: chatMessage, filter: { threadId: [threadId] }, exclusive: true } },
+  });
+} catch (error) {
+  if (!(error instanceof ListenHeldError)) throw error;
+  // error.heldBy is the execution that follows the conversation
+  await conductor.signal(error.heldBy, { name: "message", id: requestId, payload });
+}
+```
+
+- A refused `ctx.listen()` or `signalWithStart()` throws a `ListenHeldError` with the listen's name
+  (`listen`) and the execution that holds it (`heldBy`), and writes nothing: `signalWithStart()`
+  starts no execution, `ctx.listen()` adds no listen
+- The check is atomic: of executions listening under a name at once, exactly one holds it
+- The holder may listen again under its name. An execution that ended holds no name
+- Only exclusive listens hold names: a listen without `exclusive` under the same name is neither
+  refused nor refuses others
 
 A trigger with `unlistened: true` fires only for the events no execution listens for, for example
 to route an event to whoever handles it, and the rest to a default handler:

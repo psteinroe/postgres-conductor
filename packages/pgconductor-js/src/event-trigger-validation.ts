@@ -146,8 +146,12 @@ export function compileEventFilter(
 	return { required_field_count: fields.length, terms };
 }
 
-/** A listen of an execution: matching events reach it as signals named after the event. */
-export type Listen = { event: { name: string }; filter?: unknown };
+/**
+ * A listen of an execution: matching events reach it as signals named after the event. An
+ * `exclusive` listen holds its name: no other open execution of the task may listen under it
+ * exclusively.
+ */
+export type Listen = { event: { name: string }; filter?: unknown; exclusive?: boolean };
 
 /** Compiles listens by name, as `ctx.listen()` and `signalWithStart()` take them. */
 export function compileListens(
@@ -160,6 +164,7 @@ export function compileListens(
 			name,
 			event_key: listen.event.name,
 			...compileEventFilter(listen.event.name, listen.filter, eventDefinitions),
+			exclusive: listen.exclusive || false,
 		};
 	});
 }

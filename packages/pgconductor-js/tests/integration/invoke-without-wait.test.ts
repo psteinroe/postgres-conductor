@@ -58,7 +58,7 @@ describe("ctx.invoke without waiting (Postgres integration)", () => {
 			{ name: "starter" },
 			{ invocable: true },
 			async (_e, ctx) => {
-				const id = await ctx.invoke(
+				const { id } = await ctx.invoke(
 					"start-work",
 					{ name: "work" },
 					{ value: 2 },
@@ -110,7 +110,7 @@ describe("ctx.invoke without waiting (Postgres integration)", () => {
 			{ name: "starter", maxAttempts: 2 },
 			{ invocable: true },
 			async (_e, ctx) => {
-				ids.push(await ctx.invoke("start-work", { name: "work" }, {}));
+				ids.push((await ctx.invoke("start-work", { name: "work" }, {})).id);
 				await ctx.sleep("pause", 0);
 				if (ids.length === 2) {
 					await db.sql`delete from pgconductor._private_steps where key = 'start-work'`;
@@ -163,7 +163,7 @@ describe("ctx.invoke without waiting (Postgres integration)", () => {
 			{ name: "starter" },
 			{ invocable: true },
 			async (_e, ctx) => {
-				return { id: await ctx.invoke("start-work", { name: "work" }, {}) };
+				return { id: (await ctx.invoke("start-work", { name: "work" }, {})).id };
 			},
 		);
 		const orchestrator = Orchestrator.create({ conductor, tasks: [starter, work] });
@@ -213,7 +213,7 @@ describe("ctx.invoke without waiting (Postgres integration)", () => {
 			{ name: "starter" },
 			{ invocable: true },
 			async (_e, ctx) => {
-				return { id: await ctx.invoke("start-work", { name: "work", queue: "children" }, {}) };
+				return { id: (await ctx.invoke("start-work", { name: "work", queue: "children" }, {})).id };
 			},
 		);
 		const orchestrator = Orchestrator.create({
@@ -258,7 +258,7 @@ describe("ctx.invoke without waiting (Postgres integration)", () => {
 			{ name: "starter" },
 			{ invocable: true },
 			async (_e, ctx) => {
-				workId = await ctx.invoke("start-work", { name: "work" }, {});
+				({ id: workId } = await ctx.invoke("start-work", { name: "work" }, {}));
 				await ctx.sleep("wait", 60 * 60 * 1000);
 			},
 		);
@@ -345,6 +345,7 @@ describe("ctx.invoke without waiting (Postgres integration)", () => {
 		});
 		const release = new Deferred<void>();
 		const ran: string[] = [];
+		const starts: { key: string; started: boolean }[] = [];
 		const work = conductor.createTask({ name: "work" }, { invocable: true }, async (event) => {
 			ran.push(event.payload.label);
 			await release.promise;
@@ -353,19 +354,32 @@ describe("ctx.invoke without waiting (Postgres integration)", () => {
 			{ name: "starter" },
 			{ invocable: true },
 			async (_e, ctx) => {
-				const id = await ctx.invoke(
+				const reconnect = await ctx.invoke(
 					"reconnect",
 					{ name: "work" },
 					{ label: "started" },
 					{ dedupe_key: "thread-1" },
 				);
-				return { id };
+				const fresh = await ctx.invoke(
+					"fresh",
+					{ name: "work" },
+					{ label: "fresh" },
+					{ dedupe_key: "thread-2" },
+				);
+				starts.push(
+					{ key: "reconnect", started: reconnect.started },
+					{ key: "fresh", started: fresh.started },
+				);
+				// A replay returns what the first call stored
+				await ctx.sleep("pause", 0);
+				return { id: reconnect.id };
 			},
 		);
 		const orchestrator = Orchestrator.create({
 			conductor,
 			tasks: [starter, work],
-			defaultWorker: { ...config, concurrency: 2 },
+			// both works block until released
+			defaultWorker: { ...config, concurrency: 3 },
 		});
 
 		await orchestrator.start();
@@ -379,11 +393,18 @@ describe("ctx.invoke without waiting (Postgres integration)", () => {
 		const { id } = await conductor.waitForResult({ name: "starter" }, starterId, {
 			pollIntervalMs: 10,
 		});
+		await waitForCondition(() => ran.length === 2);
 		release.resolve();
 		await conductor.waitForResult(existingId, { pollIntervalMs: 10 });
 		await orchestrator.stop();
 
 		expect(id).toBe(existingId);
-		expect(ran).toEqual(["existing"]);
+		expect(ran).toEqual(["existing", "fresh"]);
+		// whether a call started the execution, also when replayed
+		const firstCall = [
+			{ key: "reconnect", started: false },
+			{ key: "fresh", started: true },
+		];
+		expect(starts).toEqual([...firstCall, ...firstCall]);
 	});
 });

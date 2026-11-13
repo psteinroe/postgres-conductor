@@ -391,7 +391,7 @@ describe("ctx.waitForAny signal branches (Postgres integration)", () => {
 				ctx.onSignal("input", (_payload: unknown, info: { id: string }) => {
 					received[id] = [...(received[id] || []), info.id];
 				});
-				const toolId = await ctx.invoke("start", { name: "tool" });
+				const { id: toolId } = await ctx.invoke("start", { name: "tool" });
 				const winner = await ctx.waitForAny("idle", {
 					input: { signal: "input" },
 					tool: { execution: toolId },
@@ -437,7 +437,7 @@ describe("ctx.waitForAny signal branches (Postgres integration)", () => {
 				ctx.onSignal("input", (_payload: unknown, { id }: { id: string }) => {
 					inputs.push(id);
 				});
-				const toolId = await ctx.invoke("start-tool", { name: "tool" });
+				const { id: toolId } = await ctx.invoke("start-tool", { name: "tool" });
 				for (let n = 0; ; n++) {
 					const winner = await ctx.waitForAny(`idle:${n}`, {
 						input: { signal: "input" },
@@ -450,12 +450,14 @@ describe("ctx.waitForAny signal branches (Postgres integration)", () => {
 			tool: () => release.promise,
 		});
 		const start = (id: string) =>
-			conductor.signalWithStart({
-				task: "session",
-				key: "thread-1",
-				signal: { name: "input", id },
-				input: { id: "keyed" },
-			});
+			conductor
+				.signalWithStart({
+					task: "session",
+					key: "thread-1",
+					signal: { name: "input", id },
+					input: { id: "keyed" },
+				})
+				.then(({ id }) => id);
 		// The wait the session suspends at depends on whether "first" was delivered before it
 		const suspended = async (sessionId: string) => {
 			let key: string | null = null;
@@ -650,5 +652,60 @@ describe("ctx.waitForAny signal branches (Postgres integration)", () => {
 		await start();
 		await conductor.waitForResult(late, { pollIntervalMs: 10 });
 		expect(await step(database, late, "idle")).toEqual({ key: "timeout" });
+	});
+
+	test("a delayed signal wins a wait only once due, stored before or while it waits", async () => {
+		const database = await db();
+		await database.clock.set(new Date("2024-01-01T12:00:00Z"));
+		const hour = 60 * 60 * 1000;
+		let early: Date | undefined;
+		const handled: string[] = [];
+		const { conductor } = await setup(database, {
+			session: async (id, ctx) => {
+				ctx.onSignal("input", (_payload: unknown, info: { id: string }) => {
+					handled.push(info.id);
+				});
+				// On a resume, the handler delivers the signal that woke the wait before it registers again
+				await new Promise((resolve) => setTimeout(resolve, 100));
+				if (id === "before" && !early) {
+					early = new Date(database.clock.now().getTime() + hour);
+					await ctx.sendSignal(ctx.executionId, { name: "input", id: "early" }, { at: early });
+				}
+				await ctx.waitForAny("idle", { input: { signal: "input" } }, { timeout: "10h" });
+			},
+			clock: true,
+		});
+		const runAt = async (sessionId: string) => {
+			const [row] = await database.sql<{ run_at: Date }[]>`
+				select run_at from pgconductor._private_executions where id = ${sessionId}::uuid
+			`;
+			return row?.run_at;
+		};
+
+		const before = await conductor.invoke({ name: "session" }, { id: "before" });
+		await suspendedAt(database, before, "idle");
+		// It sleeps until the signal is due, not until the timeout
+		expect(await runAt(before)).toEqual(early);
+		expect(await step(database, before, "idle:input")).toBeUndefined();
+
+		const during = await conductor.invoke({ name: "session" }, { id: "during" });
+		await suspendedAt(database, during, "idle");
+		const late = new Date(database.clock.now().getTime() + 2 * hour);
+		await conductor.signal(during, { name: "input", id: "late" }, { at: late });
+		expect(await runAt(during)).toEqual(late);
+		expect(await step(database, during, "idle:input")).toBeUndefined();
+
+		await database.clock.advance("3h");
+		await conductor.waitForResult(before, { pollIntervalMs: 10 });
+		await conductor.waitForResult(during, { pollIntervalMs: 10 });
+		expect(await step(database, before, "idle")).toEqual({
+			key: "input",
+			signal: { id: "early", name: "input", payload: null },
+		});
+		expect(await step(database, during, "idle")).toEqual({
+			key: "input",
+			signal: { id: "late", name: "input", payload: null },
+		});
+		expect(handled).toEqual(expect.arrayContaining(["early", "late"]));
 	});
 });

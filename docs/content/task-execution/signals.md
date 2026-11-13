@@ -22,6 +22,8 @@ const session = conductor.createTask(
 );
 ```
 
+The second argument of a handler holds the signal's `id`, its `name` and `listens`: for a signal that delivers an event the execution [listens](../crafting-tasks/triggers.md#listening-for-events) for, the names of its listens the event matched, in the order they were created; empty for any other signal.
+
 - Signals stored before the handler started are delivered first, in the order they were sent. The worker reads them when it claims the execution, so a listener receives them as soon as it registers
 - Later signals are delivered while the handler runs. The worker reads them with its next claim, so they arrive within about one `pollIntervalMs`
 - Handlers run one at a time. The payload is any JSON value
@@ -39,7 +41,7 @@ const session = conductor.createTask(
   { invocable: true },
   async (event, ctx) => {
     ctx.onSignal("input", (payload, { id }) => saveInput(id, payload));
-    const toolId = await ctx.invoke("start-tool", { name: "run-tool" }, event.payload);
+    const { id: toolId } = await ctx.invoke("start-tool", { name: "run-tool" }, event.payload);
 
     for (let n = 0; ; n++) {
       await processSavedInputs(ctx, n);
@@ -109,6 +111,22 @@ const stored = await conductor.signal(executionId, {
 
 Each signal has an `id`. Sending an id again stores it once, so a retried send is safe.
 
+### Delayed Signals
+
+With `at`, a signal is stored now and delivered at that time:
+
+```typescript
+await conductor.signal(
+  executionId,
+  { name: "expire", id: `expire:${expiresAt.toISOString()}` },
+  { at: expiresAt },
+);
+```
+
+- Before `at`, no handler receives it and it wakes nothing. A running execution receives it with the worker's first poll after `at`; an idle [actor](actors.md) wakes at `at`, or at its alarm if that is earlier; an execution waiting in `ctx.waitForAny()` with a branch for its name wakes at `at` and the signal wins
+- A time that passed delivers it at once
+- It is deduplicated by id like any signal, and `ctx.sendSignal()` takes the same option
+- An execution that completes before `at` drops it, like any undelivered signal
 ### By Key
 
 An execution started by [`signalWithStart()`](#signal-or-start) holds its key while it is pending or running. Signal it by its task and key, without reading its ID first:
@@ -132,15 +150,16 @@ const stopped = await conductor.signal(
 `signalWithStart()` makes a task execution addressable by a key. It signals the execution of the task for that key, or starts one that receives the signal first:
 
 ```typescript
-const executionId = await conductor.signalWithStart({
+const { id, started } = await conductor.signalWithStart({
   task: "session",
   key: "slack:T1:C1:1712345678.000100",
   signal: { name: "input", id: requestId, payload },
   input: {}, // payload of the execution, used only when it starts one (default: {})
 });
+// started: whether this call started the execution
 ```
 
-- At most one non-terminal execution exists per task and key. Concurrent calls for a key start one execution
+- At most one non-terminal execution exists per task and key. Concurrent calls for a key start one execution, and exactly one of them returns `started: true`
 - A completed, failed or cancelled execution does not hold its key, so the next call starts a new execution
 - The call runs in one transaction under a lock on the task and key
 
@@ -152,8 +171,8 @@ An execution that should live on for its key, sleeping between messages, is an [
 await ctx.sendSignal(executionId, { name: "input", id: "report-1", payload });
 await ctx.sendSignal({ task: { name: "session" }, key: threadKey }, { name: "stop", id: "stop-1" });
 
-// memoized by the step key like other context operations
-const sessionId = await ctx.signalWithStart("start-session", {
+// memoized by the step key like other context operations, with whether it started the execution
+const { id: sessionId, started } = await ctx.signalWithStart("start-session", {
   task: "session",
   key: threadKey,
   signal: { name: "input", id: messageId, payload },
@@ -170,6 +189,8 @@ No signal is lost when the handler returns:
 
 - **Completion:** when the handler returns, the attempt first delivers the signals it has already read to their listeners. Settlement then checks, in the same transaction, for signals the attempt listens for but did not deliver, which are ones stored after the worker last read them. If there are any, the execution is not completed but re-queued, and the new attempt receives them when it starts. Its result is discarded and the re-run does not count as an attempt
 - **Signals with no listener:** a signal whose name the attempt never listened for does not re-queue it. The execution completes and the signal is not delivered
+- **Delayed signals** not yet due do not re-queue it either
+- **`ctx.complete()`:** an execution that completes itself is never re-queued; its undelivered signals are dropped
 - **Retries:** a failed attempt delivers its remaining signals to the next attempt
 - **Sleeping or waiting:** signals for an execution that sleeps, waits for a child or waits for an event are kept and delivered when its handler next runs. A signal does not wake it, unless it waits in `ctx.waitForAny()` with a signal branch for its name
 - **Pending executions** receive their signals when they first run

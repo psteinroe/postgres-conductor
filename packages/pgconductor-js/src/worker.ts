@@ -587,6 +587,19 @@ export class Worker<
 				taskAbortController.abort({ reason: "signal-failed", error: error.message });
 			},
 		});
+		// A completion validates the result first. One by ctx.complete() is final: undelivered
+		// signals do not re-queue it
+		const complete = async (output: unknown, final: boolean): Promise<ExecutionResult> => {
+			const result = await parseResult(task, output);
+			if ("error" in result) return { ...identity, ...result };
+			return {
+				...identity,
+				status: "completed",
+				result: result.value as Payload | undefined,
+				signal_names: signals.names,
+				...(final && { final }),
+			};
+		};
 		// Signals stored before the claim are ready when the handler registers its listener
 		for (const stored of exec.signals) signals.push(stored);
 		this._running.set(exec.id, {
@@ -716,6 +729,8 @@ export class Worker<
 							reschedule_in_ms: output.reschedule_in_ms,
 							step_key: output.step_key,
 						} as const;
+					case "completed":
+						return complete(output.result, true);
 					default:
 						assert.never(output);
 				}
@@ -741,15 +756,7 @@ export class Worker<
 				} as const;
 			}
 
-			const result = await parseResult(task, outcome.output);
-			if ("error" in result) return { ...identity, ...result };
-
-			return {
-				...identity,
-				status: "completed",
-				result: result.value as Payload | undefined,
-				signal_names: signals.names,
-			} as const;
+			return complete(outcome.output, false);
 		} catch (err) {
 			// A handler that stops on ctx.signal during shutdown is released, not failed
 			if (this.signal.aborted) {

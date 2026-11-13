@@ -66,13 +66,15 @@ export type DispatchCustomEventsArgs = {
 	orchestratorId: string;
 };
 
-/** An event dispatch matched to a listen of an execution, delivered as a signal. */
+/** An event dispatch matched to listens of an execution, delivered as a signal. */
 export type ListenDelivery = {
 	execution_id: string;
 	queue: string;
 	event_id: string;
 	event_key: string;
 	payload: Payload;
+	/** Names of the listens the event matched */
+	listens: string[];
 };
 
 /** A listen as `ctx.listen()` and `signalWithStart()` register it. */
@@ -81,6 +83,8 @@ export type ListenSpec = {
 	event_key: string;
 	required_field_count: number;
 	terms: EventFilterTerm[];
+	/** No other open execution of the task may hold the name exclusively */
+	exclusive: boolean;
 };
 
 export type ListListenersArgs = {
@@ -98,6 +102,9 @@ export type SetListensArgs = {
 	listens: ListenSpec[];
 	unlisten: string[];
 };
+
+/** An execution a call started, or found holding its key */
+export type StartedExecution = { id: string; started: boolean };
 
 export type RegisterWorkerArgs = {
 	queueName: string;
@@ -228,12 +235,15 @@ export type SignalArgs = {
 	payload?: JsonValue;
 };
 
+/** A signal sent by `conductor.signal()` or `ctx.sendSignal()`, delivered at `at` when given */
+export type SentSignalArgs = SignalArgs & { at?: Date | null };
+
 /** Signals an execution by id, or the open execution of `task` holding `key` */
 export type SignalExecutionArgs = (
 	| { executionId: string }
 	| { task: { key: string; queue: string }; key: string }
 ) & {
-	signal: SignalArgs;
+	signal: SentSignalArgs;
 };
 
 export type SignalWithStartArgs = {
@@ -362,13 +372,15 @@ export class QueryBuilder {
 	buildSignalExecution(args: SignalExecutionArgs): PendingQuery<[{ stored: boolean }]> {
 		const { signal } = args;
 		const payload = signal.payload === undefined ? null : this.sql.json(signal.payload);
+		const at = signal.at ? signal.at.toISOString() : null;
 		if ("executionId" in args) {
 			return this.sql<[{ stored: boolean }]>`
 				select pgconductor.signal_execution(
 					${args.executionId}::uuid,
 					${signal.name}::text,
 					${signal.id}::text,
-					${payload}::jsonb
+					${payload}::jsonb,
+					${at}::timestamptz
 				) as stored
 			`;
 		}
@@ -379,7 +391,8 @@ export class QueryBuilder {
 				${args.key}::text,
 				${signal.name}::text,
 				${signal.id}::text,
-				${payload}::jsonb
+				${payload}::jsonb,
+				${at}::timestamptz
 			) as stored
 		`;
 	}
@@ -395,9 +408,9 @@ export class QueryBuilder {
 		metadata,
 		state,
 		listens,
-	}: SignalWithStartArgs): PendingQuery<[{ id: string }]> {
-		return this.sql<[{ id: string }]>`
-			select pgconductor.signal_with_start(
+	}: SignalWithStartArgs): PendingQuery<[StartedExecution]> {
+		return this.sql<[StartedExecution]>`
+			select id, started from pgconductor.signal_with_start(
 				p_task_key := ${taskKey}::text,
 				p_queue := ${queue}::text,
 				p_key := ${key}::text,
@@ -410,12 +423,12 @@ export class QueryBuilder {
 				p_priority := ${priority || null}::integer,
 				p_state := ${state ? this.sql.json(state) : null}::jsonb,
 				p_listens := ${listens?.length ? this.sql.json(listens) : null}::jsonb
-			) as id
+			)
 		`;
 	}
 
-	// Memoizes the id as a step of the claimed execution in the same statement, so a replay
-	// returns the id stored by the first call
+	// Memoizes the id, and whether the call started it, as a step of the claimed execution in the
+	// same statement, so a replay returns what the first call stored
 	buildSignalWithStartStep({
 		executionId,
 		queue,
@@ -423,9 +436,9 @@ export class QueryBuilder {
 		claimToken,
 		key,
 		target,
-	}: SignalWithStartStepArgs): PendingQuery<{ id: string }[]> {
+	}: SignalWithStartStepArgs): PendingQuery<StartedExecution[]> {
 		const { signal, input, priority, traceContext, metadata, state, listens } = target;
-		return this.sql<{ id: string }[]>`
+		return this.sql<StartedExecution[]>`
 			with claimed_execution as materialized (
 				select e.id, e.queue
 				from pgconductor._private_executions e
@@ -435,10 +448,11 @@ export class QueryBuilder {
 					and e.claim_token = ${claimToken}::uuid
 				for update
 			), stored_step as (
-				select (s.result->>'result')::uuid as id
+				select (s.result->>'id')::uuid as id, (s.result->>'started')::boolean as started
 				from pgconductor._private_steps s, claimed_execution c
 				where s.execution_id = c.id and s.key = ${key}::text
-			), signalled as materialized (
+			), sent as materialized (
+				-- in the target list, so it runs only when no step is stored
 				select pgconductor.signal_with_start(
 					p_task_key := ${target.taskKey}::text,
 					p_queue := ${target.queue}::text,
@@ -452,17 +466,19 @@ export class QueryBuilder {
 					p_priority := ${priority || null}::integer,
 					p_state := ${state ? this.sql.json(state) : null}::jsonb,
 					p_listens := ${listens?.length ? this.sql.json(listens) : null}::jsonb
-				) as id
+				) as started
 				from claimed_execution
 				where not exists (select from stored_step)
+			), signalled as (
+				select (started).id, (started).started from sent
 			), saved_step as (
 				insert into pgconductor._private_steps (execution_id, queue, key, result)
-				select c.id, c.queue, ${key}::text, jsonb_build_object('result', s.id)
+				select c.id, c.queue, ${key}::text, jsonb_build_object('id', s.id, 'started', s.started)
 				from claimed_execution c, signalled s
 			)
-			select id from stored_step
+			select id, started from stored_step
 			union all
-			select id from signalled
+			select id, started from signalled
 		`;
 	}
 
@@ -641,6 +657,41 @@ export class QueryBuilder {
 					e.locked_by, e.claim_token, e."group", e.priority, e.run_at, e.created_at,
 					e.subscription_id, e.parent_execution_id, e.trace_context, e.metadata, e.dead_letter,
 					e.signal_count, e.state
+			),
+			-- A delayed signal that came due resolves the signal branches of the wait it wakes, as
+			-- _private_store_signal() resolves them for a signal stored while the execution waits, so
+			-- a handler delivering it first does not take it from the wait
+			due_signal_branches as (
+				select distinct on (subscription.id) c.id as execution_id, c.queue, subscription.step_key,
+					s.id, s.name, s.payload
+				from claimed c
+				join pgconductor._private_custom_event_subscriptions subscription
+					on subscription.execution_id = c.id
+					and subscription.kind = 'execution_wait'
+					and subscription.signal_name is not null
+				join pgconductor._private_execution_signals s
+					on s.execution_id = c.id
+					and s.name = subscription.signal_name
+					and s.delivered_at is null
+					and s.deliver_at <= (select now_ts from claim_clock)
+				where c.signal_count > 0
+					and (subscription.expires_at is null or subscription.expires_at >= s.deliver_at)
+				order by subscription.id, s.seq
+			), due_signal_steps as (
+				insert into pgconductor._private_steps (execution_id, queue, key, result)
+				select b.execution_id, b.queue, b.step_key, jsonb_build_object(
+					'status', 'resolved',
+					'signal', jsonb_build_object('id', b.id, 'name', b.name, 'payload', b.payload)
+				)
+				from due_signal_branches b
+				on conflict (execution_id, key) do nothing
+				returning execution_id, key
+			), resolved_signal_waits as (
+				delete from pgconductor._private_custom_event_subscriptions subscription
+				using due_signal_steps step
+				where subscription.kind = 'execution_wait'
+					and subscription.execution_id = step.execution_id
+					and subscription.step_key = step.key
 			),${
 				held
 					? this.sql`
@@ -667,28 +718,38 @@ export class QueryBuilder {
 					and e.locked_by = ${orchestratorId}::uuid
 					and e.claim_token = r.claim_token
 			), running_signals as (
-				-- an execution that listens for no signal has a null after_seq
-				select s.execution_id, s.seq, s.id, s.name, s.payload
+				-- an execution that listens for no signal has a null after_seq. A delayed signal is
+				-- read once due, whatever its seq, until it is delivered; the inbox skips ids it has
+				select s.execution_id, s.seq, s.id, s.name, s.payload, s.listens
 				from running r
 				join pgconductor._private_execution_signals s
 					on s.execution_id = r.id
 					and s.delivered_at is null
-					and s.seq > r.after_seq
+					and r.after_seq is not null
+					and (
+						(s.deliver_at is null and s.seq > r.after_seq)
+						or s.deliver_at <= (select now_ts from claim_clock)
+					)
 				where not r.cancelled
 			)
 			select
 				coalesce((
 					select jsonb_agg(
-						(to_jsonb(c) - 'priority' - 'run_at' - 'created_at' - 'signal_count')
+						(to_jsonb(c) - 'priority' - 'run_at' - 'signal_count')
 						-- Signals stored before the attempt starts are delivered before the next poll.
 						-- The claim holds the row lock senders take, so later ones have a higher seq.
+						-- Delayed signals not yet due are read by a later poll.
 						|| jsonb_build_object('signals', case when c.signal_count > 0 then coalesce((
 							select jsonb_agg(
-								jsonb_build_object('seq', s.seq, 'id', s.id, 'name', s.name, 'payload', s.payload)
+								jsonb_build_object(
+									'seq', s.seq, 'id', s.id, 'name', s.name, 'payload', s.payload,
+									'listens', s.listens
+								)
 								order by s.seq
 							)
 							from pgconductor._private_execution_signals s
 							where s.execution_id = c.id and s.delivered_at is null
+								and (s.deliver_at is null or s.deliver_at <= (select now_ts from claim_clock))
 						), '[]'::jsonb) else '[]'::jsonb end)
 						|| jsonb_build_object('listens', to_jsonb(${this.listensOf(this.sql`c.id`)}))
 						order by c.priority asc, c.run_at asc, c.created_at asc, c.id asc
@@ -736,7 +797,7 @@ export class QueryBuilder {
 				result jsonb, error text,
 				reschedule_in_ms bigint, step_key text, timeout_ms bigint,
 				child_task_name text, child_task_queue text, child_payload jsonb,
-				"group" text, trace_context jsonb, metadata jsonb, signal_names jsonb
+				"group" text, trace_context jsonb, metadata jsonb, signal_names jsonb, final boolean
 			)
 		)`);
 		// Lock the claimed rows for the whole statement. This prevents recovery or a
@@ -774,7 +835,8 @@ export class QueryBuilder {
 		// A completion, or an actor going idle, must not drop signals the handler did not get.
 		// signal_count comes from the locked row, so it counts signals committed after this
 		// statement's snapshot, which the count below cannot see. Signals named by no listener of
-		// the attempt do not re-queue it.
+		// the attempt, and delayed signals not yet due, do not re-queue it, nor does anything
+		// re-queue an execution that ended itself (ctx.complete(), a final result).
 		ctes.push(this.sql`signal_requeued as materialized (
 			select c.execution_id
 			from (
@@ -783,6 +845,7 @@ export class QueryBuilder {
 				select * from idle_candidates
 			) c
 			where c.execution_signal_count > 0
+				and c.final is not true
 				and (
 					c.execution_signal_count > (
 						select count(*) from pgconductor._private_execution_signals s
@@ -792,6 +855,7 @@ export class QueryBuilder {
 						select 1 from pgconductor._private_execution_signals s
 						where s.execution_id = c.execution_id
 							and s.delivered_at is null
+							and (s.deliver_at is null or s.deliver_at <= (select ts from now_ts))
 							and s.name in (
 								select jsonb_array_elements_text(coalesce(c.signal_names, '[]'::jsonb))
 							)
@@ -814,13 +878,19 @@ export class QueryBuilder {
 				and e.locked_by = ${orchestratorId}::uuid
 			returning e.id
 		)`);
-		// An idle actor sleeps until its alarm, and a signal wakes it earlier (_private_store_signal).
-		// Each activation gets its own attempts.
+		// An idle actor sleeps until its alarm or its next delayed signal, and a signal wakes it
+		// earlier (_private_store_signal). Each activation gets its own attempts.
 		ctes.push(this.sql`updated_idle as (
 			update pgconductor._private_executions e
 			set attempts = 0, waiting_step_key = 'pgconductor.idle',
-				run_at = case when r.reschedule_in_ms = -1 then 'infinity'::timestamptz
-					else nt.ts + r.reschedule_in_ms * interval '1 millisecond' end,
+				run_at = least(
+					case when r.reschedule_in_ms = -1 then 'infinity'::timestamptz
+						else nt.ts + r.reschedule_in_ms * interval '1 millisecond' end,
+					(
+						select min(s.deliver_at) from pgconductor._private_execution_signals s
+						where s.execution_id = e.id and s.delivered_at is null and s.deliver_at > nt.ts
+					)
+				),
 				locked_by = null, locked_at = null
 			from now_ts nt, idle_candidates r
 			where e.id = r.execution_id and e.queue = ${queue}
@@ -969,15 +1039,17 @@ export class QueryBuilder {
 				and p.should_remove is not true
 			returning e.id
 		)`);
-		ctes.push(this.sql`cleaned_terminal_event_waits as (
+		// Waits and listens end with their execution
+		ctes.push(this.sql`cleaned_terminal_subscriptions as (
 			delete from pgconductor._private_custom_event_subscriptions subscription
 			using (
 				select id from updated_completed
 				union all
 				select id from updated_failed
+				union all
+				select id from orphaned_children
 			) terminal
-			where subscription.kind = 'execution_wait'
-				and subscription.execution_id = terminal.id
+			where subscription.execution_id = terminal.id
 				and subscription.queue = ${queue}
 			returning subscription.id
 		)`);
@@ -1072,7 +1144,7 @@ export class QueryBuilder {
 			union all select 1 from dead_lettered
 			union all select 1 from deleted_failed
 			union all select 1 from updated_failed
-			union all select 1 from cleaned_terminal_event_waits
+			union all select 1 from cleaned_terminal_subscriptions
 			union all select 1 from resolved_result_waits
 			union all select 1 from retried
 			union all select 1 from released_steps
@@ -1523,9 +1595,12 @@ export class QueryBuilder {
 		key,
 		spec,
 		cancelWithParent,
-	}: StartExecutionArgs): PendingQuery<{ id: string }[]> {
-		return this.sql<{ id: string }[]>`
-			with claimed_execution as materialized (
+	}: StartExecutionArgs): PendingQuery<StartedExecution[]> {
+		// The new id is drawn first: an existing execution holding the dedupe key returns its own
+		return this.sql<StartedExecution[]>`
+			with new_execution as materialized (
+				select pgconductor._private_portable_uuidv7() as id
+			), claimed_execution as materialized (
 				select e.id, e.queue
 				from pgconductor._private_executions e
 				where e.id = ${executionId}::uuid
@@ -1534,7 +1609,7 @@ export class QueryBuilder {
 					and e.claim_token = ${claimToken}::uuid
 				for update
 			), stored_step as (
-				select (s.result->>'id')::uuid as id
+				select (s.result->>'id')::uuid as id, (s.result->>'started')::boolean as started
 				from pgconductor._private_steps s, claimed_execution c
 				where s.execution_id = c.id and s.key = ${key}::text
 			), started_execution as (
@@ -1543,7 +1618,7 @@ export class QueryBuilder {
 					parent_execution_id, cancel_with_parent
 				)
 				select
-					pgconductor._private_portable_uuidv7(),
+					(select id from new_execution),
 					${spec.task_key}::text,
 					${spec.queue}::text,
 					${spec.payload ? this.sql.json(spec.payload) : null}::jsonb,
@@ -1559,16 +1634,16 @@ export class QueryBuilder {
 				where not exists (select from stored_step)
 				on conflict (task_key, dedupe_key, queue) where singleton_on is null
 				do update set dedupe_key = excluded.dedupe_key
-				returning e.id
+				returning e.id, e.id = (select id from new_execution) as started
 			), saved_step as (
 				insert into pgconductor._private_steps (execution_id, queue, key, result)
-				select c.id, c.queue, ${key}::text, jsonb_build_object('id', s.id)
+				select c.id, c.queue, ${key}::text, jsonb_build_object('id', s.id, 'started', s.started)
 				from claimed_execution c, started_execution s
 				on conflict (execution_id, key) do nothing
 			)
-			select id from stored_step
+			select id, started from stored_step
 			union all
-			select id from started_execution
+			select id, started from started_execution
 		`;
 	}
 
@@ -1700,8 +1775,13 @@ export class QueryBuilder {
 				for update of source
 			), ${this.matchSubscriptions()}, listens as materialized (
 				-- delivered by a second statement, which locks the listening executions, so this
-				-- one locks no executions but the waits'
-				select distinct matched.event_id, subscription.execution_id, subscription.queue
+				-- one locks no executions but the waits'. One delivery per execution, with the names
+				-- of the listens the event matched
+				select matched.event_id, subscription.execution_id, subscription.queue,
+					array_agg(
+						substr(subscription.step_key, length('pgconductor.listen:') + 1)
+						order by subscription.created_at, subscription.id
+					) as names
 				from matched_subscriptions matched
 				join pgconductor._private_custom_event_subscriptions subscription
 					on subscription.id = matched.subscription_id
@@ -1714,6 +1794,7 @@ export class QueryBuilder {
 					and execution.completed_at is null
 					and execution.failed_at is null
 					and not execution.cancelled
+				group by matched.event_id, subscription.execution_id, subscription.queue
 			), candidates as materialized (
 				select matched.event_id, subscription.id as subscription_id,
 					subscription.task_key, subscription.queue, subscription.payload_fields
@@ -1836,7 +1917,8 @@ export class QueryBuilder {
 					'queue', l.queue,
 					'event_id', source.event_id,
 					'event_key', source.event_key,
-					'payload', source.event_payload
+					'payload', source.event_payload,
+					'listens', l.names
 				) order by l.execution_id)
 				from listens l
 				where l.event_id = source.event_id

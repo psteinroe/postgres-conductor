@@ -89,6 +89,42 @@ describe("execution state types", () => {
 		});
 	});
 
+	test("ctx.complete takes the task's result, and starts report whether they started", () => {
+		conductor.createTask(
+			{ name: "report", queue: "reports" },
+			{ invocable: true },
+			async (_event, ctx) => {
+				expectTypeOf(ctx.createdAt).toEqualTypeOf<Date>();
+				if (false) {
+					await ctx.complete({ url: "https://example.com" });
+					// @ts-expect-error - not the task's result
+					await ctx.complete({ url: 1 });
+					// @ts-expect-error - the result is required
+					await ctx.complete();
+				}
+				return { url: "" };
+			},
+		);
+		// An actor's activation returns nothing, and it completes with its result
+		conductor.createTask(
+			{ name: "report", queue: "reports", actor: true },
+			{ invocable: true },
+			async (_event, ctx) => {
+				if (false) await ctx.complete({ url: "https://example.com" });
+			},
+		);
+		// A task without a result completes without one
+		conductor.createTask({ name: "plain" }, { invocable: true }, async (_event, ctx) => {
+			if (false) await ctx.complete();
+			expectTypeOf(
+				ctx.signalWithStart("start", { task: "agent", key: "k", signal: { name: "go", id: "1" } }),
+			).toEqualTypeOf<Promise<{ id: string; started: boolean }>>();
+		});
+		expectTypeOf(
+			conductor.signalWithStart({ task: "agent", key: "k", signal: { name: "go", id: "1" } }),
+		).toEqualTypeOf<Promise<{ id: string; started: boolean }>>();
+	});
+
 	test("without a state schema, state stays any JSON object", () => {
 		conductor.createTask({ name: "plain" }, { invocable: true }, async (_event, ctx) => {
 			expectTypeOf(ctx.state).toEqualTypeOf<Readonly<Payload> | null>();

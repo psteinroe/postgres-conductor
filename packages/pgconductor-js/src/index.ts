@@ -29,8 +29,10 @@ export type {
 	KeyedExecution,
 	SignalBranch,
 	SignalMessage,
+	SignalOptions,
 	WaitForAnyResult,
 } from "./task-context.js";
+export type { StartedExecution } from "./query-builder.js";
 export type { ReceivedSignal, SignalHandler, SignalInfo } from "./signal-inbox.js";
 export type { Middleware, MiddlewareExecution, MiddlewareResult } from "./middleware.js";
 export { defineTask } from "./task-definition.js";
@@ -54,6 +56,7 @@ export type {
 } from "./event-definition.js";
 export { defineEvent } from "./event-definition.js";
 export type { Listen } from "./event-trigger-validation.js";
+export { ListenHeldError } from "./database-client.js";
 export type {
 	EventInfo,
 	ExecutionInfo,

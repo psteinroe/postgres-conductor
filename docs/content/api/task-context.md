@@ -181,7 +181,7 @@ An `{ execution: id }` branch wins when that execution settles, with the same ou
 [`ctx.waitForResult()`](#ctxwaitforresult):
 
 ```typescript
-const toolId = await ctx.invoke("start-tool", { name: "run-tool" }, input);
+const { id: toolId } = await ctx.invoke("start-tool", { name: "run-tool" }, input);
 const click = await ctx.subscribe("click", { event: buttonClicked, filter: { toolId: [toolId] } });
 
 const winner = await ctx.waitForAny("tool-or-click", { tool: { execution: toolId }, click }, { timeout: "1h" });
@@ -327,10 +327,11 @@ const parent = conductor.createTask(
 
 ## ctx.invoke()
 
-Invoke a task without waiting for it and return the execution ID, like `conductor.invoke()`:
+Invoke a task without waiting for it and return the execution ID, and whether this call started
+it:
 
 ```typescript
-const executionId = await ctx.invoke(
+const { id, started } = await ctx.invoke(
   stepName: string,
   taskRef: { name: string, queue?: string },
   payload: TPayload,
@@ -342,7 +343,7 @@ const executionId = await ctx.invoke(
     group?: string,
     cancelWithParent?: boolean,
   }
-): Promise<string>
+): Promise<{ id: string, started: boolean }>
 ```
 
 **Example:**
@@ -352,7 +353,7 @@ const intake = conductor.createTask(
   { name: "intake" },
   { invocable: true },
   async (event, ctx) => {
-    const handoffId = await ctx.invoke("handoff", { name: "support-flow" }, event.payload);
+    const { id: handoffId } = await ctx.invoke("handoff", { name: "support-flow" }, event.payload);
     return { handoffId };
   }
 );
@@ -362,8 +363,8 @@ const result = await conductor.waitForResult({ name: "support-flow" }, handoffId
 ```
 
 **Behavior:**
-- Creates the execution and memoizes its ID under the step name in one statement, so retries
-  and resumes return the same ID
+- Creates the execution and memoizes its ID, and whether it started it, under the step name in
+  one statement, so retries and resumes return the same ID and `started`
 - The execution is independent: this task does not wait for it, its failure does not fail this
   task, and cancelling this task does not cancel it
 - With `cancelWithParent: true`, the execution is cancelled with this task's reason when this task
@@ -371,8 +372,8 @@ const result = await conductor.waitForResult({ name: "support-flow" }, handoffId
   same way. One that completed first stays completed. The link is set only when this call starts
   the execution
 - `dedupe_key` defaults to a key derived from this execution and the step name. Pass your own to
-  reconnect to an execution: if one of the task already holds the key, its ID is returned and
-  nothing is started, superseded or updated
+  reconnect to an execution: if one of the task already holds the key, its ID is returned with
+  `started: false`, and nothing is started, superseded or updated
 - The execution inherits `ctx.metadata` unless `metadata` overrides it
 - Wait for it with [`ctx.waitForResult()`](#ctxwaitforresult) or an `{ execution: id }` branch of
   `ctx.waitForAny()`, or read it by ID with `conductor.getExecution()`
@@ -398,7 +399,7 @@ const outcome = await ctx.waitForResult(
 **Example:**
 
 ```typescript
-const id = await ctx.invoke("start-tool", { name: "run-tool" }, input);
+const { id } = await ctx.invoke("start-tool", { name: "run-tool" }, input);
 await ctx.step("announce", () => postMessage("Tool started"));
 
 const outcome = await ctx.waitForResult("tool-result", { name: "run-tool" }, id, { timeout: "24h" });
@@ -436,10 +437,12 @@ if (outcome.status === "completed") {
 Listen for signals by name. Signals stored before the handler started are delivered first, in order. A signal handler that throws fails the attempt. See [Signals](../task-execution/signals.md).
 
 ```typescript
-ctx.onSignal("input", async (payload, { id, name }) => {
+ctx.onSignal("input", async (payload, { id, name, listens }) => {
   await handleInput(id, payload);
 });
 ```
+
+`listens` names the execution's [listens](../crafting-tasks/triggers.md#listening-for-events) that the event the signal delivers matched, in the order they were created; it is empty for a signal that did not come from a listen.
 
 ## ctx.untilIdle()
 
@@ -458,13 +461,33 @@ Only in an [actor](../task-execution/actors.md): wake it at `at` once the activa
 ctx.setAlarm(new Date(Date.now() + 60 * 60 * 1000));
 ```
 
+An alarm does not reach a running activation; a [delayed signal](../task-execution/signals.md#delayed-signals) does.
+
+## ctx.complete()
+
+Complete this execution with `result` and hang up. The result is typed by the task's `returns` and validated like a returned one; a task without `returns` completes without one. It is how an [actor](../task-execution/actors.md#ending-an-actor) ends, also from a signal handler or within `ctx.untilIdle()`. The execution completes for good: waiters receive the result, its listens end, and undelivered signals do not re-queue it.
+
+```typescript
+ctx.complete(result: Returns): Promise<never>
+
+ctx.onSignal("stop", async () => {
+  await ctx.complete({ summary: "stopped" });
+});
+```
+
 ## ctx.listen()
 
-Receive the events that match a filter as signals named after the event, until `ctx.unlisten()` or the end of the execution. The signal's payload is the event's, and its id the event's id. Listening again under a name replaces its listen, unless event and filter stay the same. Not memoized; it hangs up when the attempt no longer holds the execution. See [Listening for Events](../crafting-tasks/triggers.md#listening-for-events).
+Receive the events that match a filter as signals named after the event, until `ctx.unlisten()` or the end of the execution. The signal's payload is the event's, its id the event's id, and `listens` the names of the listens it matched. Listening again under a name replaces its listen, unless event, filter and `exclusive` stay the same. Not memoized; it hangs up when the attempt no longer holds the execution. See [Listening for Events](../crafting-tasks/triggers.md#listening-for-events).
 
 ```typescript
 ctx.onSignal("chat.message", (payload, { id }) => handle(id, payload));
 await ctx.listen("thread", { event: chatMessage, filter: { threadId: [threadId] } });
+```
+
+With `exclusive: true`, the name is held among the open executions of this task: while another one holds it, the call throws a `ListenHeldError` (`listen`, `heldBy`: the holder's execution ID) and listens for nothing. See [Exclusive Listens](../crafting-tasks/triggers.md#exclusive-listens).
+
+```typescript
+await ctx.listen(threadKey, { event: chatMessage, filter: { threadId: [threadId] }, exclusive: true });
 ```
 
 ## ctx.unlisten()
@@ -502,19 +525,21 @@ The state writes of an attempt run one after another, in the order they were cal
 
 ## ctx.sendSignal()
 
-Send a signal to an execution by ID, or to the non-terminal execution of a task that holds a key, like [`conductor.signal()`](conductor.md#conductorsignal). Idempotent by signal id. Returns `false` if the execution is completed, failed, cancelled or unknown, or no non-terminal execution holds the key. It starts nothing, so it takes no `metadata`.
+Send a signal to an execution by ID, or to the non-terminal execution of a task that holds a key, like [`conductor.signal()`](conductor.md#conductorsignal). Idempotent by signal id. Returns `false` if the execution is completed, failed, cancelled or unknown, or no non-terminal execution holds the key. It starts nothing, so it takes no `metadata`. With `at`, the signal is [delivered at that time](../task-execution/signals.md#delayed-signals).
 
 ```typescript
 await ctx.sendSignal(executionId, { name: "input", id: "report-1", payload });
 await ctx.sendSignal({ task: { name: "session" }, key: threadKey }, { name: "stop", id: "stop-1" });
+// delivered at expiresAt, also to this execution while it runs
+await ctx.sendSignal(ctx.executionId, { name: "expire", id: `expire:${expiresAt.toISOString()}` }, { at: expiresAt });
 ```
 
 ## ctx.signalWithStart()
 
-Like `conductor.signalWithStart()`, and validates `state` against the target task's state schema the same way. Sends the signal and memoizes the execution ID under the step key in one statement, so retries and resumes return that ID, also after the execution completed. An execution it starts inherits this execution's metadata unless `metadata` overrides it, as for `ctx.invoke()`. `metadata` applies only when the call starts the execution: a running one keeps its metadata.
+Like `conductor.signalWithStart()`, and validates `state` against the target task's state schema the same way. Sends the signal and memoizes the execution ID and whether it started the execution under the step key in one statement, so retries and resumes return the same `{ id, started }`, also after the execution completed. An execution it starts inherits this execution's metadata unless `metadata` overrides it, as for `ctx.invoke()`. `metadata` applies only when the call starts the execution: a running one keeps its metadata.
 
 ```typescript
-const sessionId = await ctx.signalWithStart("start-session", {
+const { id: sessionId, started } = await ctx.signalWithStart("start-session", {
   task: "session",
   key: threadKey,
   signal: { name: "input", id: messageId, payload },
@@ -681,6 +706,14 @@ The names of the current execution's [listens](../crafting-tasks/triggers.md#lis
 
 ```typescript
 ctx.listens: readonly string[]
+```
+
+## ctx.createdAt
+
+When the current execution was created:
+
+```typescript
+ctx.createdAt: Date
 ```
 
 ## ctx.executionId
