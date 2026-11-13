@@ -76,13 +76,15 @@ describe("execution state", () => {
 		await orchestrator.start();
 
 		const send = (key: string, owner: string, topic: string) =>
-			conductor.signalWithStart({
-				task: "worker",
-				key,
-				signal: { name: "topic", id: `${key}:${topic}`, payload: topic },
-				input: { owner },
-				state: { status: "new", topics: [] },
-			});
+			conductor
+				.signalWithStart({
+					task: "worker",
+					key,
+					signal: { name: "topic", id: `${key}:${topic}`, payload: topic },
+					input: { owner },
+					state: { status: "new", topics: [] },
+				})
+				.then(({ id }) => id);
 		const ann = await send("w1", "ann", "billing");
 		const bea = await send("w2", "bea", "export");
 		const busy = async () =>
@@ -158,7 +160,7 @@ describe("execution state", () => {
 		).rejects.toThrow(/^Invalid state for task "counter": count: /);
 		expect(await conductor.listExecutions({ task: { name: "counter" } })).toEqual([]);
 
-		const id = await conductor.signalWithStart({
+		const { id } = await conductor.signalWithStart({
 			task: "counter",
 			key: "first",
 			signal: { name: "go", id: "1" },

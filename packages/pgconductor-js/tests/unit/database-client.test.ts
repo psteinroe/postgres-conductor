@@ -62,7 +62,7 @@ describe("DatabaseClient retry behavior", () => {
 		const signal = new AbortController().signal;
 		const result = await db.startExecution(start, { signal });
 
-		expect(result).toBe("test-id");
+		expect(result).toEqual({ id: "test-id", started: false });
 		expect(attemptCount).toBe(3);
 	}, 10000);
 
@@ -214,7 +214,7 @@ describe("DatabaseClient retry behavior", () => {
 		const resultWithSignal = await db.startExecution(start, {
 			signal: new AbortController().signal,
 		});
-		expect(resultWithSignal).toBe("success-id");
+		expect(resultWithSignal).toEqual({ id: "success-id", started: false });
 		expect(attemptCount).toBe(1);
 
 		// Reset counter
@@ -257,7 +257,7 @@ describe("DatabaseClient retry behavior", () => {
 		const signal = new AbortController().signal;
 		const result = await db.startExecution(start, { signal });
 
-		expect(result).toBe("success-after-retry");
+		expect(result).toEqual({ id: "success-after-retry", started: false });
 		expect(attemptCount).toBe(2);
 	}, 10000);
 
@@ -286,7 +286,7 @@ describe("DatabaseClient retry behavior", () => {
 		const signal = new AbortController().signal;
 		const result = await db.startExecution(start, { signal });
 
-		expect(result).toBe("success-after-lock");
+		expect(result).toEqual({ id: "success-after-lock", started: false });
 		expect(attemptCount).toBe(2);
 	}, 10000);
 });

@@ -39,6 +39,7 @@ const expected = {
 			"BatchTaskContext",
 			"Conductor",
 			"EventSchemas",
+			"ListenHeldError",
 			"Orchestrator",
 			"Task",
 			"TaskContext",

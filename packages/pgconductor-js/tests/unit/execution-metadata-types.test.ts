@@ -45,7 +45,7 @@ describe("execution metadata types", () => {
 			);
 			expectTypeOf(
 				await ctx.invoke("start", { name: "worker" }, {}, { metadata: { tenant: "acme" } }),
-			).toEqualTypeOf<string>();
+			).toEqualTypeOf<{ id: string; started: boolean }>();
 			const signal = { name: "input", id: "1" };
 			await ctx.signalWithStart("session", {
 				task: "worker",

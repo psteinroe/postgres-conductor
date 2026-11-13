@@ -2,7 +2,15 @@ import type { JsonValue, StoredSignal } from "./database-client.js";
 import { AsyncQueue } from "./lib/async-queue.js";
 import { coerceError } from "./lib/coerce-error.js";
 
-export type SignalInfo = { id: string; name: string };
+export type SignalInfo = {
+	id: string;
+	name: string;
+	/**
+	 * Names of the execution's listens (`ctx.listen()`) that the event this signal carries matched,
+	 * in the order they were created; empty for a signal that did not come from a listen.
+	 */
+	listens: string[];
+};
 
 /** The signal that won a `{ signal: name }` branch of `ctx.waitForAny()`, with its payload. */
 export type ReceivedSignal<T extends JsonValue = JsonValue> = {
@@ -32,6 +40,8 @@ export type SignalInboxOptions = {
 export class SignalInbox {
 	private readonly handlers = new Map<string, SignalHandler>();
 	private readonly queue = new AsyncQueue<StoredSignal>(Infinity);
+	/** Ids received: a delayed signal is read on every poll until it is delivered */
+	private readonly ids = new Set<string>();
 	private lastSeq = 0;
 	private delivering: SignalInfo | null = null;
 	private holds = 0;
@@ -59,7 +69,10 @@ export class SignalInbox {
 		return this._started;
 	}
 
-	/** Sequence number of the last signal received, or null while nothing is read for this inbox */
+	/**
+	 * Highest sequence number received, or null while nothing is read for this inbox. Signals of an
+	 * execution are stored one at a time, so every immediate one below it was read.
+	 */
 	get afterSeq(): number | null {
 		return this.closed || this.handlers.size === 0 ? null : this.lastSeq;
 	}
@@ -75,10 +88,11 @@ export class SignalInbox {
 		this.consuming ||= this.consume();
 	}
 
-	/** Add an undelivered signal, in stored order; one received before is skipped */
+	/** Add an undelivered signal, in the order it is due; one received before is skipped */
 	push(signal: StoredSignal): void {
-		if (signal.seq <= this.lastSeq || this.closed) return;
-		this.lastSeq = signal.seq;
+		if (this.ids.has(signal.id) || this.closed) return;
+		this.ids.add(signal.id);
+		this.lastSeq = Math.max(this.lastSeq, signal.seq);
 		this.received++;
 		void this.queue.push(signal);
 	}
@@ -152,9 +166,10 @@ export class SignalInbox {
 			}
 
 			this._started++;
-			this.delivering = { id: signal.id, name: signal.name };
+			const info = { id: signal.id, name: signal.name, listens: signal.listens || [] };
+			this.delivering = info;
 			try {
-				await handler(signal.payload, { id: signal.id, name: signal.name });
+				await handler(signal.payload, info);
 			} catch (err) {
 				this.fail(
 					new Error(`Signal handler for "${signal.name}" failed: ${coerceError(err).message}`),

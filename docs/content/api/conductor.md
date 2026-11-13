@@ -234,16 +234,21 @@ await conductor.signal(
   { task: { name: "session", queue: "default" }, key: "thread-1" }, // queue is optional
   { name: "stop", id: requestId },
 );
+
+// delivered at a time: neither a handler nor a wake-up sees it before
+await conductor.signal(executionId, { name: "expire", id: `expire:${at.toISOString()}` }, { at });
 ```
+
+With `at`, the signal is stored now and delivered at that time: a running execution receives it with the worker's first poll after `at`, an idle actor wakes at `at` (or at its alarm, if earlier). See [Delayed Signals](../task-execution/signals.md#delayed-signals).
 
 By key, the lookup and the signal run in one transaction under the lock `signalWithStart()` takes on the task and key, so a signal sent while `signalWithStart()` starts the execution for that key waits for it and reaches the new execution.
 
 ## conductor.signalWithStart()
 
-Signal the non-terminal execution of a task for a key, or start one that receives the signal first. Returns the execution ID.
+Signal the non-terminal execution of a task for a key, or start one that receives the signal first. Returns the execution ID and whether this call started it.
 
 ```typescript
-const executionId = await conductor.signalWithStart({
+const { id, started } = await conductor.signalWithStart({
   task: "session",
   queue: "default", // optional
   key: "thread-1",
@@ -255,6 +260,8 @@ const executionId = await conductor.signalWithStart({
   metadata: {}, // optional
 });
 ```
+
+A listen in `listen` with `exclusive: true` whose name another open execution of the task holds makes the call throw a `ListenHeldError` (`listen`, `heldBy`) and start nothing. See [Exclusive Listens](../crafting-tasks/triggers.md#exclusive-listens).
 
 ## conductor.getExecution()
 
@@ -300,7 +307,7 @@ Returns `null` if nothing matches or the execution was removed by its [retention
 
 `pending` covers executions that wait for their first attempt, a retry, a sleep, a child or an event. `cancelled` is reported once the cancellation has settled; until then a running execution stays `running`.
 
-`listens` names the [listens](../crafting-tasks/triggers.md#listening-for-events) set by `ctx.listen()` and `signalWithStart({ listen })` and not removed by `ctx.unlisten()`. Listening again under a name with another event or filter creates it anew, so it moves to the end. An execution that ended keeps the listens it ended with, but no event reaches them any more.
+`listens` names the [listens](../crafting-tasks/triggers.md#listening-for-events) set by `ctx.listen()` and `signalWithStart({ listen })` and not removed by `ctx.unlisten()`. Listening again under a name with another event, filter or exclusivity creates it anew, so it moves to the end. Listens end with their execution: one that completed, failed or was cancelled has none.
 
 ## conductor.getEvent()
 

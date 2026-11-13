@@ -35,6 +35,7 @@ import {
 	type SetListensArgs,
 	type ListListenersArgs,
 	type RegisterEventRaceArgs,
+	type StartedExecution,
 } from "./query-builder.js";
 import { makeChildLogger, type Logger } from "./lib/logger.js";
 import { uuidv7 } from "./lib/uuidv7.js";
@@ -108,7 +109,7 @@ export type ExecutionInfo<TResult = unknown, TPayload = Payload, TState = Payloa
 	state: TState | null;
 	/**
 	 * Names of its listens (`ctx.listen()`, `signalWithStart({ listen })`) in the order they were
-	 * created. An ended execution keeps the ones it ended with, which no event reaches any more.
+	 * created. Listens end with their execution, so an ended one has none.
 	 */
 	listens: string[];
 	/** Return value of a completed execution */
@@ -171,6 +172,8 @@ export interface Execution {
 	signals: StoredSignal[];
 	/** Names of its listens in the order they were created, read when the execution was claimed */
 	listens: string[];
+	/** When the execution was created, as an ISO timestamp */
+	created_at: string;
 }
 
 // todo: move all of this to query-builder too or create new types.ts file
@@ -198,6 +201,8 @@ export type ExecutionCompleted = {
 	result?: Payload;
 	/** Signal names the attempt listened for; undelivered ones re-queue the execution */
 	signal_names?: string[];
+	/** Completed by `ctx.complete()`: undelivered signals do not re-queue it */
+	final?: boolean;
 };
 
 export type ExecutionFailed = {
@@ -270,7 +275,46 @@ export type StoredSignal = {
 	id: string;
 	name: string;
 	payload: JsonValue;
+	/** Names of the execution's listens the event of this signal matched; empty for others */
+	listens: string[];
 };
+
+/** SQLSTATE `_private_put_listens()` raises for an exclusive listen another execution holds */
+const LISTEN_HELD = "PGC02";
+
+/**
+ * An exclusive listen (`ctx.listen(name, { exclusive: true })`, `signalWithStart({ listen })`)
+ * was refused: another open execution of the task holds the name exclusively. Nothing was written.
+ */
+export class ListenHeldError extends Error {
+	readonly code = "PGCONDUCTOR_LISTEN_HELD";
+	constructor(
+		/** The name of the listen */
+		public readonly listen: string,
+		/** The execution that holds it */
+		public readonly heldBy: string,
+	) {
+		super(`Listen "${listen}" is held by execution ${heldBy}`);
+		this.name = "ListenHeldError";
+	}
+}
+
+/** Reads the holder `_private_put_listens()` reports as JSON detail */
+function listenHeldError(detail: string | undefined): ListenHeldError | null {
+	if (!detail) return null;
+	const held: unknown = JSON.parse(detail);
+	if (
+		typeof held === "object" &&
+		held !== null &&
+		"listen" in held &&
+		typeof held.listen === "string" &&
+		"execution_id" in held &&
+		typeof held.execution_id === "string"
+	) {
+		return new ListenHeldError(held.listen, held.execution_id);
+	}
+	return null;
+}
 
 /** Executions claimed by a poll, and what changed for the running executions it was given. */
 export type ClaimResult = {
@@ -367,7 +411,7 @@ type QueryOptions = {
 // statement can run again without a second effect take a signal, which enables retries.
 type QueryMethodOptions = Pick<QueryOptions, "signal">;
 
-type ErrorWithOptionalCode = Error & { code?: string };
+type ErrorWithOptionalCode = Error & { code?: string; detail?: string };
 
 export type SetFakeTimeArgs = {
 	date: Date;
@@ -413,6 +457,9 @@ export class DatabaseClient {
 				return await callback(this.sql);
 			} catch (error) {
 				const err = error as ErrorWithOptionalCode;
+				// A refusal, not a failure: thrown as is
+				const held = err.code === LISTEN_HELD ? listenHeldError(err.detail) : null;
+				if (held) throw held;
 				if (!this.isRetryableError(err)) {
 					if (!options?.expectError) {
 						logger.error(`Non-retryable database error${label}: ${err.message}`);
@@ -492,23 +539,24 @@ export class DatabaseClient {
 		return row.stored;
 	}
 
-	async signalWithStart(args: SignalWithStartArgs): Promise<string> {
+	async signalWithStart(args: SignalWithStartArgs): Promise<StartedExecution> {
 		const [row] = await this.query(() => this.builder.buildSignalWithStart(args), {
 			label: "signalWithStart",
 		});
-		return row.id;
+		return { id: row.id, started: row.started };
 	}
 
 	/** Returns null when this worker no longer holds the signalling execution. */
 	async signalWithStartStep(
 		args: SignalWithStartStepArgs,
 		opts?: QueryMethodOptions,
-	): Promise<string | null> {
+	): Promise<StartedExecution | null> {
 		const rows = await this.query(() => this.builder.buildSignalWithStartStep(args), {
 			label: "signalWithStartStep",
 			...opts,
 		});
-		return rows[0]?.id || null;
+		const row = rows[0];
+		return row ? { id: row.id, started: row.started === true } : null;
 	}
 
 	async cancelExecution(
@@ -859,12 +907,13 @@ export class DatabaseClient {
 	async startExecution(
 		args: StartExecutionArgs,
 		opts?: QueryMethodOptions,
-	): Promise<string | null> {
+	): Promise<StartedExecution | null> {
 		const rows = await this.query(() => this.builder.buildStartExecution(args), {
 			label: "startExecution",
 			...opts,
 		});
-		return rows[0]?.id || null;
+		const row = rows[0];
+		return row ? { id: row.id, started: row.started === true } : null;
 	}
 
 	async checkMetadata(metadata: Payload, opts?: QueryMethodOptions): Promise<void> {

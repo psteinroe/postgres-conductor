@@ -218,7 +218,7 @@ describe("ctx.invoke with cancelWithParent (Postgres integration)", () => {
 			{ name: "parent", maxAttempts: 2 },
 			{ invocable: true },
 			async (_e, ctx) => {
-				const id = await ctx.invoke("work", { name: "work" }, {}, { cancelWithParent: true });
+				const { id } = await ctx.invoke("work", { name: "work" }, {}, { cancelWithParent: true });
 				if (++attempts === 1) throw new Error("retry");
 				return { id };
 			},

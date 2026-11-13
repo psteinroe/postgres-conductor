@@ -209,7 +209,7 @@ describe("execution metadata (Postgres integration)", () => {
 						input: { label: stepKey },
 						...options,
 					});
-				ids.push(await start("inherited", "a"));
+				ids.push((await start("inherited", "a")).id);
 				await start("overridden", "b", { metadata: { tenant: "acme", replyTo: "thread-2" } });
 				await start("function", "c", {
 					metadata: (metadata: { tenant: string } | undefined) => ({
@@ -218,7 +218,7 @@ describe("execution metadata (Postgres integration)", () => {
 					}),
 				});
 				// signals the running execution, which keeps its metadata
-				ids.push(await start("existing", "a", { metadata: { tenant: "other" } }));
+				ids.push((await start("existing", "a", { metadata: { tenant: "other" } })).id);
 				await ctx.emit("order.placed", { source: "inherited" });
 				await ctx.emit(
 					"order.placed",

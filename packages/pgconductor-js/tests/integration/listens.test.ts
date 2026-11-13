@@ -1,6 +1,8 @@
 import { z } from "zod";
+import postgres from "postgres";
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "vitest";
 import { Conductor } from "../../src/conductor";
+import { ListenHeldError } from "../../src/database-client";
 import { defineEvent } from "../../src/event-definition";
 import { Orchestrator } from "../../src/orchestrator";
 import { TaskSchemas } from "../../src/schemas";
@@ -17,7 +19,7 @@ const message = defineEvent({
 const threadDefinition = defineTask({ name: "thread", payload: z.object({}) });
 const routeDefinition = defineTask({ name: "route", payload: z.object({}) });
 
-type Received = { activation: number; id: string; text: string };
+type Received = { activation: number; id: string; text: string; listens: string[] };
 
 describe("Listens", () => {
 	let pool: TestDatabasePool;
@@ -60,8 +62,8 @@ describe("Listens", () => {
 			{ invocable: true },
 			async (_event, ctx) => {
 				const activation = ++activations;
-				ctx.onSignal("chat.message", (payload, { id }) => {
-					received.push({ activation, id, text: message.payload.parse(payload).text });
+				ctx.onSignal("chat.message", (payload, { id, listens }) => {
+					received.push({ activation, id, text: message.payload.parse(payload).text, listens });
 				});
 				ctx.onSignal("command", () => {});
 				await activate(activation, ctx);
@@ -88,12 +90,14 @@ describe("Listens", () => {
 			id: string,
 			listen?: Parameters<typeof conductor.signalWithStart>[0]["listen"],
 		) =>
-			conductor.signalWithStart({
-				task: "thread",
-				key: "t1",
-				signal: { name: "command", id },
-				listen,
-			});
+			conductor
+				.signalWithStart({
+					task: "thread",
+					key: "t1",
+					signal: { name: "command", id },
+					listen,
+				})
+				.then(({ id }) => id);
 		const idle = (id: string) =>
 			waitForCondition(async () => {
 				const [row] = await db.sql<{ waiting_step_key: string | null }[]>`
@@ -102,7 +106,7 @@ describe("Listens", () => {
 				return row?.waiting_step_key === "pgconductor.idle";
 			}, 5000);
 		const emit = (thread: string, text: string) => conductor.emit("chat.message", { thread, text });
-		return { conductor, received, routed, command, idle, emit };
+		return { db, conductor, received, routed, command, idle, emit };
 	}
 
 	test("an actor receives the events it listens for, and others go to unlistened triggers", async () => {
@@ -118,7 +122,9 @@ describe("Listens", () => {
 		await emit("2", "for nobody");
 		await waitForCondition(() => received.length === 1 && routed.length === 1, 5000);
 		// The signal is named after the event, its id is the event's, and it woke the idle actor
-		expect(received).toEqual([{ activation: 2, id: eventId, text: "for the thread" }]);
+		expect(received).toEqual([
+			{ activation: 2, id: eventId, text: "for the thread", listens: ["thread"] },
+		]);
 		expect(routed).toEqual(["for nobody"]);
 
 		await idle(id);
@@ -233,15 +239,15 @@ describe("Listens", () => {
 		]);
 		expect(await read()).toEqual(["other", "thread"]);
 
-		// An ended execution keeps the listens it ended with
+		// Listens end with their execution
 		await conductor.cancel(id);
 		await waitForCondition(
 			async () => (await conductor.getExecution(id))?.status === "cancelled",
 			5000,
 		);
-		expect(await read()).toEqual(["other", "thread"]);
+		expect(await read()).toEqual([]);
 		expect(await conductor.listExecutions({ task: { name: "thread" } })).toMatchObject([
-			{ id, status: "cancelled", listens: ["other", "thread"] },
+			{ id, status: "cancelled", listens: [] },
 		]);
 	});
 
@@ -252,5 +258,148 @@ describe("Listens", () => {
 		const id = await command("start");
 		await idle(id);
 		expect(await conductor.getExecution(id)).toMatchObject({ listens: [] });
+	});
+
+	test("a signal from listens names the listens the event matched", async () => {
+		const { received, command, idle, emit } = await setup(async (activation, ctx) => {
+			if (activation === 1) {
+				await ctx.listen("all", { event: message });
+				await ctx.listen("thread", { event: message, filter: { thread: ["1"] } });
+			}
+		});
+
+		const id = await command("start");
+		await idle(id);
+		const both = await emit("1", "both");
+		const all = await emit("2", "all only");
+		await waitForCondition(() => received.length === 2, 5000);
+		expect(received.map(({ id, listens }) => ({ id, listens }))).toEqual(
+			expect.arrayContaining([
+				{ id: both, listens: ["all", "thread"] },
+				{ id: all, listens: ["all"] },
+			]),
+		);
+	});
+
+	test("an execution that completes itself ends its listens", async () => {
+		const { db, conductor, received, routed, command, idle, emit } = await setup(
+			async (activation, ctx) => {
+				if (activation === 1)
+					await ctx.listen("thread", { event: message, filter: { thread: ["1"] } });
+				if (activation === 2) await ctx.complete();
+			},
+		);
+		const listeners = () =>
+			conductor.listListeners({ event: "chat.message", payload: { thread: "1", text: "" } });
+
+		const id = await command("start");
+		await idle(id);
+		expect((await listeners()).map((listener) => listener.id)).toEqual([id]);
+
+		await command("end");
+		await waitForCondition(
+			async () => (await conductor.getExecution(id))?.status === "completed",
+			5000,
+		);
+		expect(await conductor.getExecution(id)).toMatchObject({ listens: [] });
+		expect(await listeners()).toEqual([]);
+		const subscriptions = await db.sql`
+			select 1 from pgconductor._private_custom_event_subscriptions where execution_id = ${id}
+		`;
+		expect(subscriptions).toHaveLength(0);
+
+		// Its events now go to the unlistened trigger
+		await emit("1", "after the end");
+		await waitForCondition(() => routed.length === 1, 5000);
+		expect(received).toEqual([]);
+	});
+
+	test("an exclusive listen holds its name among the open executions of the task", async () => {
+		const outcomes: { id: string; heldBy: string | null; listens: readonly string[] }[] = [];
+		const conversation = { event: message, filter: { thread: ["1"] }, exclusive: true };
+		const { conductor, idle } = await setup(async (_activation, ctx) => {
+			try {
+				// The holder may listen again; another execution is refused
+				await ctx.listen("conversation", conversation);
+				outcomes.push({ id: ctx.executionId, heldBy: null, listens: ctx.listens });
+			} catch (error) {
+				if (!(error instanceof ListenHeldError)) throw error;
+				outcomes.push({ id: ctx.executionId, heldBy: error.heldBy, listens: ctx.listens });
+			}
+		});
+		const start = (key: string, listen?: { conversation: typeof conversation }) =>
+			conductor.signalWithStart({
+				task: "thread",
+				key,
+				signal: { name: "command", id: "start" },
+				listen,
+			});
+
+		const holder = await start("t1", { conversation });
+		await idle(holder.id);
+		expect(outcomes).toEqual([{ id: holder.id, heldBy: null, listens: ["conversation"] }]);
+
+		// signalWithStart is refused and starts nothing
+		const refused = await start("t2", { conversation }).catch((error: unknown) => error);
+		expect(refused).toBeInstanceOf(ListenHeldError);
+		expect(refused).toMatchObject({ listen: "conversation", heldBy: holder.id });
+		expect(await conductor.getExecution({ task: { name: "thread" }, key: "t2" })).toBeNull();
+
+		// ctx.listen is refused and listens for nothing
+		const other = await start("t3");
+		await idle(other.id);
+		expect(outcomes[1]).toEqual({ id: other.id, heldBy: holder.id, listens: [] });
+		expect(await conductor.getExecution(other.id)).toMatchObject({ listens: [] });
+
+		// An ended execution holds no name
+		await conductor.cancel(holder.id);
+		const next = await start("t2", { conversation });
+		expect(next.started).toBe(true);
+		await idle(next.id);
+		expect(outcomes[2]).toEqual({ id: next.id, heldBy: null, listens: ["conversation"] });
+	});
+
+	test("of executions listening exclusively at once, exactly one holds the name", async () => {
+		const total = 8;
+		const { db, conductor } = await setup(async () => {});
+		// A pool of its own, so the calls run concurrently
+		const sql = postgres(db.url, { max: total });
+		cleanups.push(() => sql.end());
+		const sender = Conductor.create({
+			sql,
+			tasks: TaskSchemas.fromSchema([threadDefinition, routeDefinition]),
+			events: [message],
+			context: {},
+		});
+
+		const results = await Promise.allSettled(
+			Array.from({ length: total }, (_, n) =>
+				sender.signalWithStart({
+					task: "thread",
+					key: `t${n}`,
+					signal: { name: "command", id: "start" },
+					listen: {
+						conversation: { event: message, filter: { thread: ["1"] }, exclusive: true },
+					},
+				}),
+			),
+		);
+
+		const started = results.flatMap((result) =>
+			result.status === "fulfilled" ? [result.value] : [],
+		);
+		expect(started).toHaveLength(1);
+		const winner = started[0]?.id;
+		const refusals = results.flatMap((result) =>
+			result.status === "rejected" ? [result.reason] : [],
+		);
+		expect(refusals).toHaveLength(total - 1);
+		for (const refusal of refusals) {
+			expect(refusal).toBeInstanceOf(ListenHeldError);
+			expect(refusal).toMatchObject({ heldBy: winner });
+		}
+		expect((await conductor.listExecutions({ task: { name: "thread" } })).map((e) => e.id)).toEqual(
+			[winner],
+		);
 	});
 });

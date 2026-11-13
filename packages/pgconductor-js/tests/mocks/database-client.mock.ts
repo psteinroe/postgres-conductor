@@ -36,7 +36,7 @@ export class MockDatabaseClient implements IDatabaseClient {
 	countSteps = vi.fn(async () => 0);
 	saveStep = vi.fn(async (_args) => true);
 	setState = vi.fn(async (_args) => true);
-	startExecution = vi.fn(async () => "mock-started-id");
+	startExecution = vi.fn(async () => ({ id: "mock-started-id", started: true }));
 	checkMetadata = vi.fn(async () => {});
 	clearWaitingState = vi.fn(async () => true);
 	registerEventWait = vi.fn(async () => null);
@@ -44,8 +44,8 @@ export class MockDatabaseClient implements IDatabaseClient {
 	cancelExecution = vi.fn(async () => true);
 	ackSignals = vi.fn(async () => {});
 	signalExecution = vi.fn(async () => true);
-	signalWithStart = vi.fn(async () => "mock-execution-id");
-	signalWithStartStep = vi.fn(async () => "mock-execution-id");
+	signalWithStart = vi.fn(async () => ({ id: "mock-execution-id", started: true }));
+	signalWithStartStep = vi.fn(async () => ({ id: "mock-execution-id", started: true }));
 	getDatabaseTime = vi.fn(async () => new Date());
 	setFakeTime = vi.fn(async () => {});
 	clearFakeTime = vi.fn(async () => {});

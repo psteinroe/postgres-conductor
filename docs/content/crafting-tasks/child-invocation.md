@@ -109,14 +109,14 @@ Each child runs sequentially. The parent hangs up and resumes for each child.
 
 ## Invoking Without Waiting
 
-Use `ctx.invoke()` to start work that runs on its own, such as a handoff to another workflow. It returns the new execution's ID right away:
+Use `ctx.invoke()` to start work that runs on its own, such as a handoff to another workflow. It returns the execution's ID right away, and whether this call started it:
 
 ```typescript
 const intake = conductor.createTask(
   { name: "intake" },
   { invocable: true },
   async (event, ctx) => {
-    const handoffId = await ctx.invoke("handoff", { name: "support-flow" }, event.payload);
+    const { id: handoffId } = await ctx.invoke("handoff", { name: "support-flow" }, event.payload);
     return { handoffId };
   }
 );
@@ -124,15 +124,15 @@ const intake = conductor.createTask(
 
 | | `ctx.invokeAndWait()` | `ctx.invoke()` |
 |-|-----------------------|----------------|
-| Returns | The child's result | The execution ID |
+| Returns | The child's result | `{ id, started }` |
 | Caller | Hangs up until the child settles | Continues immediately |
 | Child fails | Caller fails | Caller is unaffected |
 | Caller cancelled | Child is cancelled | Execution keeps running, unless `cancelWithParent` is set |
-| Retries and resumes | Return the memoized result | Return the same execution ID |
+| Retries and resumes | Return the memoized result | Return the same execution ID and `started` |
 
 Both inherit the caller's [metadata](execution-metadata.md) unless `metadata` overrides it.
 
-Retrying the invoking attempt never starts a second execution, even if it crashed right after the start: the execution is deduplicated by a key derived from the caller and the step name. Pass `dedupe_key` to use your own key instead, for example to reconnect to a workflow for a conversation. If an execution of the task already holds the key, `ctx.invoke()` returns its ID without starting, superseding or updating anything.
+Retrying the invoking attempt never starts a second execution, even if it crashed right after the start: the execution is deduplicated by a key derived from the caller and the step name. Pass `dedupe_key` to use your own key instead, for example to reconnect to a workflow for a conversation. If an execution of the task already holds the key, `ctx.invoke()` returns its ID with `started: false`, without starting, superseding or updating anything.
 
 ### Cancelling with the Parent
 
@@ -143,7 +143,7 @@ const session = conductor.createTask(
   { name: "session" },
   { invocable: true },
   async (event, ctx) => {
-    const toolId = await ctx.invoke("tool", { name: "run-tool" }, event.payload, {
+    const { id: toolId } = await ctx.invoke("tool", { name: "run-tool" }, event.payload, {
       cancelWithParent: true,
     });
     // keep working while the tool runs
@@ -162,7 +162,7 @@ const workflow = conductor.createTask(
   { name: "review" },
   { invocable: true },
   async (event, ctx) => {
-    const checkId = await ctx.invoke("start-checks", { name: "run-checks" }, event.payload);
+    const { id: checkId } = await ctx.invoke("start-checks", { name: "run-checks" }, event.payload);
     await ctx.step("notify", () => notifyReviewers(event.payload));
 
     const outcome = await ctx.waitForResult("checks", checkId, { timeout: "1h" });

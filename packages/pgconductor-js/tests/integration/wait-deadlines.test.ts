@@ -73,7 +73,7 @@ describe.each([
 		const outcomes: unknown[] = [];
 		const workIds: string[] = [];
 		const waiter = conductor.createTask({ name: "waiter" }, { invocable: true }, async (_, ctx) => {
-			const id = await ctx.invoke("start", { name: "work", queue: "work" }, {});
+			const { id } = await ctx.invoke("start", { name: "work", queue: "work" }, {});
 			workIds.push(id);
 			outcomes.push(await wait(ctx, id));
 		});

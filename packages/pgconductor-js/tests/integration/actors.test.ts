@@ -14,7 +14,12 @@ const counterDefinition = defineTask({
 	name: "counter",
 	payload: z.object({}),
 });
-const tasks = TaskSchemas.fromSchema([counterDefinition]);
+const tallyDefinition = defineTask({
+	name: "tally",
+	payload: z.object({}),
+	returns: z.object({ total: z.number() }),
+});
+const tasks = TaskSchemas.fromSchema([counterDefinition, tallyDefinition]);
 
 type Received = { activation: number; id: string; payload: JsonValue };
 
@@ -70,11 +75,13 @@ describe("Actors", () => {
 		await orchestrator.start();
 
 		const send = (id: string, payload: JsonValue = null) =>
-			conductor.signalWithStart({
-				task: "counter",
-				key: "k1",
-				signal: { name: "message", id, payload },
-			});
+			conductor
+				.signalWithStart({
+					task: "counter",
+					key: "k1",
+					signal: { name: "message", id, payload },
+				})
+				.then(({ id }) => id);
 		const row = async (id: string) => {
 			const [execution] = await db.sql<
 				{
@@ -223,6 +230,144 @@ describe("Actors", () => {
 			error: "done for good",
 		});
 		expect(activations()).toBe(2);
+	});
+
+	test("a delayed signal wakes an idle actor when due, before its alarm", async () => {
+		const hour = 60 * 60 * 1000;
+		const { db, conductor, received, activations, send, row, idle } = await setup(
+			async (activation, ctx) => {
+				if (activation === 1) ctx.setAlarm(new Date(db.clock.now().getTime() + 3 * hour));
+			},
+		);
+
+		const id = await send("s1", 1);
+		await idle(id);
+		const at = new Date(db.clock.now().getTime() + hour);
+		const later = { name: "message", id: "later", payload: 2 };
+		expect(await conductor.signal(id, later, { at })).toBe(true);
+		// Idempotent by id: a resend stores nothing
+		expect(await conductor.signal(id, later, { at })).toBe(true);
+		const [{ count }] = await db.sql<[{ count: number }]>`
+			select count(*)::int from pgconductor._private_execution_signals where execution_id = ${id}
+		`;
+		expect(count).toBe(2);
+
+		// It sleeps until the signal is due, which is before its alarm, and the signal waits
+		expect(await row(id)).toMatchObject({ waiting_step_key: "pgconductor.idle", run_at: at });
+		await new Promise((resolve) => setTimeout(resolve, 150));
+		expect(received.map((r) => r.id)).toEqual(["s1"]);
+		expect(activations()).toBe(1);
+
+		await db.clock.advance("2h");
+		await waitForCondition(() => received.length === 2, 5000);
+		expect(received[1]).toEqual({ activation: 2, id: "later", payload: 2 });
+		await idle(id);
+		expect(activations()).toBe(2);
+	});
+
+	test("a running activation receives a delayed signal when due, and the next one gets a later one", async () => {
+		const hour = 60 * 60 * 1000;
+		const expired = new Deferred<void>();
+		const expiries: string[] = [];
+		let tomorrow: Date | undefined;
+		const { db, received, send, row, idle } = await setup(async (activation, ctx) => {
+			if (activation !== 1) return;
+			ctx.onSignal("expire", (_payload, { id }) => {
+				expiries.push(id);
+				expired.resolve();
+			});
+			// The activation expires itself at a time; it keeps running until then
+			const now = db.clock.now().getTime();
+			const expiresAt = new Date(now + hour);
+			await ctx.sendSignal(
+				ctx.executionId,
+				{ name: "expire", id: `expire:${expiresAt.toISOString()}` },
+				{ at: expiresAt },
+			);
+			tomorrow = new Date(now + 24 * hour);
+			await ctx.sendSignal(ctx.executionId, { name: "message", id: "tomorrow" }, { at: tomorrow });
+			await ctx.untilIdle(() => expired.promise);
+		});
+
+		const id = await send("s1");
+		await waitForCondition(() => received.length === 1, 5000);
+		await new Promise((resolve) => setTimeout(resolve, 150));
+		expect(expiries).toEqual([]);
+		expect((await row(id))?.locked_by).not.toBeNull();
+
+		await db.clock.advance("2h");
+		const sleeping = await idle(id);
+		expect(expiries).toHaveLength(1);
+		// Not due when the activation returned: it sleeps until the signal is
+		expect(sleeping?.run_at).toEqual(tomorrow);
+		expect(received.map((r) => r.id)).toEqual(["s1"]);
+
+		await db.clock.advance("1d");
+		await waitForCondition(() => received.length === 2, 5000);
+		expect(received[1]).toMatchObject({ activation: 2, id: "tomorrow" });
+	});
+
+	test("ctx.complete ends an actor with its result, and nothing re-opens it", async () => {
+		const db = await pool.child();
+		databases.push(db);
+		const conductor = Conductor.create({ sql: db.sql, tasks, context: {}, clock: db.clock });
+		let activations = 0;
+		const createdAt: Date[] = [];
+		const added: string[] = [];
+		const tally = conductor.createTask(
+			{ name: "tally", actor: true },
+			{ invocable: true },
+			async (_event, ctx) => {
+				activations++;
+				createdAt.push(ctx.createdAt);
+				ctx.onSignal("add", (_payload, { id }) => {
+					added.push(id);
+				});
+				// Ends the actor from a handler while untilIdle waits for it
+				ctx.onSignal("done", async (payload) => {
+					// Stored meanwhile: it neither re-queues the completion nor is delivered
+					await conductor.signal(ctx.executionId, { name: "add", id: "meanwhile" });
+					await ctx.complete({ total: Number(payload) });
+				});
+				await ctx.untilIdle(async () => {});
+			},
+		);
+		const orchestrator = Orchestrator.create({
+			conductor,
+			tasks: [tally],
+			defaultWorker: { pollIntervalMs: 20, flushIntervalMs: 20 },
+		});
+		cleanups.push(() => orchestrator.stop());
+		await conductor.ensureInstalled();
+		await orchestrator.start();
+
+		const start = await conductor.signalWithStart({
+			task: "tally",
+			key: "k",
+			signal: { name: "done", id: "d1", payload: 3 },
+		});
+		expect(start.started).toBe(true);
+		const { id } = start;
+		expect(await conductor.waitForResult({ name: "tally" }, id, { pollIntervalMs: 10 })).toEqual({
+			total: 3,
+		});
+		const execution = await conductor.getExecution(id);
+		expect(execution).toMatchObject({ status: "completed", result: { total: 3 } });
+		expect(createdAt).toEqual([execution?.createdAt]);
+
+		// Ended for good: a signal is refused, and the key starts a new execution
+		expect(await conductor.signal(id, { name: "add", id: "later" })).toBe(false);
+		const next = await conductor.signalWithStart({
+			task: "tally",
+			key: "k",
+			signal: { name: "add", id: "a1" },
+		});
+		expect(next.started).toBe(true);
+		expect(next.id).not.toBe(id);
+		await waitForCondition(() => added.includes("a1"), 5000);
+		expect(await conductor.getExecution(id)).toMatchObject({ status: "completed" });
+		expect(added).toEqual(["a1"]);
+		expect(activations).toBe(2);
 	});
 
 	test("an actor cannot process batches", () => {

@@ -77,12 +77,13 @@ describe("Executions by key", () => {
 	}
 
 	async function startWorker(conductor: ReturnType<typeof createConductor>, workerId: string) {
-		return conductor.signalWithStart({
+		const { id } = await conductor.signalWithStart({
 			task: "agent-worker",
 			key: workerId,
 			signal: { name: "start", id: `start-${workerId}` },
 			input: { workerId },
 		});
+		return id;
 	}
 
 	test("signals the open execution holding a key", async () => {
@@ -166,9 +167,9 @@ describe("Executions by key", () => {
 		const commit = new Deferred<void>();
 		const tx = starter.begin(async (tx) => {
 			const [row] = await tx<{ id: string }[]>`
-				select pgconductor.signal_with_start(
+				select id from pgconductor.signal_with_start(
 					'agent-worker', 'default', 'w1', 'start', 'start-w1', null, '{"workerId":"w1"}'::jsonb
-				) as id
+				)
 			`;
 			started.resolve(row?.id || "");
 			await commit.promise;
@@ -224,10 +225,12 @@ describe("Executions by key", () => {
 			),
 		]);
 
-		expect(new Set(starts).size).toBe(1);
+		expect(new Set(starts.map((start) => start.id)).size).toBe(1);
+		// exactly one call started it
+		expect(starts.filter((start) => start.started)).toHaveLength(1);
 		const stored = await storedSignals(db);
 		// every signal that reported true is stored for the one execution
-		expect(stored.every((s) => s.execution_id === starts[0])).toBe(true);
+		expect(stored.every((s) => s.execution_id === starts[0]?.id)).toBe(true);
 		expect(stored.filter((s) => s.id.startsWith("stop-"))).toHaveLength(
 			signals.filter(Boolean).length,
 		);
