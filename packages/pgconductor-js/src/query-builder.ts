@@ -1,4 +1,4 @@
-import type { PendingQuery, Row, RowList, Sql } from "postgres";
+import type { PendingQuery, Row, RowList, Sql, TransactionSql } from "postgres";
 import type { ReturnExecutionsArgs } from "./database-client.js";
 import * as assert from "./lib/assert.js";
 import type { TraceContextCarrier } from "./telemetry.js";
@@ -314,7 +314,8 @@ export type RegisterEventRaceArgs = {
 };
 
 export class QueryBuilder {
-	constructor(private readonly sql: Sql) {}
+	// A transaction's sql builds the same queries, e.g. to claim and settle in one transaction
+	constructor(private readonly sql: Sql | TransactionSql) {}
 
 	buildRegisterOrchestrator({
 		orchestratorId,
