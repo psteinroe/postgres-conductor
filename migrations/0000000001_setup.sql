@@ -878,6 +878,31 @@ as $function$
 declare
     spec pgconductor.execution_spec;
 begin
+    -- without dedupe, every spec inserts a new execution: one statement for the whole batch
+    if not exists (
+        select 1 from unnest(specs) s
+        where s.dedupe_key is not null or s.dedupe_seconds is not null
+    ) then
+        perform pgconductor._private_check_metadata(s.metadata) from unnest(specs) s;
+
+        return query
+        with batch as materialized (
+            select pgconductor._private_portable_uuidv7() as id, s.*
+            from unnest(specs) with ordinality s
+        ), inserted as (
+            insert into pgconductor._private_executions (
+                id, task_key, queue, payload, trace_context, metadata, run_at, cron_expression,
+                priority, "group"
+            )
+            select b.id, b.task_key, coalesce(b.queue, 'default'), b.payload, b.trace_context,
+                b.metadata, coalesce(b.run_at, pgconductor._private_current_time()),
+                b.cron_expression, coalesce(b.priority, 0), b."group"
+            from batch b
+        )
+        select b.id from batch b order by b.ordinality;
+        return;
+    end if;
+
     foreach spec in array specs loop
         return query select * from pgconductor.invoke(
             p_task_key := spec.task_key,
@@ -1865,11 +1890,6 @@ create index idx_custom_event_subscriptions_event
 
 create unique index idx_custom_event_subscription_execution_wait
     on pgconductor._private_custom_event_subscriptions (execution_id, step_key);
-
-create index idx_custom_event_subscription_wait_match
-    on pgconductor._private_custom_event_subscriptions
-       (event_key, created_at, expires_at, id)
-    where kind = 'execution_wait';
 
 -- an exclusive listen name is held by one execution of a task. an ended execution has no
 -- listens, so only open executions hold names

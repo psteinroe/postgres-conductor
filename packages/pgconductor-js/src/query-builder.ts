@@ -855,9 +855,13 @@ export class QueryBuilder {
 		)`);
 		// A completion, or an actor going idle, must not drop signals the handler did not get.
 		// signal_count comes from the locked row, so it counts signals committed after this
-		// statement's snapshot, which the count below cannot see. Signals named by no listener of
-		// the attempt, and delayed signals not yet due, do not re-queue it, nor does anything
-		// re-queue an execution that ended itself (ctx.complete(), a final result).
+		// statement's snapshot. The unlocked read of the same row below is its snapshot value: a
+		// sender stores the signal and increments the count in one transaction, so that value is
+		// the number of signals the snapshot sees, without counting an actor's whole history. A
+		// signal committed after the snapshot re-queues, even a delayed one, which the idle alarm
+		// below cannot see. Of the signals the snapshot sees, those named by no listener of the
+		// attempt, and delayed ones not yet due, do not re-queue it, nor does anything re-queue an
+		// execution that ended itself (ctx.complete(), a final result).
 		ctes.push(this.sql`signal_requeued as materialized (
 			select c.execution_id
 			from (
@@ -868,10 +872,10 @@ export class QueryBuilder {
 			where c.execution_signal_count > 0
 				and c.final is not true
 				and (
-					c.execution_signal_count > (
-						select count(*) from pgconductor._private_execution_signals s
-						where s.execution_id = c.execution_id
-					)
+					c.execution_signal_count > coalesce((
+						select e.signal_count from pgconductor._private_executions e
+						where e.id = c.execution_id and e.queue = ${queue}
+					), 0)
 					or exists (
 						select 1 from pgconductor._private_execution_signals s
 						where s.execution_id = c.execution_id
@@ -2005,16 +2009,22 @@ export class QueryBuilder {
 					event_value.event_id,
 					event_value.event_key,
 					event_value.field_name,
-					term.prefix_length,
-					left(event_value.value #>> '{}', term.prefix_length) as prefix_value
+					prefix_length,
+					left(event_value.value #>> '{}', prefix_length) as prefix_value
 				from event_values event_value
+				-- every length from the field's shortest prefix term to its longest one or the value's
+				-- length, from two index probes, rather than the distinct lengths of all its terms. Terms
+				-- are at most 64 characters long, so that is at most 64 lengths
 				cross join lateral (
-					select distinct candidate.prefix_length
+					select min(candidate.prefix_length) as shortest, max(candidate.prefix_length) as longest
 					from pgconductor._private_event_filter_terms candidate
 					where candidate.operator = 'prefix'
 						and candidate.event_key collate "C" = event_value.event_key collate "C"
 						and candidate.field_name collate "C" = event_value.field_name collate "C"
 				) term
+				cross join generate_series(
+					term.shortest, least(term.longest, length(event_value.value #>> '{}'))
+				) prefix_length
 				where event_value.scalar_type = 'string'
 			), raw_matched_fields as (
 				select event_value.event_id, term.subscription_id, term.field_name

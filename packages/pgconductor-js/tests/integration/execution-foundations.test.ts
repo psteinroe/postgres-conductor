@@ -821,6 +821,43 @@ describe("execution foundations", () => {
 		);
 	});
 
+	test("batch invoke without dedupe stores every spec and returns ids in spec order", async () => {
+		const db = await database();
+		const runAt = new Date("2030-01-01T00:00:00Z");
+		const ids = await db.client.invokeBatch([
+			{ task_key: "a", queue: "default", payload: { n: 1 }, priority: 5, group: "g" },
+			{ task_key: "b", queue: "default", payload: { n: 2 }, run_at: runAt, metadata: { m: 1 } },
+			{ task_key: "a", queue: "default", payload: { n: 3 }, cron_expression: "0 * * * *" },
+		]);
+
+		const rows = await db.sql`
+			select id, task_key, payload, priority, "group", run_at, metadata, cron_expression
+			from pgconductor._private_executions
+		`;
+		expect(ids.map((id) => rows.find((row) => row.id === id))).toEqual([
+			expect.objectContaining({ task_key: "a", payload: { n: 1 }, priority: 5, group: "g" }),
+			expect.objectContaining({
+				task_key: "b",
+				payload: { n: 2 },
+				run_at: runAt,
+				metadata: { m: 1 },
+			}),
+			expect.objectContaining({ task_key: "a", payload: { n: 3 }, cron_expression: "0 * * * *" }),
+		]);
+	});
+
+	test("batch invoke without dedupe checks the metadata of every spec", async () => {
+		const db = await database();
+
+		await expect(
+			db.client.invokeBatch([
+				{ task_key: "a", queue: "default" },
+				{ task_key: "a", queue: "default", metadata: { blob: "x".repeat(8192) } },
+			]),
+		).rejects.toThrow("Execution metadata must not exceed 8192 bytes");
+		expect(await db.sql`select 1 from pgconductor._private_executions`).toHaveLength(0);
+	});
+
 	test("batch invoke replaces trace context on dedupe conflict", async () => {
 		const db = await database();
 		const spec = { task_key: "traced", queue: "default", dedupe_key: "same" };
