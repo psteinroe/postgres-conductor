@@ -36,8 +36,8 @@ await conductor.emit("slack.mentioned", payload, {
 });
 ```
 
-The schema validates metadata on `conductor.invoke()`, `conductor.emit()` and `ctx.invokeAndWait()`
-overrides, like event payloads.
+The schema validates metadata on `conductor.invoke()`, `conductor.emit()` and the `metadata`
+overrides of `ctx` methods, like event payloads.
 
 ## Reading Metadata
 
@@ -70,8 +70,9 @@ execution and keep its metadata. Cron schedules declared as task triggers have n
 ## Overriding Metadata for a Child
 
 Pass `metadata` to `ctx.invokeAndWait()`, `ctx.invoke()`, `ctx.signalWithStart()` or `ctx.emit()`
-to replace the metadata of that child or event only. `ctx.signalWithStart()` applies it only when
-it starts the execution. A function receives the current metadata:
+to replace the metadata of that child or event only, or to `ctx.schedule()` for every occurrence of
+the schedule. `ctx.signalWithStart()` applies it only when it starts the execution. A function
+receives the current metadata:
 
 ```typescript
 await ctx.invokeAndWait("reply", { name: "post-reply" }, payload, {
