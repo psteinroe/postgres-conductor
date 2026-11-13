@@ -1,3 +1,4 @@
+import postgres from "postgres";
 import { z } from "zod";
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "vitest";
 import { Conductor } from "../../src/conductor";
@@ -5,7 +6,7 @@ import { Orchestrator } from "../../src/orchestrator";
 import { defineTask } from "../../src/task-definition";
 import { TaskSchemas } from "../../src/schemas";
 import { Deferred } from "../../src/lib/deferred";
-import type { JsonValue } from "../../src/database-client";
+import type { DatabaseClient, JsonValue } from "../../src/database-client";
 import type { TaskContext } from "../../src/task-context";
 import { TestDatabasePool, type TestDatabase } from "../fixtures/test-database";
 import { waitForCondition } from "../test-utils";
@@ -105,6 +106,56 @@ describe("Actors", () => {
 		};
 
 		return { db, conductor, received, activations: () => activations, send, row, idle };
+	}
+
+	// Gives an actor the history of a long-lived one: signals delivered by earlier activations
+	async function storeDeliveredSignals(db: TestDatabase, id: string, count: number) {
+		await db.sql`
+			with stored as (
+				insert into pgconductor._private_execution_signals (execution_id, queue, id, name, delivered_at)
+				select ${id}::uuid, 'default', 'old-' || n, 'message', pgconductor._private_current_time()
+				from generate_series(1, ${count}::int) n
+				returning 1
+			)
+			update pgconductor._private_executions
+			set signal_count = signal_count + (select count(*) from stored)
+			where id = ${id}::uuid
+		`;
+	}
+
+	// Holds the execution row in another transaction that stores a signal while the next idle
+	// settlement waits for it, so the settlement's snapshot is older than the signal
+	function storeDuringIdleSettlement(
+		db: TestDatabase,
+		client: DatabaseClient,
+		store: (tx: postgres.TransactionSql) => Promise<unknown>,
+	) {
+		const sql = postgres(db.url, { max: 1 });
+		cleanups.push(() => sql.end());
+		const returnExecutions = client.returnExecutions.bind(client);
+		const held = new Deferred<void>();
+		let holding = false;
+		client.returnExecutions = async (args, opts) => {
+			if (holding || !args.results.some((r) => r.status === "idle")) {
+				return returnExecutions(args, opts);
+			}
+			holding = true;
+			held.resolve();
+			const locked = new Deferred<void>();
+			const commit = new Deferred<void>();
+			const tx = sql.begin(async (tx) => {
+				await store(tx);
+				locked.resolve();
+				await commit.promise;
+			});
+			await locked.promise;
+			const settled = returnExecutions(args, opts);
+			await new Promise((resolve) => setTimeout(resolve, 200));
+			commit.resolve();
+			await tx;
+			return settled;
+		};
+		return held.promise;
 	}
 
 	test("sleeps when an activation returns, and a signal wakes the same execution", async () => {
@@ -263,6 +314,53 @@ describe("Actors", () => {
 		expect(received[1]).toEqual({ activation: 2, id: "later", payload: 2 });
 		await idle(id);
 		expect(activations()).toBe(2);
+	});
+
+	test("an actor with a long signal history settles without counting it, and a signal stored meanwhile wakes it", async () => {
+		const { db, conductor, received, activations, send, idle } = await setup(async () => {});
+
+		const id = await send("s1");
+		await idle(id);
+		await storeDeliveredSignals(db, id, 5000);
+		const held = storeDuringIdleSettlement(db, conductor.db, (tx) => {
+			return tx`select pgconductor.signal_execution(${id}::uuid, 'message', 's3', null)`;
+		});
+
+		await send("s2");
+		await held;
+		await waitForCondition(() => received.length === 3, 5000);
+		await idle(id);
+		expect(received.map((r) => [r.activation, r.id])).toEqual([
+			[1, "s1"],
+			[2, "s2"],
+			[3, "s3"],
+		]);
+		expect(activations()).toBe(3);
+	});
+
+	test("a delayed signal stored while an actor settles idle wakes it when due", async () => {
+		const hour = 60 * 60 * 1000;
+		const { db, conductor, received, activations, send, idle } = await setup(async () => {});
+
+		const id = await send("s1");
+		await idle(id);
+		await storeDeliveredSignals(db, id, 100);
+		const at = new Date(db.clock.now().getTime() + hour);
+		const held = storeDuringIdleSettlement(db, conductor.db, (tx) => {
+			return tx`select pgconductor.signal_execution(${id}::uuid, 'message', 'later', null, ${at})`;
+		});
+
+		await send("s2");
+		await held;
+		// The settlement could not see the signal, so it starts another activation, which sleeps
+		// until the signal is due
+		await waitForCondition(() => activations() === 3, 5000);
+		expect(await idle(id)).toMatchObject({ run_at: at });
+		expect(received.map((r) => r.id)).toEqual(["s1", "s2"]);
+
+		await db.clock.advance("2h");
+		await waitForCondition(() => received.length === 3, 5000);
+		expect(received[2]).toMatchObject({ activation: 4, id: "later" });
 	});
 
 	test("a running activation receives a delayed signal when due, and the next one gets a later one", async () => {
