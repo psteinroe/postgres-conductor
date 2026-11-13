@@ -21,6 +21,7 @@ pgconductor/
         │   ├── worker.ts             # Fetch→execute→flush pipeline
         │   ├── task.ts               # Task wrapper with execute method
         │   ├── task-definition.ts    # Standard Schema / type-only task definitions
+        │   ├── reads.ts              # Execution, listener and event reads of Conductor and TaskContext
         │   ├── task-context.ts       # Context API (step, sleep, invoke, invokeAndWait, waitForResult, waitForEvent, waitForAny, onSignal)
         │   ├── signal-inbox.ts       # In-process delivery of signals to ctx.onSignal handlers
         │   ├── middleware.ts         # Per-attempt middleware types
@@ -143,9 +144,10 @@ Tables live in the `pgconductor` schema with a `_private_` prefix (`_private_exe
 - Validates the payload of every invocation (any origin, including SQL and dead letters) and the return value against the task's Standard Schemas (`Task.schemas`, resolved from `TaskSchemas` in `createTask`) and passes their output on. Issues fail the execution as `permanently_failed`; a throwing validator fails the attempt. Batches validate per member
 
 **TaskContext** (`task-context.ts`)
-- Provides API to task functions: `step()`, `sleep()`, `invoke()`, `invokeAndWait()`, `waitForResult()`, `waitForEvent()`, `subscribe()`, `waitForAny()`, `onSignal()`, `untilIdle()`, `setAlarm()`, `setState()`, `updateState()`, `listen()`, `unlisten()`, `sendSignal()`, `signalWithStart()`, plus `executionId`, `queue`, `state` and `listens`
+- Provides API to task functions: `step()`, `sleep()`, `invoke()`, `invokeAndWait()`, `waitForResult()`, `waitForEvent()`, `subscribe()`, `waitForAny()`, `onSignal()`, `untilIdle()`, `setAlarm()`, `setState()`, `updateState()`, `listen()`, `unlisten()`, `sendSignal()`, `signalWithStart()`, the reads `getExecution()`, `listExecutions()`, `listListeners()`, `getEvent()`, `listEvents()` and `countEvents()`, plus `executionId`, `queue`, `state` and `listens`
 - `invoke()` inserts an independent execution and memoizes its id as a step in one statement. Only with `cancelWithParent` does it set `parent_execution_id`, together with `cancel_with_parent`; settlement fails a completed child that has a parent but neither a waiter nor that flag
 - Memoized by step key, so a replay returns the stored result: `step()`, `sleep()`, `invoke()`, `invokeAndWait()`, `waitForResult()`, `waitForEvent()`, `subscribe()`, `waitForAny()` and `signalWithStart()`. `emit()` (deduplicated only with a `dedupe_key`), `sendSignal()` (deduplicated by signal id), `schedule()` (replaces the pending occurrence), `unschedule()` and `cancel()` are not memoized and run again on every replay
+- The reads are the conductor's (`reads.ts` holds both: the query types and the conversion to `DatabaseClient` arguments), typed by the same task catalog, and pass `ctx.signal`. They are not memoized: a replay reads the rows anew
 - `checkpoint()` hangs up when the abort signal fired or the time window closed; it persists nothing
 - Each attempt tracks its step callbacks and their saves (`TaskContextOptions.steps`). Before it reports a result, the worker waits for those still running, bounded by `timeoutMs`, so a sibling's hangup or error (or `stop()`) does not end an attempt while a concurrent step runs. A timeout, cancellation or signal failure ends it at once
 - `step()` checkpoints after reading the step, so `fn` never starts once the attempt aborted, and hangs up as suspended when the claim fence rejects its save

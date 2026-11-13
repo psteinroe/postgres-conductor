@@ -522,6 +522,17 @@ const sessionId = await ctx.signalWithStart("start-session", {
 });
 ```
 
+## Reads
+
+A task reads executions, listeners and events like the conductor, typed the same way by its task catalog: [`getExecution()`](conductor.md#conductorgetexecution), [`listExecutions()`](conductor.md#conductorlistexecutions), [`listListeners()`](conductor.md#conductorlistlisteners), [`getEvent()`](conductor.md#conductorgetevent), [`listEvents()`](conductor.md#conductorlistevents) and [`countEvents()`](conductor.md#conductorlistevents). A read is aborted with the attempt.
+
+```typescript
+const request = await ctx.getExecution({ task: { name: "request" }, dedupeKey: requestId });
+const workers = await ctx.listListeners({ event: "chat.message", payload, task: { name: "session" } });
+```
+
+Reads are not memoized: a replay reads the current rows again. When what a read returns decides what a durable step does, read inside that step.
+
 ## ctx.checkpoint()
 
 Stop the handler here if `ctx.signal` is aborted or the task is outside its time window:
