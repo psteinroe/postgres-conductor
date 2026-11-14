@@ -120,9 +120,6 @@ describe("waitForEvent API", () => {
 				| { key: "withdrawn"; signal: { id: string; name: string; payload: JsonValue } }
 				| { key: "timeout" }
 			>();
-			// @ts-expect-error a payload type is JSON
-			const invalid: SignalBranch<{ at: Date }> = { signal: "invalid" };
-			expect(invalid).toBeDefined();
 			expectTypeOf(ctx.executionId).toEqualTypeOf<string>();
 			expectTypeOf(ctx.queue).toEqualTypeOf<string>();
 		});

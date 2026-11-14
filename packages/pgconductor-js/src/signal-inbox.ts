@@ -13,16 +13,13 @@ export type SignalInfo = {
 };
 
 /** The signal that won a `{ signal: name }` branch of `ctx.waitForAny()`, with its payload. */
-export type ReceivedSignal<T extends JsonValue = JsonValue> = {
+export type ReceivedSignal<T = JsonValue> = {
 	id: string;
 	name: string;
 	payload: T;
 };
 
-export type SignalHandler<T extends JsonValue = JsonValue> = (
-	payload: T,
-	info: SignalInfo,
-) => unknown;
+export type SignalHandler<T = JsonValue> = (payload: T, info: SignalInfo) => unknown;
 
 export type SignalInboxOptions = {
 	/** Mark a signal delivered */

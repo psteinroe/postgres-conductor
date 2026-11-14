@@ -209,9 +209,11 @@ for (let n = 0; ; n++) {
 }
 ```
 
-The payload is memoized with the winner, so a replay returns it. Annotate a branch as
-`SignalBranch<T>` to type `winner.signal.payload`; it is not checked, like the type of a
-`ctx.onSignal<T>()` handler. Without it, the payload is a `JsonValue`, and `null` for a signal
+The payload is memoized with the winner, so a replay returns it. It is typed by the task's
+declaration of the signal and parsed with its schema; a payload that does not match throws (see
+[Typed Signals](../task-execution/signals.md#typed-signals)).
+Annotate a branch as `SignalBranch<T>` to type another; it is not checked, like the type of a
+`ctx.onSignal<T>()` handler. Otherwise the payload is a `JsonValue`, and `null` for a signal
 sent without one:
 
 ```typescript
@@ -444,6 +446,8 @@ ctx.onSignal("input", async (payload, { id, name, listens }) => {
 
 `listens` names the execution's [listens](../crafting-tasks/triggers.md#listening-for-events) that the event the signal delivers matched, in the order they were created; it is empty for a signal that did not come from a listen.
 
+The payload of a signal the task declares is parsed with its schema, and the handler receives the schema's output; one that does not match is logged as an error and skipped. Other names, such as the event names of `ctx.listen()`, take any `JsonValue`. `ctx.onSignal<T>()` types the payload as `T` without a check. See [Typed Signals](../task-execution/signals.md#typed-signals).
+
 ## ctx.untilIdle()
 
 Wait until `fn` resolves while no signal is delivered, then stop delivering signals to this attempt. `fn` runs again whenever a signal handler started while it ran, or a signal already read still waits for its handler. Signals stored later stay undelivered: they re-queue the execution when it completes, or start an actor's next activation. See [Actors](../task-execution/actors.md#going-idle).
@@ -530,13 +534,16 @@ Send a signal to an execution by ID, or to the non-terminal execution of a task 
 ```typescript
 await ctx.sendSignal(executionId, { name: "input", id: "report-1", payload });
 await ctx.sendSignal({ task: { name: "session" }, key: threadKey }, { name: "stop", id: "stop-1" });
+await ctx.sendSignal({ task: { name: "session" }, id: executionId }, { name: "input", id: "report-2", payload });
 // delivered at expiresAt, also to this execution while it runs
 await ctx.sendSignal(ctx.executionId, { name: "expire", id: `expire:${expiresAt.toISOString()}` }, { at: expiresAt });
 ```
 
+With the task, the payload is typed and checked like [`conductor.signal()`](conductor.md#conductorsignal)'s.
+
 ## ctx.signalWithStart()
 
-Like `conductor.signalWithStart()`, and validates `state` against the target task's state schema the same way. Sends the signal and memoizes the execution ID and whether it started the execution under the step key in one statement, so retries and resumes return the same `{ id, started }`, also after the execution completed. An execution it starts inherits this execution's metadata unless `metadata` overrides it, as for `ctx.invoke()`. `metadata` applies only when the call starts the execution: a running one keeps its metadata.
+Like `conductor.signalWithStart()`, and validates `state` and checks the signal's payload against the target task's schemas the same way. Sends the signal and memoizes the execution ID and whether it started the execution under the step key in one statement, so retries and resumes return the same `{ id, started }`, also after the execution completed. An execution it starts inherits this execution's metadata unless `metadata` overrides it, as for `ctx.invoke()`. `metadata` applies only when the call starts the execution: a running one keeps its metadata.
 
 ```typescript
 const { id: sessionId, started } = await ctx.signalWithStart("start-session", {

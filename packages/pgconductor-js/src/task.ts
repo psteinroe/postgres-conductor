@@ -86,12 +86,15 @@ export type RetentionSettings = boolean | { days: number };
 
 /**
  * Standard Schemas the worker validates the payload and return value of every execution with,
- * and `ctx.setState()` and `ctx.updateState()` the state.
+ * `ctx.setState()` and `ctx.updateState()` the state, and `ctx.onSignal()` and `ctx.waitForAny()`
+ * the signals received.
  */
 export type TaskRuntimeSchemas = {
 	readonly payload?: StandardSchemaV1;
 	readonly returns?: StandardSchemaV1;
 	readonly state?: StandardSchemaV1;
+	/** Schemas of the signals the task declares, by name: handlers receive their output */
+	readonly signals?: unknown;
 };
 
 export type TaskEvent<P extends object = object> =

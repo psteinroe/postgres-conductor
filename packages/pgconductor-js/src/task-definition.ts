@@ -6,10 +6,13 @@ import type {
 	InferEventPayload,
 } from "./event-definition.js";
 import type { ValidateColumns } from "./select-columns.js";
-import type { Payload } from "./database-client.js";
-import { validateSchema } from "./lib/validate-schema.js";
+import type { JsonValue, Payload } from "./database-client.js";
+import { parseSchema, validateSchema } from "./lib/validate-schema.js";
 
 type ObjectSchema = StandardSchemaV1<unknown, object>;
+
+/** Standard Schemas of a task's signals, by signal name */
+type SignalSchemas = Record<string, StandardSchemaV1>;
 
 export type TaskDefinition<
 	Name extends string,
@@ -17,6 +20,7 @@ export type TaskDefinition<
 	Returns = undefined,
 	Queue extends string = "default",
 	State = unknown,
+	Signals = unknown,
 > = {
 	readonly name: Name;
 	readonly queue: Queue;
@@ -24,6 +28,11 @@ export type TaskDefinition<
 	readonly returns: Returns;
 	/** Schema (or, in `DefineTask`, type) of the execution's state; untyped without one */
 	readonly state?: State;
+	/**
+	 * Schemas (or, in `DefineTask`, types) of the payloads of the signals the task takes, by
+	 * signal name; signals of other names are untyped
+	 */
+	readonly signals?: Signals;
 };
 
 /**
@@ -36,6 +45,7 @@ export type TaskDefinition<
  *   payload: { to: string };
  *   returns: { sent: boolean };
  *   state: { attempts: number };
+ *   signals: { cancel: { reason: string } };
  * }>;
  */
 export type DefineTask<
@@ -45,13 +55,15 @@ export type DefineTask<
 		payload?: unknown;
 		returns?: unknown;
 		state?: unknown;
+		signals?: Record<string, unknown>;
 	},
 > = TaskDefinition<
 	T["name"],
 	T extends { payload: infer P } ? P : undefined,
 	T extends { returns: infer R } ? R : undefined,
 	T extends { queue: infer Q extends string } ? Q : "default",
-	T extends { state: infer S } ? S : undefined
+	T extends { state: infer S } ? S : undefined,
+	T extends { signals: infer S } ? S : undefined
 >;
 
 export function defineTask<Name extends string, Queue extends string>(def: {
@@ -80,29 +92,33 @@ export function defineTask<
 	Name extends string,
 	Queue extends string,
 	Payload extends ObjectSchema,
-	// Unset when only state routes a definition here
+	// Unset when only state or signals route a definition here
 	Returns extends ObjectSchema | undefined = undefined,
 	State extends ObjectSchema | undefined = undefined,
+	Signals extends SignalSchemas | undefined = undefined,
 >(def: {
 	name: Name;
 	queue: Queue;
 	payload?: Payload;
 	returns?: Returns;
 	state?: State;
-}): TaskDefinition<Name, Payload, Returns, Queue, State>;
+	signals?: Signals;
+}): TaskDefinition<Name, Payload, Returns, Queue, State, Signals>;
 export function defineTask<
 	Name extends string,
 	Payload extends ObjectSchema,
-	// Unset when only state routes a definition here
+	// Unset when only state or signals route a definition here
 	Returns extends ObjectSchema | undefined = undefined,
 	State extends ObjectSchema | undefined = undefined,
+	Signals extends SignalSchemas | undefined = undefined,
 >(def: {
 	name: Name;
 	queue?: never;
 	payload?: Payload;
 	returns?: Returns;
 	state?: State;
-}): TaskDefinition<Name, Payload, Returns, "default", State>;
+	signals?: Signals;
+}): TaskDefinition<Name, Payload, Returns, "default", State, Signals>;
 
 export function defineTask(def: any) {
 	return { ...def, queue: def.queue || "default" };
@@ -144,6 +160,84 @@ export type InferState<T> =
 					? EnsureObject<O>
 					: EnsureObject<S> // Plain type (type-only definition)
 		: never;
+
+/** The input or output types of the signal schemas `S`, by signal name, or their plain types. */
+type SignalTypes<S, Side extends "input" | "output"> = {
+	[K in keyof S]: S[K] extends StandardSchemaV1<infer I, infer O>
+		? Side extends "input"
+			? I
+			: O
+		: S[K]; // Plain type (type-only definition)
+};
+
+/** The signals `S` a task definition `T` declares, as `Side` types; `{}` for none. */
+type DeclaredSignals<T, Side extends "input" | "output"> = [T] extends [never]
+	? {}
+	: T extends TaskDefinition<string, any, any, string, any, infer S>
+		? unknown extends S
+			? {}
+			: [S] extends [undefined]
+				? {}
+				: SignalTypes<NonNullable<S>, Side>
+		: never;
+
+/**
+ * The payload types of the signals a task declares, by signal name, as its handlers receive them:
+ * the output of each signal schema, or its `DefineTask` type. `{}` for a task that declares none.
+ */
+export type InferSignals<T> = DeclaredSignals<T, "output">;
+
+/**
+ * The payload types of the signals a task declares, by signal name, as senders pass them: the
+ * input of each signal schema, so a field with a default is optional, or its `DefineTask` type.
+ */
+export type InferSignalInputs<T> = DeclaredSignals<T, "input">;
+
+/**
+ * The payload of a signal named `TName` of a task with the signals `TSignals` (see
+ * `InferSignals`): its declared type, or `TUndeclared` for a name the task does not declare.
+ */
+export type SignalPayload<
+	TSignals,
+	TName extends string,
+	TUndeclared = JsonValue,
+> = string extends TName
+	? TUndeclared
+	: TName extends keyof TSignals
+		? TSignals[TName]
+		: TUndeclared;
+
+/** The signal schemas of `task` in the catalog `definitions`, if it declares any. */
+export function signalsOf(
+	definitions: readonly TaskDefinition<string, unknown, unknown, string>[],
+	task: { name: string; queue: string },
+): unknown {
+	return definitions.find(
+		(definition) => definition.name === task.name && definition.queue === task.queue,
+	)?.signals;
+}
+
+/**
+ * Parse the payload of a signal named `name` for an execution of `task` with its schema in
+ * `signals`, a task definition's signal schemas: the schema's output, or the issues. A signal
+ * without a schema takes any payload as it is.
+ */
+export async function parseSignalPayload(
+	signals: unknown,
+	task: string,
+	name: string,
+	payload: JsonValue | undefined,
+): Promise<{ value: unknown } | { error: string }> {
+	const schema =
+		typeof signals === "object" && signals !== null && Object.hasOwn(signals, name)
+			? (signals as Record<string, unknown>)[name]
+			: undefined;
+	return parseSchema(
+		isStandardSchema(schema) ? schema : undefined,
+		payload,
+		`payload of signal "${name}" for task "${task}"`,
+	);
+}
 
 /**
  * Validate a state written to an execution of `task` against the task's state schema, and return

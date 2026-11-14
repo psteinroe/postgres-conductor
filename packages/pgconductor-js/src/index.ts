@@ -30,6 +30,9 @@ export type {
 	SignalBranch,
 	SignalMessage,
 	SignalOptions,
+	SignalTarget,
+	TaskExecution,
+	TaskSignalMessage,
 	WaitForAnyResult,
 } from "./task-context.js";
 export type { StartedExecution } from "./query-builder.js";
@@ -41,7 +44,10 @@ export type {
 	DefineTask,
 	InferPayload,
 	InferReturns,
+	InferSignalInputs,
+	InferSignals,
 	InferState,
+	SignalPayload,
 	Trigger,
 	InvocableTrigger,
 	CronTrigger,

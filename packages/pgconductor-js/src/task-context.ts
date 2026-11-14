@@ -19,9 +19,11 @@ import type {
 	FindTaskByIdentifier,
 	InferPayload,
 	InferReturns,
+	InferSignalInputs,
 	InferState,
+	SignalPayload,
 } from "./task-definition.js";
-import { validateState } from "./task-definition.js";
+import { parseSignalPayload, signalsOf, validateState } from "./task-definition.js";
 import type { TaskIdentifier } from "./task.js";
 import type { Logger } from "./lib/logger.js";
 import { WindowChecker } from "./lib/window-checker.js";
@@ -113,23 +115,27 @@ declare const signalPayload: unique symbol;
 
 /**
  * A `ctx.waitForAny()` branch that waits for a signal with this name. It does not consume the
- * signal: `ctx.onSignal()` handlers still receive it. The winner carries the signal's payload;
- * annotate the branch as `SignalBranch<T>` to type it, which is not checked, like the type of a
- * `ctx.onSignal<T>()` handler.
+ * signal: `ctx.onSignal()` handlers still receive it. The winner carries the signal's payload,
+ * typed by the task's declaration of the signal when it declares one. Annotate the branch as
+ * `SignalBranch<T>` to type another; that is not checked, like the type of a `ctx.onSignal<T>()`
+ * handler.
  */
-export type SignalBranch<TPayload extends JsonValue = JsonValue> = {
+export type SignalBranch<TPayload = JsonValue> = {
 	signal: string;
 	/** Type only: the payload type of the signal that wins this branch */
 	readonly [signalPayload]?: TPayload;
 };
 
-type SignalBranchPayload<TBranch> = TBranch extends {
-	readonly [signalPayload]?: infer TPayload extends JsonValue;
-}
-	? unknown extends TPayload
-		? JsonValue
-		: TPayload
-	: JsonValue;
+type SignalBranchPayload<TBranch, TSignals> = typeof signalPayload extends keyof TBranch
+	? TBranch extends { readonly [signalPayload]?: infer TPayload }
+		? unknown extends TPayload
+			? JsonValue
+			: TPayload
+		: JsonValue
+	: // Not annotated: the task's declaration of the signal, if it has one
+		TBranch extends { signal: infer TName extends string }
+		? SignalPayload<TSignals, TName>
+		: JsonValue;
 
 type ExecutionBranchResult<
 	TBranch,
@@ -153,6 +159,7 @@ export type WaitForAnyResult<
 		any,
 		string
 	>[],
+	TSignals = {},
 > =
 	| {
 			[K in keyof TBranches & string]: TBranches[K] extends EventSubscription<infer TEvent>
@@ -160,7 +167,7 @@ export type WaitForAnyResult<
 				: TBranches[K] extends ExecutionBranch
 					? { key: K; outcome: ExecutionOutcome<ExecutionBranchResult<TBranches[K], Tasks>> }
 					: TBranches[K] extends SignalBranch
-						? { key: K; signal: ReceivedSignal<SignalBranchPayload<TBranches[K]>> }
+						? { key: K; signal: ReceivedSignal<SignalBranchPayload<TBranches[K], TSignals>> }
 						: never;
 	  }[keyof TBranches & string]
 	| { key: "timeout" };
@@ -176,6 +183,8 @@ export type TaskContextOptions = {
 	metadataSchema?: StandardSchemaV1<unknown, object>;
 	/** Schema of this execution's state, validated by `ctx.setState()` and `ctx.updateState()` */
 	stateSchema?: StandardSchemaV1;
+	/** Schemas of the signals this execution's task declares, parsed on receipt */
+	signalSchemas?: unknown;
 	/** The conductor's task catalog, for the state schemas of the tasks `ctx.signalWithStart()` targets */
 	taskDefinitions?: readonly TaskDefinition<string, unknown, unknown, string>[];
 	window?: [string, string];
@@ -210,15 +219,83 @@ export type KeyedExecution<TName extends string = string, TQueue extends string 
 	key: string;
 };
 
-/** @internal Addresses a signal by execution id or by key. */
+/** An execution of a task by its id: sending a signal to it checks that it belongs to the task. */
+export type TaskExecution<TName extends string = string, TQueue extends string = string> = {
+	task: TaskIdentifier<TName, TQueue>;
+	id: string;
+};
+
+/**
+ * Where `conductor.signal()` and `ctx.sendSignal()` send a signal: an execution by id, or one of
+ * a task by id or by key, which types and validates the payload by the task's signals.
+ */
+export type SignalTarget<TName extends string = string, TQueue extends string = string> =
+	| string
+	| TaskExecution<TName, TQueue>
+	| KeyedExecution<TName, TQueue>;
+
+/**
+ * A signal named `TName` sent to a task with the signal inputs `TSignals` (see
+ * `InferSignalInputs`): its payload is typed by the task's declaration of the signal, and is
+ * required unless that type takes `undefined`; any JSON value for a signal it does not declare.
+ */
+export type TaskSignalMessage<TSignals, TName extends string> = {
+	name: TName;
+	/** Identifies the signal: a signal id is stored once per execution */
+	id: string;
+} & (string extends TName
+	? { payload?: JsonValue }
+	: TName extends keyof TSignals
+		? undefined extends TSignals[TName]
+			? { payload?: TSignals[TName] }
+			: { payload: TSignals[TName] }
+		: { payload?: JsonValue });
+
+/** The signal inputs of the task `TName` of queue `TQueue` in the catalog `Tasks`. */
+export type TargetSignalInputs<
+	Tasks extends readonly TaskDefinition<string, any, any, string>[],
+	TName extends string,
+	TQueue extends string,
+> = InferSignalInputs<FindTaskByIdentifier<Tasks, TName, TQueue>>;
+
+/** @internal Addresses a signal by execution id, by a task's execution id, or by key. */
 export function signalTarget(
-	target: string | KeyedExecution<string, string>,
-): { executionId: string } | { task: { key: string; queue: string }; key: string } {
+	target: SignalTarget,
+):
+	| { executionId: string; task?: { key: string; queue: string } }
+	| { task: { key: string; queue: string }; key: string } {
 	if (typeof target === "string") return { executionId: target };
-	return {
-		task: { key: target.task.name, queue: target.task.queue || "default" },
-		key: target.key,
-	};
+	const task = { key: target.task.name, queue: target.task.queue || "default" };
+	return "id" in target ? { executionId: target.id, task } : { task, key: target.key };
+}
+
+/**
+ * @internal Throw if the payload of `signal` does not match the schema `task` declares for it in
+ * the catalog `definitions`. The payload is sent as given: receivers parse it with the schema.
+ */
+export async function checkSignal(
+	definitions: readonly TaskDefinition<string, unknown, unknown, string>[],
+	task: TaskIdentifier<string, string> | undefined,
+	signal: SignalMessage,
+): Promise<void> {
+	if (!task) return;
+	const queue = task.queue || "default";
+	const parsed = await parseSignalPayload(
+		signalsOf(definitions, { name: task.name, queue }),
+		task.name,
+		signal.name,
+		signal.payload,
+	);
+	if ("error" in parsed) throw new Error(parsed.error);
+}
+
+/** A signal as senders that name the task pass it: its payload typed by the task's declaration. */
+export type SentSignal = { name: string; id: string; payload?: unknown };
+
+/** @internal The signal to store: a payload a task's declaration typed is stored as JSON. */
+export function sentSignal(signal: SentSignal): SignalMessage {
+	// Typed by a signal schema's input or a `DefineTask` type rather than as JSON; stored as JSON
+	return signal as SignalMessage;
 }
 
 type ScheduleOptions<Metadata> = {
@@ -245,6 +322,8 @@ export class TaskContext<
 	Metadata extends object = Payload,
 	State extends object = Payload,
 	Returns = unknown,
+	/** Payload types of the signals the task declares, by name (see `InferSignals`) */
+	Signals extends object = {},
 > {
 	private readonly windowChecker?: WindowChecker;
 	/** The last state write of this attempt: writes run one after another */
@@ -489,7 +568,7 @@ export class TaskContext<
 		stepKey: string,
 		branches: TBranches & { timeout?: never },
 		options: { timeout?: DurationInput } = {},
-	): Promise<WaitForAnyResult<TBranches, Tasks>> {
+	): Promise<WaitForAnyResult<TBranches, Tasks, Signals>> {
 		// From the call on, no signal handler starts, and the one running is passed along: a signal
 		// handled before the wait registers would neither win nor wake it
 		const result = await this.opts.signals.hold(async (delivering) => {
@@ -530,7 +609,18 @@ export class TaskContext<
 			);
 		});
 		if (!result) return this.abortAndHangup({ reason: "suspended" });
-		return result as WaitForAnyResult<TBranches, Tasks>;
+		if ("signal" in result) {
+			// The branch already won, so a payload that does not match fails like a thrown error
+			const { signal } = result as { signal: ReceivedSignal };
+			const parsed = await this.parseSignal(signal.name, signal.payload);
+			if ("error" in parsed) throw new Error(parsed.error);
+			return { ...result, signal: { ...signal, payload: parsed.value } } as WaitForAnyResult<
+				TBranches,
+				Tasks,
+				Signals
+			>;
+		}
+		return result as WaitForAnyResult<TBranches, Tasks, Signals>;
 	}
 
 	/**
@@ -901,9 +991,36 @@ export class TaskContext<
 	 * When the handler returns, signals already read are delivered before the attempt settles.
 	 * Ones stored later for a name this attempt listens for re-queue the execution, so a new
 	 * attempt receives them when it starts.
+	 *
+	 * A signal the task declares a schema for is parsed with it, and the handler receives the
+	 * schema's output. One that does not match is logged as an error and counts as delivered
+	 * without reaching the handler: failing the attempt would fail every retry on it. Other names,
+	 * such as the event names of `ctx.listen()`, take any JSON value. An explicit type argument
+	 * (`onSignal<T>()`) types the payload without a check.
 	 */
-	onSignal<T extends JsonValue = JsonValue>(name: string, handler: SignalHandler<T>): void {
-		this.opts.signals.listen(name, handler as SignalHandler);
+	onSignal<TName extends string, T = JsonValue>(
+		name: TName,
+		handler: SignalHandler<SignalPayload<Signals, TName, T>>,
+	): void;
+	onSignal<T>(name: string, handler: SignalHandler<NoInfer<T>>): void;
+	onSignal(name: string, handler: SignalHandler<never>): void {
+		const handle = handler as SignalHandler<unknown>;
+		this.opts.signals.listen(name, async (payload, info) => {
+			const parsed = await this.parseSignal(name, payload);
+			if ("error" in parsed) {
+				this.opts.logger.error(`Skipped signal "${name}": ${parsed.error}`, { signal_id: info.id });
+				return;
+			}
+			return handle(parsed.value, info);
+		});
+	}
+
+	/** A received signal's payload, parsed with the schema this task declares for its name. */
+	private parseSignal(
+		name: string,
+		payload: JsonValue,
+	): Promise<{ value: unknown } | { error: string }> {
+		return parseSignalPayload(this.opts.signalSchemas, this.opts.execution.task_key, name, payload);
 	}
 
 	/**
@@ -1064,21 +1181,45 @@ export class TaskContext<
 	}
 
 	/**
-	 * Signal an execution by id, or the open execution of `{ task, key }` that holds the key.
-	 * Idempotent by signal id: resending an id stores the signal once. With `at`, the signal is
-	 * delivered at that time (see `conductor.signal()`).
+	 * Signal an execution by id, an execution of a task by `{ task, id }`, or the open execution
+	 * of `{ task, key }` that holds the key. Idempotent by signal id: resending an id stores the
+	 * signal once. With `at`, the signal is delivered at that time (see `conductor.signal()`).
+	 *
+	 * With the task, the payload is typed by the task's declaration of the signal and checked
+	 * against its schema, which throws and sends nothing on issues; `{ task, id }` also throws if
+	 * the execution belongs to another task. A bare execution id takes any JSON value.
 	 * @returns false if the execution is completed, failed, cancelled or unknown, or no open
 	 * execution holds the key
 	 */
-	async sendSignal<TName extends TaskName<Tasks>, TQueue extends string = "default">(
-		target: string | KeyedExecution<TName, TQueue>,
+	async sendSignal<
+		TName extends TaskName<Tasks>,
+		TQueue extends string = "default",
+		TSignal extends string = string,
+	>(
+		target: TaskExecution<TName, TQueue> | KeyedExecution<TName, TQueue>,
+		signal: TaskSignalMessage<TargetSignalInputs<Tasks, TName, TQueue>, TSignal>,
+		options?: SignalOptions,
+	): Promise<boolean>;
+	async sendSignal(
+		executionId: string,
 		signal: SignalMessage,
+		options?: SignalOptions,
+	): Promise<boolean>;
+	async sendSignal(
+		target: SignalTarget,
+		signal: SentSignal,
 		options: SignalOptions = {},
 	): Promise<boolean> {
+		const sent = sentSignal(signal);
+		await checkSignal(
+			this.opts.taskDefinitions || [],
+			typeof target === "string" ? undefined : target.task,
+			sent,
+		);
 		return this.opts.db.signalExecution(
 			{
 				...signalTarget(target),
-				signal: { ...signal, at: options.at, traceContext: this.opts.telemetry.traceContext() },
+				signal: { ...sent, at: options.at, traceContext: this.opts.telemetry.traceContext() },
 			},
 			{ signal: this.signal },
 		);
@@ -1098,13 +1239,15 @@ export class TaskContext<
 			TName,
 			TQueue
 		>,
+		TSignal extends string = string,
 	>(
 		stepKey: string,
 		options: {
 			task: TName;
 			queue?: TQueue;
 			key: string;
-			signal: SignalMessage;
+			/** Typed and checked by the task's declaration of the signal */
+			signal: TaskSignalMessage<InferSignalInputs<TDef>, TSignal>;
 			/** Payload of the execution, used only when it starts one */
 			input?: InferPayload<TDef>;
 			/**
@@ -1132,6 +1275,8 @@ export class TaskContext<
 				{ name: options.task, queue },
 				options.state,
 			));
+		const signal = sentSignal(options.signal);
+		await checkSignal(this.opts.taskDefinitions || [], { name: options.task, queue }, signal);
 
 		const started = await this.opts.db.signalWithStartStep(
 			{
@@ -1144,7 +1289,7 @@ export class TaskContext<
 					taskKey: options.task,
 					queue,
 					key: options.key,
-					signal: options.signal,
+					signal,
 					input: (options.input || {}) as Payload,
 					state,
 					listens: compileListens(options.listen || {}, this.opts.eventDefinitions),
