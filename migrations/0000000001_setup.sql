@@ -1260,7 +1260,9 @@ create or replace function pgconductor.signal_execution(
   p_id text,
   p_payload jsonb default null,
   p_deliver_at timestamptz default null,
-  p_trace_context jsonb default null
+  p_trace_context jsonb default null,
+  p_task_key text default null,
+  p_task_queue text default null
 )
 returns boolean
 language plpgsql
@@ -1269,11 +1271,12 @@ set search_path to ''
 as $function$
 declare
   v_queue text;
+  v_task_key text;
 begin
   -- the row lock orders this with settlement, which re-queues an execution that has signals it
   -- did not deliver
-  select e.queue
-  into v_queue
+  select e.queue, e.task_key
+  into v_queue, v_task_key
   from pgconductor._private_executions e
   where e.id = p_execution_id
     and e.completed_at is null
@@ -1283,6 +1286,14 @@ begin
 
   if not found then
     return false;
+  end if;
+
+  -- a sender that names the task typed and validated the payload for it
+  if p_task_key is not null
+    and (v_task_key <> p_task_key or v_queue <> coalesce(p_task_queue, 'default')) then
+    raise exception 'Execution % belongs to task "%" of queue "%", not to task "%" of queue "%"',
+      p_execution_id, v_task_key, v_queue, p_task_key, coalesce(p_task_queue, 'default')
+      using errcode = 'P0001';
   end if;
 
   perform pgconductor._private_store_signal(

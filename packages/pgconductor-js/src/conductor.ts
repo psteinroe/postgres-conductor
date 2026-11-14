@@ -21,19 +21,27 @@ import {
 	type RetentionSettings,
 } from "./task.js";
 import {
+	checkSignal,
+	sentSignal,
 	signalTarget,
 	type TaskContext,
 	type BatchTaskContext,
 	type BatchTaskEvent,
 	type KeyedExecution,
+	type SentSignal,
 	type SignalMessage,
 	type SignalOptions,
+	type SignalTarget,
+	type TargetSignalInputs,
+	type TaskExecution,
+	type TaskSignalMessage,
 } from "./task-context.js";
 import type { StartedExecution } from "./query-builder.js";
 import {
 	type FindTaskByIdentifier,
 	type InferPayload,
 	type InferReturns,
+	type InferSignals,
 	type InferState,
 	type NonEmptyArray,
 	type TaskDefinition,
@@ -128,12 +136,32 @@ type ResolvedState<
 	TDef extends { readonly name: string; readonly queue?: string },
 > = TDef["name"] extends TaskName<Tasks> ? InferState<ResolvedTaskDef<Tasks, TDef>> : Payload;
 
+type ResolvedSignals<
+	Tasks extends readonly TaskDefinition<string, any, any, string>[],
+	TDef extends { readonly name: string; readonly queue?: string },
+> = TDef["name"] extends TaskName<Tasks> ? InferSignals<ResolvedTaskDef<Tasks, TDef>> : {};
+
 type ResolvedContext<
 	Tasks extends readonly TaskDefinition<string, any, any, string>[],
 	Events extends readonly EventDefinition<string, any, any>[],
 	Metadata extends object,
 	TDef extends { readonly name: string; readonly queue?: string },
-> = TaskContext<Tasks, Events, Metadata, ResolvedState<Tasks, TDef>, ResolvedReturns<Tasks, TDef>>;
+> = TaskContext<
+	Tasks,
+	Events,
+	Metadata,
+	ResolvedState<Tasks, TDef>,
+	ResolvedReturns<Tasks, TDef>,
+	ResolvedSignals<Tasks, TDef>
+>;
+
+/** A signal for the task `TName` of queue `TQueue`, typed by its declaration of the signal. */
+type TaskSignal<
+	Tasks extends readonly TaskDefinition<string, any, any, string>[],
+	TName extends string,
+	TQueue extends string,
+	TSignal extends string,
+> = TaskSignalMessage<TargetSignalInputs<Tasks, TName, TQueue>, TSignal>;
 
 type ResolvedTaskEvent<
 	Tasks extends readonly TaskDefinition<string, any, any, string>[],
@@ -531,25 +559,50 @@ export class Conductor<
 	}
 
 	/**
-	 * Signal an execution by id, or the open execution of `{ task, key }` that holds the key (see
-	 * `signalWithStart()`). A running execution receives it right away in `ctx.onSignal`, any other
-	 * when its handler next runs. Idempotent by signal id: resending an id stores the signal once.
-	 * By key, it runs under the lock `signalWithStart()` takes, so it waits for one starting the
-	 * execution for that key.
+	 * Signal an execution by id, an execution of a task by `{ task, id }`, or the open execution
+	 * of `{ task, key }` that holds the key (see `signalWithStart()`). A running execution receives
+	 * it right away in `ctx.onSignal`, any other when its handler next runs. Idempotent by signal
+	 * id: resending an id stores the signal once. By key, it runs under the lock
+	 * `signalWithStart()` takes, so it waits for one starting the execution for that key.
+	 *
+	 * With the task, the payload is typed by the task's declaration of the signal and checked
+	 * against its schema, which throws and sends nothing on issues; `{ task, id }` also throws if
+	 * the execution belongs to another task. A bare execution id takes any JSON value. The
+	 * payload is stored as sent: the receiving task parses it with its schema.
 	 *
 	 * With `at`, the signal is stored now and delivered at that time: a running execution receives
 	 * it with the first poll after it, an idle actor wakes then (or at its alarm, if earlier).
 	 * @returns false if the execution is completed, failed, cancelled or unknown, or no open
 	 * execution holds the key
 	 */
-	async signal<TName extends TaskName<Tasks>, TQueue extends string = "default">(
-		target: string | KeyedExecution<TName, TQueue>,
+	async signal<
+		TName extends TaskName<Tasks>,
+		TQueue extends string = "default",
+		TSignal extends string = string,
+	>(
+		target: TaskExecution<TName, TQueue> | KeyedExecution<TName, TQueue>,
+		signal: TaskSignal<Tasks, TName, TQueue, TSignal>,
+		options?: SignalOptions,
+	): Promise<boolean>;
+	async signal(
+		executionId: string,
 		signal: SignalMessage,
+		options?: SignalOptions,
+	): Promise<boolean>;
+	async signal(
+		target: SignalTarget,
+		signal: SentSignal,
 		options: SignalOptions = {},
 	): Promise<boolean> {
+		const sent = sentSignal(signal);
+		await checkSignal(
+			this.options.tasks?.definitions || [],
+			typeof target === "string" ? undefined : target.task,
+			sent,
+		);
 		return this.db.signalExecution({
 			...signalTarget(target),
-			signal: { ...signal, at: options.at, traceContext: this.telemetry.traceContext() },
+			signal: { ...sent, at: options.at, traceContext: this.telemetry.traceContext() },
 		});
 	}
 
@@ -561,11 +614,16 @@ export class Conductor<
 	 * `ListenHeldError` and starts nothing.
 	 * @returns ID of the execution that received the signal, and whether this call started it
 	 */
-	async signalWithStart<TName extends TaskName<Tasks>, TQueue extends string = "default">(options: {
+	async signalWithStart<
+		TName extends TaskName<Tasks>,
+		TQueue extends string = "default",
+		TSignal extends string = string,
+	>(options: {
 		task: TName;
 		queue?: TQueue;
 		key: string;
-		signal: SignalMessage;
+		/** Typed and checked by the task's declaration of the signal */
+		signal: TaskSignal<Tasks, TName, TQueue, TSignal>;
 		/** Payload of the execution, used only when it starts one */
 		input?: InferPayload<FindTaskByIdentifier<Tasks, TName, TQueue>>;
 		/**
@@ -587,6 +645,8 @@ export class Conductor<
 				{ name: options.task, queue },
 				options.state,
 			));
+		const signal = sentSignal(options.signal);
+		await checkSignal(this.options.tasks?.definitions || [], { name: options.task, queue }, signal);
 		return this.telemetry.send({
 			taskKey: options.task,
 			queue,
@@ -595,7 +655,7 @@ export class Conductor<
 					taskKey: options.task,
 					queue,
 					key: options.key,
-					signal: options.signal,
+					signal,
 					input: (options.input || {}) as Payload,
 					state,
 					listens: compileListens(options.listen || {}, this.events),

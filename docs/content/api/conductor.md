@@ -235,9 +235,14 @@ await conductor.signal(
   { name: "stop", id: requestId },
 );
 
+// by task and execution ID: typed by the task's signals, and throws for an execution of another task
+await conductor.signal({ task: { name: "session" }, id: executionId }, { name: "input", id: requestId, payload });
+
 // delivered at a time: neither a handler nor a wake-up sees it before
 await conductor.signal(executionId, { name: "expire", id: `expire:${at.toISOString()}` }, { at });
 ```
+
+With the task, by key or as `{ task, id }`, the payload of a signal the task [declares](../crafting-tasks/defining-tasks.md#signals) is typed by its schema's input and checked against it: an invalid payload throws and sends nothing. `{ task, id }` also throws if the execution belongs to another task. By execution ID alone, the payload is any JSON value. See [Typed Signals](../task-execution/signals.md#typed-signals).
 
 With `at`, the signal is stored now and delivered at that time: a running execution receives it with the worker's first poll after `at`, an idle actor wakes at `at` (or at its alarm, if earlier). See [Delayed Signals](../task-execution/signals.md#delayed-signals).
 
@@ -252,7 +257,7 @@ const { id, started } = await conductor.signalWithStart({
   task: "session",
   queue: "default", // optional
   key: "thread-1",
-  signal: { name: "input", id: requestId, payload },
+  signal: { name: "input", id: requestId, payload }, // typed and checked by the task's declared signals
   input: {}, // used only when it starts an execution (default: {})
   state: {}, // optional: its state (ctx.setState()), used only when it starts an execution; validated against the task's state schema
   listen: { thread: { event: chatMessage, filter: { threadId: ["1"] } } }, // optional: ctx.listen()s when it starts one

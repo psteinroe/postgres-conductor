@@ -61,7 +61,7 @@ const session = conductor.createTask(
 - `winner.signal` holds the signal's `id`, `name` and `payload` (`null` when it was sent without one). The winner is memoized under the step key, so a replay returns the same signal and payload
 - The wait does not consume the signal. The next attempt delivers it to `ctx.onSignal()` handlers as usual
 - Signals for other names are kept and do not wake the execution
-- Annotate a branch as `SignalBranch<T>` to type `winner.signal.payload`; like the type of a `ctx.onSignal<T>()` handler, it is not checked. An unannotated branch's payload is a `JsonValue`
+- `winner.signal.payload` is typed by the task's declaration of the signal, and parsed with its schema (see [Typed Signals](#typed-signals)). Annotate a branch as `SignalBranch<T>` to type another; like the type of a `ctx.onSignal<T>()` handler, it is not checked. Otherwise the payload is a `JsonValue`
 
 Since the payload is memoized with the winner, the signal itself can carry what the execution waits for. An approval request that waits for the first decision, a withdrawal or its expiry does not have to persist decisions from a handler:
 
@@ -181,6 +181,54 @@ const { id: sessionId, started } = await ctx.signalWithStart("start-session", {
 ```
 
 `ctx.signalWithStart()` passes the metadata of the calling execution to an execution it starts, unless its `metadata` option overrides it. `ctx.sendSignal()` starts nothing and takes no metadata.
+
+## Typed Signals
+
+A task can declare the signals it takes in its [definition](../crafting-tasks/defining-tasks.md#signals), with a Standard Schema per name, or a type per name in `DefineTask`:
+
+```typescript
+const Delivery = z.object({ text: z.string(), from: z.string() });
+
+const sessionTask = defineTask({
+  name: "session",
+  payload: z.object({ thread: z.string() }),
+  signals: { input: Delivery, withdraw: z.object({ reason: z.string().default("none") }) },
+});
+```
+
+Its handler then receives typed payloads, parsed with the schema:
+
+```typescript
+conductor.createTask({ name: "session" }, { invocable: true }, async (event, ctx) => {
+  ctx.onSignal("input", (payload) => {
+    payload.text; // string
+  });
+  const winner = await ctx.waitForAny("idle", { input: { signal: "input" } }, { timeout: "1h" });
+  if (winner.key === "input") winner.signal.payload.from; // string
+
+  // a name the task does not declare, like the event of a ctx.listen(), is a JsonValue
+  ctx.onSignal("chat.message", (payload) => {});
+});
+```
+
+Senders that name the task, by key or as `{ task, id }`, are typed and checked by its declaration:
+
+```typescript
+await conductor.signal({ task: { name: "session" }, key }, { name: "input", id, payload: delivery });
+await conductor.signal({ task: { name: "session" }, id: executionId }, { name: "withdraw", id, payload: {} });
+await ctx.sendSignal({ task: { name: "session" }, id: executionId }, { name: "input", id, payload: delivery });
+await conductor.signalWithStart({ task: "session", key, signal: { name: "input", id, payload: delivery } });
+```
+
+- Senders are typed by each schema's input, so a field with a default may be left out; handlers are typed by its output and receive the default
+- Where the sender's catalog has the schema, the payload is checked against it before anything is stored, by `conductor.` and `ctx.` senders alike. An invalid payload throws at the call site, for example `Invalid payload of signal "input" for task "session": text: Invalid input`, and sends nothing; `signalWithStart()` then starts no execution. The payload is stored as sent
+- The receiving task parses each signal it declares a schema for, and its `ctx.onSignal()` handler receives the schema's output, so transforms and defaults apply. A payload that does not match, for example one sent by execution id alone or by SQL, is logged as an error and counts as delivered without reaching the handler: failing the attempt would fail every retry on the same signal. A `{ signal: name }` branch of `ctx.waitForAny()` has already won when its payload is parsed, so one that does not match throws from `waitForAny()` like any error
+- `{ task, id }` throws if the execution belongs to another task, and sends nothing
+- By execution id alone (`signal(executionId, signal)`), the payload is any JSON value and is not checked when sent
+- Names the task does not declare stay untyped and unchecked, so the event-named signals of [listens](../crafting-tasks/triggers.md#listening-for-events) keep working. A task that declares no signals behaves as before
+- A type-only definition (`DefineTask`) types signals but has no schema to check them with, on either side
+- A declared type need not be JSON in TypeScript's eyes, so interfaces work; the payload is still stored as JSON
+- An explicit type argument, `ctx.onSignal<T>()`, types any name's payload without a check
 
 ## Delivery Guarantees
 

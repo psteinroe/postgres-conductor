@@ -117,6 +117,31 @@ type Agent = DefineTask<{
 
 State is validated where it enters, against the task's state schema: `ctx.setState()`, `ctx.updateState()`, and `signalWithStart({ state })` from the Conductor or a task context. An invalid state throws at the call site with the issues, for example `Invalid state for task "agent": status: Invalid option`, and writes nothing; `signalWithStart()` then sends no signal and starts no execution. The schema's output is written, so transforms and defaults apply. `null` clears the state and is not validated. Reads are not validated: `ctx.state` and the executions the Conductor reads return the state as stored.
 
+### Signals
+
+A task can declare the [signals](../task-execution/signals.md) it takes, by name, with a schema for each payload. `DefineTask` takes a type per name instead:
+
+```typescript
+export const sessionTask = defineTask({
+  name: "session",
+  payload: z.object({ thread: z.string() }),
+  signals: {
+    input: z.object({ text: z.string(), from: z.string() }),
+    withdraw: z.object({ reason: z.string().default("none") }),
+  },
+});
+
+type Session = DefineTask<{
+  name: "session";
+  payload: { thread: string };
+  signals: { input: { text: string; from: string }; withdraw: { reason: string } };
+}>;
+```
+
+The payload of a declared signal is then typed where the task receives it, in `ctx.onSignal()` and the `{ signal: name }` branches of `ctx.waitForAny()`, and where it is sent: `conductor.signal()` and `ctx.sendSignal()` by key or as `{ task, id }`, and `signalWithStart()`. See [Typed Signals](../task-execution/signals.md#typed-signals). Signals with other names stay untyped, as do all signals of a task that declares none. `InferSignals<typeof sessionTask>` reads the payload types handlers receive (the schemas' outputs), `InferSignalInputs` those senders pass (their inputs).
+
+A declared payload is checked where the signal is sent, against the target task's schema, like `signalWithStart({ state })`. An invalid payload throws at the call site, for example `Invalid payload of signal "input" for task "session": text: Invalid input`, and sends nothing; `signalWithStart()` then starts no execution. The payload is stored as sent, and the receiving task parses it with its schema: handlers receive the schema's output, and a payload that does not match is logged and skipped.
+
 A catalog made at runtime, such as one task per configured integration, can type its tasks by any name: names typed `string` match every literal name, and a task returning `unknown` may return any object or nothing.
 
 ```typescript

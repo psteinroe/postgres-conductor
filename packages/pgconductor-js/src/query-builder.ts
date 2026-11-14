@@ -256,12 +256,14 @@ export type SentSignalArgs = SignalArgs & {
 };
 
 /** Signals an execution by id, or the open execution of `task` holding `key` */
-export type SignalExecutionArgs = (
-	| { executionId: string }
-	| { task: { key: string; queue: string }; key: string }
-) & {
-	signal: SentSignalArgs;
-};
+export type SignalExecutionArgs =
+	/** With `task`, the execution must belong to it */
+	(
+		| { executionId: string; task?: { key: string; queue: string } }
+		| { task: { key: string; queue: string }; key: string }
+	) & {
+		signal: SentSignalArgs;
+	};
 
 export type SignalWithStartArgs = {
 	taskKey: string;
@@ -401,7 +403,9 @@ export class QueryBuilder {
 					${signal.id}::text,
 					${payload}::jsonb,
 					${at}::timestamptz,
-					${trace}::jsonb
+					${trace}::jsonb,
+					${args.task ? args.task.key : null}::text,
+					${args.task ? args.task.queue : null}::text
 				) as stored
 			`;
 		}
