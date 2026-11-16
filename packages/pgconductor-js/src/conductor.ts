@@ -426,15 +426,28 @@ export class Conductor<
 		if (options.queue === EVENT_DISPATCH_QUEUE) {
 			throw new Error(`Queue "${EVENT_DISPATCH_QUEUE}" is reserved for internal use`);
 		}
+		return this.buildWorker(options.queue, options.tasks as AnyTask[], options.config);
+	}
+
+	/**
+	 * @internal A worker of this conductor for any queue, the internal one included: the orchestrator
+	 * builds its default and event-dispatch workers with it. Middleware does not wrap internal tasks
+	 */
+	buildWorker(
+		queue: string,
+		tasks: readonly AnyTask[],
+		config?: Partial<WorkerConfig>,
+		logger: Logger = this.logger,
+	): Worker<Tasks> {
 		return new Worker<Tasks>(
-			options.queue,
-			options.tasks as AnyTask[],
+			queue,
+			tasks,
 			this.db,
-			this.logger,
-			options.config,
+			logger,
+			config,
 			this.options.context,
 			this.telemetry,
-			this.options.middleware,
+			queue === EVENT_DISPATCH_QUEUE ? [] : this.options.middleware,
 			this.options.clock,
 		);
 	}

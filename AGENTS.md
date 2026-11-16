@@ -176,7 +176,7 @@ Tables live in the `pgconductor` schema with a `_private_` prefix (`_private_exe
 - Provides `stopped` promise for graceful shutdown. `stop()` interrupts startup, `run()` and `drain()` alike
 - A heartbeat is cancelled when it takes `staleAfterMs` (the next one then finds out whether the orchestrator was recovered) and, like stale recovery, when cleanup stops the heartbeats, so a heartbeat waiting on a lock or a lost connection cannot hold up the stop
 - Cleanup retries removing the orchestrator for at most 10s, cancelling a statement still running, then gives up and leaves the rest to stale recovery; local lifecycle state and process listeners are reset in a `finally`
-- Runs the internal event dispatch worker only when the conductor has `events` configured
+- Runs the internal event dispatch worker only when the conductor has `events` configured. It builds it and the default worker with `conductor.buildWorker()` (also behind `createWorker()`), so every worker gets the conductor's context, telemetry and clock; middleware does not wrap the internal queue
 - One queue = one codebase: every orchestrator polling a queue runs the same task set, so worker registration owns the whole queue and replaces its cron schedules and trigger subscriptions
 
 **Reading executions**

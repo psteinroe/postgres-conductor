@@ -96,18 +96,9 @@ export class Orchestrator {
 		}
 
 		if (options.tasks?.length) {
-			const worker = new Worker(
-				"default",
-				options.tasks,
-				this.db,
-				this.logger,
-				options.defaultWorker,
-				options.conductor.options.context,
-				options.conductor.telemetry,
-				options.conductor.options.middleware,
-				options.conductor.options.clock,
+			this.workers.push(
+				options.conductor.buildWorker("default", options.tasks, options.defaultWorker, this.logger),
 			);
-			this.workers.push(worker);
 		}
 
 		for (const w of options.workers || []) {
@@ -133,11 +124,9 @@ export class Orchestrator {
 				...options.defaultWorker,
 			};
 			this.workers.push(
-				new Worker(
+				options.conductor.buildWorker(
 					EVENT_DISPATCH_QUEUE,
 					[createEventDispatchTask(this.db, options.conductor.options.eventRetention)],
-					this.db,
-					this.logger,
 					{
 						concurrency: 1,
 						fetchBatchSize: 10,
@@ -145,8 +134,7 @@ export class Orchestrator {
 						pollIntervalMs,
 						flushIntervalMs,
 					},
-					options.conductor.options.context,
-					options.conductor.telemetry,
+					this.logger,
 				),
 			);
 		}

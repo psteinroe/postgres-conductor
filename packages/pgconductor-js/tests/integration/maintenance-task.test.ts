@@ -50,6 +50,40 @@ describe("Maintenance Task", () => {
 		expect(new Set(crons).size).toBeGreaterThanOrEqual(5);
 	});
 
+	test("the event-dispatch worker follows the conductor's clock", async () => {
+		const db = await pool.child();
+		databases.push(db);
+		await db.clock.set(new Date("2024-01-01T23:00:00Z"));
+		const conductor = Conductor.create({
+			sql: db.sql,
+			clock: db.clock,
+			events: [defineEvent({ name: "clock.tick", payload: z.object({}) })],
+			context: {},
+		});
+		await conductor.ensureInstalled();
+		const orchestrator = Orchestrator.create({
+			conductor,
+			defaultWorker: { pollIntervalMs: 20, flushIntervalMs: 20 },
+		});
+		await orchestrator.start();
+		try {
+			// Past the internal queue's maintenance, which schedules its successor by the worker clock
+			await db.clock.set(new Date("2024-01-02T01:00:00Z"));
+			const cron = maintenanceCron("pgconductor.internal");
+			const next = nextCronOccurrence(cron, new Date("2024-01-02T01:00:00Z"));
+			await waitForCondition(async () => {
+				const rows = await db.sql`
+					select id from pgconductor._private_executions
+					where queue = 'pgconductor.internal' and task_key = 'pgconductor.maintenance'
+						and run_at = ${next}::timestamptz
+				`;
+				return rows.length === 1;
+			}, 10_000);
+		} finally {
+			await orchestrator.stop();
+		}
+	});
+
 	test("a worker starts on every queue name", async () => {
 		const db = await pool.child();
 		databases.push(db);
