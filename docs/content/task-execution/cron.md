@@ -108,7 +108,7 @@ const cancelReport = conductor.createTask(
 );
 ```
 
-This deletes the pending scheduled execution and cancels a running one, which then schedules no further execution.
+This deletes the pending scheduled execution and cancels one that already started, running or suspended (sleeping, or waiting on a child or an event), which then schedules no further execution. A cancelled occurrence ends like any cancelled execution: its waiters see the cancellation and its `cancelWithParent` children are cancelled too. The same holds for a static trigger that a deploy removes.
 
 ## Schedule Names
 

@@ -621,7 +621,7 @@ await ctx.schedule(
 Every occurrence runs with the payload, priority, group and metadata of the schedule. Metadata
 defaults to this execution's metadata; `metadata` overrides it as for `ctx.invoke()`. A function
 runs once, when scheduling. Scheduling `scheduleName` again replaces them for the pending and
-later occurrences; a running occurrence keeps its own.
+later occurrences; an occurrence that already started keeps its own, also while it sleeps or waits.
 
 **Example:**
 
