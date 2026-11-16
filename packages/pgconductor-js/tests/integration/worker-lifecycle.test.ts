@@ -318,7 +318,7 @@ test("an execution whose last attempt never settled fails instead of running aga
 		context: {},
 	});
 	let ran = false;
-	const task = conductor.createTask({ name: "session", maxAttempts: 2 }, { invocable: true }, () => {
+	const task = conductor.createTask({ name: "session", maxAttempts: 2 }, { invocable: true }, async () => {
 		ran = true;
 	});
 	await conductor.ensureInstalled();

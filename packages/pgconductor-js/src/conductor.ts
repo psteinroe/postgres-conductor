@@ -21,6 +21,7 @@ import {
 	type RetentionSettings,
 } from "./task.js";
 import {
+	checkContextKeys,
 	checkSignal,
 	sentSignal,
 	signalTarget,
@@ -245,6 +246,7 @@ export class Conductor<
 	private constructor(
 		public readonly options: ConductorOptions<TTaskSchemas, TEventSchemas, ExtraContext>,
 	) {
+		checkContextKeys(options.context);
 		this.logger = options.logger || new DefaultLogger();
 		this.telemetry = new Telemetry(options.telemetry !== false);
 		this.events =
