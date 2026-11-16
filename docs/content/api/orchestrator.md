@@ -15,7 +15,8 @@ const orchestrator = Orchestrator.create({
   workers?,             // Custom workers
   defaultWorker?,       // Default worker config
   heartbeatIntervalMs?, // Heartbeat interval (default: 5000)
-  staleAfterMs?         // Stale age (default: 30000)
+  staleAfterMs?,        // Stale age (default: 30000)
+  handleSignals?        // Stop on process signals (default: true)
 });
 ```
 
@@ -27,6 +28,7 @@ const orchestrator = Orchestrator.create({
 - `defaultWorker`: (optional) Configuration for default worker
 - `heartbeatIntervalMs`: (optional) How often the orchestrator heartbeats. Default `5000`
 - `staleAfterMs`: (optional) How long an orchestrator may go without a heartbeat before other orchestrators remove it and release its executions. Default `30000`; at least twice `heartbeatIntervalMs`, and the same on every orchestrator of a database. See [Crash Recovery](../scaling/horizontal.md#crash-recovery)
+- `handleSignals`: (optional) Stop gracefully on SIGINT, SIGTERM, SIGHUP, SIGUSR2 and SIGABRT, and exit at once on a second SIGINT or SIGTERM: the orchestrator removes its listeners and raises the signal again, so the process ends as it would without them. Default `true`; set `false` when your application handles process signals and calls `stop()` itself
 
 The Orchestrator is the registration authority for its workers. Configure at
 most one worker for each queue (including the implicit `default` worker); put
@@ -58,7 +60,7 @@ await orchestrator.start();
 - Initializes database schema (if needed)
 - Opens a connection of its own for heartbeats; once its heartbeats have succeeded for `staleAfterMs`, it releases the executions of crashed orchestrators (see [Crash Recovery](../scaling/horizontal.md#crash-recovery))
 - Starts all workers
-- Sets up signal handlers (SIGTERM, SIGINT)
+- Sets up signal handlers (SIGINT, SIGTERM, SIGHUP, SIGUSR2, SIGABRT) unless `handleSignals` is `false`; a second SIGINT or SIGTERM exits at once
 - Begins polling for executions
 
 ## orchestrator.stop()

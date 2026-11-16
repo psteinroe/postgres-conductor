@@ -27,6 +27,12 @@ export type OrchestratorOptions<TTasks extends readonly AnyTask[] = readonly Any
 	 * orchestrator of a database
 	 */
 	staleAfterMs?: number;
+	/**
+	 * Stop gracefully on SIGINT, SIGTERM, SIGHUP, SIGUSR2 and SIGABRT, and exit at once on a second
+	 * SIGINT or SIGTERM (default true). Set to false when the application handles process signals
+	 * itself and calls `stop()`
+	 */
+	handleSignals?: boolean;
 };
 
 type InternalOrchestratorOptions = {
@@ -36,6 +42,7 @@ type InternalOrchestratorOptions = {
 	workers?: Worker[];
 	heartbeatIntervalMs?: number;
 	staleAfterMs?: number;
+	handleSignals?: boolean;
 };
 
 const DEFAULT_HEARTBEAT_INTERVAL_MS = 5_000;
@@ -60,6 +67,7 @@ export class Orchestrator {
 	private readonly logger: Logger;
 	private readonly heartbeatIntervalMs: number;
 	private readonly staleAfterMs: number;
+	private readonly handleSignals: boolean;
 
 	private heartbeats: Promise<void> | null = null;
 	private heartbeatController: AbortController | null = null;
@@ -80,6 +88,7 @@ export class Orchestrator {
 		this.schemaManager = new SchemaManager(this.db, { logger: this.logger });
 		this.heartbeatIntervalMs = options.heartbeatIntervalMs || DEFAULT_HEARTBEAT_INTERVAL_MS;
 		this.staleAfterMs = options.staleAfterMs || DEFAULT_STALE_AFTER_MS;
+		this.handleSignals = options.handleSignals !== false;
 		if (!(this.heartbeatIntervalMs > 0) || !(this.staleAfterMs >= this.heartbeatIntervalMs * 2)) {
 			throw new Error(
 				`staleAfterMs (${this.staleAfterMs}) must be at least twice heartbeatIntervalMs (${this.heartbeatIntervalMs}), or live orchestrators look stale`,
@@ -205,7 +214,7 @@ export class Orchestrator {
 		this._stopDeferred.promise.catch(noop);
 		this._startDeferred = new Deferred<void>();
 		this._abortController = new AbortController();
-		this.registerSignalHandlers();
+		if (this.handleSignals) this.registerSignalHandlers();
 		// Heartbeats run on a connection of their own, so handlers holding every pool connection cannot
 		// make the orchestrator look stale
 		const heartbeatDb = this.db.withOwnConnection();
@@ -415,6 +424,13 @@ export class Orchestrator {
 
 		const shutdownHandler = (signal: Signal) => {
 			if (this.isShuttingDown) {
+				// A second interrupt or termination means the caller will not wait: exit as without us
+				if (signal === "SIGINT" || signal === "SIGTERM") {
+					this.logger.warn(`Received ${signal} again while shutting down, exiting at once`);
+					this.releaseSignalHandlers?.();
+					process.kill(process.pid, signal);
+					return;
+				}
 				this.logger.debug(`Ignoring duplicate signal: ${signal}, already shutting down`);
 				return;
 			}

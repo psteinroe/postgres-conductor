@@ -475,3 +475,81 @@ process.exit(0);
 	// Cleanup
 	unlinkSync(scriptPath);
 }, 30000);
+
+test("a second SIGTERM exits while a handler keeps the graceful shutdown waiting", async () => {
+	const db = await pool.child();
+	databases.push(db);
+
+	const scriptPath = join(__dirname, "../../tmp/signal-test-second-sigterm.ts");
+	writeFileSync(
+		scriptPath,
+		`
+import { Conductor } from "../src/conductor";
+import { Orchestrator } from "../src/orchestrator";
+import { defineTask } from "../src/task-definition";
+import { TaskSchemas } from "../src/schemas";
+import postgres from "postgres";
+
+const sql = postgres("${db.url}");
+const taskDefinition = defineTask({ name: "stuck-task" });
+const conductor = Conductor.create({
+	sql,
+	tasks: TaskSchemas.fromSchema([taskDefinition]),
+	context: {},
+});
+await conductor.ensureInstalled();
+
+const task = conductor.createTask(taskDefinition, { invocable: true }, async () => {
+	console.log("HANDLER_STARTED");
+	// Ignores ctx.signal, so a graceful stop never finishes
+	await new Promise(() => {});
+});
+
+const orch = Orchestrator.create({
+	conductor,
+	tasks: [task],
+	defaultWorker: { pollIntervalMs: 50 },
+});
+await conductor.invoke(taskDefinition, {});
+await orch.run();
+console.log("ORCHESTRATOR_STOPPED");
+`,
+	);
+
+	const child = spawn("node", ["--import", "tsx", scriptPath], {
+		stdio: ["ignore", "pipe", "pipe"],
+		env: process.env,
+	});
+	let stdout = "";
+	child.stdout?.on("data", (data) => {
+		stdout += data.toString();
+	});
+	const exited = new Promise<NodeJS.Signals | null>((resolve) =>
+		child.on("exit", (_code, signal) => resolve(signal)),
+	);
+	try {
+		const deadline = Date.now() + 15_000;
+		while (!stdout.includes("HANDLER_STARTED")) {
+			if (Date.now() > deadline) throw new Error(`handler did not start: ${stdout}`);
+			await new Promise((r) => setTimeout(r, 50));
+		}
+
+		child.kill("SIGTERM");
+		const first = await Promise.race([
+			exited.then(() => "exited"),
+			new Promise((r) => setTimeout(() => r("running"), 1000)),
+		]);
+		expect(first).toBe("running");
+
+		child.kill("SIGTERM");
+		const second = await Promise.race([
+			exited,
+			new Promise((r) => setTimeout(() => r("running"), 5000)),
+		]);
+		expect(second).toBe("SIGTERM");
+		expect(stdout).not.toContain("ORCHESTRATOR_STOPPED");
+	} finally {
+		child.kill("SIGKILL");
+		unlinkSync(scriptPath);
+	}
+}, 30000);
