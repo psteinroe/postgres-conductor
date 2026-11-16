@@ -74,7 +74,7 @@ await orchestrator.stop();
 - Releases locked executions
 - Cleans up database records
 - Shuts down workers
-- Gives up saving results or releasing executions when the database stays unreachable for about 10 seconds; `stopped` then rejects, and stale orchestrator recovery releases the executions it still held
+- Gives up saving results or releasing executions when the database stays unreachable, or a statement waits on a lock, for about 10 seconds each: it cancels the statement, `stopped` then rejects, and stale orchestrator recovery releases the executions it still held. A heartbeat in flight is cancelled at once
 - Leaves the database connection open, so the conductor stays usable and the orchestrator can be started again (see [`conductor.close()`](conductor.md#conductorclose))
 
 ## orchestrator.drain()

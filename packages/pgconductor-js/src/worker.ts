@@ -1029,6 +1029,11 @@ export class Worker<
 		// Flushes run one at a time, so the final flush follows every earlier one
 		let flushing = Promise.resolve();
 		let closed = false;
+		// Starts when the pipeline ends and bounds the final flush, together with one still in flight:
+		// it cancels their statements, so a settlement waiting on a lock cannot hold up the stop
+		const finalDeadline = new AbortController();
+		// Retries of a flush end when the worker stops or the final deadline passes
+		const flushSignal = AbortSignal.any([this.signal, finalDeadline.signal]);
 
 		const send = async (signal: AbortSignal) => {
 			if (flushTimer) {
@@ -1065,7 +1070,7 @@ export class Worker<
 				run: () =>
 					this.db.returnExecutions(
 						{ orchestratorId, queueName: this.queueName, results },
-						{ signal },
+						{ signal, deadline: finalDeadline.signal },
 					),
 			});
 
@@ -1105,7 +1110,7 @@ export class Worker<
 		const flush = () => {
 			if (closed) return flushing;
 			flushing = flushing
-				.then(() => send(this.signal))
+				.then(() => send(flushSignal))
 				.catch((err) => {
 					this.logger.error("Error flushing results:", err);
 					scheduleFlush();
@@ -1131,10 +1136,18 @@ export class Worker<
 		} finally {
 			closed = true;
 			if (flushTimer) clearTimeout(flushTimer);
-			await flushing;
 			// The worker signal is aborted on stop, so retries get their own deadline. Results that
 			// still cannot be settled fail the worker's stop.
-			await send(AbortSignal.timeout(FINAL_FLUSH_TIMEOUT_MS));
+			const timer = setTimeout(
+				() => finalDeadline.abort(new Error("The final flush did not settle in time")),
+				FINAL_FLUSH_TIMEOUT_MS,
+			);
+			try {
+				await flushing;
+				await send(finalDeadline.signal);
+			} finally {
+				clearTimeout(timer);
+			}
 		}
 	}
 

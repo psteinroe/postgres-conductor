@@ -345,9 +345,12 @@ export class Orchestrator {
 
 			const sentAt = Date.now();
 			try {
-				const heartbeat = await db.orchestratorHeartbeat({
-					orchestratorId: this.orchestratorId,
-				});
+				// A heartbeat that takes the stale age is cancelled, so the next one can find out that the
+				// orchestrator was recovered; stopping cancels it at once
+				const heartbeat = await db.orchestratorHeartbeat(
+					{ orchestratorId: this.orchestratorId },
+					{ deadline: AbortSignal.any([signal, AbortSignal.timeout(this.staleAfterMs)]) },
+				);
 
 				// Our row is gone, so another orchestrator recovered our executions
 				if (!heartbeat) {
@@ -368,10 +371,11 @@ export class Orchestrator {
 				if (now - liveSince >= this.staleAfterMs) {
 					await db.recoverStaleOrchestrators(
 						{ maxAge: `${this.staleAfterMs} milliseconds` },
-						{ signal },
+						{ signal, deadline: signal },
 					);
 				}
 			} catch (err) {
+				if (signal.aborted) return;
 				liveSince = null;
 				this.logger.error("Heartbeat error:", err);
 			}
@@ -467,22 +471,17 @@ export class Orchestrator {
 	 */
 	private async cleanup(heartbeatDb: DatabaseClient): Promise<void> {
 		try {
-			// Stop heartbeat and wait for one in flight
+			// Stop heartbeat; stopping cancels a statement in flight
 			this.heartbeatController?.abort();
 			await this.heartbeats;
 
 			// Remove ourselves from orchestrators table and release locked executions, retrying until the
-			// deadline, which also ends a statement still waiting for a response
+			// deadline, which also cancels a statement still running
 			const deadline = AbortSignal.timeout(CLEANUP_TIMEOUT_MS);
-			await Promise.race([
-				heartbeatDb.orchestratorShutdown(
-					{ orchestratorId: this.orchestratorId },
-					{ signal: deadline },
-				),
-				new Promise<never>((_, reject) => {
-					deadline.addEventListener("abort", () => reject(deadline.reason));
-				}),
-			]);
+			await heartbeatDb.orchestratorShutdown(
+				{ orchestratorId: this.orchestratorId },
+				{ signal: deadline, deadline },
+			);
 		} finally {
 			await heartbeatDb.close();
 			this.heartbeats = null;

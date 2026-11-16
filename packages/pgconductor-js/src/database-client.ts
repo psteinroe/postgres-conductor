@@ -411,13 +411,39 @@ type QueryOptions = {
 	label?: string;
 	expectError?: boolean;
 	signal?: AbortSignal;
+	deadline?: AbortSignal;
 };
 
 // A connection error is ambiguous: the statement may have committed. Only methods whose
 // statement can run again without a second effect take a signal, which enables retries.
-type QueryMethodOptions = Pick<QueryOptions, "signal">;
+// A deadline cancels the running statement when it aborts and rejects without waiting for the
+// server, so neither a lock wait nor a lost connection holds the caller; it also ends retries.
+type QueryMethodOptions = Pick<QueryOptions, "signal" | "deadline">;
 
 type ErrorWithOptionalCode = Error & { code?: string; detail?: string };
+
+// Rejects with the deadline's reason when it aborts, and cancels the statement if it is a
+// postgres.js query; a transaction or a callback composing several is only abandoned
+function untilDeadline<T>(pending: Promise<T>, deadline: AbortSignal | undefined): Promise<T> {
+	if (!deadline) return pending;
+	return new Promise<T>((resolve, reject) => {
+		const abort = () => {
+			if ("cancel" in pending && typeof pending.cancel === "function") pending.cancel();
+			reject(deadline.reason);
+		};
+		deadline.addEventListener("abort", abort, { once: true });
+		pending.then(
+			(value) => {
+				deadline.removeEventListener("abort", abort);
+				resolve(value);
+			},
+			(error: unknown) => {
+				deadline.removeEventListener("abort", abort);
+				reject(error);
+			},
+		);
+	});
+}
 
 // postgres.js takes the options it parsed as they are, as it does for its own listen connection
 function isParsedOptions(options: object): options is postgres.Options<{}> {
@@ -480,8 +506,11 @@ export class DatabaseClient {
 		let attempt = 0;
 		while (true) {
 			try {
-				return await callback(this.sql);
+				options?.deadline?.throwIfAborted();
+				return await untilDeadline(callback(this.sql), options?.deadline);
 			} catch (error) {
+				// The caller gave up on the statement
+				if (options?.deadline?.aborted) throw error;
 				const err = error as ErrorWithOptionalCode;
 				// A refusal, not a failure: thrown as is
 				const held = err.code === LISTEN_HELD ? listenHeldError(err.detail) : null;
@@ -776,19 +805,11 @@ export class DatabaseClient {
 		args: GetExecutionArgs,
 		opts?: QueryMethodOptions,
 	): Promise<ExecutionInfo | null> {
-		const rows = await this.query(
-			async () => {
-				const query = this.builder.buildGetExecution(args);
-				const cancel = () => query.cancel();
-				opts?.signal?.addEventListener("abort", cancel);
-				try {
-					return await query;
-				} finally {
-					opts?.signal?.removeEventListener("abort", cancel);
-				}
-			},
-			{ label: "getExecution", ...opts },
-		);
+		const rows = await this.query(() => this.builder.buildGetExecution(args), {
+			label: "getExecution",
+			deadline: opts?.signal,
+			...opts,
+		});
 		return rows[0] || null;
 	}
 
@@ -826,8 +847,8 @@ export class DatabaseClient {
 	}
 
 	async returnExecutions(args: ReturnExecutionsArgs, opts?: QueryMethodOptions): Promise<void> {
-		// A query runs once, so every attempt builds a new one.
-		await this.query(async () => this.builder.buildReturnExecutions(args), {
+		// A query runs once, so every attempt builds a new one; returned as is, so a deadline cancels it
+		await this.query(() => this.builder.buildReturnExecutions(args) || Promise.resolve(), {
 			label: "returnExecutions",
 			...opts,
 		});

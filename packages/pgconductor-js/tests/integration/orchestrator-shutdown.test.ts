@@ -165,9 +165,12 @@ test("stop() waits for an in-flight heartbeat and nothing runs after cleanup", a
 		if (++heartbeats === 1) {
 			heartbeatStarted.resolve();
 			await releaseHeartbeat.promise;
-			const result = await heartbeat(args, opts);
-			heartbeatSettled = true;
-			return result;
+			try {
+				// stop() cancels the statement
+				return await heartbeat(args, opts);
+			} finally {
+				heartbeatSettled = true;
+			}
 		}
 		return heartbeat(args, opts);
 	};
