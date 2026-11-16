@@ -277,6 +277,39 @@ test.each(Object.keys(outputs))(
 	},
 );
 
+test("a result Postgres rejects does not hold up the results flushed with it", async () => {
+	const db = await child();
+	const definition = defineTask({ name: "session", payload: z.object({ n: z.number() }) });
+	const conductor = Conductor.create({
+		sql: db.sql,
+		tasks: TaskSchemas.fromSchema([definition]),
+		context: {},
+	});
+	const task = conductor.createTask(
+		{ name: "session", maxAttempts: 1 },
+		{ invocable: true },
+		async (event) => {
+			// jsonb rejects a NUL character
+			if (event.payload.n === 0) throw new Error("bad\u0000byte");
+		},
+	);
+	await conductor.ensureInstalled();
+	const rejected = await conductor.invoke(definition, { n: 0 });
+	const other = await conductor.invoke(definition, { n: 1 });
+	await Orchestrator.create({
+		conductor,
+		tasks: [task],
+		defaultWorker: { flushIntervalMs: 1000 },
+	}).drain();
+
+	expect(await row(db, other)).toMatchObject({ completed: true, locked: false });
+	expect(await row(db, rejected)).toMatchObject({
+		failed: true,
+		locked: false,
+		last_error: "badbyte",
+	});
+});
+
 test("cancelling a member of a running batch aborts the batch and releases the others", async () => {
 	const db = await child();
 	const definition = defineTask({ name: "batch", payload: z.object({ n: z.number() }) });

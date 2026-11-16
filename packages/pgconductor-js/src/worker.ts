@@ -1033,21 +1033,63 @@ export class Worker<
 			buffer = [];
 
 			try {
-				await this.telemetry.settle({
-					queue: this.queueName,
-					batchMessageCount: results.length,
-					run: () =>
-						this.db.returnExecutions(
-							{ orchestratorId, queueName: this.queueName, results },
-							{ signal },
-						),
-				});
+				await settle(results, signal);
 			} catch (err) {
-				buffer = [...results, ...buffer];
-				throw err;
+				// Retryable errors are retried until the signal aborts, so anything else is a rejection
+				// of the batch, e.g. of a result Postgres cannot store. Each result is settled on its
+				// own, so one cannot hold up every later flush.
+				if (signal.aborted) {
+					buffer = [...results, ...buffer];
+					throw err;
+				}
+				await settleEach(results, signal);
 			}
 			for (const result of results) {
 				this.release(result.execution_id, result.claim_token);
+			}
+		};
+
+		const settle = (results: ExecutionResult[], signal: AbortSignal) =>
+			this.telemetry.settle({
+				queue: this.queueName,
+				batchMessageCount: results.length,
+				run: () =>
+					this.db.returnExecutions(
+						{ orchestratorId, queueName: this.queueName, results },
+						{ signal },
+					),
+			});
+
+		const settleEach = async (results: ExecutionResult[], signal: AbortSignal) => {
+			for (const [index, result] of results.entries()) {
+				try {
+					await settle([result], signal);
+					continue;
+				} catch (err) {
+					if (signal.aborted) {
+						buffer = [...results.slice(index), ...buffer];
+						throw err;
+					}
+					this.logger.error(`Could not settle execution ${result.execution_id}:`, err);
+					// A failure counts as an attempt, so a result that never stores dead-letters
+					const error =
+						result.status === "failed"
+							? result.error
+							: `Could not store the result: ${coerceError(err).message}`;
+					const failed: ExecutionResult = {
+						execution_id: result.execution_id,
+						task_key: result.task_key,
+						claim_token: result.claim_token,
+						status: "failed",
+						// jsonb cannot store NUL characters
+						error: error.replaceAll("\u0000", ""),
+					};
+					// Left locked, it is released with the orchestrator's other orphans
+					await settle([failed], signal).catch((err: unknown) => {
+						if (signal.aborted) throw err;
+						this.logger.error(`Could not fail execution ${result.execution_id}:`, err);
+					});
+				}
 			}
 		};
 
