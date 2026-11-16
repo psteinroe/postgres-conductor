@@ -27,6 +27,12 @@ export type OrchestratorOptions<TTasks extends readonly AnyTask[] = readonly Any
 	 * orchestrator of a database
 	 */
 	staleAfterMs?: number;
+	/**
+	 * Stop gracefully on SIGINT, SIGTERM, SIGHUP, SIGUSR2 and SIGABRT, and exit at once on a second
+	 * SIGINT or SIGTERM (default true). Set to false when the application handles process signals
+	 * itself and calls `stop()`
+	 */
+	handleSignals?: boolean;
 };
 
 type InternalOrchestratorOptions = {
@@ -36,6 +42,7 @@ type InternalOrchestratorOptions = {
 	workers?: Worker[];
 	heartbeatIntervalMs?: number;
 	staleAfterMs?: number;
+	handleSignals?: boolean;
 };
 
 const DEFAULT_HEARTBEAT_INTERVAL_MS = 5_000;
@@ -60,6 +67,7 @@ export class Orchestrator {
 	private readonly logger: Logger;
 	private readonly heartbeatIntervalMs: number;
 	private readonly staleAfterMs: number;
+	private readonly handleSignals: boolean;
 
 	private heartbeats: Promise<void> | null = null;
 	private heartbeatController: AbortController | null = null;
@@ -77,9 +85,10 @@ export class Orchestrator {
 			orchestratorId: this.orchestratorId,
 		});
 		this.migrationStore = new MigrationStore();
-		this.schemaManager = new SchemaManager(this.db);
+		this.schemaManager = new SchemaManager(this.db, { logger: this.logger });
 		this.heartbeatIntervalMs = options.heartbeatIntervalMs || DEFAULT_HEARTBEAT_INTERVAL_MS;
 		this.staleAfterMs = options.staleAfterMs || DEFAULT_STALE_AFTER_MS;
+		this.handleSignals = options.handleSignals !== false;
 		if (!(this.heartbeatIntervalMs > 0) || !(this.staleAfterMs >= this.heartbeatIntervalMs * 2)) {
 			throw new Error(
 				`staleAfterMs (${this.staleAfterMs}) must be at least twice heartbeatIntervalMs (${this.heartbeatIntervalMs}), or live orchestrators look stale`,
@@ -87,18 +96,9 @@ export class Orchestrator {
 		}
 
 		if (options.tasks?.length) {
-			const worker = new Worker(
-				"default",
-				options.tasks,
-				this.db,
-				this.logger,
-				options.defaultWorker,
-				options.conductor.options.context,
-				options.conductor.telemetry,
-				options.conductor.options.middleware,
-				options.conductor.options.clock,
+			this.workers.push(
+				options.conductor.buildWorker("default", options.tasks, options.defaultWorker, this.logger),
 			);
-			this.workers.push(worker);
 		}
 
 		for (const w of options.workers || []) {
@@ -124,11 +124,9 @@ export class Orchestrator {
 				...options.defaultWorker,
 			};
 			this.workers.push(
-				new Worker(
+				options.conductor.buildWorker(
 					EVENT_DISPATCH_QUEUE,
 					[createEventDispatchTask(this.db, options.conductor.options.eventRetention)],
-					this.db,
-					this.logger,
 					{
 						concurrency: 1,
 						fetchBatchSize: 10,
@@ -136,8 +134,7 @@ export class Orchestrator {
 						pollIntervalMs,
 						flushIntervalMs,
 					},
-					options.conductor.options.context,
-					options.conductor.telemetry,
+					this.logger,
 				),
 			);
 		}
@@ -205,7 +202,7 @@ export class Orchestrator {
 		this._stopDeferred.promise.catch(noop);
 		this._startDeferred = new Deferred<void>();
 		this._abortController = new AbortController();
-		this.registerSignalHandlers();
+		if (this.handleSignals) this.registerSignalHandlers();
 		// Heartbeats run on a connection of their own, so handlers holding every pool connection cannot
 		// make the orchestrator look stale
 		const heartbeatDb = this.db.withOwnConnection();
@@ -345,9 +342,12 @@ export class Orchestrator {
 
 			const sentAt = Date.now();
 			try {
-				const heartbeat = await db.orchestratorHeartbeat({
-					orchestratorId: this.orchestratorId,
-				});
+				// A heartbeat that takes the stale age is cancelled, so the next one can find out that the
+				// orchestrator was recovered; stopping cancels it at once
+				const heartbeat = await db.orchestratorHeartbeat(
+					{ orchestratorId: this.orchestratorId },
+					{ deadline: AbortSignal.any([signal, AbortSignal.timeout(this.staleAfterMs)]) },
+				);
 
 				// Our row is gone, so another orchestrator recovered our executions
 				if (!heartbeat) {
@@ -368,10 +368,11 @@ export class Orchestrator {
 				if (now - liveSince >= this.staleAfterMs) {
 					await db.recoverStaleOrchestrators(
 						{ maxAge: `${this.staleAfterMs} milliseconds` },
-						{ signal },
+						{ signal, deadline: signal },
 					);
 				}
 			} catch (err) {
+				if (signal.aborted) return;
 				liveSince = null;
 				this.logger.error("Heartbeat error:", err);
 			}
@@ -411,6 +412,13 @@ export class Orchestrator {
 
 		const shutdownHandler = (signal: Signal) => {
 			if (this.isShuttingDown) {
+				// A second interrupt or termination means the caller will not wait: exit as without us
+				if (signal === "SIGINT" || signal === "SIGTERM") {
+					this.logger.warn(`Received ${signal} again while shutting down, exiting at once`);
+					this.releaseSignalHandlers?.();
+					process.kill(process.pid, signal);
+					return;
+				}
 				this.logger.debug(`Ignoring duplicate signal: ${signal}, already shutting down`);
 				return;
 			}
@@ -467,22 +475,17 @@ export class Orchestrator {
 	 */
 	private async cleanup(heartbeatDb: DatabaseClient): Promise<void> {
 		try {
-			// Stop heartbeat and wait for one in flight
+			// Stop heartbeat; stopping cancels a statement in flight
 			this.heartbeatController?.abort();
 			await this.heartbeats;
 
 			// Remove ourselves from orchestrators table and release locked executions, retrying until the
-			// deadline, which also ends a statement still waiting for a response
+			// deadline, which also cancels a statement still running
 			const deadline = AbortSignal.timeout(CLEANUP_TIMEOUT_MS);
-			await Promise.race([
-				heartbeatDb.orchestratorShutdown(
-					{ orchestratorId: this.orchestratorId },
-					{ signal: deadline },
-				),
-				new Promise<never>((_, reject) => {
-					deadline.addEventListener("abort", () => reject(deadline.reason));
-				}),
-			]);
+			await heartbeatDb.orchestratorShutdown(
+				{ orchestratorId: this.orchestratorId },
+				{ signal: deadline, deadline },
+			);
 		} finally {
 			await heartbeatDb.close();
 			this.heartbeats = null;

@@ -4,6 +4,7 @@ export type {
 	EventQuery,
 	ExecutionLookup,
 	ExecutionQuery,
+	InvokeOptions,
 	WaitForResultOptions,
 } from "./conductor.js";
 export { Orchestrator } from "./orchestrator.js";

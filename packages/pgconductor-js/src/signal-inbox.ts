@@ -1,6 +1,19 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import type { JsonValue, StoredSignal } from "./database-client.js";
 import { AsyncQueue } from "./lib/async-queue.js";
 import { coerceError } from "./lib/coerce-error.js";
+import { Deferred } from "./lib/deferred.js";
+
+// Set while a handler runs, to what ends its delivery when it hangs up
+const handlerScope = new AsyncLocalStorage<() => void>();
+
+/**
+ * Called by a hangup (`ctx.sleep()`, `ctx.complete()`, ...). A hangup never returns, so a handler
+ * that hangs up never does either: its inbox stops waiting for it, and its signal stays undelivered.
+ */
+export function hangUpSignalHandler(): void {
+	handlerScope.getStore()?.();
+}
 
 export type SignalInfo = {
 	id: string;
@@ -167,11 +180,20 @@ export class SignalInbox {
 			this._started++;
 			const info = { id: signal.id, name: signal.name, listens: signal.listens || [] };
 			this.delivering = info;
+			const hungUp = new Deferred<"hung-up">();
 			try {
 				const handle = async () => {
 					await handler(signal.payload, info);
 				};
-				await (this.opts.run ? this.opts.run(signal, handle) : handle());
+				const outcome = await Promise.race([
+					handlerScope.run(
+						() => hungUp.resolve("hung-up"),
+						() => (this.opts.run ? this.opts.run(signal, handle) : handle()),
+					),
+					hungUp.promise,
+				]);
+				// The attempt ended with the handler
+				if (outcome === "hung-up") return;
 			} catch (err) {
 				this.fail(
 					new Error(`Signal handler for "${signal.name}" failed: ${coerceError(err).message}`),

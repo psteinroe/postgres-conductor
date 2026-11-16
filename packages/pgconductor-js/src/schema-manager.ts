@@ -1,5 +1,6 @@
 import { MigrationStore } from "./migration-store.js";
 import { waitFor } from "./lib/wait-for.js";
+import { DefaultLogger, type Logger } from "./lib/logger.js";
 import type { DatabaseClient } from "./database-client.js";
 
 const POLL_INTERVAL_MS = 2000;
@@ -14,12 +15,14 @@ const POLL_JITTER_MS = 500;
  */
 export class SchemaManager {
 	private readonly migrationStore: MigrationStore;
+	private readonly logger: Logger;
 
 	constructor(
 		private readonly db: DatabaseClient,
-		options: { schemaName?: string } = {},
+		options: { schemaName?: string; logger?: Logger } = {},
 	) {
 		this.migrationStore = new MigrationStore(options.schemaName || "pgconductor");
+		this.logger = options.logger || new DefaultLogger();
 	}
 
 	/**
@@ -35,7 +38,7 @@ export class SchemaManager {
 		const ourLatest = this.migrationStore.getLatestMigrationNumber();
 
 		if (installedVersion > ourLatest) {
-			console.error(
+			this.logger.error(
 				`Database has migrations up to version ${installedVersion}, but this binary only knows ${ourLatest}. Please deploy a newer orchestrator first.`,
 			);
 			return { migrated: false, shouldShutdown: true };
@@ -50,16 +53,9 @@ export class SchemaManager {
 				return { migrated, shouldShutdown: false };
 			}
 
-			let fence = false;
-			if (nextMigration.breaking) {
-				await this.db.sweepOrchestrators(
-					{
-						migrationNumber: nextMigration.version,
-					},
-					{ signal },
-				);
-				fence = await this.waitForOlderOrchestratorsToExit(nextMigration.version, signal);
-			}
+			const fence =
+				nextMigration.breaking &&
+				(await this.waitForOlderOrchestratorsToExit(nextMigration.version, signal));
 
 			const status = await this.db.applyMigration(nextMigration, { fence, signal });
 
@@ -85,6 +81,9 @@ export class SchemaManager {
 
 		while (Date.now() - start < maxWaitMs) {
 			signal.throwIfAborted();
+			// Every time, so an older orchestrator that registers meanwhile, e.g. one restarted by its
+			// platform, is signalled to shut down as well
+			await this.db.sweepOrchestrators({ migrationNumber: targetVersion }, { signal });
 			const remaining = await this.db.countActiveOrchestratorsBelow(
 				{
 					version: targetVersion,
@@ -102,7 +101,7 @@ export class SchemaManager {
 			});
 		}
 
-		console.warn(
+		this.logger.warn(
 			`Timed out waiting for older orchestrators to exit within ${maxWaitMs}ms, continuing with migrations`,
 		);
 		return false;

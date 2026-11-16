@@ -23,7 +23,7 @@ import {
 	type TaskAbortReasons,
 } from "./task-context.js";
 import * as assert from "./lib/assert.js";
-import { createMaintenanceTask } from "./maintenance-task.js";
+import { createMaintenanceTask, MAINTENANCE_TASK_NAME } from "./maintenance-task.js";
 import { makeChildLogger, type Logger } from "./lib/logger.js";
 import type { EventDefinition } from "./event-definition.js";
 import { coerceError } from "./lib/coerce-error.js";
@@ -394,8 +394,14 @@ export class Worker<
 
 		const orchestratorId = this.orchestratorId;
 		const allTasks = Array.from(this.tasks.values());
-		// A slot runs one execution, or one batch of a batched task
-		const executionsPerSlot = Math.max(...allTasks.map((task) => task.batch?.size || 1));
+		// A slot runs one execution, or one batch of a batched task. A claim cannot tell the tasks
+		// apart, so a slot takes a whole batch only when every task of the queue is batched (the daily
+		// maintenance task aside); otherwise a batch fills over several claims.
+		const executionsPerSlot = allTasks.every(
+			(task) => task.batch || task.name === MAINTENANCE_TASK_NAME,
+		)
+			? Math.max(...allTasks.map((task) => task.batch?.size || 1))
+			: 1;
 		const windows = allTasks.map((task) => ({
 			name: task.name,
 			window: task.window && new WindowChecker(task.window),
@@ -625,7 +631,7 @@ export class Worker<
 		});
 
 		// Pass db and tasks as extra context to maintenance task, which skips middleware
-		const isMaintenance = task.name === "pgconductor.maintenance";
+		const isMaintenance = task.name === MAINTENANCE_TASK_NAME;
 		const actor: { alarm: Date | null } | undefined = task.actor ? { alarm: null } : undefined;
 		const extraContext = isMaintenance
 			? { ...this.extraContext, db: this.db, tasks: this.tasks }
@@ -789,16 +795,20 @@ export class Worker<
 				error: coerceError(err).message,
 			} as const;
 		} finally {
-			// Steps still running when a sibling hung up or threw end with the attempt, unless the
-			// worker aborted it. They save their results before the attempt settles.
+			// Steps and a signal handler still running when a sibling hung up or threw end with the
+			// attempt, unless the worker aborted it, so the next attempt never runs beside them. Steps
+			// save their results before the attempt settles. A hung-up or failed attempt leaves
+			// undelivered signals for the next one.
 			const reason = taskAbortController.signal.reason?.reason;
 			if (reason !== "timed-out" && reason !== "cancelled" && reason !== "signal-failed") {
-				await Promise.race([Promise.allSettled(steps), timedOut.promise]);
+				await Promise.race([
+					Promise.allSettled(steps).then(() => signals.close({ drain: false })),
+					timedOut.promise,
+				]);
 			}
+			void signals.close({ drain: false });
 			clearTimeout(timeout);
 			this._running.delete(exec.id);
-			// A hung-up or failed attempt leaves undelivered signals for the next one
-			void signals.close({ drain: false });
 		}
 	}
 
@@ -1029,6 +1039,11 @@ export class Worker<
 		// Flushes run one at a time, so the final flush follows every earlier one
 		let flushing = Promise.resolve();
 		let closed = false;
+		// Starts when the pipeline ends and bounds the final flush, together with one still in flight:
+		// it cancels their statements, so a settlement waiting on a lock cannot hold up the stop
+		const finalDeadline = new AbortController();
+		// Retries of a flush end when the worker stops or the final deadline passes
+		const flushSignal = AbortSignal.any([this.signal, finalDeadline.signal]);
 
 		const send = async (signal: AbortSignal) => {
 			if (flushTimer) {
@@ -1065,7 +1080,7 @@ export class Worker<
 				run: () =>
 					this.db.returnExecutions(
 						{ orchestratorId, queueName: this.queueName, results },
-						{ signal },
+						{ signal, deadline: finalDeadline.signal },
 					),
 			});
 
@@ -1105,7 +1120,7 @@ export class Worker<
 		const flush = () => {
 			if (closed) return flushing;
 			flushing = flushing
-				.then(() => send(this.signal))
+				.then(() => send(flushSignal))
 				.catch((err) => {
 					this.logger.error("Error flushing results:", err);
 					scheduleFlush();
@@ -1131,10 +1146,18 @@ export class Worker<
 		} finally {
 			closed = true;
 			if (flushTimer) clearTimeout(flushTimer);
-			await flushing;
 			// The worker signal is aborted on stop, so retries get their own deadline. Results that
 			// still cannot be settled fail the worker's stop.
-			await send(AbortSignal.timeout(FINAL_FLUSH_TIMEOUT_MS));
+			const timer = setTimeout(
+				() => finalDeadline.abort(new Error("The final flush did not settle in time")),
+				FINAL_FLUSH_TIMEOUT_MS,
+			);
+			try {
+				await flushing;
+				await send(finalDeadline.signal);
+			} finally {
+				clearTimeout(timer);
+			}
 		}
 	}
 

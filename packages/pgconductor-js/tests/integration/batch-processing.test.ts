@@ -387,6 +387,50 @@ describe("Batch Processing", () => {
 		expect(batchedProcessed[0]?.sort()).toEqual([2, 3]);
 	}, 30000);
 
+	test("a queue with batched and other tasks claims no more of the others than free slots", async () => {
+		const db = await pool.child();
+		databases.push(db);
+		const batched = defineTask({ name: "batched", payload: z.object({}) });
+		const normal = defineTask({ name: "normal", payload: z.object({}) });
+		const conductor = Conductor.create({
+			sql: db.sql,
+			tasks: TaskSchemas.fromSchema([batched, normal]),
+			context: {},
+		});
+		await conductor.ensureInstalled();
+		const started = new Deferred<void>();
+		const finish = new Deferred<void>();
+		const batchedTask = conductor.createTask(
+			{ name: "batched", batch: { size: 5, timeoutMs: 100 } },
+			{ invocable: true },
+			async () => {},
+		);
+		const normalTask = conductor.createTask({ name: "normal" }, { invocable: true }, async () => {
+			started.resolve();
+			await finish.promise;
+		});
+		for (let i = 0; i < 3; i++) await conductor.invoke({ name: "normal" }, {});
+		const orchestrator = Orchestrator.create({
+			conductor,
+			tasks: [batchedTask, normalTask],
+			defaultWorker: { concurrency: 1, fetchBatchSize: 10, pollIntervalMs: 20 },
+		});
+		await orchestrator.start();
+		try {
+			await started.promise;
+			// a few more polls
+			await new Promise((r) => setTimeout(r, 200));
+			const locked = await db.sql`
+				select id from pgconductor._private_executions
+				where task_key = 'normal' and locked_by is not null
+			`;
+			expect(locked.length).toBe(1);
+		} finally {
+			finish.resolve();
+			await orchestrator.stop();
+		}
+	});
+
 	test("single item doesn't wait for batch size", async () => {
 		const db = await pool.child();
 		databases.push(db);

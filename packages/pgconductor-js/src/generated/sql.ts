@@ -659,19 +659,23 @@ begin
     priority = excluded.priority,
     "group" = excluded."group";
 
-  -- Clean up stale schedules for this queue.
+  -- Clean up stale schedules for this queue. Pending occurrences that never ran are deleted; one
+  -- that ran stored its successor as a step before its handler started
   with removed as (
-    delete from pgconductor._private_executions
-    where queue = p_queue_name
-      and cron_expression is not null
-      and is_available
-      and dedupe_key like 'scheduled::%'
-      and (task_key, split_part(dedupe_key, '::', 2), cron_expression) not in (
+    delete from pgconductor._private_executions e
+    where e.queue = p_queue_name
+      and e.cron_expression is not null
+      and e.is_available
+      and e.dedupe_key like 'scheduled::%'
+      and (e.task_key, split_part(e.dedupe_key, '::', 2), e.cron_expression) not in (
         select spec.task_key, split_part(spec.dedupe_key, '::', 2), spec.cron_expression
         from unnest(p_cron_schedules) as spec
         where spec.dedupe_key is not null and spec.dedupe_key like 'scheduled::%'
       )
-    returning result_waiters
+      and not exists (
+        select 1 from pgconductor._private_steps s where s.execution_id = e.id and s.queue = e.queue
+      )
+    returning e.result_waiters
   )
   select pgconductor._private_resolve_result_waits(jsonb_agg(w.value || jsonb_build_object(
     'outcome', jsonb_build_object('status', 'cancelled', 'reason', 'Schedule removed')
@@ -680,6 +684,20 @@ begin
   from removed r
   cross join lateral jsonb_array_elements(r.result_waiters) w
   having count(*) > 0;
+
+  -- Suspended occurrences (sleeping, or waiting on a child or an event) ran: cancelled like any
+  -- execution, so their waits, waiters and linked children end with them
+  perform pgconductor.cancel_execution(e.id, 'Schedule removed')
+  from pgconductor._private_executions e
+  where e.queue = p_queue_name
+    and e.cron_expression is not null
+    and e.is_available
+    and e.dedupe_key like 'scheduled::%'
+    and (e.task_key, split_part(e.dedupe_key, '::', 2), e.cron_expression) not in (
+      select spec.task_key, split_part(spec.dedupe_key, '::', 2), spec.cron_expression
+      from unnest(p_cron_schedules) as spec
+      where spec.dedupe_key is not null and spec.dedupe_key like 'scheduled::%'
+    );
 
   update pgconductor._private_executions
   set cancelled = true
@@ -730,16 +748,21 @@ declare
 begin
   perform 1 from pgconductor._private_queues queue where queue.name = p_queue for update;
 
+  -- an occurrence that ran (it stored its successor as a step before its handler started) is
+  -- kept like a running one, also while it is suspended
   with removed as (
-    delete from pgconductor._private_executions
-    where task_key = p_task_key
-      and queue = p_queue
-      and dedupe_key like 'dynamic::%'
-      and split_part(dedupe_key, '::', 2) = p_schedule_name
-      and dedupe_key <> p_dedupe_key
-      and cron_expression is not null
-      and is_available
-    returning result_waiters
+    delete from pgconductor._private_executions e
+    where e.task_key = p_task_key
+      and e.queue = p_queue
+      and e.dedupe_key like 'dynamic::%'
+      and split_part(e.dedupe_key, '::', 2) = p_schedule_name
+      and e.dedupe_key <> p_dedupe_key
+      and e.cron_expression is not null
+      and e.is_available
+      and not exists (
+        select 1 from pgconductor._private_steps s where s.execution_id = e.id and s.queue = e.queue
+      )
+    returning e.result_waiters
   )
   select pgconductor._private_resolve_result_waits(jsonb_agg(w.value || jsonb_build_object(
     'outcome', jsonb_build_object('status', 'cancelled', 'reason', 'Schedule removed')
@@ -767,7 +790,7 @@ end;
 $function$;
 
 -- Removes the dynamic cron schedule p_schedule_name: deletes its pending
--- occurrences and cancels running ones. Holding the queue row lock, like
+-- occurrences that never ran and cancels suspended and running ones. Holding the queue row lock, like
 -- registration, keeps running occurrences from inserting a successor until
 -- this commits; each statement then sees the successors inserted before.
 create or replace function pgconductor._private_unschedule(
@@ -785,15 +808,20 @@ declare
 begin
   perform 1 from pgconductor._private_queues queue where queue.name = p_queue for update;
 
+  -- pending occurrences that never ran; one that ran stored its successor as a step before its
+  -- handler started
   with removed as (
-    delete from pgconductor._private_executions
-    where task_key = p_task_key
-      and queue = p_queue
-      and dedupe_key like 'dynamic::%'
-      and split_part(dedupe_key, '::', 2) = p_schedule_name
-      and cron_expression is not null
-      and is_available
-    returning result_waiters
+    delete from pgconductor._private_executions e
+    where e.task_key = p_task_key
+      and e.queue = p_queue
+      and e.dedupe_key like 'dynamic::%'
+      and split_part(e.dedupe_key, '::', 2) = p_schedule_name
+      and e.cron_expression is not null
+      and e.is_available
+      and not exists (
+        select 1 from pgconductor._private_steps s where s.execution_id = e.id and s.queue = e.queue
+      )
+    returning e.result_waiters
   )
   select pgconductor._private_resolve_result_waits(jsonb_agg(w.value || jsonb_build_object(
     'outcome', jsonb_build_object('status', 'cancelled', 'reason', 'Schedule removed')
@@ -802,6 +830,17 @@ begin
   from removed r
   cross join lateral jsonb_array_elements(r.result_waiters) w
   having count(*) > 0;
+
+  -- Suspended occurrences (sleeping, or waiting on a child or an event) ran: cancelled like any
+  -- execution, so their waits, waiters and linked children end with them
+  perform pgconductor.cancel_execution(e.id, 'Schedule removed')
+  from pgconductor._private_executions e
+  where e.task_key = p_task_key
+    and e.queue = p_queue
+    and e.dedupe_key like 'dynamic::%'
+    and split_part(e.dedupe_key, '::', 2) = p_schedule_name
+    and e.cron_expression is not null
+    and e.is_available;
 
   -- A separate statement, so it also sees occurrences claimed while the delete ran
   update pgconductor._private_executions
@@ -904,7 +943,9 @@ create or replace function pgconductor.invoke_batch(
 as $function$
 declare
     spec pgconductor.execution_spec;
+    v_id uuid;
 begin
+    -- one row per spec, in order: a throttled spec returns null
     -- without dedupe, every spec inserts a new execution: one statement for the whole batch
     if not exists (
         select 1 from unnest(specs) s
@@ -931,7 +972,8 @@ begin
     end if;
 
     foreach spec in array specs loop
-        return query select * from pgconductor.invoke(
+        v_id := null;
+        select i.id into v_id from pgconductor.invoke(
             p_task_key := spec.task_key,
             p_queue := coalesce(spec.queue, 'default'),
             p_payload := spec.payload,
@@ -944,7 +986,8 @@ begin
             p_group := spec."group",
             p_trace_context := spec.trace_context,
             p_metadata := spec.metadata
-        );
+        ) i;
+        return query select v_id;
     end loop;
 end;
 $function$

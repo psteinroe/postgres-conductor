@@ -165,9 +165,12 @@ test("stop() waits for an in-flight heartbeat and nothing runs after cleanup", a
 		if (++heartbeats === 1) {
 			heartbeatStarted.resolve();
 			await releaseHeartbeat.promise;
-			const result = await heartbeat(args, opts);
-			heartbeatSettled = true;
-			return result;
+			try {
+				// stop() cancels the statement
+				return await heartbeat(args, opts);
+			} finally {
+				heartbeatSettled = true;
+			}
 		}
 		return heartbeat(args, opts);
 	};
@@ -479,4 +482,31 @@ test("stop() while another session holds the migration lock does not migrate", a
 
 	expect(orch.isStopped).toBe(true);
 	expect(await conductor.db.getInstalledMigrationNumber()).toBe(-1);
+});
+
+test("handleSignals: false installs no process signal listeners", async () => {
+	const db = await pool.child();
+	databases.push(db);
+	const conductor = Conductor.create({
+		sql: db.sql,
+		tasks: TaskSchemas.fromSchema([defineTask({ name: "idle" })]),
+		context: {},
+	});
+	await conductor.ensureInstalled();
+	const task = conductor.createTask({ name: "idle" }, { invocable: true }, async () => {});
+	const listeners = () => ["SIGINT", "SIGTERM", "SIGHUP"].map((s) => process.listenerCount(s));
+	const before = listeners();
+
+	const handled = Orchestrator.create({ conductor, tasks: [task] });
+	await handled.start();
+	const whileHandled = listeners();
+	await handled.stop();
+
+	const unhandled = Orchestrator.create({ conductor, tasks: [task], handleSignals: false });
+	await unhandled.start();
+	const whileUnhandled = listeners();
+	await unhandled.stop();
+
+	expect(whileHandled).toEqual(before.map((count) => count + 1));
+	expect(whileUnhandled).toEqual(before);
 });

@@ -772,6 +772,118 @@ describe("Cron Scheduling", () => {
 		await db.destroy();
 	});
 
+	describe("an occurrence that ran and is suspended", () => {
+		// The occurrence ran (it stored its successor before its handler started), started a
+		// child that ends with it, and sleeps
+		async function suspend(db: TestDatabase, taskKey: string) {
+			const [occurrence] = await db.sql<{ id: string }[]>`
+				update pgconductor._private_executions
+				set run_at = 'infinity'
+				where task_key = ${taskKey}
+				returning id
+			`;
+			if (!occurrence) throw new Error("no occurrence");
+			await db.sql`
+				insert into pgconductor._private_steps (execution_id, queue, key, result)
+				values (${occurrence.id}::uuid, 'default', 'pgconductor.next-occurrence', '{}'::jsonb)
+			`;
+			const [child] = await db.sql<{ id: string }[]>`
+				insert into pgconductor._private_executions (
+					task_key, queue, parent_execution_id, cancel_with_parent, run_at
+				)
+				values ('child', 'default', ${occurrence.id}::uuid, true, 'infinity')
+				returning id
+			`;
+			if (!child) throw new Error("no child");
+			const state = async (id: string) => {
+				const [row] = await db.sql<{ steps: number; cancelled: boolean | null }[]>`
+					select
+						(select count(*)::int from pgconductor._private_steps where execution_id = ${id}::uuid) as steps,
+						(select cancelled and failed_at is not null from pgconductor._private_executions where id = ${id}::uuid) as cancelled
+				`;
+				return row;
+			};
+			return { occurrence: () => state(occurrence.id), child: () => state(child.id) };
+		}
+
+		const spec = {
+			task_key: "suspended-dynamic",
+			queue: "default",
+			cron_expression: "0 0 0 * * *",
+		};
+
+		test("is kept when its schedule is replaced, and cancelled when it is removed", async () => {
+			const db = await pool.child();
+			await Conductor.create({ sql: db.sql, context: {} }).ensureInstalled();
+			await db.client.scheduleCronExecution({
+				spec: { ...spec, run_at: new Date("2030-01-01T00:00:00Z") },
+				scheduleName: "nightly",
+			});
+			const suspended = await suspend(db, spec.task_key);
+
+			await db.client.scheduleCronExecution({
+				spec: { ...spec, run_at: new Date("2030-01-02T00:00:00Z") },
+				scheduleName: "nightly",
+			});
+			expect(await suspended.occurrence()).toEqual({ steps: 1, cancelled: false });
+
+			await db.client.unscheduleCronExecution({
+				taskKey: spec.task_key,
+				queue: spec.queue,
+				scheduleName: "nightly",
+			});
+			expect({
+				occurrence: await suspended.occurrence(),
+				child: await suspended.child(),
+				pending: (
+					await db.sql`
+						select id from pgconductor._private_executions
+						where task_key = ${spec.task_key} and failed_at is null
+					`
+				).length,
+			}).toEqual({
+				occurrence: { steps: 1, cancelled: true },
+				child: { steps: 0, cancelled: true },
+				pending: 0,
+			});
+
+			await db.destroy();
+		});
+
+		test("is cancelled when registration drops its schedule", async () => {
+			const db = await pool.child();
+			await Conductor.create({ sql: db.sql, context: {} }).ensureInstalled();
+			const runAt = new Date("2030-01-01T00:00:00Z");
+			const register = (cronSchedules: { run_at: Date; dedupe_key: string }[]) =>
+				db.client.registerWorker({
+					queueName: "default",
+					taskSpecs: [{ key: "suspended-cron", queue: "default" }],
+					cronSchedules: cronSchedules.map((schedule) => ({
+						...schedule,
+						task_key: "suspended-cron",
+						queue: "default",
+						cron_expression: "0 0 0 * * *",
+					})),
+					eventSubscriptions: [],
+				});
+			await register([
+				{ run_at: runAt, dedupe_key: `scheduled::nightly::${runAt.getTime() / 1000}` },
+			]);
+			const suspended = await suspend(db, "suspended-cron");
+
+			await register([]);
+			expect({
+				occurrence: await suspended.occurrence(),
+				child: await suspended.child(),
+			}).toEqual({
+				occurrence: { steps: 1, cancelled: true },
+				child: { steps: 0, cancelled: true },
+			});
+
+			await db.destroy();
+		});
+	});
+
 	test("scheduling the occurrence that is running keeps it", async () => {
 		const db = await pool.child();
 		await Conductor.create({ sql: db.sql, context: {} }).ensureInstalled();

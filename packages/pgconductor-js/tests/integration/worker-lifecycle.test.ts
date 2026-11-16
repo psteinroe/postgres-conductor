@@ -125,6 +125,55 @@ describe("signal draining races the attempt's abort", () => {
 	});
 });
 
+test("an attempt that hangs up waits for its running signal handler before the next attempt", async () => {
+	const db = await child();
+	const conductor = Conductor.create({
+		sql: db.sql,
+		tasks: TaskSchemas.fromSchema([sessionDefinition]),
+		context: {},
+	});
+	const handlerStarted = new Deferred<void>();
+	const finishHandler = new Deferred<void>();
+	let handlersRunning = 0;
+	const runningAtAttempt: number[] = [];
+	const task = conductor.createTask(
+		{ name: "session" },
+		{ invocable: true },
+		async (_event, ctx) => {
+			runningAtAttempt.push(handlersRunning);
+			ctx.onSignal("input", async () => {
+				handlersRunning++;
+				handlerStarted.resolve();
+				await finishHandler.promise;
+				handlersRunning--;
+			});
+			await handlerStarted.promise;
+			// Hangs up while the signal handler runs
+			await ctx.sleep("nap", 10);
+		},
+	);
+	await conductor.ensureInstalled();
+	const orchestrator = Orchestrator.create({
+		conductor,
+		tasks: [task],
+		defaultWorker: { pollIntervalMs: 20, flushIntervalMs: 20, flushBatchSize: 1 },
+	});
+	const id = await conductor.invoke({ name: "session" }, {});
+	await conductor.signal(id, { name: "input", id: "s1" });
+	await orchestrator.start();
+	try {
+		await handlerStarted.promise;
+		// Long enough for the sleep to end and a next attempt to be claimed
+		await sleep(500);
+		finishHandler.resolve();
+		await waitForCondition(async () => (await row(db, id))?.completed === true);
+		expect(runningAtAttempt).toEqual([0, 0]);
+	} finally {
+		finishHandler.resolve();
+		await orchestrator.stop();
+	}
+});
+
 // Holds the response of the loadStep for `key` until `release` resolves
 function delayLoadStep(sql: Sql, key: string, release: Promise<void>, delivered: Deferred<void>) {
 	return new Proxy(sql, {

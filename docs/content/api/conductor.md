@@ -129,6 +129,8 @@ const executionId = await conductor.invoke(
 );
 ```
 
+`queue` may be left out only for a task on the `default` queue: naming a task of another queue without it is a type error, here and wherever a task is named (`getExecution()`, `waitForResult()`, `signal()`, `ctx.invoke()`, `ctx.unschedule()`, ...).
+
 **Single invocation:**
 
 ```typescript
@@ -146,10 +148,12 @@ await conductor.invoke(
 );
 ```
 
+Returns the execution ID, or `null` when `throttle` finds its time slot taken (see [Deduplication](../task-execution/deduplication.md)); only an invoke with `throttle` is typed `string | null`.
+
 **Batch invocation:**
 
 ```typescript
-await conductor.invoke(
+const ids = await conductor.invoke(
   { name: "process-item" },
   [
     { payload: { id: 1 }, dedupe_key: "item-1" },
@@ -158,6 +162,8 @@ await conductor.invoke(
   ]
 );
 ```
+
+Returns one ID per item, in the order of the items: `ids[i]` belongs to the `i`th item, and is `null` for an item whose `throttle` found its slot taken.
 
 ## conductor.createWorker()
 

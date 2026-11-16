@@ -5,7 +5,6 @@ import {
 	type EventInfo,
 	type ExecutionInfo,
 	type ListenerInfo,
-	type ExecutionSpec,
 	type Payload,
 } from "./database-client.js";
 import {
@@ -40,6 +39,8 @@ import {
 import type { StartedExecution } from "./query-builder.js";
 import {
 	type FindTaskByIdentifier,
+	type QueueRef,
+	type TaskRef,
 	type InferPayload,
 	type InferPayloadInput,
 	type InferReturns,
@@ -106,10 +107,31 @@ type MetadataSchema = StandardSchemaV1<unknown, object>;
 
 type InferMetadata<T> = T extends StandardSchemaV1<any, infer O extends object> ? O : Payload;
 
-type InvokeOptions<Metadata extends object> = Omit<
-	ExecutionSpec,
-	"task_key" | "payload" | "queue" | "metadata"
-> & { metadata?: Metadata };
+/** Options of `conductor.invoke()` */
+export type InvokeOptions<Metadata extends object = Payload> = {
+	/** Run no earlier than this time */
+	run_at?: Date | null;
+	/** Returns the execution that holds this key instead of starting a new one */
+	dedupe_key?: string | null;
+	/** At most one execution per time slot (per `dedupe_key`); later invokes in the slot return null */
+	throttle?: { seconds: number } | null;
+	/** One execution at the start of the next time slot; later invokes replace its payload */
+	debounce?: { seconds: number } | null;
+	priority?: number | null;
+	group?: string | null;
+	metadata?: Metadata;
+};
+
+type InvokePayload<
+	Tasks extends readonly TaskDefinition<string, any, any, string>[],
+	TTask extends { readonly name: string; readonly queue?: string },
+> = InferPayloadInput<
+	FindTaskByIdentifier<
+		Tasks,
+		TTask["name"],
+		TTask["queue"] extends string ? TTask["queue"] : "default"
+	>
+>;
 
 type ConnectionOptions =
 	| { connectionString: string; sql?: never }
@@ -310,7 +332,7 @@ export class Conductor<
 	 * Useful for tests to initialize schema without starting orchestrator.
 	 */
 	async ensureInstalled(): Promise<void> {
-		const schemaManager = new SchemaManager(this.db, {});
+		const schemaManager = new SchemaManager(this.db, { logger: this.logger });
 		const signal = new AbortController().signal;
 		const { shouldShutdown } = await schemaManager.ensureLatest(signal);
 		if (shouldShutdown) {
@@ -404,49 +426,65 @@ export class Conductor<
 		if (options.queue === EVENT_DISPATCH_QUEUE) {
 			throw new Error(`Queue "${EVENT_DISPATCH_QUEUE}" is reserved for internal use`);
 		}
+		return this.buildWorker(options.queue, options.tasks as AnyTask[], options.config);
+	}
+
+	/**
+	 * @internal A worker of this conductor for any queue, the internal one included: the orchestrator
+	 * builds its default and event-dispatch workers with it. Middleware does not wrap internal tasks
+	 */
+	buildWorker(
+		queue: string,
+		tasks: readonly AnyTask[],
+		config?: Partial<WorkerConfig>,
+		logger: Logger = this.logger,
+	): Worker<Tasks> {
 		return new Worker<Tasks>(
-			options.queue,
-			options.tasks as AnyTask[],
+			queue,
+			tasks,
 			this.db,
-			this.logger,
-			options.config,
+			logger,
+			config,
 			this.options.context,
 			this.telemetry,
-			this.options.middleware,
+			queue === EVENT_DISPATCH_QUEUE ? [] : this.options.middleware,
 			this.options.clock,
 		);
 	}
 
+	/**
+	 * Invoke a task. Returns the execution id, or null when `throttle` finds its slot taken; only an
+	 * invoke that may throttle is typed with null.
+	 */
 	async invoke<const TTask extends { readonly name: string; readonly queue?: string }>(
 		task: TTask,
-		payload: InferPayloadInput<
-			FindTaskByIdentifier<
-				Tasks,
-				TTask["name"],
-				TTask["queue"] extends string ? TTask["queue"] : "default"
-			>
-		>,
-		opts?: InvokeOptions<Metadata>,
+		payload: InvokePayload<Tasks, TTask>,
+		opts?: InvokeOptions<Metadata> & { throttle?: undefined },
 	): Promise<string>;
 	async invoke<const TTask extends { readonly name: string; readonly queue?: string }>(
 		task: TTask,
-		items: Array<
-			{
-				payload: InferPayloadInput<
-					FindTaskByIdentifier<
-						Tasks,
-						TTask["name"],
-						TTask["queue"] extends string ? TTask["queue"] : "default"
-					>
-				>;
-			} & InvokeOptions<Metadata>
-		>,
+		payload: InvokePayload<Tasks, TTask>,
+		opts?: InvokeOptions<Metadata>,
+	): Promise<string | null>;
+	/**
+	 * Invoke a task once per item. Returns one id per item, in order: null for an item whose
+	 * `throttle` found its slot taken; only items that may throttle are typed with null.
+	 */
+	async invoke<const TTask extends { readonly name: string; readonly queue?: string }>(
+		task: TTask,
+		items: ({ payload: InvokePayload<Tasks, TTask> } & InvokeOptions<Metadata> & {
+				throttle?: undefined;
+			})[],
 	): Promise<string[]>;
+	async invoke<const TTask extends { readonly name: string; readonly queue?: string }>(
+		task: TTask,
+		items: ({ payload: InvokePayload<Tasks, TTask> } & InvokeOptions<Metadata>)[],
+	): Promise<(string | null)[]>;
 	async invoke<const TTask extends { readonly name: string; readonly queue?: string }>(
 		task: TTask,
 		payloadOrItems: any,
 		opts?: InvokeOptions<Metadata>,
-	): Promise<string | null | string[]> {
+	): Promise<string | null | (string | null)[]> {
 		const taskName = task.name;
 		const queue = task.queue || "default";
 		const definitions = this.options.tasks?.definitions || [];
@@ -472,7 +510,6 @@ export class Conductor<
 							dedupe_key: item.dedupe_key,
 							throttle: item.throttle,
 							debounce: item.debounce,
-							cron_expression: item.cron_expression,
 							priority: item.priority,
 							group: item.group,
 							trace_context: traceContext,
@@ -489,11 +526,17 @@ export class Conductor<
 			taskKey: taskName,
 			queue,
 			run: async (span) => {
+				// Only the public options: a spec also has fields for children and schedules
 				const id = await this.db.invoke({
 					task_key: taskName,
 					queue,
 					payload: payloadOrItems,
-					...opts,
+					run_at: opts?.run_at,
+					dedupe_key: opts?.dedupe_key,
+					throttle: opts?.throttle,
+					debounce: opts?.debounce,
+					priority: opts?.priority,
+					group: opts?.group,
 					trace_context: this.telemetry.traceContext(),
 					metadata,
 				});
@@ -595,7 +638,9 @@ export class Conductor<
 		TQueue extends string = "default",
 		TSignal extends string = string,
 	>(
-		target: TaskExecution<TName, TQueue> | KeyedExecution<TName, TQueue>,
+		target: (TaskExecution<TName, TQueue> | KeyedExecution<TName, TQueue>) & {
+			task: QueueRef<Tasks, TName, TQueue>;
+		},
 		signal: TaskSignal<Tasks, TName, TQueue, TSignal>,
 		options?: SignalOptions,
 	): Promise<boolean>;
@@ -633,24 +678,25 @@ export class Conductor<
 		TName extends TaskName<Tasks>,
 		TQueue extends string = "default",
 		TSignal extends string = string,
-	>(options: {
-		task: TName;
-		queue?: TQueue;
-		key: string;
-		/** Typed and checked by the task's declaration of the signal */
-		signal: TaskSignal<Tasks, TName, TQueue, TSignal>;
-		/** Payload of the execution, used only when it starts one */
-		input?: InferPayloadInput<FindTaskByIdentifier<Tasks, TName, TQueue>>;
-		/**
-		 * State of the execution (see `ctx.setState()`), used only when it starts one. Validated
-		 * against the task's state schema.
-		 */
-		state?: InferStateInput<FindTaskByIdentifier<Tasks, TName, TQueue>>;
-		/** Listens of the execution by name (see `ctx.listen()`), registered only when it starts one */
-		listen?: Record<string, Listen>;
-		priority?: number;
-		metadata?: Metadata;
-	}): Promise<StartedExecution> {
+	>(
+		options: {
+			task: TName;
+			key: string;
+			/** Typed and checked by the task's declaration of the signal */
+			signal: TaskSignal<Tasks, TName, TQueue, TSignal>;
+			/** Payload of the execution, used only when it starts one */
+			input?: InferPayloadInput<FindTaskByIdentifier<Tasks, TName, TQueue>>;
+			/**
+			 * State of the execution (see `ctx.setState()`), used only when it starts one. Validated
+			 * against the task's state schema.
+			 */
+			state?: InferStateInput<FindTaskByIdentifier<Tasks, TName, TQueue>>;
+			/** Listens of the execution by name (see `ctx.listen()`), registered only when it starts one */
+			listen?: Record<string, Listen>;
+			priority?: number;
+			metadata?: Metadata;
+		} & QueueRef<Tasks, TName, TQueue>,
+	): Promise<StartedExecution> {
 		const queue = options.queue || "default";
 		const metadata = await this.validateMetadata(options.metadata);
 		const state =
@@ -697,11 +743,11 @@ export class Conductor<
 	 */
 	async getExecution(executionId: string): Promise<ExecutionInfo | null>;
 	async getExecution<TName extends TaskName<Tasks>, TQueue extends string = "default">(
-		task: TaskIdentifier<TName, TQueue>,
+		task: TaskRef<Tasks, TName, TQueue>,
 		executionId: string,
 	): Promise<TaskExecutionInfo<FindTaskByIdentifier<Tasks, TName, TQueue>> | null>;
 	async getExecution<TName extends TaskName<Tasks>, TQueue extends string = "default">(
-		lookup: ExecutionLookup<TName, TQueue>,
+		lookup: ExecutionLookup<TName, TQueue> & { task: QueueRef<Tasks, TName, TQueue> },
 	): Promise<TaskExecutionInfo<FindTaskByIdentifier<Tasks, TName, TQueue>> | null>;
 	async getExecution(
 		target: TaskIdentifier<string, string> | ExecutionLookup<string, string> | string,
@@ -721,7 +767,7 @@ export class Conductor<
 			TName,
 			TQueue,
 			InferPayloadInput<FindTaskByIdentifier<Tasks, TName, TQueue>>
-		>,
+		> & { task: QueueRef<Tasks, TName, TQueue> },
 	): Promise<TaskExecutionInfo<FindTaskByIdentifier<Tasks, TName, TQueue>>[]>;
 	async listExecutions(query: ExecutionQuery<string, string, Payload>): Promise<ExecutionInfo[]> {
 		return readExecutions(this.db, query);
@@ -736,7 +782,7 @@ export class Conductor<
 	async listListeners<TName extends TaskName<Tasks>, TQueue extends string = "default">(query: {
 		event: EventName<Events>;
 		payload: Payload;
-		task: TaskIdentifier<TName, TQueue>;
+		task: TaskRef<Tasks, TName, TQueue>;
 		limit?: number;
 	}): Promise<TaskListenerInfo<FindTaskByIdentifier<Tasks, TName, TQueue>>[]>;
 	async listListeners(query: {
@@ -761,7 +807,7 @@ export class Conductor<
 	 */
 	async waitForResult(executionId: string, options?: WaitForResultOptions): Promise<unknown>;
 	async waitForResult<TName extends TaskName<Tasks>, TQueue extends string = "default">(
-		task: TaskIdentifier<TName, TQueue>,
+		task: TaskRef<Tasks, TName, TQueue>,
 		executionId: string,
 		options?: WaitForResultOptions,
 	): Promise<InferReturns<FindTaskByIdentifier<Tasks, TName, TQueue>>>;

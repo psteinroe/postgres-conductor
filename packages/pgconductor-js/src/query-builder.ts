@@ -1441,7 +1441,7 @@ export class QueryBuilder {
 		`;
 	}
 
-	buildInvokeBatch(specs: ExecutionSpec[]): PendingQuery<{ id: string }[]> {
+	buildInvokeBatch(specs: ExecutionSpec[]): PendingQuery<{ id: string | null }[]> {
 		const specsArray = specs.map((spec) => {
 			if (spec.throttle && spec.debounce) {
 				throw new Error("Cannot use both throttle and debounce - choose one");
@@ -1467,7 +1467,7 @@ export class QueryBuilder {
 			};
 		});
 
-		return this.sql<{ id: string }[]>`
+		return this.sql<{ id: string | null }[]>`
 			select id from pgconductor.invoke_batch(
 				array(
 					select jsonb_populate_recordset(null::pgconductor.execution_spec, ${this.sql.json(JSON.parse(JSON.stringify(specsArray)))}::jsonb)

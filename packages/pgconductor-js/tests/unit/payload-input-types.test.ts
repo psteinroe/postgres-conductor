@@ -62,3 +62,53 @@ describe("senders take a schema's input, handlers get its output", () => {
 		).rejects.toThrow('Invalid payload for task "send"');
 	});
 });
+
+describe("invoke returns null only when it may throttle", () => {
+	test("an invoke without throttle returns an id", () => {
+		if (false) {
+			expectTypeOf(
+				conductor.invoke({ name: "send" }, { to: "a" }),
+			).resolves.toEqualTypeOf<string>();
+			expectTypeOf(
+				conductor.invoke({ name: "send" }, { to: "a" }, { dedupe_key: "k" }),
+			).resolves.toEqualTypeOf<string>();
+			expectTypeOf(
+				conductor.invoke({ name: "send" }, [{ payload: { to: "a" } }]),
+			).resolves.toEqualTypeOf<string[]>();
+		}
+	});
+
+	test("invoke takes only its public options", () => {
+		if (false) {
+			// @ts-expect-error - set by ctx.invoke() for children
+			void conductor.invoke({ name: "send" }, { to: "a" }, { parent_execution_id: "id" });
+			// @ts-expect-error - schedules are made with ctx.schedule()
+			void conductor.invoke({ name: "send" }, { to: "a" }, { cron_expression: "* * * * *" });
+			// @ts-expect-error - taken from the active span
+			void conductor.invoke({ name: "send" }, { to: "a" }, { trace_context: {} });
+			void conductor.invoke(
+				{ name: "send" },
+				{ to: "a" },
+				{ run_at: new Date(), dedupe_key: "k", priority: 1, group: "g", metadata: {} },
+			);
+		}
+	});
+
+	test("a throttled invoke may return null", () => {
+		if (false) {
+			expectTypeOf(
+				conductor.invoke({ name: "send" }, { to: "a" }, { throttle: { seconds: 1 } }),
+			).resolves.toEqualTypeOf<string | null>();
+			const opts: { throttle?: { seconds: number } } = {};
+			expectTypeOf(conductor.invoke({ name: "send" }, { to: "a" }, opts)).resolves.toEqualTypeOf<
+				string | null
+			>();
+			expectTypeOf(
+				conductor.invoke({ name: "send" }, [
+					{ payload: { to: "a" } },
+					{ payload: { to: "b" }, throttle: { seconds: 1 } },
+				]),
+			).resolves.toEqualTypeOf<(string | null)[]>();
+		}
+	});
+});

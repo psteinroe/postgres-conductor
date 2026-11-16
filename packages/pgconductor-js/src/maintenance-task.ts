@@ -19,6 +19,8 @@ const BATCH_SIZE = 1000;
 // rollback registers the task again. A day covers both; afterwards no worker runs them anymore.
 const UNREGISTERED_GRACE_DAYS = 1;
 
+export const MAINTENANCE_TASK_NAME = "pgconductor.maintenance";
+
 export const createMaintenanceTask = <Queue extends string = "default">(queue: Queue) => {
 	// Add consistent jitter based on queue name to spread load between midnight and 1am
 	const jitterMinutes = hashToJitter(queue);
@@ -43,8 +45,11 @@ export const createMaintenanceTask = <Queue extends string = "default">(queue: Q
 		async (_, ctx) => {
 			const { db, tasks, signal } = ctx;
 
+			// Each batch commits on its own, so a stop between batches releases the run, which the next
+			// one continues
 			let hasMore = true;
 			while (hasMore) {
+				signal.throwIfAborted();
 				hasMore = await db.failUnregisteredExecutions(
 					{
 						queueName: queue,
@@ -68,6 +73,7 @@ export const createMaintenanceTask = <Queue extends string = "default">(queue: Q
 			// Steps are automatically deleted via CASCADE foreign key
 			hasMore = true;
 			while (hasMore) {
+				signal.throwIfAborted();
 				hasMore = await db.removeExecutions(
 					{
 						queueName: queue,
