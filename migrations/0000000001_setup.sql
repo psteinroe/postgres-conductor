@@ -635,7 +635,12 @@ begin
   where spec.dedupe_key is not null
   on conflict (task_key, dedupe_key, queue) where singleton_on is null do update set
     payload = excluded.payload,
-    run_at = excluded.run_at,
+    run_at = case
+      -- waking an execution that waits on a child or an event would run its timeout path
+      when _private_executions.waiting_on_execution_id is not null or _private_executions.waiting_step_key <> 'pgconductor.idle'
+        then _private_executions.run_at
+      else excluded.run_at
+    end,
     cron_expression = excluded.cron_expression,
     priority = excluded.priority,
     "group" = excluded."group";
@@ -1099,7 +1104,12 @@ begin
               payload = excluded.payload,
               trace_context = excluded.trace_context,
               metadata = excluded.metadata,
-              run_at = excluded.run_at,
+              run_at = case
+                -- waking an execution that waits on a child or an event would run its timeout path
+                when _private_executions.waiting_on_execution_id is not null or _private_executions.waiting_step_key <> 'pgconductor.idle'
+                  then _private_executions.run_at
+                else excluded.run_at
+              end,
               priority = excluded.priority,
               cron_expression = excluded.cron_expression,
               "group" = excluded."group"
@@ -1138,7 +1148,12 @@ begin
     payload = excluded.payload,
     trace_context = excluded.trace_context,
     metadata = excluded.metadata,
-    run_at = excluded.run_at,
+    run_at = case
+      -- waking an execution that waits on a child or an event would run its timeout path
+      when e.waiting_on_execution_id is not null or e.waiting_step_key <> 'pgconductor.idle'
+        then e.run_at
+      else excluded.run_at
+    end,
     priority = excluded.priority,
     cron_expression = excluded.cron_expression,
     "group" = excluded."group"
