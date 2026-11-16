@@ -261,6 +261,53 @@ describe("DatabaseClient retry behavior", () => {
 		expect(attemptCount).toBe(2);
 	}, 10000);
 
+	test("retries a statement a cancel meant for an earlier one hit", async () => {
+		let attemptCount = 0;
+		const mockSql = createMockSql(() => {
+			attemptCount++;
+			if (attemptCount < 2) {
+				const err = new Error("canceling statement due to user request") as Error & {
+					code?: string;
+				};
+				err.code = "57014";
+				throw err;
+			}
+			return Promise.resolve([{ id: "success-after-cancel" }]);
+		});
+		const db = new DatabaseClient({
+			sql: mockSql,
+			logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
+		});
+
+		const result = await db.startExecution(start, { signal: new AbortController().signal });
+
+		expect(result).toEqual({ id: "success-after-cancel", started: false });
+		expect(attemptCount).toBe(2);
+	}, 10000);
+
+	test("does not retry a statement its own deadline cancelled", async () => {
+		const deadline = new AbortController();
+		let attemptCount = 0;
+		const mockSql = createMockSql(() => {
+			attemptCount++;
+			deadline.abort(new Error("deadline"));
+			const err = new Error("canceling statement due to user request") as Error & {
+				code?: string;
+			};
+			err.code = "57014";
+			return Promise.reject(err);
+		});
+		const db = new DatabaseClient({
+			sql: mockSql,
+			logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
+		});
+
+		await expect(
+			db.startExecution(start, { signal: new AbortController().signal, deadline: deadline.signal }),
+		).rejects.toThrow();
+		expect(attemptCount).toBe(1);
+	});
+
 	test("retries on lock not available", async () => {
 		let attemptCount = 0;
 		const mockSql = createMockSql(() => {

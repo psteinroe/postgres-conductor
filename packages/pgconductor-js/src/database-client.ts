@@ -366,6 +366,10 @@ const RETRYABLE_SQLSTATE_CODES = new Set([
 	"40001", // serialization_failure
 	"40P01", // deadlock_detected
 	"55P03", // lock_not_available
+	// query_canceled: Postgres cancels whatever its backend runs when a cancel request arrives, so
+	// cancelling a statement (a deadline) can hit the next one on that connection. A deadline's own
+	// cancel is thrown before this check.
+	"57014",
 	"57P01", // admin_shutdown
 	"57P02", // crash_shutdown
 	"57P03", // cannot_connect_now
