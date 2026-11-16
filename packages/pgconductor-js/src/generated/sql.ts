@@ -285,14 +285,14 @@ begin
 
     -- main index for fetching available executions
     execute format(
-      'create index %I on pgconductor.%I (priority, run_at, created_at, id) include (task_key) where is_available = true',
+      'create index %I on pgconductor.%I (priority, run_at, created_at, id) include (task_key) where is_available = true and run_at < ''infinity''',
       'idx_' || v_partition_name || '_get_executions',
       v_partition_name
     );
 
     -- index for claiming available executions of one task under concurrency limits
     execute format(
-      'create index %I on pgconductor.%I (task_key, priority, run_at, created_at, id) where is_available = true',
+      'create index %I on pgconductor.%I (task_key, priority, run_at, created_at, id) where is_available = true and run_at < ''infinity''',
       'idx_' || v_partition_name || '_get_task_executions',
       v_partition_name
     );

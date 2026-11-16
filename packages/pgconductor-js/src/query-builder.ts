@@ -572,6 +572,8 @@ export class QueryBuilder {
 				where not (select enabled from task_limits)
 					and e.queue = ${queueName}::text
 					and e.run_at <= (select now_ts from claim_clock)
+					-- Matches the partial index, which leaves out idle actors and waits without a timeout
+					and e.run_at < 'infinity'::timestamptz
 					and e.is_available = true
 					and e.task_key = any(${this.sql.array(taskKeys, 1009)}::text[])
 				order by e.priority asc, e.run_at asc, e.created_at asc, e.id asc
@@ -629,6 +631,7 @@ export class QueryBuilder {
 					where e.queue = ${queueName}::text
 						and e.task_key = t.key
 						and e.run_at <= (select now_ts from claim_clock)
+						and e.run_at < 'infinity'::timestamptz
 						and e.is_available = true
 						and (t.group_concurrency_limit is null
 							or e."group" is null
