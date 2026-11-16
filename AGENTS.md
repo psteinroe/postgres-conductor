@@ -151,9 +151,9 @@ Tables live in the `pgconductor` schema with a `_private_` prefix (`_private_exe
 - Memoized by step key, so a replay returns the stored result: `step()`, `sleep()`, `invoke()`, `invokeAndWait()`, `waitForResult()`, `waitForEvent()`, `subscribe()`, `waitForAny()` and `signalWithStart()`. `emit()` (deduplicated only with a `dedupe_key`), `sendSignal()` (deduplicated by signal id), `schedule()` (replaces the pending occurrence), `unschedule()` and `cancel()` are not memoized and run again on every replay
 - The reads are the conductor's (`reads.ts` holds both: the query types and the conversion to `DatabaseClient` arguments), typed by the same task catalog, and pass `ctx.signal`. They are not memoized: a replay reads the rows anew
 - `checkpoint()` hangs up when the abort signal fired or the time window closed; it persists nothing
-- Each attempt tracks its step callbacks and their saves (`TaskContextOptions.steps`). Before it reports a result, the worker waits for those still running, bounded by `timeoutMs`, so a sibling's hangup or error (or `stop()`) does not end an attempt while a concurrent step runs. A timeout, cancellation or signal failure ends it at once
+- Each attempt tracks its step callbacks and their saves (`TaskContextOptions.steps`). Before it reports a result, the worker waits for those still running, and then for the running `ctx.onSignal` handler (`signals.close({ drain: false })`), bounded by `timeoutMs`, so a sibling's hangup or error (or `stop()`) does not end an attempt while a concurrent step or signal handler runs. A timeout, cancellation or signal failure ends it at once
 - `step()` checkpoints after reading the step, so `fn` never starts once the attempt aborted, and hangs up as suspended when the claim fence rejects its save
-- Hangup pattern: abort execution and return never-resolving promise
+- Hangup pattern: abort execution and return never-resolving promise. A hangup inside a `ctx.onSignal` handler calls `hangUpSignalHandler()`, which the inbox scopes to the running handler with an `AsyncLocalStorage`, so the attempt end stops waiting for a handler that will never return
 - Resume happens automatically when database wakes execution
 
 **Conductor** (`conductor.ts`)

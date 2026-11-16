@@ -789,16 +789,20 @@ export class Worker<
 				error: coerceError(err).message,
 			} as const;
 		} finally {
-			// Steps still running when a sibling hung up or threw end with the attempt, unless the
-			// worker aborted it. They save their results before the attempt settles.
+			// Steps and a signal handler still running when a sibling hung up or threw end with the
+			// attempt, unless the worker aborted it, so the next attempt never runs beside them. Steps
+			// save their results before the attempt settles. A hung-up or failed attempt leaves
+			// undelivered signals for the next one.
 			const reason = taskAbortController.signal.reason?.reason;
 			if (reason !== "timed-out" && reason !== "cancelled" && reason !== "signal-failed") {
-				await Promise.race([Promise.allSettled(steps), timedOut.promise]);
+				await Promise.race([
+					Promise.allSettled(steps).then(() => signals.close({ drain: false })),
+					timedOut.promise,
+				]);
 			}
+			void signals.close({ drain: false });
 			clearTimeout(timeout);
 			this._running.delete(exec.id);
-			// A hung-up or failed attempt leaves undelivered signals for the next one
-			void signals.close({ drain: false });
 		}
 	}
 

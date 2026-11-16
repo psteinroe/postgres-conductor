@@ -42,7 +42,12 @@ import {
 import { compileEventFilter, compileListens, type Listen } from "./event-trigger-validation.js";
 import type { StartedExecution } from "./query-builder.js";
 import { validateSchema } from "./lib/validate-schema.js";
-import type { ReceivedSignal, SignalHandler, SignalInbox } from "./signal-inbox.js";
+import {
+	hangUpSignalHandler,
+	type ReceivedSignal,
+	type SignalHandler,
+	type SignalInbox,
+} from "./signal-inbox.js";
 import {
 	eventFilter,
 	readEvents,
@@ -1422,6 +1427,7 @@ export class TaskContext<
 	 **/
 	private abortAndHangup(reason: TaskAbortReasons): Promise<never> {
 		this.#opts.abortController.abort(reason);
+		hangUpSignalHandler();
 		return new Promise(() => {});
 	}
 }
