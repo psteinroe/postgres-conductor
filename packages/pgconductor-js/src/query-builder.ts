@@ -1613,8 +1613,8 @@ export class QueryBuilder {
 		result,
 		orchestratorId,
 		claimToken,
-	}: SaveStepArgs): PendingQuery<[{ claimed: boolean }]> {
-		return this.sql<[{ claimed: boolean }]>`
+	}: SaveStepArgs): PendingQuery<[{ claimed: boolean; existing: Payload | null }]> {
+		return this.sql<[{ claimed: boolean; existing: Payload | null }]>`
 			with claimed_execution as materialized (
 				select e.id, e.queue
 				from pgconductor._private_executions e
@@ -1624,13 +1624,19 @@ export class QueryBuilder {
 					and e.claim_token = ${claimToken}::uuid
 				for update
 			),
-			inserted as (
-				insert into pgconductor._private_steps (execution_id, queue, key, result)
-				select e.id, e.queue, ${key}::text, ${this.sql.json(result)}::jsonb
+			input as (select ${this.sql.json(result)}::jsonb as result),
+			-- A step of the same name that saved first wins, so this call returns what replays return.
+			-- The no-op update returns the stored row.
+			saved as (
+				insert into pgconductor._private_steps as s (execution_id, queue, key, result)
+				select e.id, e.queue, ${key}::text, (select result from input)
 				from claimed_execution e
-				on conflict (execution_id, key) do nothing
+				on conflict (execution_id, key) do update set result = s.result
+				returning s.result
 			)
-			select exists (select 1 from claimed_execution) as claimed
+			select
+				exists (select 1 from claimed_execution) as claimed,
+				(select s.result from saved s where s.result is distinct from (select result from input)) as existing
 		`;
 	}
 

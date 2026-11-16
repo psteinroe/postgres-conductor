@@ -445,7 +445,9 @@ export class TaskContext<
 				})();
 				this.opts.steps.add(running);
 				const { result, saved } = await running.finally(() => this.opts.steps.delete(running));
-				return saved ? result : this.abortAndHangup({ reason: "suspended" });
+				if (!saved) return this.abortAndHangup({ reason: "suspended" });
+				// A concurrent step of the same name saved first; return its result, as replays do
+				return saved.existing ? (saved.existing as { result: T }).result : result;
 			},
 		});
 	}

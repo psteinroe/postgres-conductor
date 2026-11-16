@@ -940,12 +940,19 @@ export class DatabaseClient {
 	}
 
 	/** Returns false when this worker no longer holds the execution. */
-	async saveStep(args: SaveStepArgs, opts?: QueryMethodOptions): Promise<boolean> {
+	/**
+	 * Returns false when this worker no longer holds the execution, and the stored result when a
+	 * step of the same name saved a different result first.
+	 */
+	async saveStep(
+		args: SaveStepArgs,
+		opts?: QueryMethodOptions,
+	): Promise<false | { existing: Payload | null }> {
 		const [row] = await this.query(() => this.builder.buildSaveStep(args), {
 			label: "saveStep",
 			...opts,
 		});
-		return row.claimed;
+		return row.claimed && { existing: row.existing };
 	}
 
 	/** Returns false when this worker no longer holds the execution. */
