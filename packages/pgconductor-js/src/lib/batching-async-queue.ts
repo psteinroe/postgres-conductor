@@ -21,6 +21,8 @@ export class BatchingAsyncQueue<T extends { task_key: string }> implements Polla
 > {
 	private queue: BatchGroup<T>[] = [];
 	private resolvers: ((value: IteratorResult<BatchGroup<T>>) => void)[] = [];
+	// Pushes waiting for room in the queue
+	private pushResolvers: (() => void)[] = [];
 	private itemAvailableListeners = new Set<() => void>();
 	// Shared by every waiter until the next release
 	private releaseWaiter: Deferred<void> | null = null;
@@ -46,7 +48,7 @@ export class BatchingAsyncQueue<T extends { task_key: string }> implements Polla
 
 		// Wait while full (backpressure at push level, not emit level)
 		while (this.queue.length >= this.capacity && !this.closed) {
-			await new Promise((r) => setTimeout(r, 5));
+			await new Promise<void>((resolve) => this.pushResolvers.push(resolve));
 		}
 		if (this.closed) return;
 
@@ -126,16 +128,16 @@ export class BatchingAsyncQueue<T extends { task_key: string }> implements Polla
 	}
 
 	tryNext(): BatchGroup<T> | undefined {
-		if (this.queue.length > 0) {
-			return this.queue.shift()!;
-		}
-		return undefined;
+		const value = this.queue.shift();
+		if (value) this.notifyPusher();
+		return value;
 	}
 
 	async next(): Promise<IteratorResult<BatchGroup<T>>> {
 		// Same logic as AsyncQueue
-		if (this.queue.length > 0) {
-			const value = this.queue.shift()!;
+		const value = this.queue.shift();
+		if (value) {
+			this.notifyPusher();
 			return { value, done: false };
 		}
 		if (this.closed) return { value: undefined as any, done: true };
@@ -176,6 +178,10 @@ export class BatchingAsyncQueue<T extends { task_key: string }> implements Polla
 		return this.releaseWaiter.promise;
 	}
 
+	private notifyPusher(): void {
+		if (this.queue.length < this.capacity) this.pushResolvers.shift()?.();
+	}
+
 	private notifyItemAvailable() {
 		const listeners = [...this.itemAvailableListeners];
 		this.itemAvailableListeners.clear();
@@ -198,6 +204,7 @@ export class BatchingAsyncQueue<T extends { task_key: string }> implements Polla
 		this.resolvers = [];
 		this.releaseWaiter?.resolve();
 		this.releaseWaiter = null;
+		for (const pusher of this.pushResolvers.splice(0)) pusher();
 	}
 
 	[Symbol.asyncIterator]() {

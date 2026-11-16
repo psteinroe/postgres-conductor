@@ -1,4 +1,4 @@
-import { test, expect, describe } from "vitest";
+import { test, expect, describe, vi } from "vitest";
 import { BatchingAsyncQueue } from "../../../src/lib/batching-async-queue";
 
 type TestItem = {
@@ -57,6 +57,33 @@ describe("BatchingAsyncQueue - AsyncQueue compatibility (no batching)", () => {
 		expect(thirdPushResolved).toBe(true);
 
 		queue.close();
+	});
+
+	test("a waiting push resumes when an item is taken, without timers", async () => {
+		vi.useFakeTimers();
+		try {
+			const queue = new BatchingAsyncQueue<TestItem>(1, new Map());
+			await queue.push({ task_key: "task-a", id: "1" });
+			let pushed = false;
+			const third = queue.push({ task_key: "task-a", id: "2" }).then(() => {
+				pushed = true;
+			});
+			await Promise.resolve();
+			expect(pushed).toBe(false);
+
+			queue.tryNext();
+			// Fake timers never fire, so only a wake-up resolves the push
+			for (let i = 0; i < 10 && !pushed; i++) await Promise.resolve();
+			expect(pushed).toBe(true);
+			await third;
+
+			// Closing releases a waiting push
+			const blocked = queue.push({ task_key: "task-a", id: "3" });
+			queue.close();
+			await blocked;
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
 	test("handles async iteration with for-await", async () => {
