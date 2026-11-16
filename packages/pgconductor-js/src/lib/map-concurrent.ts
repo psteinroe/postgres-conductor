@@ -8,16 +8,23 @@ export async function* mapConcurrent<T, R>(
 	limit: number,
 	mapper: (item: T) => Promise<R>,
 ): AsyncGenerator<R> {
-	type Task = { id: number; promise: Promise<R> };
-	type RaceResult = { id: number; result: R } | { id: null };
-	type ItemWait = { promise: Promise<RaceResult>; cancel(): void };
-
 	const it = source[Symbol.asyncIterator]();
 	const onNextItemAvailable = source.onNextItemAvailable?.bind(source);
-	const active = new Map<number, Task>();
+	const active = new Map<number, Promise<R>>();
+	// Each mapper reports here once when it settles, so a long one gathers no reactions per loop
+	const settled: { id: number; outcome: PromiseSettledResult<R> }[] = [];
+	let wake: (() => void) | null = null;
+	let cancelItemWait = () => {};
+	let itemWaiting = false;
+	let itemReady = false;
 	let sourceDone = false;
-	let itemWait: ItemWait | null = null;
 	let nextId = 0;
+
+	const notify = () => {
+		const resolve = wake;
+		wake = null;
+		resolve?.();
+	};
 
 	const nextItem = async (): Promise<T | null> => {
 		if (sourceDone) return null;
@@ -27,6 +34,22 @@ export async function* mapConcurrent<T, R>(
 			return null;
 		}
 		return value;
+	};
+
+	const start = (item: T) => {
+		const id = nextId++;
+		const promise = mapper(item);
+		active.set(id, promise);
+		promise.then(
+			(value) => {
+				settled.push({ id, outcome: { status: "fulfilled", value } });
+				notify();
+			},
+			(reason: unknown) => {
+				settled.push({ id, outcome: { status: "rejected", reason } });
+				notify();
+			},
+		);
 	};
 
 	const fillSlots = async () => {
@@ -47,9 +70,7 @@ export async function* mapConcurrent<T, R>(
 			}
 
 			if (item === null) break;
-
-			const id = nextId++;
-			active.set(id, { id, promise: mapper(item) });
+			start(item);
 		}
 	};
 
@@ -57,39 +78,41 @@ export async function* mapConcurrent<T, R>(
 
 	try {
 		while (active.size > 0) {
-			if (!sourceDone && active.size < limit && !itemWait && onNextItemAvailable) {
-				let cancel = () => {};
-				const promise = new Promise<void>((resolve) => {
-					cancel = onNextItemAvailable(resolve);
-				}).then(() => ({ id: null }) as const);
-				itemWait = { promise, cancel: () => cancel() };
+			if (!sourceDone && active.size < limit && !itemWaiting && onNextItemAvailable) {
+				itemWaiting = true;
+				// The source may call the listener at once
+				cancelItemWait = onNextItemAvailable(() => {
+					itemWaiting = false;
+					itemReady = true;
+					notify();
+				});
 			}
 
-			const wrappedPromises: Promise<RaceResult>[] = Array.from(active.values()).map(
-				async (task) => ({ id: task.id, result: await task.promise }),
-			);
-			if (itemWait) wrappedPromises.push(itemWait.promise);
+			// Wait for completed work or newly available input
+			if (settled.length === 0 && !itemReady) {
+				await new Promise<void>((resolve) => {
+					wake = resolve;
+				});
+			}
 
-			// Race to get completed work or newly available input
-			const event = await Promise.race(wrappedPromises);
-
-			if (event.id === null) {
-				itemWait = null;
+			const next = settled.shift();
+			if (!next) {
+				itemReady = false;
 				await fillSlots();
 				continue;
 			}
 
-			// Remove the completed task
-			active.delete(event.id);
+			active.delete(next.id);
+			if (next.outcome.status === "rejected") throw next.outcome.reason;
 
-			yield event.result;
+			yield next.outcome.value;
 
 			// Refill slots
 			await fillSlots();
 		}
 	} finally {
-		itemWait?.cancel();
+		cancelItemWait();
 		// Also on an error or an early exit, the consumer continues once every mapper settled
-		await Promise.allSettled(Array.from(active.values(), (task) => task.promise));
+		await Promise.allSettled(active.values());
 	}
 }
