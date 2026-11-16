@@ -485,25 +485,28 @@ export class Worker<
 				const task = this.tasks.get(taskKey);
 				assert.ok(task, `claimed an execution of unregistered task ${taskKey}`);
 
-				// Don't execute already-cancelled tasks
-				const cancelled: ExecutionResult[] = executions
-					.filter((e) => e.cancelled)
+				// Don't execute cancelled executions, nor ones with no attempt left: an attempt that
+				// never settled, e.g. because its process crashed, still counts
+				const ended: ExecutionResult[] = executions
+					.filter((e) => e.cancelled || e.attempts_exhausted)
 					.map((exec) => ({
 						execution_id: exec.id,
 						claim_token: exec.claim_token,
 						task_key: taskKey,
 						status: "permanently_failed",
-						error: exec.last_error || "Execution was cancelled",
+						error: exec.cancelled
+							? exec.last_error || "Execution was cancelled"
+							: "No attempt left: the last attempt ended without settling, e.g. because its process crashed",
 					}));
-				const activeExecs = executions.filter((e) => !e.cancelled);
+				const activeExecs = executions.filter((e) => !e.cancelled && !e.attempts_exhausted);
 				if (activeExecs.length === 0) {
-					return cancelled;
+					return ended;
 				}
 
 				// Don't start executions claimed before shutdown
 				if (this.signal.aborted) {
 					return [
-						...cancelled,
+						...ended,
 						...activeExecs.map((exec) => ({
 							execution_id: exec.id,
 							claim_token: exec.claim_token,
@@ -515,7 +518,7 @@ export class Worker<
 
 				// If task has batch config, always use batch execution (even for single items)
 				if (task.batch) {
-					return [...cancelled, ...(await this.executeBatchTask(task, taskKey, activeExecs))];
+					return [...ended, ...(await this.executeBatchTask(task, taskKey, activeExecs))];
 				}
 
 				// Execute single (non-batched tasks)

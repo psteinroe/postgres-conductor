@@ -44,6 +44,8 @@ With the default of 3 attempts, a task retries after 15 and 30 seconds, then fai
 
 Resuming after `ctx.sleep()` or `ctx.waitForEvent()` does not count as an attempt. Resuming after `ctx.invokeAndWait()` does.
 
+An attempt that never settles also counts, e.g. one whose process crashed or stopped heartbeating. Once its orchestrator is recovered, the execution runs again, or fails without running when it has no attempt left.
+
 ## Max Attempts
 
 Configure max retry attempts per task:

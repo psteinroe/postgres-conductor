@@ -158,6 +158,8 @@ export interface Execution {
 	locked_by: string;
 	claim_token: string;
 	cancelled: boolean;
+	/** Claimed with more attempts than its task allows, as an attempt that never settled counts */
+	attempts_exhausted?: boolean;
 	last_error: string | null;
 	dedupe_key?: string | null;
 	cron_expression?: string | null;

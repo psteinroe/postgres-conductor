@@ -310,6 +310,28 @@ test("a result Postgres rejects does not hold up the results flushed with it", a
 	});
 });
 
+test("an execution whose last attempt never settled fails instead of running again", async () => {
+	const db = await child();
+	const conductor = Conductor.create({
+		sql: db.sql,
+		tasks: TaskSchemas.fromSchema([sessionDefinition]),
+		context: {},
+	});
+	let ran = false;
+	const task = conductor.createTask({ name: "session", maxAttempts: 2 }, { invocable: true }, () => {
+		ran = true;
+	});
+	await conductor.ensureInstalled();
+	const id = await conductor.invoke({ name: "session" }, {});
+	// As recovery leaves it after the process running its second attempt crashed
+	await db.sql`update pgconductor._private_executions set attempts = 2 where id = ${id}::uuid`;
+	await Orchestrator.create({ conductor, tasks: [task] }).drain();
+
+	expect(ran).toBe(false);
+	expect(await row(db, id)).toMatchObject({ failed: true, locked: false, attempts: 3 });
+	expect((await row(db, id))?.last_error).toContain("No attempt left");
+});
+
 test("cancelling a member of a running batch aborts the batch and releases the others", async () => {
 	const db = await child();
 	const definition = defineTask({ name: "batch", payload: z.object({ n: z.number() }) });
