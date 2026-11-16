@@ -135,7 +135,7 @@ Tables live in the `pgconductor` schema with a `_private_` prefix (`_private_exe
 - Implements async pipeline: fetch → execute → flush
 - Polls the database for ready executions of one queue, claiming only the tasks it registers; it throws at construction for a task of another queue
 - Claims only tasks inside their time window (`WindowChecker`, also used by checkpoints); a window whose start is after its end spans midnight
-- Executes tasks with concurrency control (via `mapConcurrent`)
+- Executes tasks with concurrency control (via `mapConcurrent`). A claim takes at most one execution per free slot, or a whole batch per free slot when every task of the queue (the maintenance task aside) is batched, so a mixed queue never holds executions of unbatched tasks it cannot run
 - Batches and flushes results back to the database. Flushes run one at a time, so the final flush follows every earlier one; it retries with its own 10s deadline, since the worker signal is already aborted on stop, and a result it cannot settle rejects the worker's `stopped`. The deadline starts when the pipeline ends and cancels the settlement statements of the final flush and of one still in flight (`deadline` of `returnExecutions`), so a settlement waiting on a lock cannot hold up the stop
 - Each attempt races the handler, and then the draining of its signals, against an abort promise that resolves with `{ abort: reason }`. Abort reasons (`TaskAbortReasons`) are read only from the attempt's abort controller, never from handler or middleware output
 - Claiming returns each execution's undelivered signals, which prime its `SignalInbox` before the handler runs

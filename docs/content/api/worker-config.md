@@ -98,7 +98,7 @@ How often to flush results to database:
 
 ### fetchBatchSize
 
-Maximum executions fetched per poll. A worker never claims more executions than its free slots can run (a slot runs one execution, or one batch of a batched task), so the rest stays available to other workers:
+Maximum executions fetched per poll. A worker never claims more executions than its free slots can run (a slot runs one execution, or one batch of a batched task), so the rest stays available to other workers. A poll takes a whole batch per free slot only when every task of the queue is batched; a queue that also has other tasks claims one execution per free slot, and its batches fill over several polls:
 
 ```typescript
 {

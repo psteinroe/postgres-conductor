@@ -23,7 +23,7 @@ import {
 	type TaskAbortReasons,
 } from "./task-context.js";
 import * as assert from "./lib/assert.js";
-import { createMaintenanceTask } from "./maintenance-task.js";
+import { createMaintenanceTask, MAINTENANCE_TASK_NAME } from "./maintenance-task.js";
 import { makeChildLogger, type Logger } from "./lib/logger.js";
 import type { EventDefinition } from "./event-definition.js";
 import { coerceError } from "./lib/coerce-error.js";
@@ -394,8 +394,14 @@ export class Worker<
 
 		const orchestratorId = this.orchestratorId;
 		const allTasks = Array.from(this.tasks.values());
-		// A slot runs one execution, or one batch of a batched task
-		const executionsPerSlot = Math.max(...allTasks.map((task) => task.batch?.size || 1));
+		// A slot runs one execution, or one batch of a batched task. A claim cannot tell the tasks
+		// apart, so a slot takes a whole batch only when every task of the queue is batched (the daily
+		// maintenance task aside); otherwise a batch fills over several claims.
+		const executionsPerSlot = allTasks.every(
+			(task) => task.batch || task.name === MAINTENANCE_TASK_NAME,
+		)
+			? Math.max(...allTasks.map((task) => task.batch?.size || 1))
+			: 1;
 		const windows = allTasks.map((task) => ({
 			name: task.name,
 			window: task.window && new WindowChecker(task.window),
@@ -625,7 +631,7 @@ export class Worker<
 		});
 
 		// Pass db and tasks as extra context to maintenance task, which skips middleware
-		const isMaintenance = task.name === "pgconductor.maintenance";
+		const isMaintenance = task.name === MAINTENANCE_TASK_NAME;
 		const actor: { alarm: Date | null } | undefined = task.actor ? { alarm: null } : undefined;
 		const extraContext = isMaintenance
 			? { ...this.extraContext, db: this.db, tasks: this.tasks }
