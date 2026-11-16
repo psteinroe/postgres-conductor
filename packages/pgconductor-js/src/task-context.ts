@@ -17,13 +17,13 @@ import type {
 	TaskDefinition,
 	TaskName,
 	FindTaskByIdentifier,
-	InferPayload,
+	InferPayloadInput,
 	InferReturns,
 	InferSignalInputs,
-	InferState,
+	InferStateInput,
 	SignalPayload,
 } from "./task-definition.js";
-import { parseSignalPayload, signalsOf, validateState } from "./task-definition.js";
+import { checkPayload, parseSignalPayload, signalsOf, validateState } from "./task-definition.js";
 import type { TaskIdentifier } from "./task.js";
 import type { Logger } from "./lib/logger.js";
 import { WindowChecker } from "./lib/window-checker.js";
@@ -306,6 +306,17 @@ type ScheduleOptions<Metadata> = {
 	metadata?: Metadata | ((metadata: Readonly<Metadata> | undefined) => Metadata);
 };
 
+function taskOf(task: { name: string; queue?: string }): { name: string; queue: string } {
+	return { name: task.name, queue: task.queue || "default" };
+}
+
+/** @internal Throws when a context or middleware key would replace a member of the task context. */
+export function checkContextKeys(added: object): void {
+	for (const key of Object.keys(added))
+		if (key in TaskContext.prototype)
+			throw new Error(`Context key "${key}" is reserved: it is a member of the task context`);
+}
+
 // second argument for tasks
 export class TaskContext<
 	Tasks extends readonly TaskDefinition<string, any, any, string>[] = readonly TaskDefinition<
@@ -324,15 +335,20 @@ export class TaskContext<
 	Returns = unknown,
 	/** Payload types of the signals the task declares, by name (see `InferSignals`) */
 	Signals extends object = {},
+	/** The state `setState()` takes: the input of the task's state schema (see `InferStateInput`) */
+	StateInput extends object = State,
 > {
-	private readonly windowChecker?: WindowChecker;
+	// ES private fields are no properties, so context and middleware keys cannot collide with them
+	readonly #opts: TaskContextOptions;
+	readonly #windowChecker?: WindowChecker;
 	/** The last state write of this attempt: writes run one after another */
-	private stateWrites: Promise<unknown> = Promise.resolve();
-	private listensWrite: Promise<unknown> = Promise.resolve();
+	#stateWrites: Promise<unknown> = Promise.resolve();
+	#listensWrite: Promise<unknown> = Promise.resolve();
 
-	constructor(private readonly opts: TaskContextOptions) {
+	constructor(opts: TaskContextOptions) {
+		this.#opts = opts;
 		if (opts.window) {
-			this.windowChecker = new WindowChecker(opts.window);
+			this.#windowChecker = new WindowChecker(opts.window);
 		}
 	}
 
@@ -342,35 +358,36 @@ export class TaskContext<
 		Extra extends object,
 	>(opts: TaskContextOptions, extra?: Extra): TaskContext<Tasks, Events> & Extra {
 		const base = new TaskContext<Tasks, Events>(opts);
+		if (extra) checkContextKeys(extra);
 		return Object.assign(base, extra) as TaskContext<Tasks, Events> & Extra;
 	}
 
 	get logger(): Logger {
-		return this.opts.logger;
+		return this.#opts.logger;
 	}
 
 	/** ID of this execution. */
 	get executionId(): string {
-		return this.opts.execution.id;
+		return this.#opts.execution.id;
 	}
 
 	/** Queue of this execution. */
 	get queue(): string {
-		return this.opts.execution.queue;
+		return this.#opts.execution.queue;
 	}
 
 	/** When this execution was created. */
 	get createdAt(): Date {
-		return new Date(this.opts.execution.created_at);
+		return new Date(this.#opts.execution.created_at);
 	}
 
 	get signal(): AbortSignal {
-		return this.opts.signal;
+		return this.#opts.signal;
 	}
 
 	/** Metadata of this execution, inherited from the event, parent or schedule that created it. */
 	get metadata(): Readonly<Metadata> | undefined {
-		return (this.opts.execution.metadata || undefined) as Readonly<Metadata> | undefined;
+		return (this.#opts.execution.metadata || undefined) as Readonly<Metadata> | undefined;
 	}
 
 	/**
@@ -378,7 +395,7 @@ export class TaskContext<
 	 * `ctx.updateState()`, or its initial state. Read as stored, not validated.
 	 */
 	get state(): Readonly<State> | null {
-		return (this.opts.execution.state || null) as Readonly<State> | null;
+		return (this.#opts.execution.state || null) as Readonly<State> | null;
 	}
 
 	/**
@@ -386,12 +403,12 @@ export class TaskContext<
 	 * attempt started, then as this attempt's `ctx.listen()` and `ctx.unlisten()` left them.
 	 */
 	get listens(): readonly string[] {
-		return this.opts.execution.listens;
+		return this.#opts.execution.listens;
 	}
 
 	/** Metadata describing the source execution when this is a DLQ delivery. */
 	get deadLetter(): DeadLetterMetadata | null {
-		const deadLetter = this.opts.execution.dead_letter;
+		const deadLetter = this.#opts.execution.dead_letter;
 		return deadLetter ? { ...deadLetter, failedAt: new Date(deadLetter.failedAt) } : null;
 	}
 
@@ -402,10 +419,10 @@ export class TaskContext<
 	 */
 	async step<T extends JsonValue | void>(name: string, fn: () => Promise<T> | T): Promise<T> {
 		// Check if step already completed
-		const cached = await this.opts.db.loadStep(
+		const cached = await this.#opts.db.loadStep(
 			{
-				executionId: this.opts.execution.id,
-				queue: this.opts.execution.queue,
+				executionId: this.#opts.execution.id,
+				queue: this.#opts.execution.queue,
 				key: name,
 			},
 			{ signal: this.signal },
@@ -419,23 +436,23 @@ export class TaskContext<
 		await this.checkpoint();
 
 		// Execute and save. A cache hit intentionally has no span.
-		return this.opts.telemetry.trace({
-			name: `step ${this.opts.execution.task_key}`,
+		return this.#opts.telemetry.trace({
+			name: `step ${this.#opts.execution.task_key}`,
 			kind: SpanKind.INTERNAL,
 			attributes: {
-				"pgconductor.task.name": this.opts.execution.task_key,
+				"pgconductor.task.name": this.#opts.execution.task_key,
 				"pgconductor.step.name": name,
-				"pgconductor.queue": this.opts.execution.queue,
+				"pgconductor.queue": this.#opts.execution.queue,
 			},
 			run: async () => {
 				const running = (async () => {
 					const result = await fn();
-					const saved = await this.opts.db.saveStep(
+					const saved = await this.#opts.db.saveStep(
 						{
-							executionId: this.opts.execution.id,
-							queue: this.opts.execution.queue,
-							orchestratorId: this.opts.execution.locked_by,
-							claimToken: this.opts.execution.claim_token,
+							executionId: this.#opts.execution.id,
+							queue: this.#opts.execution.queue,
+							orchestratorId: this.#opts.execution.locked_by,
+							claimToken: this.#opts.execution.claim_token,
 							key: name,
 							result: { result: result as JsonValue },
 						},
@@ -443,9 +460,11 @@ export class TaskContext<
 					);
 					return { result, saved };
 				})();
-				this.opts.steps.add(running);
-				const { result, saved } = await running.finally(() => this.opts.steps.delete(running));
-				return saved ? result : this.abortAndHangup({ reason: "suspended" });
+				this.#opts.steps.add(running);
+				const { result, saved } = await running.finally(() => this.#opts.steps.delete(running));
+				if (!saved) return this.abortAndHangup({ reason: "suspended" });
+				// A concurrent step of the same name saved first; return its result, as replays do
+				return saved.existing ? (saved.existing as { result: T }).result : result;
 			},
 		});
 	}
@@ -464,10 +483,10 @@ export class TaskContext<
 		}
 
 		// Check window boundaries
-		if (this.windowChecker) {
-			const now = this.opts.clock.now();
-			if (!this.windowChecker.isWithinWindow(now)) {
-				const nextRunAt = this.windowChecker.getNextValidRunAt(now);
+		if (this.#windowChecker) {
+			const now = this.#opts.clock.now();
+			if (!this.#windowChecker.isWithinWindow(now)) {
+				const nextRunAt = this.#windowChecker.getNextValidRunAt(now);
 				const delay = Math.max(nextRunAt.getTime() - now.getTime(), 0);
 				return this.abortAndHangup({
 					reason: "released",
@@ -480,10 +499,10 @@ export class TaskContext<
 	/** Suspend for `duration`; numbers are milliseconds. Memoized by `id`. */
 	async sleep(id: string, duration: DurationInput): Promise<void> {
 		// Check if we already slept
-		const cached = await this.opts.db.loadStep(
+		const cached = await this.#opts.db.loadStep(
 			{
-				executionId: this.opts.execution.id,
-				queue: this.opts.execution.queue,
+				executionId: this.#opts.execution.id,
+				queue: this.#opts.execution.queue,
 				key: id,
 			},
 			{ signal: this.signal },
@@ -511,10 +530,10 @@ export class TaskContext<
 			timeout?: DurationInput;
 		},
 	): Promise<{ name: TDef["name"]; payload: InferEventPayload<TDef> }> {
-		const cached = (await this.opts.db.loadStep(
+		const cached = (await this.#opts.db.loadStep(
 			{
-				executionId: this.opts.execution.id,
-				queue: this.opts.execution.queue,
+				executionId: this.#opts.execution.id,
+				queue: this.#opts.execution.queue,
 				key: stepKey,
 			},
 			{ signal: this.signal },
@@ -571,21 +590,21 @@ export class TaskContext<
 	): Promise<WaitForAnyResult<TBranches, Tasks, Signals>> {
 		// From the call on, no signal handler starts, and the one running is passed along: a signal
 		// handled before the wait registers would neither win nor wake it
-		const result = await this.opts.signals.hold(async (delivering) => {
-			const cached = await this.opts.db.loadStep(
+		const result = await this.#opts.signals.hold(async (delivering) => {
+			const cached = await this.#opts.db.loadStep(
 				{
-					executionId: this.opts.execution.id,
-					queue: this.opts.execution.queue,
+					executionId: this.#opts.execution.id,
+					queue: this.#opts.execution.queue,
 					key: stepKey,
 				},
 				{ signal: this.signal },
 			);
 			if (cached !== undefined) return cached;
-			return this.opts.db.registerEventRace(
+			return this.#opts.db.registerEventRace(
 				{
-					executionId: this.opts.execution.id,
-					queue: this.opts.execution.queue,
-					taskKey: this.opts.execution.task_key,
+					executionId: this.#opts.execution.id,
+					queue: this.#opts.execution.queue,
+					taskKey: this.#opts.execution.task_key,
 					stepKey,
 					branches: Object.entries(branches).map(([key, branch]) =>
 						"execution" in branch
@@ -601,8 +620,8 @@ export class TaskContext<
 								: { key, stepKey: branch.key },
 					),
 					timeoutMs: options.timeout === undefined ? null : parseDuration(options.timeout),
-					orchestratorId: this.opts.execution.locked_by,
-					claimToken: this.opts.execution.claim_token,
+					orchestratorId: this.#opts.execution.locked_by,
+					claimToken: this.#opts.execution.claim_token,
 					deliveringSignalId: delivering?.id || null,
 				},
 				{ signal: this.signal },
@@ -675,7 +694,7 @@ export class TaskContext<
 	>(
 		key: string,
 		task: TaskIdentifier<TName, TQueue>,
-		payload: InferPayload<TDef> = {} as InferPayload<TDef>,
+		payload: InferPayloadInput<TDef>,
 		{
 			timeout,
 			group,
@@ -689,10 +708,10 @@ export class TaskContext<
 		} = {},
 	): Promise<InferReturns<TDef>> {
 		const timeoutMs = timeout === undefined ? undefined : parseDuration(timeout);
-		const cached = (await this.opts.db.loadStep(
+		const cached = (await this.#opts.db.loadStep(
 			{
-				executionId: this.opts.execution.id,
-				queue: this.opts.execution.queue,
+				executionId: this.#opts.execution.id,
+				queue: this.#opts.execution.queue,
 				key,
 			},
 			{ signal: this.signal },
@@ -703,7 +722,8 @@ export class TaskContext<
 		}
 
 		// A claim keeps waiting_step_key only while the execution waits on a child
-		if (cached === undefined && this.opts.execution.waiting_step_key !== key) {
+		if (cached === undefined && this.#opts.execution.waiting_step_key !== key) {
+			await checkPayload(this.#opts.taskDefinitions || [], taskOf(task), payload);
 			const childMetadata = await this.childMetadata(metadata);
 			return this.abortAndHangup({
 				reason: "child-invocation",
@@ -712,7 +732,7 @@ export class TaskContext<
 				step_key: key,
 				payload,
 				group,
-				trace_context: this.opts.telemetry.traceContext(),
+				trace_context: this.#opts.telemetry.traceContext(),
 				metadata: childMetadata,
 			});
 		}
@@ -720,12 +740,12 @@ export class TaskContext<
 		// Resumed at this key without the child's result: the timeout passed. Clearing the wait
 		// memoizes the timeout, so a replay throws it again.
 		if (cached === undefined) {
-			const cleared = await this.opts.db.clearWaitingState(
+			const cleared = await this.#opts.db.clearWaitingState(
 				{
-					executionId: this.opts.execution.id,
-					queue: this.opts.execution.queue,
-					orchestratorId: this.opts.execution.locked_by,
-					claimToken: this.opts.execution.claim_token,
+					executionId: this.#opts.execution.id,
+					queue: this.#opts.execution.queue,
+					orchestratorId: this.#opts.execution.locked_by,
+					claimToken: this.#opts.execution.claim_token,
 				},
 				{ signal: this.signal },
 			);
@@ -757,7 +777,7 @@ export class TaskContext<
 	>(
 		key: string,
 		task: TaskIdentifier<TName, TQueue>,
-		payload: InferPayload<TDef> = {} as InferPayload<TDef>,
+		payload: InferPayloadInput<TDef>,
 		{
 			dedupe_key,
 			metadata,
@@ -783,10 +803,10 @@ export class TaskContext<
 			cancelWithParent?: boolean;
 		} = {},
 	): Promise<StartedExecution> {
-		const cached = await this.opts.db.loadStep(
+		const cached = await this.#opts.db.loadStep(
 			{
-				executionId: this.opts.execution.id,
-				queue: this.opts.execution.queue,
+				executionId: this.#opts.execution.id,
+				queue: this.#opts.execution.queue,
 				key,
 			},
 			{ signal: this.signal },
@@ -797,22 +817,23 @@ export class TaskContext<
 			return { id: stored.id, started: stored.started === true };
 		}
 
-		const started = await this.opts.db.startExecution(
+		await checkPayload(this.#opts.taskDefinitions || [], taskOf(task), payload);
+		const started = await this.#opts.db.startExecution(
 			{
-				executionId: this.opts.execution.id,
-				queue: this.opts.execution.queue,
-				orchestratorId: this.opts.execution.locked_by,
-				claimToken: this.opts.execution.claim_token,
+				executionId: this.#opts.execution.id,
+				queue: this.#opts.execution.queue,
+				orchestratorId: this.#opts.execution.locked_by,
+				claimToken: this.#opts.execution.claim_token,
 				key,
 				spec: {
 					task_key: task.name,
 					queue: task.queue || "default",
 					payload,
 					run_at,
-					dedupe_key: dedupe_key || `${this.opts.execution.id}:${key}`,
+					dedupe_key: dedupe_key || `${this.#opts.execution.id}:${key}`,
 					priority,
 					group,
-					trace_context: this.opts.telemetry.traceContext(),
+					trace_context: this.#opts.telemetry.traceContext(),
 					metadata: await this.childMetadata(metadata),
 				},
 				cancelWithParent,
@@ -834,7 +855,7 @@ export class TaskContext<
 		task: TaskIdentifier<TName, TQueue>,
 		scheduleName: string,
 		options: ScheduleOptions<Metadata>,
-		payload: InferPayload<TDef> = {} as InferPayload<TDef>,
+		payload: InferPayloadInput<TDef>,
 	): Promise<void> {
 		if (!scheduleName) {
 			throw new Error("scheduleName is required");
@@ -848,10 +869,11 @@ export class TaskContext<
 			throw new Error("cron expression is required");
 		}
 
-		const nextTimestamp = nextCronOccurrence(options.cron, this.opts.clock.now());
+		const nextTimestamp = nextCronOccurrence(options.cron, this.#opts.clock.now());
 		const queue = task.queue || "default";
+		await checkPayload(this.#opts.taskDefinitions || [], { name: task.name, queue }, payload);
 
-		await this.opts.db.scheduleCronExecution({
+		await this.#opts.db.scheduleCronExecution({
 			spec: {
 				task_key: task.name,
 				queue,
@@ -879,7 +901,7 @@ export class TaskContext<
 		}
 
 		const queue = task.queue || "default";
-		await this.opts.db.unscheduleCronExecution(
+		await this.#opts.db.unscheduleCronExecution(
 			{
 				taskKey: task.name,
 				queue,
@@ -897,7 +919,7 @@ export class TaskContext<
 	 * @returns true if the execution was cancelled, false if it was already completed/failed
 	 */
 	async cancel(executionId: string, options?: { reason?: string }): Promise<boolean> {
-		return this.opts.db.cancelExecution(executionId, {
+		return this.#opts.db.cancelExecution(executionId, {
 			...options,
 			signal: this.signal,
 		});
@@ -921,15 +943,19 @@ export class TaskContext<
 		target: TaskIdentifier<string, string> | ExecutionLookup<string, string> | string,
 		executionId?: string,
 	): Promise<ExecutionInfo | null> {
-		return readExecution(this.opts.db, target, executionId, { signal: this.signal });
+		return readExecution(this.#opts.db, target, executionId, { signal: this.signal });
 	}
 
 	/** Like `conductor.listExecutions()`: a task's executions, typed by the task. */
 	async listExecutions<TName extends TaskName<Tasks>, TQueue extends string = "default">(
-		query: ExecutionQuery<TName, TQueue, InferPayload<FindTaskByIdentifier<Tasks, TName, TQueue>>>,
+		query: ExecutionQuery<
+			TName,
+			TQueue,
+			InferPayloadInput<FindTaskByIdentifier<Tasks, TName, TQueue>>
+		>,
 	): Promise<TaskExecutionInfo<FindTaskByIdentifier<Tasks, TName, TQueue>>[]>;
 	async listExecutions(query: ExecutionQuery<string, string, Payload>): Promise<ExecutionInfo[]> {
-		return readExecutions(this.opts.db, query, { signal: this.signal });
+		return readExecutions(this.#opts.db, query, { signal: this.signal });
 	}
 
 	/** Like `conductor.listListeners()`: the open executions an event would reach. */
@@ -951,12 +977,12 @@ export class TaskContext<
 		task?: TaskIdentifier<string, string>;
 		limit?: number;
 	}): Promise<ListenerInfo[]> {
-		return readListeners(this.opts.db, query, { signal: this.signal });
+		return readListeners(this.#opts.db, query, { signal: this.signal });
 	}
 
 	/** Like `conductor.getEvent()`: an emitted event, or null once retention removed it. */
 	async getEvent(eventId: string): Promise<EventInfo | null> {
-		return this.opts.db.getEvent(eventId, { signal: this.signal });
+		return this.#opts.db.getEvent(eventId, { signal: this.signal });
 	}
 
 	/** Like `conductor.listEvents()`: the kept events named `name`. */
@@ -966,7 +992,7 @@ export class TaskContext<
 	>(
 		query: EventQuery<TName, InferEventPayload<TDef>>,
 	): Promise<EventInfo<TName, InferEventPayload<TDef>>[]> {
-		const events = await readEvents(this.opts.db, query, { signal: this.signal });
+		const events = await readEvents(this.#opts.db, query, { signal: this.signal });
 		return events as EventInfo<TName, InferEventPayload<TDef>>[];
 	}
 
@@ -977,7 +1003,7 @@ export class TaskContext<
 	>(
 		query: Omit<EventQuery<TName, InferEventPayload<TDef>>, "order" | "limit" | "offset">,
 	): Promise<number> {
-		return this.opts.db.countEvents(eventFilter(query), { signal: this.signal });
+		return this.#opts.db.countEvents(eventFilter(query), { signal: this.signal });
 	}
 
 	/**
@@ -1005,10 +1031,12 @@ export class TaskContext<
 	onSignal<T>(name: string, handler: SignalHandler<NoInfer<T>>): void;
 	onSignal(name: string, handler: SignalHandler<never>): void {
 		const handle = handler as SignalHandler<unknown>;
-		this.opts.signals.listen(name, async (payload, info) => {
+		this.#opts.signals.listen(name, async (payload, info) => {
 			const parsed = await this.parseSignal(name, payload);
 			if ("error" in parsed) {
-				this.opts.logger.error(`Skipped signal "${name}": ${parsed.error}`, { signal_id: info.id });
+				this.#opts.logger.error(`Skipped signal "${name}": ${parsed.error}`, {
+					signal_id: info.id,
+				});
 				return;
 			}
 			return handle(parsed.value, info);
@@ -1020,7 +1048,12 @@ export class TaskContext<
 		name: string,
 		payload: JsonValue,
 	): Promise<{ value: unknown } | { error: string }> {
-		return parseSignalPayload(this.opts.signalSchemas, this.opts.execution.task_key, name, payload);
+		return parseSignalPayload(
+			this.#opts.signalSchemas,
+			this.#opts.execution.task_key,
+			name,
+			payload,
+		);
 	}
 
 	/**
@@ -1033,7 +1066,7 @@ export class TaskContext<
 	 * can use it any more.
 	 */
 	async untilIdle(fn: () => Promise<unknown>): Promise<void> {
-		const signals = this.opts.signals;
+		const signals = this.#opts.signals;
 		for (;;) {
 			const since = signals.started;
 			await fn();
@@ -1075,25 +1108,25 @@ export class TaskContext<
 	 * attempt listens concurrently.
 	 */
 	private setListens(listens: Record<string, Listen>, unlisten: string[]): Promise<void> {
-		const write = this.listensWrite.then(() => this.writeListens(listens, unlisten));
-		this.listensWrite = write.catch(() => {});
+		const write = this.#listensWrite.then(() => this.writeListens(listens, unlisten));
+		this.#listensWrite = write.catch(() => {});
 		return write;
 	}
 
 	private async writeListens(listens: Record<string, Listen>, unlisten: string[]): Promise<void> {
-		const current = await this.opts.db.setListens(
+		const current = await this.#opts.db.setListens(
 			{
-				executionId: this.opts.execution.id,
-				queue: this.opts.execution.queue,
-				orchestratorId: this.opts.execution.locked_by,
-				claimToken: this.opts.execution.claim_token,
-				listens: compileListens(listens, this.opts.eventDefinitions),
+				executionId: this.#opts.execution.id,
+				queue: this.#opts.execution.queue,
+				orchestratorId: this.#opts.execution.locked_by,
+				claimToken: this.#opts.execution.claim_token,
+				listens: compileListens(listens, this.#opts.eventDefinitions),
 				unlisten,
 			},
 			{ signal: this.signal },
 		);
 		if (!current) return this.abortAndHangup({ reason: "suspended" });
-		this.opts.execution.listens = current;
+		this.#opts.execution.listens = current;
 	}
 
 	/**
@@ -1103,7 +1136,7 @@ export class TaskContext<
 	 * Written at once and not memoized, so a replay writes it again. Runs after the state writes
 	 * this attempt started before. Hangs up when this attempt no longer holds the execution.
 	 */
-	async setState(state: State | null): Promise<void> {
+	async setState(state: StateInput | null): Promise<void> {
 		await this.queueStateWrite(() => this.writeState(state));
 	}
 
@@ -1117,7 +1150,7 @@ export class TaskContext<
 	async updateState(
 		fn: (
 			state: Readonly<State> | null,
-		) => State | null | undefined | Promise<State | null | undefined>,
+		) => StateInput | null | undefined | Promise<StateInput | null | undefined>,
 	): Promise<State | null | undefined> {
 		return this.queueStateWrite(async () => {
 			const state = await fn(this.state);
@@ -1128,33 +1161,33 @@ export class TaskContext<
 	}
 
 	private queueStateWrite<T>(write: () => Promise<T>): Promise<T> {
-		const queued = this.stateWrites.then(write);
+		const queued = this.#stateWrites.then(write);
 		// A failed write leaves the state as it was, and the next one runs
-		this.stateWrites = queued.catch(() => {});
+		this.#stateWrites = queued.catch(() => {});
 		return queued;
 	}
 
-	private async writeState(state: State | null): Promise<void> {
+	private async writeState(state: StateInput | null): Promise<void> {
 		const validated =
 			state === null
 				? null
 				: ((await validateSchema(
-						this.opts.stateSchema,
+						this.#opts.stateSchema,
 						state,
-						`state for task "${this.opts.execution.task_key}"`,
+						`state for task "${this.#opts.execution.task_key}"`,
 					)) as Payload);
-		const saved = await this.opts.db.setState(
+		const saved = await this.#opts.db.setState(
 			{
-				executionId: this.opts.execution.id,
-				queue: this.opts.execution.queue,
-				orchestratorId: this.opts.execution.locked_by,
-				claimToken: this.opts.execution.claim_token,
+				executionId: this.#opts.execution.id,
+				queue: this.#opts.execution.queue,
+				orchestratorId: this.#opts.execution.locked_by,
+				claimToken: this.#opts.execution.claim_token,
 				state: validated,
 			},
 			{ signal: this.signal },
 		);
 		if (!saved) return this.abortAndHangup({ reason: "suspended" });
-		this.opts.execution.state = validated;
+		this.#opts.execution.state = validated;
 	}
 
 	/**
@@ -1162,10 +1195,10 @@ export class TaskContext<
 	 * Each activation sets its own alarm; `null`, the default, sleeps until a signal.
 	 */
 	setAlarm(at: Date | null): void {
-		if (!this.opts.actor) {
+		if (!this.#opts.actor) {
 			throw new Error("Only an actor can set an alarm");
 		}
-		this.opts.actor.alarm = at;
+		this.#opts.actor.alarm = at;
 	}
 
 	/**
@@ -1212,14 +1245,14 @@ export class TaskContext<
 	): Promise<boolean> {
 		const sent = sentSignal(signal);
 		await checkSignal(
-			this.opts.taskDefinitions || [],
+			this.#opts.taskDefinitions || [],
 			typeof target === "string" ? undefined : target.task,
 			sent,
 		);
-		return this.opts.db.signalExecution(
+		return this.#opts.db.signalExecution(
 			{
 				...signalTarget(target),
-				signal: { ...sent, at: options.at, traceContext: this.opts.telemetry.traceContext() },
+				signal: { ...sent, at: options.at, traceContext: this.#opts.telemetry.traceContext() },
 			},
 			{ signal: this.signal },
 		);
@@ -1248,13 +1281,13 @@ export class TaskContext<
 			key: string;
 			/** Typed and checked by the task's declaration of the signal */
 			signal: TaskSignalMessage<InferSignalInputs<TDef>, TSignal>;
-			/** Payload of the execution, used only when it starts one */
-			input?: InferPayload<TDef>;
+			/** Payload of the execution, used only when it starts one. Checked against its schema. */
+			input?: InferPayloadInput<TDef>;
 			/**
 			 * State of the execution (see `ctx.setState()`), used only when it starts one. Validated
 			 * against the task's state schema.
 			 */
-			state?: InferState<TDef>;
+			state?: InferStateInput<TDef>;
 			/** Listens of the execution by name (see `ctx.listen()`), registered only when it starts one */
 			listen?: Record<string, Listen>;
 			priority?: number;
@@ -1271,30 +1304,32 @@ export class TaskContext<
 		const state =
 			options.state &&
 			(await validateState(
-				this.opts.taskDefinitions || [],
+				this.#opts.taskDefinitions || [],
 				{ name: options.task, queue },
 				options.state,
 			));
 		const signal = sentSignal(options.signal);
-		await checkSignal(this.opts.taskDefinitions || [], { name: options.task, queue }, signal);
+		await checkSignal(this.#opts.taskDefinitions || [], { name: options.task, queue }, signal);
+		const input = options.input || {};
+		await checkPayload(this.#opts.taskDefinitions || [], { name: options.task, queue }, input);
 
-		const started = await this.opts.db.signalWithStartStep(
+		const started = await this.#opts.db.signalWithStartStep(
 			{
-				executionId: this.opts.execution.id,
-				queue: this.opts.execution.queue,
-				orchestratorId: this.opts.execution.locked_by,
-				claimToken: this.opts.execution.claim_token,
+				executionId: this.#opts.execution.id,
+				queue: this.#opts.execution.queue,
+				orchestratorId: this.#opts.execution.locked_by,
+				claimToken: this.#opts.execution.claim_token,
 				key: stepKey,
 				target: {
 					taskKey: options.task,
 					queue,
 					key: options.key,
 					signal,
-					input: (options.input || {}) as Payload,
+					input: input as Payload,
 					state,
-					listens: compileListens(options.listen || {}, this.opts.eventDefinitions),
+					listens: compileListens(options.listen || {}, this.#opts.eventDefinitions),
 					priority: options.priority,
-					traceContext: this.opts.telemetry.traceContext(),
+					traceContext: this.#opts.telemetry.traceContext(),
 					metadata,
 				},
 			},
@@ -1322,13 +1357,13 @@ export class TaskContext<
 			metadata?: Metadata | ((metadata: Readonly<Metadata> | undefined) => Metadata);
 		},
 	): Promise<string> {
-		payload = await validateEventPayload(this.opts.eventDefinitions, event, payload);
+		payload = await validateEventPayload(this.#opts.eventDefinitions, event, payload);
 		const metadata = await this.childMetadata(opts?.metadata);
-		return this.opts.db.emitEvent(
+		return this.#opts.db.emitEvent(
 			{
 				eventKey: event,
 				payload: payload as any,
-				traceContext: this.opts.telemetry.traceContext(),
+				traceContext: this.#opts.telemetry.traceContext(),
 				metadata,
 				dedupeKey: opts?.dedupe_key,
 			},
@@ -1339,13 +1374,13 @@ export class TaskContext<
 	private async childMetadata(
 		metadata: Metadata | ((metadata: Readonly<Metadata> | undefined) => Metadata) | undefined,
 	): Promise<Payload | null> {
-		if (!metadata) return this.opts.execution.metadata || null;
+		if (!metadata) return this.#opts.execution.metadata || null;
 		const childMetadata = (await validateSchema(
-			this.opts.metadataSchema,
+			this.#opts.metadataSchema,
 			typeof metadata === "function" ? metadata(this.metadata) : metadata,
 			"metadata",
 		)) as Payload;
-		await this.opts.db.checkMetadata(childMetadata, { signal: this.signal });
+		await this.#opts.db.checkMetadata(childMetadata, { signal: this.signal });
 		return childMetadata;
 	}
 
@@ -1361,20 +1396,20 @@ export class TaskContext<
 		const compiled = compileEventFilter(
 			options.event.name,
 			options.filter,
-			this.opts.eventDefinitions,
+			this.#opts.eventDefinitions,
 		);
-		return this.opts.db.registerEventWait(
+		return this.#opts.db.registerEventWait(
 			{
-				executionId: this.opts.execution.id,
-				queue: this.opts.execution.queue,
-				taskKey: this.opts.execution.task_key,
+				executionId: this.#opts.execution.id,
+				queue: this.#opts.execution.queue,
+				taskKey: this.#opts.execution.task_key,
 				eventKey: options.event.name,
 				stepKey,
 				requiredFieldCount: compiled.required_field_count,
 				terms: compiled.terms,
 				timeoutMs: options.timeout === undefined ? null : parseDuration(options.timeout),
-				orchestratorId: this.opts.execution.locked_by,
-				claimToken: this.opts.execution.claim_token,
+				orchestratorId: this.#opts.execution.locked_by,
+				claimToken: this.#opts.execution.claim_token,
 				suspend,
 			},
 			{ signal: this.signal },
@@ -1386,7 +1421,7 @@ export class TaskContext<
 	 * @return Promise that never resolves
 	 **/
 	private abortAndHangup(reason: TaskAbortReasons): Promise<never> {
-		this.opts.abortController.abort(reason);
+		this.#opts.abortController.abort(reason);
 		return new Promise(() => {});
 	}
 }

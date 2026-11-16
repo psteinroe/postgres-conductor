@@ -16,7 +16,12 @@ import { BatchingAsyncQueue } from "./lib/batching-async-queue.js";
 import { nextCronOccurrence } from "./lib/cron.js";
 import { Clock } from "./lib/clock.js";
 import { WindowChecker } from "./lib/window-checker.js";
-import { TaskContext, BatchTaskContext, type TaskAbortReasons } from "./task-context.js";
+import {
+	TaskContext,
+	BatchTaskContext,
+	checkContextKeys,
+	type TaskAbortReasons,
+} from "./task-context.js";
 import * as assert from "./lib/assert.js";
 import { createMaintenanceTask } from "./maintenance-task.js";
 import { makeChildLogger, type Logger } from "./lib/logger.js";
@@ -485,25 +490,28 @@ export class Worker<
 				const task = this.tasks.get(taskKey);
 				assert.ok(task, `claimed an execution of unregistered task ${taskKey}`);
 
-				// Don't execute already-cancelled tasks
-				const cancelled: ExecutionResult[] = executions
-					.filter((e) => e.cancelled)
+				// Don't execute cancelled executions, nor ones with no attempt left: an attempt that
+				// never settled, e.g. because its process crashed, still counts
+				const ended: ExecutionResult[] = executions
+					.filter((e) => e.cancelled || e.attempts_exhausted)
 					.map((exec) => ({
 						execution_id: exec.id,
 						claim_token: exec.claim_token,
 						task_key: taskKey,
 						status: "permanently_failed",
-						error: exec.last_error || "Execution was cancelled",
+						error: exec.cancelled
+							? exec.last_error || "Execution was cancelled"
+							: "No attempt left: the last attempt ended without settling, e.g. because its process crashed",
 					}));
-				const activeExecs = executions.filter((e) => !e.cancelled);
+				const activeExecs = executions.filter((e) => !e.cancelled && !e.attempts_exhausted);
 				if (activeExecs.length === 0) {
-					return cancelled;
+					return ended;
 				}
 
 				// Don't start executions claimed before shutdown
 				if (this.signal.aborted) {
 					return [
-						...cancelled,
+						...ended,
 						...activeExecs.map((exec) => ({
 							execution_id: exec.id,
 							claim_token: exec.claim_token,
@@ -515,7 +523,7 @@ export class Worker<
 
 				// If task has batch config, always use batch execution (even for single items)
 				if (task.batch) {
-					return [...cancelled, ...(await this.executeBatchTask(task, taskKey, activeExecs))];
+					return [...ended, ...(await this.executeBatchTask(task, taskKey, activeExecs))];
 				}
 
 				// Execute single (non-batched tasks)
@@ -661,6 +669,7 @@ export class Worker<
 		>(
 			(next, middleware) => () =>
 				middleware({ execution, ctx: context }, <TNext extends object>(added: TNext) => {
+					checkContextKeys(added);
 					Object.assign(context, added);
 					return next() as Promise<MiddlewareResult<TNext>>;
 				}),
@@ -1033,21 +1042,63 @@ export class Worker<
 			buffer = [];
 
 			try {
-				await this.telemetry.settle({
-					queue: this.queueName,
-					batchMessageCount: results.length,
-					run: () =>
-						this.db.returnExecutions(
-							{ orchestratorId, queueName: this.queueName, results },
-							{ signal },
-						),
-				});
+				await settle(results, signal);
 			} catch (err) {
-				buffer = [...results, ...buffer];
-				throw err;
+				// Retryable errors are retried until the signal aborts, so anything else is a rejection
+				// of the batch, e.g. of a result Postgres cannot store. Each result is settled on its
+				// own, so one cannot hold up every later flush.
+				if (signal.aborted) {
+					buffer = [...results, ...buffer];
+					throw err;
+				}
+				await settleEach(results, signal);
 			}
 			for (const result of results) {
 				this.release(result.execution_id, result.claim_token);
+			}
+		};
+
+		const settle = (results: ExecutionResult[], signal: AbortSignal) =>
+			this.telemetry.settle({
+				queue: this.queueName,
+				batchMessageCount: results.length,
+				run: () =>
+					this.db.returnExecutions(
+						{ orchestratorId, queueName: this.queueName, results },
+						{ signal },
+					),
+			});
+
+		const settleEach = async (results: ExecutionResult[], signal: AbortSignal) => {
+			for (const [index, result] of results.entries()) {
+				try {
+					await settle([result], signal);
+					continue;
+				} catch (err) {
+					if (signal.aborted) {
+						buffer = [...results.slice(index), ...buffer];
+						throw err;
+					}
+					this.logger.error(`Could not settle execution ${result.execution_id}:`, err);
+					// A failure counts as an attempt, so a result that never stores dead-letters
+					const error =
+						result.status === "failed"
+							? result.error
+							: `Could not store the result: ${coerceError(err).message}`;
+					const failed: ExecutionResult = {
+						execution_id: result.execution_id,
+						task_key: result.task_key,
+						claim_token: result.claim_token,
+						status: "failed",
+						// jsonb cannot store NUL characters
+						error: error.replaceAll("\u0000", ""),
+					};
+					// Left locked, it is released with the orchestrator's other orphans
+					await settle([failed], signal).catch((err: unknown) => {
+						if (signal.aborted) throw err;
+						this.logger.error(`Could not fail execution ${result.execution_id}:`, err);
+					});
+				}
 			}
 		};
 

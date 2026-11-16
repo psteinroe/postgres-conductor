@@ -77,6 +77,45 @@ describe("Step Support", () => {
 		expect(expensiveFn).toHaveBeenCalledWith(5);
 	}, 30000);
 
+	test("concurrent steps of the same name return the result that was saved first", async () => {
+		const db = await pool.child();
+		databases.push(db);
+
+		const taskDefinitions = defineTask({
+			name: "same-name-steps",
+			returns: z.object({ results: z.array(z.number()) }),
+		});
+		const done = new Deferred<number[]>();
+		const conductor = Conductor.create({
+			sql: db.sql,
+			tasks: TaskSchemas.fromSchema([taskDefinitions]),
+			context: {},
+		});
+		const task = conductor.createTask(
+			{ name: "same-name-steps" },
+			{ invocable: true },
+			async (_event, ctx) => {
+				const results = await Promise.all([1, 2, 3].map((n) => ctx.step("fetch", () => n)));
+				done.resolve(results);
+				return { results };
+			},
+		);
+		const orchestrator = Orchestrator.create({
+			conductor,
+			tasks: [task],
+			defaultWorker: { pollIntervalMs: 50, flushIntervalMs: 50 },
+		});
+		await orchestrator.start();
+		await conductor.invoke({ name: "same-name-steps" }, {});
+		const results = await done.promise;
+		await orchestrator.stop();
+
+		const [stored] = await db.sql<[{ result: { result: number } }]>`
+			select result from pgconductor._private_steps where key = 'fetch'
+		`;
+		expect(results).toEqual([stored.result.result, stored.result.result, stored.result.result]);
+	}, 30000);
+
 	test("sleep() pauses execution and resumes", async () => {
 		const db = await pool.child();
 		databases.push(db);

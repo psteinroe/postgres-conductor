@@ -158,6 +158,8 @@ export interface Execution {
 	locked_by: string;
 	claim_token: string;
 	cancelled: boolean;
+	/** Its last attempt never settled, e.g. because its process crashed: it fails without running */
+	attempts_exhausted?: boolean;
 	last_error: string | null;
 	dedupe_key?: string | null;
 	cron_expression?: string | null;
@@ -940,12 +942,19 @@ export class DatabaseClient {
 	}
 
 	/** Returns false when this worker no longer holds the execution. */
-	async saveStep(args: SaveStepArgs, opts?: QueryMethodOptions): Promise<boolean> {
+	/**
+	 * Returns false when this worker no longer holds the execution, and the stored result when a
+	 * step of the same name saved a different result first.
+	 */
+	async saveStep(
+		args: SaveStepArgs,
+		opts?: QueryMethodOptions,
+	): Promise<false | { existing: Payload | null }> {
 		const [row] = await this.query(() => this.builder.buildSaveStep(args), {
 			label: "saveStep",
 			...opts,
 		});
-		return row.claimed;
+		return row.claimed && { existing: row.existing };
 	}
 
 	/** Returns false when this worker no longer holds the execution. */

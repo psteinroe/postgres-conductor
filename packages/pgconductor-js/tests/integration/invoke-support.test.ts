@@ -675,6 +675,76 @@ describe("Invoke Support", () => {
 		expect(executions[0]?.priority).toBe(10);
 	}, 10000);
 
+	test("dedupe_key re-invoke leaves a parent waiting on its child waiting", async () => {
+		const db = await pool.child();
+		databases.push(db);
+		const parentDefinition = defineTask({
+			name: "waiting-parent",
+			payload: z.object({ value: z.number() }),
+			returns: z.object({ result: z.number() }),
+		});
+		const childDefinition = defineTask({
+			name: "gated-child",
+			returns: z.object({ output: z.number() }),
+		});
+		const conductor = Conductor.create({
+			sql: db.sql,
+			tasks: TaskSchemas.fromSchema([parentDefinition, childDefinition]),
+			context: {},
+		});
+		const childStarted = new Deferred<void>();
+		const gate = new Deferred<void>();
+		const child = conductor.createTask({ name: "gated-child" }, { invocable: true }, async () => {
+			childStarted.resolve();
+			await gate.promise;
+			return { output: 10 };
+		});
+		const parent = conductor.createTask(
+			{ name: "waiting-parent" },
+			{ invocable: true },
+			async (_event, ctx) => {
+				const { output } = await ctx.invokeAndWait("child", { name: "gated-child" }, {});
+				return { result: output };
+			},
+		);
+		const orchestrator = Orchestrator.create({
+			defaultWorker: { pollIntervalMs: 20, flushIntervalMs: 20, concurrency: 2 },
+			conductor,
+			tasks: [parent, child],
+		});
+		await orchestrator.start();
+		try {
+			const id = await conductor.invoke(
+				{ name: "waiting-parent" },
+				{ value: 1 },
+				{ dedupe_key: "parent" },
+			);
+			await childStarted.promise;
+			await waitForCondition(async () => {
+				const [row] = await db.sql<{ waiting: boolean }[]>`
+					select waiting_on_execution_id is not null and locked_at is null as waiting
+					from pgconductor._private_executions where id = ${id}::uuid
+				`;
+				return row?.waiting === true;
+			});
+
+			expect(
+				await conductor.invoke({ name: "waiting-parent" }, { value: 2 }, { dedupe_key: "parent" }),
+			).toBe(id);
+			// Woken now, the parent would take its timeout path and cancel the child
+			await new Promise((resolve) => setTimeout(resolve, 200));
+			gate.resolve();
+
+			await waitForCondition(
+				async () => (await conductor.getExecution(id))?.status === "completed",
+			);
+			expect(await conductor.getExecution(id)).toMatchObject({ result: { result: 10 } });
+		} finally {
+			gate.resolve();
+			await orchestrator.stop();
+		}
+	}, 30000);
+
 	test("dedupe_key creates new execution when existing one is locked", async () => {
 		const db = await pool.child();
 		databases.push(db);

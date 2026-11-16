@@ -103,6 +103,10 @@ After a database outage, every orchestrator's last heartbeat is old. An orchestr
 
 Liveness uses the database's real time, so the fake time of [tests](../crafting-tasks/testing.md#controlling-time) does not make orchestrators stale.
 
+## Postgres Version
+
+A worker claims the due executions of its queue by priority and due time. On Postgres 18, the index skip scan jumps straight to the due executions of each priority, so a poll costs the same however many executions sleep. On older versions, a poll that finds fewer due executions than its batch size also reads past the queue's sleeping executions (`ctx.sleep()`, actor alarms, waits with a timeout). Executions that wait without a timeout, such as idle actors, are never read. For queues with many sleeping executions, use Postgres 18.
+
 ## When to Scale Horizontally
 
 **Scale up (more processes) when:**

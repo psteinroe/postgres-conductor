@@ -88,7 +88,7 @@ Workers validate every execution of a task defined with `defineTask()` against i
 - A validator that throws instead of returning issues fails the attempt, which is retried.
 - Async validators are awaited.
 - Batch tasks validate each execution on its own: members with an invalid payload fail without reaching the handler, and the others run as the batch. Return values are validated per item.
-- Invoking does not validate, so the stored payload is the one you passed. Cron and custom event triggers carry no task payload.
+- Invoking checks the payload against the schema of the task in the catalog and throws with the issues, before anything is stored: `conductor.invoke()`, `ctx.invoke()`, `ctx.invokeAndWait()`, `ctx.schedule()` and the `input` of `signalWithStart()`. The payload is stored as passed, so senders pass the schema's input (`InferPayloadInput`): a field with a default may be left out. `pgconductor.invoke()` from SQL is not checked. Cron and custom event triggers carry no task payload.
 
 Type-only definitions (`DefineTask` with `TaskSchemas.fromUnion()`) have no runtime schema and are never validated.
 
@@ -115,7 +115,7 @@ type Agent = DefineTask<{
 
 `ctx.state` is then typed (`State | null`), and so are `ctx.setState()`, `ctx.updateState()`, the `state` of `signalWithStart()` for the task, and the `state` that `getExecution(task, id)` and `listExecutions({ task })` return. Without a state schema or type, state is any JSON object, as before.
 
-State is validated where it enters, against the task's state schema: `ctx.setState()`, `ctx.updateState()`, and `signalWithStart({ state })` from the Conductor or a task context. An invalid state throws at the call site with the issues, for example `Invalid state for task "agent": status: Invalid option`, and writes nothing; `signalWithStart()` then sends no signal and starts no execution. The schema's output is written, so transforms and defaults apply. `null` clears the state and is not validated. Reads are not validated: `ctx.state` and the executions the Conductor reads return the state as stored.
+State is validated where it enters, against the task's state schema: `ctx.setState()`, `ctx.updateState()`, and `signalWithStart({ state })` from the Conductor or a task context. An invalid state throws at the call site with the issues, for example `Invalid state for task "agent": status: Invalid option`, and writes nothing; `signalWithStart()` then sends no signal and starts no execution. The schema's output is written, so transforms and defaults apply: writes take the schema's input (`InferStateInput`) and `ctx.state` has its output. `null` clears the state and is not validated. Reads are not validated: `ctx.state` and the executions the Conductor reads return the state as stored.
 
 ### Signals
 

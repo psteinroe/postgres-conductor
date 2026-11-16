@@ -94,6 +94,8 @@ create table pgconductor._private_executions (
     attempts integer default 0 not null,
     last_error text,
     cancelled boolean default false not null,
+    -- set by recovery when the attempt that never settled was the last one: the next claim fails it
+    attempts_exhausted boolean default false not null,
     priority integer default 0 not null,
     waiting_on_execution_id uuid,
     waiting_step_key text,
@@ -269,14 +271,14 @@ begin
 
     -- main index for fetching available executions
     execute format(
-      'create index %I on pgconductor.%I (priority, run_at, created_at, id) include (task_key) where is_available = true',
+      'create index %I on pgconductor.%I (priority, run_at, created_at, id) include (task_key) where is_available = true and run_at < ''infinity''',
       'idx_' || v_partition_name || '_get_executions',
       v_partition_name
     );
 
     -- index for claiming available executions of one task under concurrency limits
     execute format(
-      'create index %I on pgconductor.%I (task_key, priority, run_at, created_at, id) where is_available = true',
+      'create index %I on pgconductor.%I (task_key, priority, run_at, created_at, id) where is_available = true and run_at < ''infinity''',
       'idx_' || v_partition_name || '_get_task_executions',
       v_partition_name
     );
@@ -474,11 +476,17 @@ begin
     return;
   end if;
 
-  -- cancelled executions are reclaimed and settled like any other result
+  -- cancelled executions are reclaimed and settled like any other result. an attempt that never
+  -- settled, e.g. because its process crashed, counts like a failed one: after the last, the next
+  -- claim fails the execution instead of running it again.
   update pgconductor._private_executions e
   set
     locked_by = null,
-    locked_at = null
+    locked_at = null,
+    attempts_exhausted = e.attempts >= coalesce((
+      select t.max_attempts from pgconductor._private_tasks t
+      where t.queue = e.queue and t.key = e.task_key
+    ), 3)
   where e.locked_by = any(v_ids);
 end;
 $function$;
@@ -627,7 +635,12 @@ begin
   where spec.dedupe_key is not null
   on conflict (task_key, dedupe_key, queue) where singleton_on is null do update set
     payload = excluded.payload,
-    run_at = excluded.run_at,
+    run_at = case
+      -- waking an execution that waits on a child or an event would run its timeout path
+      when _private_executions.waiting_on_execution_id is not null or _private_executions.waiting_step_key <> 'pgconductor.idle'
+        then _private_executions.run_at
+      else excluded.run_at
+    end,
     cron_expression = excluded.cron_expression,
     priority = excluded.priority,
     "group" = excluded."group";
@@ -1091,7 +1104,12 @@ begin
               payload = excluded.payload,
               trace_context = excluded.trace_context,
               metadata = excluded.metadata,
-              run_at = excluded.run_at,
+              run_at = case
+                -- waking an execution that waits on a child or an event would run its timeout path
+                when _private_executions.waiting_on_execution_id is not null or _private_executions.waiting_step_key <> 'pgconductor.idle'
+                  then _private_executions.run_at
+                else excluded.run_at
+              end,
               priority = excluded.priority,
               cron_expression = excluded.cron_expression,
               "group" = excluded."group"
@@ -1130,7 +1148,12 @@ begin
     payload = excluded.payload,
     trace_context = excluded.trace_context,
     metadata = excluded.metadata,
-    run_at = excluded.run_at,
+    run_at = case
+      -- waking an execution that waits on a child or an event would run its timeout path
+      when e.waiting_on_execution_id is not null or e.waiting_step_key <> 'pgconductor.idle'
+        then e.run_at
+      else excluded.run_at
+    end,
     priority = excluded.priority,
     cron_expression = excluded.cron_expression,
     "group" = excluded."group"

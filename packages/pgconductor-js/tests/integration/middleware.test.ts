@@ -55,6 +55,46 @@ describe("Middleware", () => {
 		});
 	}
 
+	test("a context or middleware key naming a member of the task context throws", async () => {
+		const db = await database();
+		expect(() => Conductor.create({ sql: db.sql, context: { logger: console } })).toThrow(
+			'Context key "logger" is reserved',
+		);
+
+		const failed = new Deferred<string>();
+		const conductor = Conductor.create({
+			sql: db.sql,
+			tasks: TaskSchemas.fromSchema([parentDefinition]),
+			context: {},
+			middleware: [
+				async (_execution, next) => {
+					try {
+						return await next({ step: () => {} });
+					} catch (err) {
+						failed.resolve((err as Error).message);
+						throw err;
+					}
+				},
+			],
+		});
+		const parent = conductor.createTask(
+			{ name: "middleware.parent", maxAttempts: 1 },
+			{ invocable: true },
+			async () => {},
+		);
+		const orchestrator = Orchestrator.create({
+			conductor,
+			tasks: [parent],
+			defaultWorker: { pollIntervalMs: 50, flushIntervalMs: 50 },
+		});
+		orchestrators.push(orchestrator);
+		await orchestrator.start();
+		await conductor.invoke({ name: "middleware.parent" }, {});
+		expect(await failed.promise).toBe(
+			'Context key "step" is reserved: it is a member of the task context',
+		);
+	});
+
 	test("runs once per attempt, including after sleep, event and child resumes", async () => {
 		const db = await database();
 		const runs: MiddlewareExecution[] = [];

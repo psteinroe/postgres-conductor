@@ -328,13 +328,11 @@ describe("OpenTelemetry instrumentation", () => {
 		(db as any).returnExecutions = async () => {
 			throw new Error("database unavailable");
 		};
-		// Results that cannot be settled fail the worker's lifecycle
-		await expect(
-			makeWorker(
-				db,
-				makeTask("settle-error", async () => undefined),
-			).drain(orchestratorId),
-		).rejects.toThrow("database unavailable");
+		// A rejected batch is settled result by result, and a result that still fails is logged
+		await makeWorker(
+			db,
+			makeTask("settle-error", async () => undefined),
+		).drain(orchestratorId);
 		const settle = spans(exporter, "settle default")[0]!;
 		expect(settle.status.code).toBe(SpanStatusCode.ERROR);
 		expect(settle.attributes["error.type"]).toBe("Error");
@@ -461,7 +459,7 @@ describe("trace propagation across internal executions", () => {
 			{ name: "trace-parent" },
 			{ invocable: true },
 			async (_event, ctx) => {
-				await ctx.invokeAndWait("child", { name: "trace-child" });
+				await ctx.invokeAndWait("child", { name: "trace-child" }, {});
 			},
 		);
 		const orchestrator = Orchestrator.create({

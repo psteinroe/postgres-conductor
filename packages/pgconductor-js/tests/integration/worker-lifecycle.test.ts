@@ -277,6 +277,67 @@ test.each(Object.keys(outputs))(
 	},
 );
 
+test("a result Postgres rejects does not hold up the results flushed with it", async () => {
+	const db = await child();
+	const definition = defineTask({ name: "session", payload: z.object({ n: z.number() }) });
+	const conductor = Conductor.create({
+		sql: db.sql,
+		tasks: TaskSchemas.fromSchema([definition]),
+		context: {},
+	});
+	const task = conductor.createTask(
+		{ name: "session", maxAttempts: 1 },
+		{ invocable: true },
+		async (event) => {
+			// jsonb rejects a NUL character
+			if (event.payload.n === 0) throw new Error("bad\u0000byte");
+		},
+	);
+	await conductor.ensureInstalled();
+	const rejected = await conductor.invoke(definition, { n: 0 });
+	const other = await conductor.invoke(definition, { n: 1 });
+	await Orchestrator.create({
+		conductor,
+		tasks: [task],
+		defaultWorker: { flushIntervalMs: 1000 },
+	}).drain();
+
+	expect(await row(db, other)).toMatchObject({ completed: true, locked: false });
+	expect(await row(db, rejected)).toMatchObject({
+		failed: true,
+		locked: false,
+		last_error: "badbyte",
+	});
+});
+
+test("an execution whose last attempt never settled fails instead of running again", async () => {
+	const db = await child();
+	const conductor = Conductor.create({
+		sql: db.sql,
+		tasks: TaskSchemas.fromSchema([sessionDefinition]),
+		context: {},
+	});
+	let ran = false;
+	const task = conductor.createTask({ name: "session" }, { invocable: true }, async () => {
+		ran = true;
+	});
+	await conductor.ensureInstalled();
+	const id = await conductor.invoke({ name: "session" }, {});
+	// The process running the third and last attempt crashed, and recovery released the execution
+	const orchestratorId = await db.registerOrchestrator();
+	await db.sql`
+		update pgconductor._private_executions
+		set attempts = 3, locked_by = ${orchestratorId}::uuid, locked_at = now()
+		where id = ${id}::uuid
+	`;
+	await db.sql`select pgconductor._private_remove_orchestrators(${orchestratorId}::uuid)`;
+	await Orchestrator.create({ conductor, tasks: [task] }).drain();
+
+	expect(ran).toBe(false);
+	expect(await row(db, id)).toMatchObject({ failed: true, locked: false });
+	expect((await row(db, id))?.last_error).toContain("No attempt left");
+});
+
 test("cancelling a member of a running batch aborts the batch and releases the others", async () => {
 	const db = await child();
 	const definition = defineTask({ name: "batch", payload: z.object({ n: z.number() }) });
