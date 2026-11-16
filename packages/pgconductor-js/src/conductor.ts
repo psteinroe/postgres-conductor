@@ -41,15 +41,18 @@ import type { StartedExecution } from "./query-builder.js";
 import {
 	type FindTaskByIdentifier,
 	type InferPayload,
+	type InferPayloadInput,
 	type InferReturns,
 	type InferSignals,
 	type InferState,
+	type InferStateInput,
 	type NonEmptyArray,
 	type TaskDefinition,
 	type TaskName,
 	type Trigger,
 	type ValidateTriggers,
 	type ValidateEventTriggers,
+	checkPayload,
 	validateState,
 } from "./task-definition.js";
 import { EVENT_DISPATCH_QUEUE, EVENT_DISPATCH_TASK } from "./event-dispatch-task.js";
@@ -137,6 +140,11 @@ type ResolvedState<
 	TDef extends { readonly name: string; readonly queue?: string },
 > = TDef["name"] extends TaskName<Tasks> ? InferState<ResolvedTaskDef<Tasks, TDef>> : Payload;
 
+type ResolvedStateInput<
+	Tasks extends readonly TaskDefinition<string, any, any, string>[],
+	TDef extends { readonly name: string; readonly queue?: string },
+> = TDef["name"] extends TaskName<Tasks> ? InferStateInput<ResolvedTaskDef<Tasks, TDef>> : Payload;
+
 type ResolvedSignals<
 	Tasks extends readonly TaskDefinition<string, any, any, string>[],
 	TDef extends { readonly name: string; readonly queue?: string },
@@ -153,7 +161,8 @@ type ResolvedContext<
 	Metadata,
 	ResolvedState<Tasks, TDef>,
 	ResolvedReturns<Tasks, TDef>,
-	ResolvedSignals<Tasks, TDef>
+	ResolvedSignals<Tasks, TDef>,
+	ResolvedStateInput<Tasks, TDef>
 >;
 
 /** A signal for the task `TName` of queue `TQueue`, typed by its declaration of the signal. */
@@ -410,7 +419,7 @@ export class Conductor<
 
 	async invoke<const TTask extends { readonly name: string; readonly queue?: string }>(
 		task: TTask,
-		payload: InferPayload<
+		payload: InferPayloadInput<
 			FindTaskByIdentifier<
 				Tasks,
 				TTask["name"],
@@ -423,7 +432,7 @@ export class Conductor<
 		task: TTask,
 		items: Array<
 			{
-				payload: InferPayload<
+				payload: InferPayloadInput<
 					FindTaskByIdentifier<
 						Tasks,
 						TTask["name"],
@@ -440,8 +449,11 @@ export class Conductor<
 	): Promise<string | null | string[]> {
 		const taskName = task.name;
 		const queue = task.queue || "default";
+		const definitions = this.options.tasks?.definitions || [];
 
 		if (Array.isArray(payloadOrItems)) {
+			for (const item of payloadOrItems)
+				await checkPayload(definitions, { name: taskName, queue }, item.payload);
 			const metadata = await Promise.all(
 				payloadOrItems.map((item) => this.validateMetadata(item.metadata)),
 			);
@@ -471,6 +483,7 @@ export class Conductor<
 			});
 		}
 
+		await checkPayload(definitions, { name: taskName, queue }, payloadOrItems);
 		const metadata = await this.validateMetadata(opts?.metadata);
 		return this.telemetry.send({
 			taskKey: taskName,
@@ -627,12 +640,12 @@ export class Conductor<
 		/** Typed and checked by the task's declaration of the signal */
 		signal: TaskSignal<Tasks, TName, TQueue, TSignal>;
 		/** Payload of the execution, used only when it starts one */
-		input?: InferPayload<FindTaskByIdentifier<Tasks, TName, TQueue>>;
+		input?: InferPayloadInput<FindTaskByIdentifier<Tasks, TName, TQueue>>;
 		/**
 		 * State of the execution (see `ctx.setState()`), used only when it starts one. Validated
 		 * against the task's state schema.
 		 */
-		state?: InferState<FindTaskByIdentifier<Tasks, TName, TQueue>>;
+		state?: InferStateInput<FindTaskByIdentifier<Tasks, TName, TQueue>>;
 		/** Listens of the execution by name (see `ctx.listen()`), registered only when it starts one */
 		listen?: Record<string, Listen>;
 		priority?: number;
@@ -649,6 +662,11 @@ export class Conductor<
 			));
 		const signal = sentSignal(options.signal);
 		await checkSignal(this.options.tasks?.definitions || [], { name: options.task, queue }, signal);
+		await checkPayload(
+			this.options.tasks?.definitions || [],
+			{ name: options.task, queue },
+			options.input || {},
+		);
 		return this.telemetry.send({
 			taskKey: options.task,
 			queue,
@@ -699,7 +717,11 @@ export class Conductor<
 	 * first 100.
 	 */
 	async listExecutions<TName extends TaskName<Tasks>, TQueue extends string = "default">(
-		query: ExecutionQuery<TName, TQueue, InferPayload<FindTaskByIdentifier<Tasks, TName, TQueue>>>,
+		query: ExecutionQuery<
+			TName,
+			TQueue,
+			InferPayloadInput<FindTaskByIdentifier<Tasks, TName, TQueue>>
+		>,
 	): Promise<TaskExecutionInfo<FindTaskByIdentifier<Tasks, TName, TQueue>>[]>;
 	async listExecutions(query: ExecutionQuery<string, string, Payload>): Promise<ExecutionInfo[]> {
 		return readExecutions(this.db, query);

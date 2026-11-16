@@ -6,24 +6,27 @@ import type {
 	ListenerInfo,
 	Payload,
 } from "./database-client.js";
-import type { InferPayload, InferReturns, InferState } from "./task-definition.js";
+import type { InferPayloadInput, InferReturns, InferState } from "./task-definition.js";
 import type { TaskIdentifier } from "./task.js";
 
 // The reads of `Conductor` and `TaskContext`: a task reads as the client does.
 
 type ReadOptions = { signal?: AbortSignal };
 
-/** An execution of a task, its payload, state and result typed by the task's definition. */
+/**
+ * An execution of a task, its payload, state and result typed by the task's definition. The payload
+ * is stored as sent, so it has the type of the schema's input.
+ */
 export type TaskExecutionInfo<TTask> = ExecutionInfo<
 	InferReturns<TTask>,
-	InferPayload<TTask>,
+	InferPayloadInput<TTask>,
 	InferState<TTask>
 >;
 
 /** An execution of a task an event would reach, typed by the task's definition. */
 export type TaskListenerInfo<TTask> = ListenerInfo<
 	InferReturns<TTask>,
-	InferPayload<TTask>,
+	InferPayloadInput<TTask>,
 	InferState<TTask>
 >;
 

@@ -391,7 +391,7 @@ describe("ctx.waitForAny signal branches (Postgres integration)", () => {
 				ctx.onSignal("input", (_payload: unknown, info: { id: string }) => {
 					received[id] = [...(received[id] || []), info.id];
 				});
-				const { id: toolId } = await ctx.invoke("start", { name: "tool" });
+				const { id: toolId } = await ctx.invoke("start", { name: "tool" }, {});
 				const winner = await ctx.waitForAny("idle", {
 					input: { signal: "input" },
 					tool: { execution: toolId },
@@ -437,7 +437,7 @@ describe("ctx.waitForAny signal branches (Postgres integration)", () => {
 				ctx.onSignal("input", (_payload: unknown, { id }: { id: string }) => {
 					inputs.push(id);
 				});
-				const { id: toolId } = await ctx.invoke("start-tool", { name: "tool" });
+				const { id: toolId } = await ctx.invoke("start-tool", { name: "tool" }, {});
 				for (let n = 0; ; n++) {
 					const winner = await ctx.waitForAny(`idle:${n}`, {
 						input: { signal: "input" },

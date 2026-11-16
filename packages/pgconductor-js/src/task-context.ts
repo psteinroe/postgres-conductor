@@ -17,13 +17,13 @@ import type {
 	TaskDefinition,
 	TaskName,
 	FindTaskByIdentifier,
-	InferPayload,
+	InferPayloadInput,
 	InferReturns,
 	InferSignalInputs,
-	InferState,
+	InferStateInput,
 	SignalPayload,
 } from "./task-definition.js";
-import { parseSignalPayload, signalsOf, validateState } from "./task-definition.js";
+import { checkPayload, parseSignalPayload, signalsOf, validateState } from "./task-definition.js";
 import type { TaskIdentifier } from "./task.js";
 import type { Logger } from "./lib/logger.js";
 import { WindowChecker } from "./lib/window-checker.js";
@@ -306,6 +306,10 @@ type ScheduleOptions<Metadata> = {
 	metadata?: Metadata | ((metadata: Readonly<Metadata> | undefined) => Metadata);
 };
 
+function taskOf(task: { name: string; queue?: string }): { name: string; queue: string } {
+	return { name: task.name, queue: task.queue || "default" };
+}
+
 /** @internal Throws when a context or middleware key would replace a member of the task context. */
 export function checkContextKeys(added: object): void {
 	for (const key of Object.keys(added))
@@ -331,6 +335,8 @@ export class TaskContext<
 	Returns = unknown,
 	/** Payload types of the signals the task declares, by name (see `InferSignals`) */
 	Signals extends object = {},
+	/** The state `setState()` takes: the input of the task's state schema (see `InferStateInput`) */
+	StateInput extends object = State,
 > {
 	// ES private fields are no properties, so context and middleware keys cannot collide with them
 	readonly #opts: TaskContextOptions;
@@ -688,7 +694,7 @@ export class TaskContext<
 	>(
 		key: string,
 		task: TaskIdentifier<TName, TQueue>,
-		payload: InferPayload<TDef> = {} as InferPayload<TDef>,
+		payload: InferPayloadInput<TDef>,
 		{
 			timeout,
 			group,
@@ -717,6 +723,7 @@ export class TaskContext<
 
 		// A claim keeps waiting_step_key only while the execution waits on a child
 		if (cached === undefined && this.#opts.execution.waiting_step_key !== key) {
+			await checkPayload(this.#opts.taskDefinitions || [], taskOf(task), payload);
 			const childMetadata = await this.childMetadata(metadata);
 			return this.abortAndHangup({
 				reason: "child-invocation",
@@ -770,7 +777,7 @@ export class TaskContext<
 	>(
 		key: string,
 		task: TaskIdentifier<TName, TQueue>,
-		payload: InferPayload<TDef> = {} as InferPayload<TDef>,
+		payload: InferPayloadInput<TDef>,
 		{
 			dedupe_key,
 			metadata,
@@ -810,6 +817,7 @@ export class TaskContext<
 			return { id: stored.id, started: stored.started === true };
 		}
 
+		await checkPayload(this.#opts.taskDefinitions || [], taskOf(task), payload);
 		const started = await this.#opts.db.startExecution(
 			{
 				executionId: this.#opts.execution.id,
@@ -847,7 +855,7 @@ export class TaskContext<
 		task: TaskIdentifier<TName, TQueue>,
 		scheduleName: string,
 		options: ScheduleOptions<Metadata>,
-		payload: InferPayload<TDef> = {} as InferPayload<TDef>,
+		payload: InferPayloadInput<TDef>,
 	): Promise<void> {
 		if (!scheduleName) {
 			throw new Error("scheduleName is required");
@@ -863,6 +871,7 @@ export class TaskContext<
 
 		const nextTimestamp = nextCronOccurrence(options.cron, this.#opts.clock.now());
 		const queue = task.queue || "default";
+		await checkPayload(this.#opts.taskDefinitions || [], { name: task.name, queue }, payload);
 
 		await this.#opts.db.scheduleCronExecution({
 			spec: {
@@ -939,7 +948,11 @@ export class TaskContext<
 
 	/** Like `conductor.listExecutions()`: a task's executions, typed by the task. */
 	async listExecutions<TName extends TaskName<Tasks>, TQueue extends string = "default">(
-		query: ExecutionQuery<TName, TQueue, InferPayload<FindTaskByIdentifier<Tasks, TName, TQueue>>>,
+		query: ExecutionQuery<
+			TName,
+			TQueue,
+			InferPayloadInput<FindTaskByIdentifier<Tasks, TName, TQueue>>
+		>,
 	): Promise<TaskExecutionInfo<FindTaskByIdentifier<Tasks, TName, TQueue>>[]>;
 	async listExecutions(query: ExecutionQuery<string, string, Payload>): Promise<ExecutionInfo[]> {
 		return readExecutions(this.#opts.db, query, { signal: this.signal });
@@ -1021,7 +1034,9 @@ export class TaskContext<
 		this.#opts.signals.listen(name, async (payload, info) => {
 			const parsed = await this.parseSignal(name, payload);
 			if ("error" in parsed) {
-				this.#opts.logger.error(`Skipped signal "${name}": ${parsed.error}`, { signal_id: info.id });
+				this.#opts.logger.error(`Skipped signal "${name}": ${parsed.error}`, {
+					signal_id: info.id,
+				});
 				return;
 			}
 			return handle(parsed.value, info);
@@ -1033,7 +1048,12 @@ export class TaskContext<
 		name: string,
 		payload: JsonValue,
 	): Promise<{ value: unknown } | { error: string }> {
-		return parseSignalPayload(this.#opts.signalSchemas, this.#opts.execution.task_key, name, payload);
+		return parseSignalPayload(
+			this.#opts.signalSchemas,
+			this.#opts.execution.task_key,
+			name,
+			payload,
+		);
 	}
 
 	/**
@@ -1116,7 +1136,7 @@ export class TaskContext<
 	 * Written at once and not memoized, so a replay writes it again. Runs after the state writes
 	 * this attempt started before. Hangs up when this attempt no longer holds the execution.
 	 */
-	async setState(state: State | null): Promise<void> {
+	async setState(state: StateInput | null): Promise<void> {
 		await this.queueStateWrite(() => this.writeState(state));
 	}
 
@@ -1130,7 +1150,7 @@ export class TaskContext<
 	async updateState(
 		fn: (
 			state: Readonly<State> | null,
-		) => State | null | undefined | Promise<State | null | undefined>,
+		) => StateInput | null | undefined | Promise<StateInput | null | undefined>,
 	): Promise<State | null | undefined> {
 		return this.queueStateWrite(async () => {
 			const state = await fn(this.state);
@@ -1147,7 +1167,7 @@ export class TaskContext<
 		return queued;
 	}
 
-	private async writeState(state: State | null): Promise<void> {
+	private async writeState(state: StateInput | null): Promise<void> {
 		const validated =
 			state === null
 				? null
@@ -1261,13 +1281,13 @@ export class TaskContext<
 			key: string;
 			/** Typed and checked by the task's declaration of the signal */
 			signal: TaskSignalMessage<InferSignalInputs<TDef>, TSignal>;
-			/** Payload of the execution, used only when it starts one */
-			input?: InferPayload<TDef>;
+			/** Payload of the execution, used only when it starts one. Checked against its schema. */
+			input?: InferPayloadInput<TDef>;
 			/**
 			 * State of the execution (see `ctx.setState()`), used only when it starts one. Validated
 			 * against the task's state schema.
 			 */
-			state?: InferState<TDef>;
+			state?: InferStateInput<TDef>;
 			/** Listens of the execution by name (see `ctx.listen()`), registered only when it starts one */
 			listen?: Record<string, Listen>;
 			priority?: number;
@@ -1290,6 +1310,8 @@ export class TaskContext<
 			));
 		const signal = sentSignal(options.signal);
 		await checkSignal(this.#opts.taskDefinitions || [], { name: options.task, queue }, signal);
+		const input = options.input || {};
+		await checkPayload(this.#opts.taskDefinitions || [], { name: options.task, queue }, input);
 
 		const started = await this.#opts.db.signalWithStartStep(
 			{
@@ -1303,7 +1325,7 @@ export class TaskContext<
 					queue,
 					key: options.key,
 					signal,
-					input: (options.input || {}) as Payload,
+					input: input as Payload,
 					state,
 					listens: compileListens(options.listen || {}, this.#opts.eventDefinitions),
 					priority: options.priority,

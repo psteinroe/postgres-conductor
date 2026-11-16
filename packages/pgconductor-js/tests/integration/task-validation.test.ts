@@ -6,6 +6,7 @@ import { Orchestrator } from "../../src/orchestrator";
 import { defineTask, type DefineTask } from "../../src/task-definition";
 import { TestDatabasePool, type TestDatabase } from "../fixtures/test-database";
 import { TaskSchemas } from "../../src/schemas";
+import type { DatabaseClient, Payload } from "../../src/database-client";
 
 // Resolves asynchronously, like a validator that checks a value against a service
 const asyncCode: StandardSchemaV1<{ code: string }, { code: string }> = {
@@ -64,6 +65,17 @@ const batchSquare = defineTask({
 });
 
 type Untyped = DefineTask<{ name: "untyped"; payload: { amount: number } }>;
+
+/** Store the payload as is, past the sender's check, as `pgconductor.invoke()` from SQL does */
+async function unchecked(
+	conductor: { db: DatabaseClient },
+	task: string,
+	payload: Payload,
+): Promise<string> {
+	const id = await conductor.db.invoke({ task_key: task, queue: "default", payload });
+	if (!id) throw new Error(`expected an execution of ${task}`);
+	return id;
+}
 
 describe("Task schema validation", () => {
 	let pool: TestDatabasePool;
@@ -150,7 +162,7 @@ describe("Task schema validation", () => {
 	test("an invalid payload fails without retries and never reaches the handler", async () => {
 		const { conductor, orchestrator, received } = await setup();
 
-		const id = await conductor.invoke({ name: "charge" }, { amount: -1 });
+		const id = await unchecked(conductor, "charge", { amount: -1 });
 		await orchestrator.drain();
 
 		expect(await conductor.getExecution(id)).toMatchObject({
@@ -225,7 +237,7 @@ describe("Task schema validation", () => {
 		const { conductor, orchestrator, received } = await setup();
 
 		const valid = await conductor.invoke({ name: "redeem" }, { code: "valid" });
-		const invalid = await conductor.invoke({ name: "redeem" }, { code: "expired" });
+		const invalid = await unchecked(conductor, "redeem", { code: "expired" });
 		await orchestrator.drain();
 
 		expect(await conductor.getExecution(valid)).toMatchObject({ status: "completed" });
@@ -256,7 +268,7 @@ describe("Task schema validation", () => {
 	test("a validator that throws fails the attempt and retries", async () => {
 		const { db, conductor, orchestrator, received } = await setup();
 
-		const id = await conductor.invoke({ name: "unavailable" }, {});
+		const id = await unchecked(conductor, "unavailable", {});
 		await orchestrator.drain();
 
 		const [row] = await db.sql<{ attempts: number; failed_at: Date | null; last_error: string }[]>`
@@ -269,12 +281,9 @@ describe("Task schema validation", () => {
 	test("batch tasks validate payloads and return values per item", async () => {
 		const { conductor, orchestrator, received } = await setup();
 
-		const [three, half, nine, four] = await conductor.invoke({ name: "batch-square" }, [
-			{ payload: { value: 3 } },
-			{ payload: { value: 0.5 } },
-			{ payload: { value: 9 } },
-			{ payload: { value: 4 } },
-		]);
+		const [three, half, nine, four] = await Promise.all(
+			[3, 0.5, 9, 4].map((value) => unchecked(conductor, "batch-square", { value })),
+		);
 		await orchestrator.drain();
 
 		expect(received.map(({ payload }) => payload)).toHaveLength(3);

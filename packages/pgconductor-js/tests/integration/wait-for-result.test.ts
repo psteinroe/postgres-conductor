@@ -250,7 +250,7 @@ describe("ctx.waitForResult and execution branches (Postgres integration)", () =
 				const { id } = await ctx.invoke("start", { name: "work" }, { value: 1 });
 				outcomes.push(await ctx.waitForResult("result", id));
 			},
-			work: (_value, ctx) => ctx.invokeAndWait("leaf", { name: "leaf" }),
+			work: (_value, ctx) => ctx.invokeAndWait("leaf", { name: "leaf" }, {}),
 		});
 
 		const waiterId = await conductor.invoke({ name: "waiter" }, { id: "cascade" });

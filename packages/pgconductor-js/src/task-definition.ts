@@ -126,12 +126,28 @@ export function defineTask(def: any) {
 
 type EnsureObject<T> = T extends object ? T : {};
 
+// A definition without a payload schema has the bare `ObjectSchema` type, whose input is unknown
+type SchemaInput<I, O> = unknown extends I ? EnsureObject<O> : EnsureObject<I>;
+
 export type InferPayload<T> =
 	T extends TaskDefinition<string, infer P, any, string>
 		? P extends undefined
 			? {}
 			: P extends StandardSchemaV1<any, infer O>
 				? EnsureObject<O>
+				: EnsureObject<P> // Plain type (type-only definition)
+		: never;
+
+/**
+ * The payload senders pass: the input of the task's payload schema, or its plain type. Handlers get
+ * the schema's output (`InferPayload`), as the worker parses the stored payload.
+ */
+export type InferPayloadInput<T> =
+	T extends TaskDefinition<string, infer P, any, string>
+		? P extends undefined
+			? {}
+			: P extends StandardSchemaV1<infer I, infer O>
+				? SchemaInput<I, O>
 				: EnsureObject<P> // Plain type (type-only definition)
 		: never;
 
@@ -158,6 +174,21 @@ export type InferState<T> =
 				? Payload
 				: S extends StandardSchemaV1<any, infer O>
 					? EnsureObject<O>
+					: EnsureObject<S> // Plain type (type-only definition)
+		: never;
+
+/**
+ * The state `ctx.setState()` takes: the input of the task's state schema, its `DefineTask` state
+ * type, or any JSON object without either. The schema's output is stored (`InferState`).
+ */
+export type InferStateInput<T> =
+	T extends TaskDefinition<string, any, any, string, infer S>
+		? unknown extends S
+			? Payload
+			: [S] extends [undefined]
+				? Payload
+				: S extends StandardSchemaV1<infer I, infer O>
+					? SchemaInput<I, O>
 					: EnsureObject<S> // Plain type (type-only definition)
 		: never;
 
@@ -256,6 +287,26 @@ export async function validateState(
 		state,
 		`state for task "${task.name}"`,
 	)) as Payload;
+}
+
+/**
+ * Throw if `payload` does not match the payload schema of `task` in the catalog `definitions`. The
+ * payload is sent as given: the worker parses it with the schema.
+ */
+export async function checkPayload(
+	definitions: readonly TaskDefinition<string, unknown, unknown, string>[],
+	task: { name: string; queue: string },
+	payload: unknown,
+): Promise<void> {
+	const schema = definitions.find(
+		(definition) => definition.name === task.name && definition.queue === task.queue,
+	)?.payload;
+	const parsed = await parseSchema(
+		isStandardSchema(schema) ? schema : undefined,
+		payload,
+		`payload for task "${task.name}"`,
+	);
+	if ("error" in parsed) throw new Error(parsed.error);
 }
 
 function isStandardSchema(value: unknown): value is StandardSchemaV1 {
