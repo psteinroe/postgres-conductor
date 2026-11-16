@@ -129,6 +129,8 @@ const executionId = await conductor.invoke(
 );
 ```
 
+`queue` may be left out only for a task on the `default` queue: naming a task of another queue without it is a type error, here and wherever a task is named (`getExecution()`, `waitForResult()`, `signal()`, `ctx.invoke()`, `ctx.unschedule()`, ...).
+
 **Single invocation:**
 
 ```typescript

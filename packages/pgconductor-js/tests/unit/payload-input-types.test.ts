@@ -78,6 +78,22 @@ describe("invoke returns null only when it may throttle", () => {
 		}
 	});
 
+	test("invoke takes only its public options", () => {
+		if (false) {
+			// @ts-expect-error - set by ctx.invoke() for children
+			void conductor.invoke({ name: "send" }, { to: "a" }, { parent_execution_id: "id" });
+			// @ts-expect-error - schedules are made with ctx.schedule()
+			void conductor.invoke({ name: "send" }, { to: "a" }, { cron_expression: "* * * * *" });
+			// @ts-expect-error - taken from the active span
+			void conductor.invoke({ name: "send" }, { to: "a" }, { trace_context: {} });
+			void conductor.invoke(
+				{ name: "send" },
+				{ to: "a" },
+				{ run_at: new Date(), dedupe_key: "k", priority: 1, group: "g", metadata: {} },
+			);
+		}
+	});
+
 	test("a throttled invoke may return null", () => {
 		if (false) {
 			expectTypeOf(

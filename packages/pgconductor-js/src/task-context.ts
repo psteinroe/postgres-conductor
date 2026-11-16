@@ -17,6 +17,8 @@ import type {
 	TaskDefinition,
 	TaskName,
 	FindTaskByIdentifier,
+	QueueRef,
+	TaskRef,
 	InferPayloadInput,
 	InferReturns,
 	InferSignalInputs,
@@ -663,7 +665,7 @@ export class TaskContext<
 	): Promise<ExecutionOutcome<TResult> | { status: "timeout" }>;
 	async waitForResult<TName extends TaskName<Tasks>, TQueue extends string = "default">(
 		stepKey: string,
-		task: TaskIdentifier<TName, TQueue>,
+		task: TaskRef<Tasks, TName, TQueue>,
 		executionId: string,
 		options?: { timeout?: DurationInput },
 	): Promise<
@@ -698,7 +700,7 @@ export class TaskContext<
 		>,
 	>(
 		key: string,
-		task: TaskIdentifier<TName, TQueue>,
+		task: TaskRef<Tasks, TName, TQueue>,
 		payload: InferPayloadInput<TDef>,
 		{
 			timeout,
@@ -781,7 +783,7 @@ export class TaskContext<
 		>,
 	>(
 		key: string,
-		task: TaskIdentifier<TName, TQueue>,
+		task: TaskRef<Tasks, TName, TQueue>,
 		payload: InferPayloadInput<TDef>,
 		{
 			dedupe_key,
@@ -857,7 +859,7 @@ export class TaskContext<
 			TQueue
 		>,
 	>(
-		task: TaskIdentifier<TName, TQueue>,
+		task: TaskRef<Tasks, TName, TQueue>,
 		scheduleName: string,
 		options: ScheduleOptions<Metadata>,
 		payload: InferPayloadInput<TDef>,
@@ -894,7 +896,7 @@ export class TaskContext<
 	}
 
 	async unschedule<TName extends TaskName<Tasks>, TQueue extends string = "default">(
-		task: TaskIdentifier<TName, TQueue>,
+		task: TaskRef<Tasks, TName, TQueue>,
 		scheduleName: string,
 	): Promise<void> {
 		if (!scheduleName) {
@@ -938,11 +940,11 @@ export class TaskContext<
 	/** Like `conductor.getExecution()`: an execution by id, by task and id, or by key or dedupe key. */
 	async getExecution(executionId: string): Promise<ExecutionInfo | null>;
 	async getExecution<TName extends TaskName<Tasks>, TQueue extends string = "default">(
-		task: TaskIdentifier<TName, TQueue>,
+		task: TaskRef<Tasks, TName, TQueue>,
 		executionId: string,
 	): Promise<TaskExecutionInfo<FindTaskByIdentifier<Tasks, TName, TQueue>> | null>;
 	async getExecution<TName extends TaskName<Tasks>, TQueue extends string = "default">(
-		lookup: ExecutionLookup<TName, TQueue>,
+		lookup: ExecutionLookup<TName, TQueue> & { task: QueueRef<Tasks, TName, TQueue> },
 	): Promise<TaskExecutionInfo<FindTaskByIdentifier<Tasks, TName, TQueue>> | null>;
 	async getExecution(
 		target: TaskIdentifier<string, string> | ExecutionLookup<string, string> | string,
@@ -957,7 +959,7 @@ export class TaskContext<
 			TName,
 			TQueue,
 			InferPayloadInput<FindTaskByIdentifier<Tasks, TName, TQueue>>
-		>,
+		> & { task: QueueRef<Tasks, TName, TQueue> },
 	): Promise<TaskExecutionInfo<FindTaskByIdentifier<Tasks, TName, TQueue>>[]>;
 	async listExecutions(query: ExecutionQuery<string, string, Payload>): Promise<ExecutionInfo[]> {
 		return readExecutions(this.#opts.db, query, { signal: this.signal });
@@ -967,7 +969,7 @@ export class TaskContext<
 	async listListeners<TName extends TaskName<Tasks>, TQueue extends string = "default">(query: {
 		event: EventName<Events>;
 		payload: Payload;
-		task: TaskIdentifier<TName, TQueue>;
+		task: TaskRef<Tasks, TName, TQueue>;
 		limit?: number;
 	}): Promise<TaskListenerInfo<FindTaskByIdentifier<Tasks, TName, TQueue>>[]>;
 	async listListeners(query: {
@@ -1234,7 +1236,9 @@ export class TaskContext<
 		TQueue extends string = "default",
 		TSignal extends string = string,
 	>(
-		target: TaskExecution<TName, TQueue> | KeyedExecution<TName, TQueue>,
+		target: (TaskExecution<TName, TQueue> | KeyedExecution<TName, TQueue>) & {
+			task: QueueRef<Tasks, TName, TQueue>;
+		},
 		signal: TaskSignalMessage<TargetSignalInputs<Tasks, TName, TQueue>, TSignal>,
 		options?: SignalOptions,
 	): Promise<boolean>;
@@ -1282,7 +1286,6 @@ export class TaskContext<
 		stepKey: string,
 		options: {
 			task: TName;
-			queue?: TQueue;
 			key: string;
 			/** Typed and checked by the task's declaration of the signal */
 			signal: TaskSignalMessage<InferSignalInputs<TDef>, TSignal>;
@@ -1301,7 +1304,7 @@ export class TaskContext<
 			 * this execution.
 			 */
 			metadata?: Metadata | ((metadata: Readonly<Metadata> | undefined) => Metadata);
-		},
+		} & QueueRef<Tasks, TName, TQueue>,
 	): Promise<StartedExecution> {
 		await this.checkpoint();
 		const metadata = await this.childMetadata(options.metadata);

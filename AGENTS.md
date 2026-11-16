@@ -159,6 +159,8 @@ Tables live in the `pgconductor` schema with a `_private_` prefix (`_private_exe
 **Conductor** (`conductor.ts`)
 - Task registry and factory
 - Entry point for invoking tasks and emitting events
+- `InvokeOptions` lists the public options of `conductor.invoke()`; the implementation copies them into the `ExecutionSpec` one by one, so fields for children, schedules and traces cannot be passed
+- Methods that name a task of the catalog take `TaskRef<Tasks, TName, TQueue>` (or intersect `QueueRef` into an object that names it): `queue` is required unless the catalog has a task of that name on `default`, so a task of another queue is never looked up on `default`
 - Owns the database client: `close()` ends a pool created from `connectionString`; stopping an orchestrator never closes it
 
 **Orchestrator** (`orchestrator.ts`)

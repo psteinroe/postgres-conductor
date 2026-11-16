@@ -1,4 +1,5 @@
 import { test, expect, describe } from "vitest";
+import { expectTypeOf } from "expect-type";
 import { Conductor } from "../../src/conductor";
 import { Orchestrator } from "../../src/orchestrator";
 import { defineTask } from "../../src/task-definition";
@@ -203,5 +204,87 @@ describe("task queue type constraints", () => {
 				],
 			}),
 		).toThrow('Task "send-email" belongs to queue "notifications", not "default"');
+	});
+});
+
+describe("a task of another queue must be named with its queue", () => {
+	const email = defineTask({
+		name: "send-email",
+		queue: "notifications",
+		payload: z.object({ to: z.string() }),
+		returns: z.object({ ok: z.boolean() }),
+		signals: { stop: z.object({}) },
+	});
+	const local = defineTask({ name: "local", returns: z.object({ n: z.number() }) });
+	const conductor = Conductor.create({
+		sql: mockSql,
+		tasks: TaskSchemas.fromSchema([email, local]),
+		context: {},
+	});
+	const notifications = { name: "send-email", queue: "notifications" } as const;
+
+	test("conductor methods", () => {
+		if (false) {
+			// @ts-expect-error - queue left out
+			void conductor.waitForResult({ name: "send-email" }, "id");
+			// @ts-expect-error - queue left out
+			void conductor.getExecution({ name: "send-email" }, "id");
+			// @ts-expect-error - queue left out
+			void conductor.getExecution({ task: { name: "send-email" }, key: "k" });
+			// @ts-expect-error - queue left out
+			void conductor.listExecutions({ task: { name: "send-email" } });
+			// @ts-expect-error - queue left out
+			void conductor.signal({ task: { name: "send-email" }, id: "id" }, { name: "stop", id: "s" });
+			// @ts-expect-error - queue left out
+			void conductor.signalWithStart({
+				task: "send-email",
+				key: "k",
+				signal: { name: "stop", id: "s" },
+			});
+
+			expectTypeOf(conductor.waitForResult(notifications, "id")).resolves.toEqualTypeOf<{
+				ok: boolean;
+			}>();
+			expectTypeOf(conductor.waitForResult({ name: "local" }, "id")).resolves.toEqualTypeOf<{
+				n: number;
+			}>();
+			void conductor.getExecution(notifications, "id");
+			void conductor.listExecutions({ task: notifications, where: { to: "a" } });
+			void conductor.signal(
+				{ task: notifications, key: "k" },
+				{ name: "stop", id: "s", payload: {} },
+			);
+			void conductor.signalWithStart({
+				task: "send-email",
+				queue: "notifications",
+				key: "k",
+				signal: { name: "stop", id: "s", payload: {} },
+			});
+		}
+	});
+
+	test("context methods", () => {
+		conductor.createTask({ name: "local" }, { invocable: true }, async (_event, ctx) => {
+			if (false) {
+				// @ts-expect-error - queue left out
+				await ctx.waitForResult("w", { name: "send-email" }, "id");
+				// @ts-expect-error - queue left out
+				await ctx.unschedule({ name: "send-email" }, "nightly");
+				// @ts-expect-error - queue left out
+				await ctx.getExecution({ name: "send-email" }, "id");
+				// @ts-expect-error - queue left out
+				await ctx.sendSignal({ task: { name: "send-email" }, id: "id" }, { name: "stop", id: "s" });
+
+				await ctx.unschedule(notifications, "nightly");
+				await ctx.invoke("i", notifications, { to: "a" });
+				expectTypeOf(await ctx.waitForResult("w", notifications, "id")).toEqualTypeOf<
+					| { status: "completed"; result: { ok: boolean } }
+					| { status: "failed"; error: string }
+					| { status: "cancelled"; reason: string }
+					| { status: "timeout" }
+				>();
+			}
+			return { n: 1 };
+		});
 	});
 });

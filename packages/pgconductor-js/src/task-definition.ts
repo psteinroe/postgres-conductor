@@ -323,6 +323,26 @@ export type FindTaskByIdentifier<
 > = FindTask<TTasks[number], TName, TQueue>;
 
 /**
+ * The queue of a task of the catalog named `TName`. It may be left out, for "default", only when the
+ * catalog has a task of that name on "default", so a task of another queue is never looked for on
+ * "default".
+ */
+export type QueueRef<
+	TTasks extends readonly TaskDefinition<string, any, any, string>[],
+	TName extends string,
+	TQueue extends string,
+> = [FindTask<TTasks[number], TName, "default">] extends [never]
+	? { readonly queue: TQueue }
+	: { readonly queue?: TQueue };
+
+/** A task of the catalog by name and queue (see `QueueRef`) */
+export type TaskRef<
+	TTasks extends readonly TaskDefinition<string, any, any, string>[],
+	TName extends string,
+	TQueue extends string,
+> = { readonly name: TName } & QueueRef<TTasks, TName, TQueue>;
+
+/**
  * The tasks whose name and queue types include `TName` and `TQueue`: the task of that literal name,
  * or every task of a catalog typed by `string` names, as one made at runtime.
  */
