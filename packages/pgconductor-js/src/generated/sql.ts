@@ -108,6 +108,8 @@ create table pgconductor._private_executions (
     attempts integer default 0 not null,
     last_error text,
     cancelled boolean default false not null,
+    -- set by recovery when the attempt that never settled was the last one: the next claim fails it
+    attempts_exhausted boolean default false not null,
     priority integer default 0 not null,
     waiting_on_execution_id uuid,
     waiting_step_key text,
@@ -488,11 +490,17 @@ begin
     return;
   end if;
 
-  -- cancelled executions are reclaimed and settled like any other result
+  -- cancelled executions are reclaimed and settled like any other result. an attempt that never
+  -- settled, e.g. because its process crashed, counts like a failed one: after the last, the next
+  -- claim fails the execution instead of running it again.
   update pgconductor._private_executions e
   set
     locked_by = null,
-    locked_at = null
+    locked_at = null,
+    attempts_exhausted = e.attempts >= coalesce((
+      select t.max_attempts from pgconductor._private_tasks t
+      where t.queue = e.queue and t.key = e.task_key
+    ), 3)
   where e.locked_by = any(v_ids);
 end;
 $function$;

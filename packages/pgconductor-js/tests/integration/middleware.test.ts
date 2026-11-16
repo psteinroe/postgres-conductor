@@ -57,9 +57,9 @@ describe("Middleware", () => {
 
 	test("a context or middleware key naming a member of the task context throws", async () => {
 		const db = await database();
-		expect(() =>
-			Conductor.create({ sql: db.sql, context: { logger: console } }),
-		).toThrow('Context key "logger" is reserved');
+		expect(() => Conductor.create({ sql: db.sql, context: { logger: console } })).toThrow(
+			'Context key "logger" is reserved',
+		);
 
 		const failed = new Deferred<string>();
 		const conductor = Conductor.create({

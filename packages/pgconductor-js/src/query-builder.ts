@@ -682,12 +682,7 @@ export class QueryBuilder {
 					e.waiting_step_key, e.cancelled, e.last_error, e.dedupe_key, e.cron_expression,
 					e.locked_by, e.claim_token, e."group", e.priority, e.run_at, e.created_at,
 					e.subscription_id, e.parent_execution_id, e.trace_context, e.metadata, e.dead_letter,
-					e.signal_count, e.state,
-					-- An attempt that never settled, e.g. because its process crashed, kept its count
-					e.attempts > coalesce((
-						select t.max_attempts from pgconductor._private_tasks t
-						where t.queue = e.queue and t.key = e.task_key
-					), 3) as attempts_exhausted
+					e.signal_count, e.state, e.attempts_exhausted
 			),
 			-- A delayed signal that came due resolves the signal branches of the wait it wakes, as
 			-- _private_store_signal() resolves them for a signal stored while the execution waits, so

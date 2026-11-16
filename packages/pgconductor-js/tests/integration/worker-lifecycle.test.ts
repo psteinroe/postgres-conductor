@@ -318,17 +318,23 @@ test("an execution whose last attempt never settled fails instead of running aga
 		context: {},
 	});
 	let ran = false;
-	const task = conductor.createTask({ name: "session", maxAttempts: 2 }, { invocable: true }, async () => {
+	const task = conductor.createTask({ name: "session" }, { invocable: true }, async () => {
 		ran = true;
 	});
 	await conductor.ensureInstalled();
 	const id = await conductor.invoke({ name: "session" }, {});
-	// As recovery leaves it after the process running its second attempt crashed
-	await db.sql`update pgconductor._private_executions set attempts = 2 where id = ${id}::uuid`;
+	// The process running the third and last attempt crashed, and recovery released the execution
+	const orchestratorId = await db.registerOrchestrator();
+	await db.sql`
+		update pgconductor._private_executions
+		set attempts = 3, locked_by = ${orchestratorId}::uuid, locked_at = now()
+		where id = ${id}::uuid
+	`;
+	await db.sql`select pgconductor._private_remove_orchestrators(${orchestratorId}::uuid)`;
 	await Orchestrator.create({ conductor, tasks: [task] }).drain();
 
 	expect(ran).toBe(false);
-	expect(await row(db, id)).toMatchObject({ failed: true, locked: false, attempts: 3 });
+	expect(await row(db, id)).toMatchObject({ failed: true, locked: false });
 	expect((await row(db, id))?.last_error).toContain("No attempt left");
 });
 

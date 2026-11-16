@@ -16,7 +16,12 @@ import { BatchingAsyncQueue } from "./lib/batching-async-queue.js";
 import { nextCronOccurrence } from "./lib/cron.js";
 import { Clock } from "./lib/clock.js";
 import { WindowChecker } from "./lib/window-checker.js";
-import { TaskContext, BatchTaskContext, checkContextKeys, type TaskAbortReasons } from "./task-context.js";
+import {
+	TaskContext,
+	BatchTaskContext,
+	checkContextKeys,
+	type TaskAbortReasons,
+} from "./task-context.js";
 import * as assert from "./lib/assert.js";
 import { createMaintenanceTask } from "./maintenance-task.js";
 import { makeChildLogger, type Logger } from "./lib/logger.js";
