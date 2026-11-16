@@ -111,6 +111,17 @@ type InvokeOptions<Metadata extends object> = Omit<
 	"task_key" | "payload" | "queue" | "metadata"
 > & { metadata?: Metadata };
 
+type InvokePayload<
+	Tasks extends readonly TaskDefinition<string, any, any, string>[],
+	TTask extends { readonly name: string; readonly queue?: string },
+> = InferPayloadInput<
+	FindTaskByIdentifier<
+		Tasks,
+		TTask["name"],
+		TTask["queue"] extends string ? TTask["queue"] : "default"
+	>
+>;
+
 type ConnectionOptions =
 	| { connectionString: string; sql?: never }
 	| { sql: Sql; connectionString?: never };
@@ -417,36 +428,39 @@ export class Conductor<
 		);
 	}
 
+	/**
+	 * Invoke a task. Returns the execution id, or null when `throttle` finds its slot taken; only an
+	 * invoke that may throttle is typed with null.
+	 */
 	async invoke<const TTask extends { readonly name: string; readonly queue?: string }>(
 		task: TTask,
-		payload: InferPayloadInput<
-			FindTaskByIdentifier<
-				Tasks,
-				TTask["name"],
-				TTask["queue"] extends string ? TTask["queue"] : "default"
-			>
-		>,
-		opts?: InvokeOptions<Metadata>,
+		payload: InvokePayload<Tasks, TTask>,
+		opts?: InvokeOptions<Metadata> & { throttle?: undefined },
 	): Promise<string>;
 	async invoke<const TTask extends { readonly name: string; readonly queue?: string }>(
 		task: TTask,
-		items: Array<
-			{
-				payload: InferPayloadInput<
-					FindTaskByIdentifier<
-						Tasks,
-						TTask["name"],
-						TTask["queue"] extends string ? TTask["queue"] : "default"
-					>
-				>;
-			} & InvokeOptions<Metadata>
-		>,
+		payload: InvokePayload<Tasks, TTask>,
+		opts?: InvokeOptions<Metadata>,
+	): Promise<string | null>;
+	/**
+	 * Invoke a task once per item. Returns one id per item, in order: null for an item whose
+	 * `throttle` found its slot taken; only items that may throttle are typed with null.
+	 */
+	async invoke<const TTask extends { readonly name: string; readonly queue?: string }>(
+		task: TTask,
+		items: ({ payload: InvokePayload<Tasks, TTask> } & InvokeOptions<Metadata> & {
+				throttle?: undefined;
+			})[],
 	): Promise<string[]>;
+	async invoke<const TTask extends { readonly name: string; readonly queue?: string }>(
+		task: TTask,
+		items: ({ payload: InvokePayload<Tasks, TTask> } & InvokeOptions<Metadata>)[],
+	): Promise<(string | null)[]>;
 	async invoke<const TTask extends { readonly name: string; readonly queue?: string }>(
 		task: TTask,
 		payloadOrItems: any,
 		opts?: InvokeOptions<Metadata>,
-	): Promise<string | null | string[]> {
+	): Promise<string | null | (string | null)[]> {
 		const taskName = task.name;
 		const queue = task.queue || "default";
 		const definitions = this.options.tasks?.definitions || [];

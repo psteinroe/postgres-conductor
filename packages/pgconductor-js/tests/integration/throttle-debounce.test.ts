@@ -407,7 +407,7 @@ describe("Throttle and Debounce Integration", () => {
 		expect(executions.length).toBe(2);
 	});
 
-	test("batch throttle without dedupe_key skips throttled specs", async () => {
+	test("batch throttle returns null for throttled items, in item order", async () => {
 		const db = await pool.child();
 		databases.push(db);
 		const taskDefinition = defineTask({
@@ -428,17 +428,26 @@ describe("Throttle and Debounce Integration", () => {
 			{ payload: { value: 2 }, throttle: { seconds: 60 } },
 		]);
 		const second = await conductor.invoke({ name: "test-task" }, [
-			{ payload: { value: 3 }, throttle: { seconds: 60 } },
+			{ payload: { value: 3 } },
+			{ payload: { value: 4 }, throttle: { seconds: 60 } },
+			{ payload: { value: 5 }, dedupe_key: "five" },
 		]);
 
-		expect(first).toHaveLength(1);
-		expect(second).toHaveLength(0);
+		expect(first).toEqual([expect.any(String), null]);
+		expect(second).toEqual([expect.any(String), null, expect.any(String)]);
 
-		const executions = await db.sql`
-			select payload from pgconductor._private_executions
+		const executions = await db.sql<{ id: string; payload: { value: number } }[]>`
+			select id, payload from pgconductor._private_executions
 			where task_key = 'test-task'
 		`;
-		expect(executions.map((e) => e.payload)).toEqual([{ value: 1 }]);
+		const payloadOf = (id: string | null | undefined) =>
+			executions.find((e) => e.id === id)?.payload;
+		expect([first[0], second[0], second[2]].map(payloadOf)).toEqual([
+			{ value: 1 },
+			{ value: 3 },
+			{ value: 5 },
+		]);
+		expect(executions).toHaveLength(3);
 	});
 
 	describe("with a dedupe key", () => {

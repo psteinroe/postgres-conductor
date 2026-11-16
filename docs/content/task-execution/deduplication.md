@@ -87,7 +87,7 @@ await conductor.invoke({ name: "sync-customer" }, { customerId }, {
 });
 ```
 
-- `throttle`: the first invoke in a slot creates an execution. Later invokes in that slot return `null` while it is pending or running; it is never superseded.
+- `throttle`: the first invoke in a slot creates an execution. Later invokes in that slot return `null` while it is pending or running (a batch returns `null` in that item's place); it is never superseded.
 - `debounce`: the execution runs at the start of the next slot. Later invokes before then replace its payload and return the same ID.
 
 A slot is free again once its execution completed, failed or was cancelled. Keys of throttled and debounced invokes are separate from the same key used without them: an ordinary invoke never updates or supersedes a throttled or debounced execution, and a throttled or debounced execution that is still stored does not block its key in a later slot.

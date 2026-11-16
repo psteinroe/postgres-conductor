@@ -904,7 +904,9 @@ create or replace function pgconductor.invoke_batch(
 as $function$
 declare
     spec pgconductor.execution_spec;
+    v_id uuid;
 begin
+    -- one row per spec, in order: a throttled spec returns null
     -- without dedupe, every spec inserts a new execution: one statement for the whole batch
     if not exists (
         select 1 from unnest(specs) s
@@ -931,7 +933,8 @@ begin
     end if;
 
     foreach spec in array specs loop
-        return query select * from pgconductor.invoke(
+        v_id := null;
+        select i.id into v_id from pgconductor.invoke(
             p_task_key := spec.task_key,
             p_queue := coalesce(spec.queue, 'default'),
             p_payload := spec.payload,
@@ -944,7 +947,8 @@ begin
             p_group := spec."group",
             p_trace_context := spec.trace_context,
             p_metadata := spec.metadata
-        );
+        ) i;
+        return query select v_id;
     end loop;
 end;
 $function$

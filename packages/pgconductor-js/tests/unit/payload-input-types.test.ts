@@ -62,3 +62,37 @@ describe("senders take a schema's input, handlers get its output", () => {
 		).rejects.toThrow('Invalid payload for task "send"');
 	});
 });
+
+describe("invoke returns null only when it may throttle", () => {
+	test("an invoke without throttle returns an id", () => {
+		if (false) {
+			expectTypeOf(
+				conductor.invoke({ name: "send" }, { to: "a" }),
+			).resolves.toEqualTypeOf<string>();
+			expectTypeOf(
+				conductor.invoke({ name: "send" }, { to: "a" }, { dedupe_key: "k" }),
+			).resolves.toEqualTypeOf<string>();
+			expectTypeOf(
+				conductor.invoke({ name: "send" }, [{ payload: { to: "a" } }]),
+			).resolves.toEqualTypeOf<string[]>();
+		}
+	});
+
+	test("a throttled invoke may return null", () => {
+		if (false) {
+			expectTypeOf(
+				conductor.invoke({ name: "send" }, { to: "a" }, { throttle: { seconds: 1 } }),
+			).resolves.toEqualTypeOf<string | null>();
+			const opts: { throttle?: { seconds: number } } = {};
+			expectTypeOf(conductor.invoke({ name: "send" }, { to: "a" }, opts)).resolves.toEqualTypeOf<
+				string | null
+			>();
+			expectTypeOf(
+				conductor.invoke({ name: "send" }, [
+					{ payload: { to: "a" } },
+					{ payload: { to: "b" }, throttle: { seconds: 1 } },
+				]),
+			).resolves.toEqualTypeOf<(string | null)[]>();
+		}
+	});
+});

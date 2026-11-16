@@ -932,7 +932,8 @@ export class DatabaseClient {
 		return result[0]?.id || null;
 	}
 
-	async invokeBatch(specs: ExecutionSpec[]): Promise<string[]> {
+	/** One id per spec, in order: null for a throttled one */
+	async invokeBatch(specs: ExecutionSpec[]): Promise<(string | null)[]> {
 		const result = await this.query(() => this.builder.buildInvokeBatch(specs), {
 			label: "invokeBatch",
 		});
