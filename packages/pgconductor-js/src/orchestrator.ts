@@ -77,7 +77,7 @@ export class Orchestrator {
 			orchestratorId: this.orchestratorId,
 		});
 		this.migrationStore = new MigrationStore();
-		this.schemaManager = new SchemaManager(this.db);
+		this.schemaManager = new SchemaManager(this.db, { logger: this.logger });
 		this.heartbeatIntervalMs = options.heartbeatIntervalMs || DEFAULT_HEARTBEAT_INTERVAL_MS;
 		this.staleAfterMs = options.staleAfterMs || DEFAULT_STALE_AFTER_MS;
 		if (!(this.heartbeatIntervalMs > 0) || !(this.staleAfterMs >= this.heartbeatIntervalMs * 2)) {

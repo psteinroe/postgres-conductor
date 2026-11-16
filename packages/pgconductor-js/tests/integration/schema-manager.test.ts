@@ -6,6 +6,7 @@ import { SchemaManager } from "../../src/schema-manager";
 import { MigrationStore } from "../../src/migration-store";
 import { DefaultLogger } from "../../src/lib/logger";
 import { waitFor } from "../../src/lib/wait-for";
+import { waitForCondition } from "../test-utils";
 
 describe("SchemaManager", () => {
 	let pool: TestDatabasePool;
@@ -91,7 +92,27 @@ describe("SchemaManager", () => {
 
 			const heartbeat = await client.orchestratorHeartbeat({ orchestratorId: olderId });
 			expect(heartbeat?.shutdown_reason).toBe("breaking_migration");
+
+			// An older orchestrator restarted after the first sweep is signalled too
+			const restartedId = crypto.randomUUID();
+			const { shutdown_reason } = await client.registerOrchestrator({
+				orchestratorId: restartedId,
+				version: "old",
+				migrationNumber: 1,
+			});
+			expect(shutdown_reason).toBeNull();
+			await waitForCondition(
+				async () =>
+					(await client.orchestratorHeartbeat({ orchestratorId: restartedId }))?.shutdown_reason ===
+					"breaking_migration",
+				5000,
+			);
+			expect(
+				await Promise.race([migrating.then(() => "migrated"), waitFor(100).then(() => "waiting")]),
+			).toBe("waiting");
+
 			await client.orchestratorShutdown({ orchestratorId: olderId });
+			await client.orchestratorShutdown({ orchestratorId: restartedId });
 
 			const result = await migrating;
 			expect(result.migrated).toBe(true);

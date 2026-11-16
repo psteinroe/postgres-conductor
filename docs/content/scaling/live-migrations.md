@@ -17,7 +17,7 @@ When an orchestrator starts, it:
 5. **Applies migrations** - Runs migrations in a transaction
 6. **Registers and starts** - Begins processing tasks with the new schema
 
-A breaking migration is applied only while no older orchestrator is registered. An older orchestrator that starts during the migration waits for it and then refuses to start, as does any orchestrator whose code is older than the database schema.
+A breaking migration is applied only while no older orchestrator is registered. While it waits (at most 4 hours), it signals every older orchestrator again every few seconds, so one that your platform restarts meanwhile shuts down as well. An older orchestrator that starts during the migration waits for it and then refuses to start, as does any orchestrator whose code is older than the database schema.
 
 This happens automatically on every orchestrator startup.
 

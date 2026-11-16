@@ -321,7 +321,7 @@ export class Conductor<
 	 * Useful for tests to initialize schema without starting orchestrator.
 	 */
 	async ensureInstalled(): Promise<void> {
-		const schemaManager = new SchemaManager(this.db, {});
+		const schemaManager = new SchemaManager(this.db, { logger: this.logger });
 		const signal = new AbortController().signal;
 		const { shouldShutdown } = await schemaManager.ensureLatest(signal);
 		if (shouldShutdown) {
