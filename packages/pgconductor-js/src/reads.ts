@@ -6,6 +6,7 @@ import type {
 	ListenerInfo,
 	Payload,
 } from "./database-client.js";
+import type { StepsInfo } from "./query-builder.js";
 import type { InferPayloadInput, InferReturns, InferState } from "./task-definition.js";
 import type { TaskIdentifier } from "./task.js";
 
@@ -17,10 +18,11 @@ type ReadOptions = { signal?: AbortSignal };
  * An execution of a task, its payload, state and result typed by the task's definition. The payload
  * is stored as sent, so it has the type of the schema's input.
  */
-export type TaskExecutionInfo<TTask> = ExecutionInfo<
+export type TaskExecutionInfo<TTask, TMetadata = Payload> = ExecutionInfo<
 	InferReturns<TTask>,
 	InferPayloadInput<TTask>,
-	InferState<TTask>
+	InferState<TTask>,
+	TMetadata
 >;
 
 /** An execution of a task an event would reach, typed by the task's definition. */
@@ -31,10 +33,17 @@ export type TaskListenerInfo<TTask> = ListenerInfo<
 >;
 
 /** Which executions `conductor.listExecutions()` reads. */
-export type ExecutionQuery<TName extends string, TQueue extends string, TPayload> = {
+export type ExecutionQuery<
+	TName extends string,
+	TQueue extends string,
+	TPayload,
+	TMetadata = Payload,
+> = {
 	task: TaskIdentifier<TName, TQueue>;
 	/** Payload fields the execution's payload contains, nested objects by their own fields */
 	where?: Contained<TPayload>;
+	/** Metadata fields the execution's metadata contains, nested objects by their own fields */
+	metadata?: Contained<TMetadata>;
 	/** Only executions that have not completed, failed or been cancelled */
 	open?: boolean;
 	/** Oldest first (`asc`, the default) or newest first */
@@ -114,6 +123,7 @@ export function readExecutions(
 		{
 			task: { key: query.task.name, queue: query.task.queue || "default" },
 			where: query.where,
+			metadata: query.metadata,
 			open: query.open,
 			order: query.order,
 			limit: query.limit || 100,
@@ -121,6 +131,21 @@ export function readExecutions(
 		},
 		opts,
 	);
+}
+
+/** Options of `getSteps()` */
+export type StepsQuery = {
+	/** How many of the last saved step keys to return (default: 10) */
+	limit?: number;
+};
+
+export function readSteps(
+	db: DatabaseClient,
+	executionId: string,
+	query: StepsQuery | undefined,
+	opts?: ReadOptions,
+): Promise<StepsInfo> {
+	return db.getSteps({ executionId, limit: query?.limit || 10 }, opts);
 }
 
 export function readListeners(

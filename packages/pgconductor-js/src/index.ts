@@ -5,6 +5,7 @@ export type {
 	ExecutionLookup,
 	ExecutionQuery,
 	InvokeOptions,
+	StepsQuery,
 	WaitForResultOptions,
 } from "./conductor.js";
 export { Orchestrator } from "./orchestrator.js";
@@ -28,6 +29,7 @@ export type {
 	EventSubscription,
 	ExecutionBranch,
 	KeyedExecution,
+	OnSettled,
 	SignalBranch,
 	SignalMessage,
 	SignalOptions,
@@ -36,10 +38,10 @@ export type {
 	TaskSignalMessage,
 	WaitForAnyResult,
 } from "./task-context.js";
-export type { StartedExecution } from "./query-builder.js";
+export type { StartedExecution, StepsInfo } from "./query-builder.js";
 export type { ReceivedSignal, SignalHandler, SignalInfo } from "./signal-inbox.js";
 export type { Middleware, MiddlewareExecution, MiddlewareResult } from "./middleware.js";
-export { defineTask } from "./task-definition.js";
+export { defineTask, SETTLED_SIGNAL } from "./task-definition.js";
 export type {
 	TaskDefinition,
 	DefineTask,
@@ -50,6 +52,7 @@ export type {
 	InferSignals,
 	InferState,
 	InferStateInput,
+	SettledSignal,
 	SignalPayload,
 	Trigger,
 	InvocableTrigger,

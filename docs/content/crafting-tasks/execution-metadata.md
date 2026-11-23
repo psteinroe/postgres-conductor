@@ -82,6 +82,23 @@ await ctx.invokeAndWait("reply", { name: "post-reply" }, payload, {
 
 The parent and later children keep the original metadata.
 
+## Finding Executions by Metadata
+
+`conductor.listExecutions()` and `ctx.listExecutions()` return each execution's `metadata` and
+take a `metadata` filter, typed by the schema: an execution matches when its metadata contains
+the given fields, nested objects by their own fields, like `where` does for payloads:
+
+```typescript
+const running = await conductor.listExecutions({
+  task: { name: "handle-mention" },
+  metadata: { replyTo: "thread-1" },
+  open: true,
+});
+```
+
+With `open`, the read goes through the index of the task's open executions and checks the
+metadata of each; without it, it reads all kept executions of the task.
+
 ## Size Limit
 
 Metadata is limited to 8 KB (8192 bytes of its JSON text in Postgres). Larger metadata is

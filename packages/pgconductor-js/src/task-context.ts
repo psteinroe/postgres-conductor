@@ -10,6 +10,7 @@ import type {
 	EventWaitResult,
 	ExecutionOutcome,
 	JsonValue,
+	OnSettledSpec,
 } from "./database-client.js";
 import { nextCronOccurrence } from "./lib/cron.js";
 import type { Clock } from "./lib/clock.js";
@@ -42,7 +43,7 @@ import {
 	type FilterForEvent,
 } from "./event-definition.js";
 import { compileEventFilter, compileListens, type Listen } from "./event-trigger-validation.js";
-import type { StartedExecution } from "./query-builder.js";
+import type { StartedExecution, StepsInfo } from "./query-builder.js";
 import { validateSchema } from "./lib/validate-schema.js";
 import {
 	hangUpSignalHandler,
@@ -56,9 +57,11 @@ import {
 	readExecution,
 	readExecutions,
 	readListeners,
+	readSteps,
 	type EventQuery,
 	type ExecutionLookup,
 	type ExecutionQuery,
+	type StepsQuery,
 	type TaskExecutionInfo,
 	type TaskListenerInfo,
 } from "./reads.js";
@@ -225,6 +228,24 @@ export type KeyedExecution<TName extends string = string, TQueue extends string 
 	task: TaskIdentifier<TName, TQueue>;
 	key: string;
 };
+
+/**
+ * What Postgres Conductor does when an invoked execution settles for good: completes, fails
+ * permanently, is cancelled or superseded. Activations of an actor that go idle, retries, sleeps
+ * and suspensions do not settle it. `signal` sends the open execution of `task` holding `key` a
+ * `pgconductor.settled` signal (`SettledSignal`) with id `pgconductor.settled:<execution id>`; when
+ * no open execution holds the key, nothing is sent and none is started.
+ */
+export type OnSettled<TName extends string = string, TQueue extends string = string> = {
+	signal: KeyedExecution<TName, TQueue>;
+};
+
+/** @internal The row's `on_settled` for `onSettled` */
+export function onSettledSpec(onSettled: OnSettled | undefined): OnSettledSpec | null {
+	if (!onSettled) return null;
+	const { task, key } = onSettled.signal;
+	return { signal: { task_key: task.name, queue: task.queue || "default", key } };
+}
 
 /** An execution of a task by its id: sending a signal to it checks that it belongs to the task. */
 export type TaskExecution<TName extends string = string, TQueue extends string = string> = {
@@ -792,6 +813,7 @@ export class TaskContext<
 			priority,
 			group,
 			cancelWithParent = false,
+			onSettled,
 		}: {
 			/**
 			 * Returns the execution that holds this key instead of starting a new one.
@@ -808,6 +830,12 @@ export class TaskContext<
 			 * or fails permanently. Applies only when this call starts the execution.
 			 */
 			cancelWithParent?: boolean;
+			/**
+			 * When the started execution settles for good, send the open execution of a task holding
+			 * a key a `pgconductor.settled` signal (see `OnSettled`). Applies only when this call
+			 * starts the execution.
+			 */
+			onSettled?: OnSettled;
 		} = {},
 	): Promise<StartedExecution> {
 		const cached = await this.#opts.db.loadStep(
@@ -842,6 +870,7 @@ export class TaskContext<
 					group,
 					trace_context: this.#opts.telemetry.traceContext(),
 					metadata: await this.childMetadata(metadata),
+					on_settled: onSettledSpec(onSettled),
 				},
 				cancelWithParent,
 			},
@@ -942,15 +971,20 @@ export class TaskContext<
 	async getExecution<TName extends TaskName<Tasks>, TQueue extends string = "default">(
 		task: TaskRef<Tasks, TName, TQueue>,
 		executionId: string,
-	): Promise<TaskExecutionInfo<FindTaskByIdentifier<Tasks, TName, TQueue>> | null>;
+	): Promise<TaskExecutionInfo<FindTaskByIdentifier<Tasks, TName, TQueue>, Metadata> | null>;
 	async getExecution<TName extends TaskName<Tasks>, TQueue extends string = "default">(
 		lookup: ExecutionLookup<TName, TQueue> & { task: QueueRef<Tasks, TName, TQueue> },
-	): Promise<TaskExecutionInfo<FindTaskByIdentifier<Tasks, TName, TQueue>> | null>;
+	): Promise<TaskExecutionInfo<FindTaskByIdentifier<Tasks, TName, TQueue>, Metadata> | null>;
 	async getExecution(
 		target: TaskIdentifier<string, string> | ExecutionLookup<string, string> | string,
 		executionId?: string,
-	): Promise<ExecutionInfo | null> {
+	): Promise<ExecutionInfo<unknown, unknown, unknown, unknown> | null> {
 		return readExecution(this.#opts.db, target, executionId, { signal: this.signal });
+	}
+
+	/** Like `conductor.getSteps()`: how many steps an execution saved, and its last step keys. */
+	async getSteps(executionId: string, query?: StepsQuery): Promise<StepsInfo> {
+		return readSteps(this.#opts.db, executionId, query, { signal: this.signal });
 	}
 
 	/** Like `conductor.listExecutions()`: a task's executions, typed by the task. */
@@ -958,10 +992,13 @@ export class TaskContext<
 		query: ExecutionQuery<
 			TName,
 			TQueue,
-			InferPayloadInput<FindTaskByIdentifier<Tasks, TName, TQueue>>
+			InferPayloadInput<FindTaskByIdentifier<Tasks, TName, TQueue>>,
+			Metadata
 		> & { task: QueueRef<Tasks, TName, TQueue> },
-	): Promise<TaskExecutionInfo<FindTaskByIdentifier<Tasks, TName, TQueue>>[]>;
-	async listExecutions(query: ExecutionQuery<string, string, Payload>): Promise<ExecutionInfo[]> {
+	): Promise<TaskExecutionInfo<FindTaskByIdentifier<Tasks, TName, TQueue>, Metadata>[]>;
+	async listExecutions(
+		query: ExecutionQuery<string, string, Payload>,
+	): Promise<ExecutionInfo<unknown, unknown, unknown, unknown>[]> {
 		return readExecutions(this.#opts.db, query, { signal: this.signal });
 	}
 

@@ -22,12 +22,14 @@ import {
 import {
 	checkContextKeys,
 	checkSignal,
+	onSettledSpec,
 	sentSignal,
 	signalTarget,
 	type TaskContext,
 	type BatchTaskContext,
 	type BatchTaskEvent,
 	type KeyedExecution,
+	type OnSettled,
 	type SentSignal,
 	type SignalMessage,
 	type SignalOptions,
@@ -36,7 +38,7 @@ import {
 	type TaskExecution,
 	type TaskSignalMessage,
 } from "./task-context.js";
-import type { StartedExecution } from "./query-builder.js";
+import type { StartedExecution, StepsInfo } from "./query-builder.js";
 import {
 	type FindTaskByIdentifier,
 	type QueueRef,
@@ -71,14 +73,16 @@ import {
 	readExecution,
 	readExecutions,
 	readListeners,
+	readSteps,
 	type EventQuery,
 	type ExecutionLookup,
 	type ExecutionQuery,
+	type StepsQuery,
 	type TaskExecutionInfo,
 	type TaskListenerInfo,
 } from "./reads.js";
 
-export type { EventQuery, ExecutionLookup, ExecutionQuery } from "./reads.js";
+export type { EventQuery, ExecutionLookup, ExecutionQuery, StepsQuery } from "./reads.js";
 import { validateSchema } from "./lib/validate-schema.js";
 import {
 	validateEventPayload,
@@ -120,6 +124,12 @@ export type InvokeOptions<Metadata extends object = Payload> = {
 	priority?: number | null;
 	group?: string | null;
 	metadata?: Metadata;
+	/**
+	 * When the execution settles for good, send the open execution of a task holding a key a
+	 * `pgconductor.settled` signal (see `OnSettled`). Applies only when this call starts the
+	 * execution: one holding the `dedupe_key` keeps its own.
+	 */
+	onSettled?: OnSettled;
 };
 
 type InvokePayload<
@@ -514,6 +524,7 @@ export class Conductor<
 							group: item.group,
 							trace_context: traceContext,
 							metadata: metadata[i],
+							on_settled: onSettledSpec(item.onSettled),
 						})),
 					);
 				},
@@ -539,6 +550,7 @@ export class Conductor<
 					group: opts?.group,
 					trace_context: this.telemetry.traceContext(),
 					metadata,
+					on_settled: onSettledSpec(opts?.onSettled),
 				});
 				if (id) span?.setAttribute("messaging.message.id", id);
 				return id;
@@ -745,31 +757,43 @@ export class Conductor<
 	async getExecution<TName extends TaskName<Tasks>, TQueue extends string = "default">(
 		task: TaskRef<Tasks, TName, TQueue>,
 		executionId: string,
-	): Promise<TaskExecutionInfo<FindTaskByIdentifier<Tasks, TName, TQueue>> | null>;
+	): Promise<TaskExecutionInfo<FindTaskByIdentifier<Tasks, TName, TQueue>, Metadata> | null>;
 	async getExecution<TName extends TaskName<Tasks>, TQueue extends string = "default">(
 		lookup: ExecutionLookup<TName, TQueue> & { task: QueueRef<Tasks, TName, TQueue> },
-	): Promise<TaskExecutionInfo<FindTaskByIdentifier<Tasks, TName, TQueue>> | null>;
+	): Promise<TaskExecutionInfo<FindTaskByIdentifier<Tasks, TName, TQueue>, Metadata> | null>;
 	async getExecution(
 		target: TaskIdentifier<string, string> | ExecutionLookup<string, string> | string,
 		executionId?: string,
-	): Promise<ExecutionInfo | null> {
+	): Promise<ExecutionInfo<unknown, unknown, unknown, unknown> | null> {
 		return readExecution(this.db, target, executionId);
+	}
+
+	/**
+	 * How many steps an execution saved, and the keys of the last ones (`limit`, default 10) in the
+	 * order they were saved, newest last: its progress. A separate read, because it reads all of the
+	 * execution's steps, which execution listings should not do for every row.
+	 */
+	async getSteps(executionId: string, query?: StepsQuery): Promise<StepsInfo> {
+		return readSteps(this.db, executionId, query);
 	}
 
 	/**
 	 * List a task's executions in the order they were created (or newest first with `order: "desc"`),
 	 * with their payloads and states: only open ones (pending, waiting or running) with `open`, only
-	 * those whose payload contains `where`. Executions removed by retention are gone. Defaults to the
-	 * first 100.
+	 * those whose payload contains `where` and whose metadata contains `metadata`. Executions
+	 * removed by retention are gone. Defaults to the first 100.
 	 */
 	async listExecutions<TName extends TaskName<Tasks>, TQueue extends string = "default">(
 		query: ExecutionQuery<
 			TName,
 			TQueue,
-			InferPayloadInput<FindTaskByIdentifier<Tasks, TName, TQueue>>
+			InferPayloadInput<FindTaskByIdentifier<Tasks, TName, TQueue>>,
+			Metadata
 		> & { task: QueueRef<Tasks, TName, TQueue> },
-	): Promise<TaskExecutionInfo<FindTaskByIdentifier<Tasks, TName, TQueue>>[]>;
-	async listExecutions(query: ExecutionQuery<string, string, Payload>): Promise<ExecutionInfo[]> {
+	): Promise<TaskExecutionInfo<FindTaskByIdentifier<Tasks, TName, TQueue>, Metadata>[]>;
+	async listExecutions(
+		query: ExecutionQuery<string, string, Payload>,
+	): Promise<ExecutionInfo<unknown, unknown, unknown, unknown>[]> {
 		return readExecutions(this.db, query);
 	}
 

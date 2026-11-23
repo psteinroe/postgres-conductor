@@ -178,6 +178,17 @@ export type SetStateArgs = {
 	state: Payload | null;
 };
 
+export type GetStepsArgs = {
+	executionId: string;
+	limit: number;
+};
+
+/** The steps an execution saved: how many, and the keys of the last ones, newest last */
+export type StepsInfo = {
+	count: number;
+	recent: string[];
+};
+
 export type StartExecutionArgs = {
 	executionId: string;
 	queue: string;
@@ -219,6 +230,8 @@ export type ListExecutionsArgs = {
 	task: { key: string; queue: string };
 	/** Payload fields the execution's payload contains, as in `@>` */
 	where?: Contained<Payload>;
+	/** Metadata fields the execution's metadata contains, as in `@>` */
+	metadata?: Contained<Payload>;
 	/** Only executions that have not completed, failed or been cancelled */
 	open?: boolean;
 	order?: "asc" | "desc";
@@ -838,7 +851,7 @@ export class QueryBuilder {
 				e.signal_count as execution_signal_count, e.result_waiters,
 				e."group" as execution_group, e.payload as execution_payload,
 				e.attempts as execution_attempts, e.trace_context as execution_trace_context,
-				e.metadata as execution_metadata
+				e.metadata as execution_metadata, e.on_settled
 			from result_data r
 			join pgconductor._private_executions e
 				on e.id = r.execution_id
@@ -997,7 +1010,7 @@ export class QueryBuilder {
 					r.error, r.execution_last_error, 'unknown error') as child_error,
 				r.execution_group, r.execution_payload, r.execution_attempts,
 				r.subscription_id, r.parent_execution_id,
-				r.execution_trace_context, r.execution_metadata, r.result_waiters,
+				r.execution_trace_context, r.execution_metadata, r.result_waiters, r.on_settled,
 				tc.remove_on_fail_days = 0 as should_remove,
 				tc.dead_letter_queue, tc.dead_letter_task_key
 			from failed_results r
@@ -1113,6 +1126,33 @@ export class QueryBuilder {
 			cross join lateral jsonb_array_elements(s.result_waiters) w
 			having count(*) > 0
 		)`);
+		// The onSettled signals of the executions that settled for good, sent after every write
+		ctes.push(this.sql`settled_signals as (
+			select jsonb_agg(jsonb_build_object(
+				'execution_id', s.execution_id, 'task_key', s.task_key, 'on_settled', s.on_settled,
+				'status', s.status, 'result', s.result, 'error', s.error,
+				'trace_context', s.trace_context
+			)) as settled
+			from (
+				select r.execution_id, r.task_key, r.on_settled, r.execution_trace_context as trace_context,
+					case when oc.id is null then 'completed' else 'failed' end as status,
+					case when oc.id is null then r.result end as result,
+					case when oc.id is not null then 'Parent timed out before child completed' end as error
+				from completed_results r
+				left join orphaned_children oc on oc.id = r.execution_id
+				where r.on_settled is not null
+				union all
+				select p.execution_id, p.task_key, p.on_settled, p.execution_trace_context,
+					case when p.execution_cancelled then 'cancelled' else 'failed' end, null, p.child_error
+				from permanently_failed_children p
+				where p.on_settled is not null
+				union all
+				select p.execution_id, p.task_key, p.on_settled, p.trace_context, 'failed', null,
+					p.failure_error
+				from failed_parents p
+				where p.on_settled is not null
+			) s
+		)`);
 		ctes.push(this.sql`retried as (
 			update pgconductor._private_executions e
 			set last_error = coalesce(r.error, 'unknown error'),
@@ -1187,20 +1227,29 @@ export class QueryBuilder {
 		)`);
 
 		const combined = ctes.reduce((acc, cte, i) => (i === 0 ? cte : this.sql`${acc}, ${cte}`));
-		// Linked children of a terminal failure are cancelled with its error. The cascade reads the
-		// graph with fresh snapshots, so it sees children and waits that changed while this
-		// statement waited for locks, and it writes rows this statement may write too. It runs
-		// last: filtering on the row count of every write runs them to completion first (the
-		// planner drops a count nothing reads).
+		// The onSettled signals are sent, and linked children of a terminal failure are cancelled
+		// with its error. Both read with fresh snapshots and write rows this statement may write
+		// too: a signal target can be settled in the same batch (an actor going idle is woken), and
+		// the cascade sees children and waits that changed while this statement waited for locks.
+		// They run last: subqueries on the row count of every write run them to completion first
+		// (the planner drops a count nothing reads).
 		return this.sql`
 			with recursive ${combined}
-			select pgconductor._private_cancel_linked_children(jsonb_agg(jsonb_build_object(
-				'execution_id', t.execution_id, 'reason', t.failure_error
-			)))
+			select
+				(
+					select pgconductor._private_signal_settled(s.settled)
+					from settled_signals s
+					where w.writes >= 0 and s.settled is not null
+				) as signalled,
+				(
+					select pgconductor._private_cancel_linked_children(jsonb_agg(jsonb_build_object(
+						'execution_id', t.execution_id, 'reason', t.failure_error
+					)))
+					from terminal_failures t
+					where w.writes >= 0
+					having count(*) > 0
+				) as cascaded
 			from (select count(*) as writes from writes) w
-			left join terminal_failures t on true
-			where w.writes >= 0
-			having count(t.execution_id) > 0
 		`;
 	}
 	buildRemoveExecutions({
@@ -1375,7 +1424,8 @@ export class QueryBuilder {
 				p_priority := ${spec.priority || null}::integer,
 				p_trace_context := ${spec.trace_context ? this.sql.json(spec.trace_context) : null}::jsonb,
 				p_metadata := ${spec.metadata ? this.sql.json(spec.metadata) : null}::jsonb,
-				p_group := ${spec.group || null}::text
+				p_group := ${spec.group || null}::text,
+				p_on_settled := ${spec.on_settled ? this.sql.json(spec.on_settled) : null}::jsonb
 			)
 		`;
 	}
@@ -1464,6 +1514,7 @@ export class QueryBuilder {
 				metadata: spec.metadata,
 				priority: spec.priority,
 				group: spec.group || null,
+				on_settled: spec.on_settled || null,
 			};
 		});
 
@@ -1486,12 +1537,22 @@ export class QueryBuilder {
 					when locked_by is not null then 'running'
 					else 'pending'
 				end as status,
-				key, payload, state, ${this.listensOf(this.sql`execution.id`)} as listens, result,
+				${this.waitingStepKey()},
+				key, payload, state, metadata, ${this.listensOf(this.sql`execution.id`)} as listens, result,
 				last_error as error, attempts, created_at as "createdAt",
 				completed_at as "completedAt", failed_at as "failedAt"
 			from pgconductor._private_executions execution
 			where ${this.executionLookup(args)}
 		`;
+	}
+
+	/**
+	 * The step key of the wait an execution is suspended at (`waiting_step_key`), `pgconductor.idle`
+	 * for an idle actor. A claimed or ended execution waits at nothing.
+	 */
+	private waitingStepKey() {
+		return this.sql`case when locked_by is null and completed_at is null and failed_at is null
+			then waiting_step_key end as "waitingStepKey"`;
 	}
 
 	/**
@@ -1515,6 +1576,7 @@ export class QueryBuilder {
 	buildListExecutions({
 		task,
 		where,
+		metadata,
 		open,
 		order,
 		limit,
@@ -1533,12 +1595,14 @@ export class QueryBuilder {
 						when locked_by is not null then 'running'
 						else 'pending'
 					end as status,
-					key, payload, state, result, last_error as error, attempts,
+					${this.waitingStepKey()},
+					key, payload, state, metadata, result, last_error as error, attempts,
 					created_at as "createdAt", completed_at as "completedAt", failed_at as "failedAt"
 				from pgconductor._private_executions
 				where task_key = ${task.key}::text and queue = ${task.queue}::text
 					${open ? this.sql`and completed_at is null and failed_at is null` : this.sql``}
 					${where ? this.sql`and payload @> ${this.sql.json(where as JsonValue)}::jsonb` : this.sql``}
+					${metadata ? this.sql`and metadata @> ${this.sql.json(metadata as JsonValue)}::jsonb` : this.sql``}
 				order by created_at ${direction}, id ${direction}
 				limit ${limit}::int offset ${offset}::int
 			)
@@ -1606,6 +1670,30 @@ export class QueryBuilder {
 		return this.sql<[{ count: number }]>`
 			select count(*)::int as count from pgconductor._private_steps
 			where execution_id = any(${this.sql.array(executionIds, 2951)}::uuid[]) and key = ${key}::text
+		`;
+	}
+
+	/**
+	 * How many steps an execution saved, and the keys of the last `limit` in the order they were
+	 * saved. It reads all of the execution's steps through their primary key, so it costs what the
+	 * execution saved, which is why execution reads leave steps out.
+	 */
+	buildGetSteps({ executionId, limit }: GetStepsArgs): PendingQuery<[StepsInfo]> {
+		return this.sql<[StepsInfo]>`
+			with steps as materialized (
+				select s.key, s.created_at
+				from pgconductor._private_steps s
+				where s.execution_id = ${executionId}::uuid
+			)
+			select
+				(select count(*)::int from steps) as count,
+				coalesce((
+					select array_agg(r.key order by r.created_at, r.key)
+					from (
+						select key, created_at from steps order by created_at desc, key desc
+						limit ${limit}::int
+					) r
+				), '{}') as recent
 		`;
 	}
 
@@ -1692,7 +1780,7 @@ export class QueryBuilder {
 			), started_execution as (
 				insert into pgconductor._private_executions as e (
 					id, task_key, queue, payload, trace_context, metadata, run_at, dedupe_key, priority, "group",
-					parent_execution_id, cancel_with_parent
+					parent_execution_id, cancel_with_parent, on_settled
 				)
 				select
 					(select id from new_execution),
@@ -1706,7 +1794,8 @@ export class QueryBuilder {
 					${spec.priority || 0}::integer,
 					${spec.group || null}::text,
 					case when ${cancelWithParent}::boolean then claimed_execution.id end,
-					${cancelWithParent}::boolean
+					${cancelWithParent}::boolean,
+					${spec.on_settled ? this.sql.json(spec.on_settled) : null}::jsonb
 				from claimed_execution
 				where not exists (select from stored_step)
 				on conflict (task_key, dedupe_key, queue) where singleton_on is null
@@ -2166,9 +2255,10 @@ export class QueryBuilder {
 			), ${this.matchSubscriptions()}
 			select e.id, e.task_key as "taskKey", e.queue,
 				case when e.locked_by is not null then 'running' else 'pending' end as status,
-				e.key, e.payload, e.state, ${this.listensOf(this.sql`e.id`)} as listens, e.result,
-				e.last_error as error, e.attempts, e.created_at as "createdAt",
-				e.completed_at as "completedAt", e.failed_at as "failedAt",
+				e.key, e.payload, e.state, e.metadata, ${this.listensOf(this.sql`e.id`)} as listens,
+				e.result, e.last_error as error, e.attempts,
+				case when e.locked_by is null then e.waiting_step_key end as "waitingStepKey",
+				e.created_at as "createdAt", e.completed_at as "completedAt", e.failed_at as "failedAt",
 				array_agg(
 					substr(subscription.step_key, length('pgconductor.listen:') + 1)
 					order by subscription.created_at, subscription.id
