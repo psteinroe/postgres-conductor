@@ -63,6 +63,50 @@ const criticalTask = conductor.createTask(
 
 Default is 3 attempts.
 
+## Failing Without Retries
+
+Some errors no retry can fix, such as invalid input the handler finds. Throw a `PermanentError` for them, and the execution fails permanently at once, without the attempts it has left:
+
+```typescript
+import { PermanentError } from "pgconductor-js";
+
+const chargeTask = conductor.createTask(
+  { name: "charge", maxAttempts: 5 },
+  { invocable: true },
+  async (event, ctx) => {
+    const order = await ctx.step("load-order", () => loadOrder(event.payload.orderId));
+    if (!order) {
+      throw new PermanentError(`Order ${event.payload.orderId} does not exist`);
+    }
+    await ctx.step("charge", () => charge(order));
+  }
+);
+```
+
+- It works wherever the attempt's code runs: in the handler, in a `ctx.step()` callback (the step is not saved, as with any error), in a `ctx.onSignal()` handler and in [middleware](../crafting-tasks/custom-context.md#middleware)
+- Its message is the execution's error. A `ctx.onSignal()` handler's error is prefixed with `Signal handler for "<name>" failed: `, as for other errors
+- The execution takes the same path as one that used up its attempts: it goes to its [dead-letter queue](dead-letter-queue.md) once, fails the workflow waiting on it with `ctx.invokeAndWait()`, resolves result waits, cancels its `cancelWithParent` children, sends its [`onSettled`](../crafting-tasks/child-invocation.md#telling-an-actor-when-it-settles) signal with status `failed` and ends its listens
+- A batch handler fails a single member by returning a `PermanentError` at that member's index instead of its result; the other members settle with their results. One thrown from a batch handler fails every member permanently
+- It is recognized by a global symbol, so `PermanentError` works when two copies of `pgconductor-js` end up in an application
+- Validation issues of the payload or the return value against the task's schema fail the execution permanently the same way (see [Runtime Validation](../crafting-tasks/defining-tasks.md#runtime-validation))
+
+```typescript
+const exportTask = conductor.createTask(
+  { name: "export", batch: { size: 50, timeoutMs: 1000 } },
+  { invocable: true },
+  async (events) => {
+    const valid = events.filter((event) => event.payload.rows.length > 0);
+    await exportRows(valid.flatMap((event) => event.payload.rows));
+    // one entry per event, in order
+    return events.map((event) =>
+      event.payload.rows.length > 0
+        ? { exported: event.payload.rows.length }
+        : new PermanentError("Nothing to export")
+    );
+  }
+);
+```
+
 ## Steps and Retries
 
 Steps cache results across retries:

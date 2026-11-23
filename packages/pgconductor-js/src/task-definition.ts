@@ -224,9 +224,47 @@ export type InferSignals<T> = DeclaredSignals<T, "output">;
  */
 export type InferSignalInputs<T> = DeclaredSignals<T, "input">;
 
+/** Name of the signal `onSettled: { signal }` sends when the invoked execution settles */
+export const SETTLED_SIGNAL = "pgconductor.settled";
+
+/**
+ * Payload of the `pgconductor.settled` signal: the execution that settled for good, how, and its
+ * result or error. No task needs to declare it.
+ */
+export type SettledSignal<TResult = JsonValue> = {
+	executionId: string;
+	taskKey: string;
+	/** `failed` covers permanent failures and superseded executions */
+	status: "completed" | "failed" | "cancelled";
+	/** Return value of a completed execution, null otherwise */
+	result: TResult | null;
+	/** Error of a failed execution or the cancellation reason, null when it completed */
+	error: string | null;
+};
+
+/** @internal The payload of a `pgconductor.settled` signal, or the reason it is not one */
+export function parseSettledSignal(
+	payload: JsonValue | undefined,
+): { value: SettledSignal } | { error: string } {
+	if (typeof payload !== "object" || payload === null || Array.isArray(payload)) {
+		return { error: "payload is not an object" };
+	}
+	const { executionId, taskKey, status, result, error } = payload;
+	if (typeof executionId !== "string") return { error: "executionId is not a string" };
+	if (typeof taskKey !== "string") return { error: "taskKey is not a string" };
+	if (status !== "completed" && status !== "failed" && status !== "cancelled") {
+		return { error: "status is not completed, failed or cancelled" };
+	}
+	if (error !== null && typeof error !== "string") return { error: "error is not a string" };
+	return {
+		value: { executionId, taskKey, status, result: result === undefined ? null : result, error },
+	};
+}
+
 /**
  * The payload of a signal named `TName` of a task with the signals `TSignals` (see
- * `InferSignals`): its declared type, or `TUndeclared` for a name the task does not declare.
+ * `InferSignals`): its declared type, `SettledSignal` for `pgconductor.settled`, or `TUndeclared`
+ * for a name the task does not declare.
  */
 export type SignalPayload<
 	TSignals,
@@ -236,7 +274,9 @@ export type SignalPayload<
 	? TUndeclared
 	: TName extends keyof TSignals
 		? TSignals[TName]
-		: TUndeclared;
+		: TName extends typeof SETTLED_SIGNAL
+			? SettledSignal
+			: TUndeclared;
 
 /** The signal schemas of `task` in the catalog `definitions`, if it declares any. */
 export function signalsOf(

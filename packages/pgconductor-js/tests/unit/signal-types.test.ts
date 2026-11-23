@@ -9,6 +9,7 @@ import {
 	type DefineTask,
 	type InferSignalInputs,
 	type InferSignals,
+	type SettledSignal,
 } from "../../src/task-definition";
 import { TaskSchemas } from "../../src/schemas";
 
@@ -106,6 +107,28 @@ describe("signal types", () => {
 			ctx.onSignal("decision", (payload) => {
 				expectTypeOf(payload).toEqualTypeOf<Decision>();
 			});
+		});
+	});
+
+	test("ctx.onSettled types its handler's parameter as a SettledSignal", () => {
+		conductor.createTask({ name: "session" }, { invocable: true }, async (_event, ctx) => {
+			ctx.onSettled((outcome, info) => {
+				expectTypeOf(outcome).toEqualTypeOf<SettledSignal>();
+				expectTypeOf(outcome.status).toEqualTypeOf<"completed" | "failed" | "cancelled">();
+				expectTypeOf(outcome.result).toEqualTypeOf<JsonValue>();
+				expectTypeOf(info).toEqualTypeOf<{ id: string; name: string; listens: string[] }>();
+			});
+		});
+		conductor.createTask({ name: "plain" }, { invocable: true }, async (_event, ctx) => {
+			// A type argument types the result, unchecked
+			ctx.onSettled<{ value: string }>((outcome) => {
+				expectTypeOf(outcome).toEqualTypeOf<SettledSignal<{ value: string }>>();
+				expectTypeOf(outcome.result).toEqualTypeOf<{ value: string } | null>();
+			});
+			if (false) {
+				// @ts-expect-error - the handler receives a SettledSignal
+				ctx.onSettled((outcome: { status: number }) => outcome);
+			}
 		});
 	});
 

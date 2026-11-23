@@ -226,6 +226,7 @@ await conductor.signalWithStart({ task: "session", key, signal: { name: "input",
 - `{ task, id }` throws if the execution belongs to another task, and sends nothing
 - By execution id alone (`signal(executionId, signal)`), the payload is any JSON value and is not checked when sent
 - Names the task does not declare stay untyped and unchecked, so the event-named signals of [listens](../crafting-tasks/triggers.md#listening-for-events) keep working. A task that declares no signals behaves as before
+- `pgconductor.settled`, the signal [`onSettled`](../crafting-tasks/child-invocation.md#telling-an-actor-when-it-settles) sends, needs no declaration: its payload is typed as `SettledSignal`, and `ctx.onSettled()` receives it checked as one
 - A type-only definition (`DefineTask`) types signals but has no schema to check them with, on either side
 - A declared type need not be JSON in TypeScript's eyes, so interfaces work; the payload is still stored as JSON
 - An explicit type argument, `ctx.onSignal<T>()`, types any name's payload without a check

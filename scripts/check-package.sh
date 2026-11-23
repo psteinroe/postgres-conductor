@@ -41,6 +41,8 @@ const expected = {
 			"EventSchemas",
 			"ListenHeldError",
 			"Orchestrator",
+			"PermanentError",
+			"SETTLED_SIGNAL",
 			"Task",
 			"TaskContext",
 			"TaskSchemas",

@@ -153,6 +153,46 @@ const session = conductor.createTask(
 
 An execution that completed before the caller ended stays completed, and a caller retry or completion leaves it running. The link is set only when the call starts the execution: an execution returned for an existing `dedupe_key` keeps its own.
 
+### Telling an Actor When It Settles
+
+An [actor](../task-execution/actors.md) is idle between signals, so it cannot wait for an execution with `ctx.waitForResult()`. Pass `onSettled: { signal: { task, key } }` instead: when the execution settles for good, Postgres Conductor sends the open execution of `task` holding `key` a `pgconductor.settled` signal, which wakes it like any signal. The actor receives it with `ctx.onSettled(handler)`:
+
+```typescript
+const session = conductor.createTask(
+  { name: "session", actor: true },
+  { invocable: true },
+  async (_event, ctx) => {
+    ctx.onSignal("run", async (payload, { id }) => {
+      await ctx.invoke(id, { name: "workflow" }, payload, {
+        onSettled: { signal: { task: { name: "session" }, key: "thread-1" } },
+      });
+    });
+    // receives the outcome as a SettledSignal
+    ctx.onSettled(async ({ executionId, status, result, error }) => {
+      await ctx.step(`report:${executionId}`, () => report(status, result, error));
+    });
+  },
+);
+```
+
+`conductor.invoke(task, payload, { onSettled })` takes the same option. The two go together: the `onSettled` option sends, `ctx.onSettled()` receives. `ctx.onSettled(handler)` is a shorthand for `ctx.onSignal(SETTLED_SIGNAL, handler)` (`SETTLED_SIGNAL` is `"pgconductor.settled"`) whose handler receives the payload checked as a `SettledSignal`; a payload that is not one, for example one sent by hand, is logged as an error and skipped. Both receive the signal and register a handler for the same name, so an actor uses one of them; registering both throws. `ctx.onSettled<T>()` types `result` as `T` without a check. To race the signal against something else, pass `{ signal: SETTLED_SIGNAL }` as a branch of `ctx.waitForAny()`.
+
+The signal's payload is a `SettledSignal`:
+
+| Field | |
+|-|-|
+| `executionId` | The execution that settled |
+| `taskKey` | Its task |
+| `status` | `completed`, `failed` or `cancelled` |
+| `result` | Its return value when it completed, otherwise `null` |
+| `error` | Its error or cancellation reason, otherwise `null` |
+
+The execution settles when it completes, fails permanently (also as an [unregistered task](../scaling/maintenance.md)), is cancelled (pending or running, including through `cancelWithParent` or a timed-out `ctx.invokeAndWait()`), or is [superseded](../task-execution/deduplication.md#duplicate-keys) (`failed`, `superseded by reinvoke`). A retry, a sleep, a wait or an actor activation going idle does not settle it, so an invoked actor sends the signal only when it calls `ctx.complete()`.
+
+The signal id is `pgconductor.settled:<execution id>`, so an execution sends it at most once, whichever paths race to end it. It goes to the open execution holding the key, like `conductor.signal({ task, key })`: when no open execution holds the key, nothing is sent and none is started. The target is set only when the call starts the execution: an execution returned for an existing `dedupe_key` keeps its own.
+
+`onSettled` names its kind (`signal`), so further kinds can join it. For a follow-up task when executions of a task fail permanently, configure a [dead-letter queue](../task-execution/dead-letter-queue.md) on the task instead.
+
 ## Waiting for a Started Execution
 
 Use `ctx.waitForResult()` to wait for an execution started earlier, for example after other work or with a timeout that should not cancel it:

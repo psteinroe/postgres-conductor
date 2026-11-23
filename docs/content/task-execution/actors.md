@@ -77,6 +77,10 @@ ctx.onSignal("topic", async (topic) => {
 
 An actor receives the events it [listens](../crafting-tasks/triggers.md#listening-for-events) for as signals, which wake it like any other. Listens last across activations, so an actor listens once, for example in its first activation or with `signalWithStart({ listen })`. A handler learns which of its listens an event matched from `listens` in its second argument. An [exclusive listen](../crafting-tasks/triggers.md#exclusive-listens) makes an actor the only one of its task to follow, for example, a conversation.
 
+## Executions an Actor Starts
+
+An actor cannot wait for an execution it starts: it sleeps between signals. Start it with `onSettled: { signal: { task, key } }` naming the actor's own task and key, and the actor gets a `pgconductor.settled` signal with the outcome once the execution completes, fails permanently, is cancelled or is superseded, which it receives with `ctx.onSettled(handler)`. See [Telling an Actor When It Settles](../crafting-tasks/child-invocation.md#telling-an-actor-when-it-settles).
+
 ## Ending an Actor
 
 An activation ends its actor with `ctx.complete(result)`. The execution completes for good with `result`, typed and validated by the task's `returns` schema like a returned result, so `conductor.waitForResult()`, `ctx.waitForResult()` and `ctx.invokeAndWait()` receive it:

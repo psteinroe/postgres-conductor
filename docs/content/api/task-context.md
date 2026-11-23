@@ -344,6 +344,7 @@ const { id, started } = await ctx.invoke(
     priority?: number,
     group?: string,
     cancelWithParent?: boolean,
+    onSettled?: { signal: { task: { name: string, queue?: string }, key: string } },
   }
 ): Promise<{ id: string, started: boolean }>
 ```
@@ -373,6 +374,13 @@ const result = await conductor.waitForResult({ name: "support-flow" }, handoffId
   is cancelled or fails permanently, in any state and transitively for executions it started the
   same way. One that completed first stays completed. The link is set only when this call starts
   the execution
+- With `onSettled: { signal: { task, key } }`, the open execution of `task` holding `key` gets a
+  `pgconductor.settled` signal (`SettledSignal`: `executionId`, `taskKey`, `status`, `result`,
+  `error`) once the execution completes, fails permanently, is cancelled or is superseded, so an
+  [actor](../task-execution/actors.md) learns of it without waiting; it receives the signal with
+  [`ctx.onSettled()`](#ctxonsettled). See
+  [Telling an Actor When It Settles](../crafting-tasks/child-invocation.md#telling-an-actor-when-it-settles).
+  Set only when this call starts the execution
 - `dedupe_key` defaults to a key derived from this execution and the step name. Pass your own to
   reconnect to an execution: if one of the task already holds the key, its ID is returned with
   `started: false`, and nothing is started, superseded or updated
@@ -447,6 +455,21 @@ ctx.onSignal("input", async (payload, { id, name, listens }) => {
 `listens` names the execution's [listens](../crafting-tasks/triggers.md#listening-for-events) that the event the signal delivers matched, in the order they were created; it is empty for a signal that did not come from a listen.
 
 The payload of a signal the task declares is parsed with its schema, and the handler receives the schema's output; one that does not match is logged as an error and skipped. Other names, such as the event names of `ctx.listen()`, take any `JsonValue`. `ctx.onSignal<T>()` types the payload as `T` without a check. See [Typed Signals](../task-execution/signals.md#typed-signals).
+
+## ctx.onSettled()
+
+Receive the outcomes of executions started with `onSettled: { signal: { task, key } }` naming this execution's task and key, as `SettledSignal`s (`executionId`, `taskKey`, `status`, `result`, `error`). The `onSettled` option of [`ctx.invoke()`](#ctxinvoke) and `conductor.invoke()` sends the signal; `ctx.onSettled()` receives it. See [Telling an Actor When It Settles](../crafting-tasks/child-invocation.md#telling-an-actor-when-it-settles).
+
+```typescript
+ctx.onSettled(async ({ executionId, status, result, error }, { id }) => {
+  await ctx.step(`report:${executionId}`, () => report(status, result, error));
+});
+```
+
+- A shorthand for `ctx.onSignal(SETTLED_SIGNAL, handler)`, with the payload checked as a `SettledSignal`: one that is not is logged as an error and counts as delivered without reaching the handler
+- Both register the handler of `pgconductor.settled`, so use one of them; registering both throws
+- `ctx.onSettled<T>()` types `result` as `T` without a check
+- `SETTLED_SIGNAL` names the signal for a `{ signal: SETTLED_SIGNAL }` branch of `ctx.waitForAny()`
 
 ## ctx.untilIdle()
 
@@ -556,7 +579,7 @@ const { id: sessionId, started } = await ctx.signalWithStart("start-session", {
 
 ## Reads
 
-A task reads executions, listeners and events like the conductor, typed the same way by its task catalog: [`getExecution()`](conductor.md#conductorgetexecution), [`listExecutions()`](conductor.md#conductorlistexecutions), [`listListeners()`](conductor.md#conductorlistlisteners), [`getEvent()`](conductor.md#conductorgetevent), [`listEvents()`](conductor.md#conductorlistevents) and [`countEvents()`](conductor.md#conductorlistevents). A read is aborted with the attempt.
+A task reads executions, listeners and events like the conductor, typed the same way by its task catalog: [`getExecution()`](conductor.md#conductorgetexecution), [`listExecutions()`](conductor.md#conductorlistexecutions), [`getSteps()`](conductor.md#conductorgetsteps), [`listListeners()`](conductor.md#conductorlistlisteners), [`getEvent()`](conductor.md#conductorgetevent), [`listEvents()`](conductor.md#conductorlistevents) and [`countEvents()`](conductor.md#conductorlistevents). A read is aborted with the attempt.
 
 ```typescript
 const request = await ctx.getExecution({ task: { name: "request" }, dedupeKey: requestId });

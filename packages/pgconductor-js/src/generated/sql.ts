@@ -124,6 +124,9 @@ create table pgconductor._private_executions (
     -- waits for this execution's outcome, as {execution_id, queue, step_key}. registration appends
     -- under the row lock, so settlement sees waits registered after its snapshot was taken
     result_waiters jsonb,
+    -- what happens when the execution settles for good, set only by the call that starts it:
+    -- {"signal": {task_key, queue, key}} sends that open execution a pgconductor.settled signal
+    on_settled jsonb,
 
     -- source execution metadata of a dead-letter delivery, copied so the source row may be removed
     dead_letter jsonb,
@@ -531,7 +534,8 @@ create type pgconductor.execution_spec as (
     priority integer,
     "group" text,
     trace_context jsonb,
-    metadata jsonb
+    metadata jsonb,
+    on_settled jsonb
 );
 
 create type pgconductor.task_spec as (
@@ -570,6 +574,7 @@ set search_path to ''
 as $function$
 declare
   v_resolved integer;
+  v_settled jsonb;
 begin
   -- Upsert every required queue in a stable order (triggers partition
   -- creation).  Registrations may reference one another as dead-letter queues,
@@ -675,15 +680,30 @@ begin
       and not exists (
         select 1 from pgconductor._private_steps s where s.execution_id = e.id and s.queue = e.queue
       )
-    returning e.result_waiters
+    returning e.id, e.task_key, e.result_waiters, e.on_settled, e.trace_context
   )
-  select pgconductor._private_resolve_result_waits(jsonb_agg(w.value || jsonb_build_object(
-    'outcome', jsonb_build_object('status', 'cancelled', 'reason', 'Schedule removed')
-  )))
-  into v_resolved
-  from removed r
-  cross join lateral jsonb_array_elements(r.result_waiters) w
-  having count(*) > 0;
+  select
+    (
+      select pgconductor._private_resolve_result_waits(jsonb_agg(w.value || jsonb_build_object(
+        'outcome', jsonb_build_object('status', 'cancelled', 'reason', 'Schedule removed')
+      )))
+      from removed r
+      cross join lateral jsonb_array_elements(r.result_waiters) w
+      having count(*) > 0
+    ),
+    (
+      select jsonb_agg(jsonb_build_object(
+        'execution_id', r.id, 'task_key', r.task_key, 'on_settled', r.on_settled,
+        'status', 'cancelled', 'error', 'Schedule removed', 'trace_context', r.trace_context
+      ))
+      from removed r
+      where r.on_settled is not null
+    )
+  into v_resolved, v_settled;
+
+  if v_settled is not null then
+    perform pgconductor._private_signal_settled(v_settled);
+  end if;
 
   -- Suspended occurrences (sleeping, or waiting on a child or an event) ran: cancelled like any
   -- execution, so their waits, waiters and linked children end with them
@@ -745,6 +765,7 @@ set search_path to ''
 as $function$
 declare
   v_resolved integer;
+  v_settled jsonb;
 begin
   perform 1 from pgconductor._private_queues queue where queue.name = p_queue for update;
 
@@ -762,15 +783,30 @@ begin
       and not exists (
         select 1 from pgconductor._private_steps s where s.execution_id = e.id and s.queue = e.queue
       )
-    returning e.result_waiters
+    returning e.id, e.task_key, e.result_waiters, e.on_settled, e.trace_context
   )
-  select pgconductor._private_resolve_result_waits(jsonb_agg(w.value || jsonb_build_object(
-    'outcome', jsonb_build_object('status', 'cancelled', 'reason', 'Schedule removed')
-  )))
-  into v_resolved
-  from removed r
-  cross join lateral jsonb_array_elements(r.result_waiters) w
-  having count(*) > 0;
+  select
+    (
+      select pgconductor._private_resolve_result_waits(jsonb_agg(w.value || jsonb_build_object(
+        'outcome', jsonb_build_object('status', 'cancelled', 'reason', 'Schedule removed')
+      )))
+      from removed r
+      cross join lateral jsonb_array_elements(r.result_waiters) w
+      having count(*) > 0
+    ),
+    (
+      select jsonb_agg(jsonb_build_object(
+        'execution_id', r.id, 'task_key', r.task_key, 'on_settled', r.on_settled,
+        'status', 'cancelled', 'error', 'Schedule removed', 'trace_context', r.trace_context
+      ))
+      from removed r
+      where r.on_settled is not null
+    )
+  into v_resolved, v_settled;
+
+  if v_settled is not null then
+    perform pgconductor._private_signal_settled(v_settled);
+  end if;
 
   -- a running or settled occurrence is kept
   insert into pgconductor._private_executions as e (
@@ -805,6 +841,7 @@ set search_path to ''
 as $function$
 declare
   v_resolved integer;
+  v_settled jsonb;
 begin
   perform 1 from pgconductor._private_queues queue where queue.name = p_queue for update;
 
@@ -821,15 +858,30 @@ begin
       and not exists (
         select 1 from pgconductor._private_steps s where s.execution_id = e.id and s.queue = e.queue
       )
-    returning e.result_waiters
+    returning e.id, e.task_key, e.result_waiters, e.on_settled, e.trace_context
   )
-  select pgconductor._private_resolve_result_waits(jsonb_agg(w.value || jsonb_build_object(
-    'outcome', jsonb_build_object('status', 'cancelled', 'reason', 'Schedule removed')
-  )))
-  into v_resolved
-  from removed r
-  cross join lateral jsonb_array_elements(r.result_waiters) w
-  having count(*) > 0;
+  select
+    (
+      select pgconductor._private_resolve_result_waits(jsonb_agg(w.value || jsonb_build_object(
+        'outcome', jsonb_build_object('status', 'cancelled', 'reason', 'Schedule removed')
+      )))
+      from removed r
+      cross join lateral jsonb_array_elements(r.result_waiters) w
+      having count(*) > 0
+    ),
+    (
+      select jsonb_agg(jsonb_build_object(
+        'execution_id', r.id, 'task_key', r.task_key, 'on_settled', r.on_settled,
+        'status', 'cancelled', 'error', 'Schedule removed', 'trace_context', r.trace_context
+      ))
+      from removed r
+      where r.on_settled is not null
+    )
+  into v_resolved, v_settled;
+
+  if v_settled is not null then
+    perform pgconductor._private_signal_settled(v_settled);
+  end if;
 
   -- Suspended occurrences (sleeping, or waiting on a child or an event) ran: cancelled like any
   -- execution, so their waits, waiters and linked children end with them
@@ -960,11 +1012,11 @@ begin
         ), inserted as (
             insert into pgconductor._private_executions (
                 id, task_key, queue, payload, trace_context, metadata, run_at, cron_expression,
-                priority, "group"
+                priority, "group", on_settled
             )
             select b.id, b.task_key, coalesce(b.queue, 'default'), b.payload, b.trace_context,
                 b.metadata, coalesce(b.run_at, pgconductor._private_current_time()),
-                b.cron_expression, coalesce(b.priority, 0), b."group"
+                b.cron_expression, coalesce(b.priority, 0), b."group", b.on_settled
             from batch b
         )
         select b.id from batch b order by b.ordinality;
@@ -985,7 +1037,8 @@ begin
             p_priority := spec.priority,
             p_group := spec."group",
             p_trace_context := spec.trace_context,
-            p_metadata := spec.metadata
+            p_metadata := spec.metadata,
+            p_on_settled := spec.on_settled
         ) i;
         return query select v_id;
     end loop;
@@ -1005,7 +1058,8 @@ create or replace function pgconductor.invoke(
     p_priority integer default null,
     p_group text default null,
     p_trace_context jsonb default null,
-    p_metadata jsonb default null
+    p_metadata jsonb default null,
+    p_on_settled jsonb default null
 )
  returns table(id uuid)
  language plpgsql
@@ -1018,6 +1072,7 @@ declare
     v_next_singleton_on timestamptz;
     v_run_at timestamptz;
     v_superseded_id uuid;
+    v_settled jsonb;
 begin
   perform pgconductor._private_check_metadata(p_metadata);
   v_now := pgconductor._private_current_time();
@@ -1027,7 +1082,8 @@ begin
   -- supersede: a running execution holds its slot
   if p_dedupe_key is not null and p_dedupe_seconds is null then
       with superseded as (
-          select e.id, e.queue, e.result_waiters, t.remove_on_fail_days = 0 as should_remove
+          select e.id, e.queue, e.task_key, e.result_waiters, e.on_settled, e.trace_context,
+              t.remove_on_fail_days = 0 as should_remove
           from pgconductor._private_executions e
           left join pgconductor._private_tasks t on t.key = e.task_key and t.queue = e.queue
           where e.dedupe_key = p_dedupe_key
@@ -1067,10 +1123,17 @@ begin
           cross join lateral jsonb_array_elements(s.result_waiters) w
           having count(*) > 0
       )
-      select s.id
-      into v_superseded_id
+      select s.id, case when s.on_settled is not null then jsonb_build_array(jsonb_build_object(
+          'execution_id', s.id, 'task_key', s.task_key, 'on_settled', s.on_settled,
+          'status', 'failed', 'error', 'superseded by reinvoke', 'trace_context', s.trace_context
+      )) end
+      into v_superseded_id, v_settled
       from superseded s
       left join resolved on true;
+
+      if v_settled is not null then
+          perform pgconductor._private_signal_settled(v_settled);
+      end if;
 
       if v_superseded_id is not null then
           perform pgconductor._private_cancel_linked_children(jsonb_build_array(jsonb_build_object(
@@ -1103,7 +1166,8 @@ begin
               singleton_on,
               cron_expression,
               priority,
-              "group"
+              "group",
+              on_settled
           ) values (
               pgconductor._private_portable_uuidv7(),
               p_task_key,
@@ -1116,7 +1180,8 @@ begin
               v_singleton_on,
               p_cron_expression,
               coalesce(p_priority, 0),
-              p_group
+              p_group,
+              p_on_settled
           )
           on conflict (task_key, singleton_on, coalesce(dedupe_key, ''), queue)
           where singleton_on is not null and completed_at is null and failed_at is null and cancelled = false
@@ -1140,7 +1205,8 @@ begin
               singleton_on,
               cron_expression,
               priority,
-              "group"
+              "group",
+              on_settled
           ) values (
               pgconductor._private_portable_uuidv7(),
               p_task_key,
@@ -1153,7 +1219,8 @@ begin
               v_next_singleton_on,
               p_cron_expression,
               coalesce(p_priority, 0),
-              p_group
+              p_group,
+              p_on_settled
           )
           on conflict (task_key, singleton_on, coalesce(dedupe_key, ''), queue)
           where singleton_on is not null and completed_at is null and failed_at is null and cancelled = false
@@ -1187,7 +1254,8 @@ begin
     dedupe_key,
     cron_expression,
     priority,
-    "group"
+    "group",
+    on_settled
   ) values (
     pgconductor._private_portable_uuidv7(),
     p_task_key,
@@ -1199,7 +1267,8 @@ begin
     p_dedupe_key,
     p_cron_expression,
     coalesce(p_priority, 0),
-    p_group
+    p_group,
+    p_on_settled
   )
   on conflict (task_key, dedupe_key, queue) where singleton_on is null do update set
     payload = excluded.payload,
@@ -1231,7 +1300,8 @@ begin
       p_priority,
       p_group,
       p_trace_context,
-      p_metadata
+      p_metadata,
+      p_on_settled
     );
   end if;
 end;
@@ -1451,6 +1521,72 @@ begin
 end;
 $function$;
 
+-- sends the onSettled signal of executions that settled for good ([{execution_id, task_key,
+-- on_settled, status, result, error, trace_context}]): a pgconductor.settled signal to the open
+-- execution holding the key of on_settled's signal target, with id pgconductor.settled:<execution
+-- id>, so an execution signals at most once whichever paths end it. like
+-- signal_execution_by_key(), a key no open execution holds gets nothing, and nothing is started.
+-- callers hold the locks of the settled rows and call it after their own writes to them; targets
+-- are locked after them, like result waiters after the execution they await, one at a time in
+-- (queue, task, key) order, so two callers lock shared targets in the same order. it takes no key
+-- lock: a settled row is locked before a key lock, which signal_with_start() takes before rows
+create or replace function pgconductor._private_signal_settled(p_settled jsonb)
+returns void
+language plpgsql
+volatile
+set search_path to ''
+as $function$
+declare
+  v_settled record;
+  v_target_id uuid;
+begin
+  for v_settled in
+    select s.execution_id, s.task_key, s.status, s.result, s.error, s.trace_context,
+      s.on_settled->'signal'->>'queue' as target_queue,
+      s.on_settled->'signal'->>'task_key' as target_task_key,
+      s.on_settled->'signal'->>'key' as target_key
+    from jsonb_to_recordset(p_settled) as s(
+      execution_id uuid, task_key text, on_settled jsonb, status text, result jsonb, error text,
+      trace_context jsonb
+    )
+    where s.on_settled ? 'signal'
+    order by 7, 8, 9, 1
+  loop
+    -- reads through the partial unique index on (task_key, key, queue). a concurrent settlement
+    -- holding the row is waited for; if it ended the execution, the row no longer matches
+    select e.id
+    into v_target_id
+    from pgconductor._private_executions e
+    where e.task_key = v_settled.target_task_key
+      and e.queue = v_settled.target_queue
+      and e.key = v_settled.target_key
+      and e.completed_at is null
+      and e.failed_at is null
+      and e.cancelled = false
+    for update;
+
+    if found then
+      perform pgconductor._private_store_signal(
+        v_target_id,
+        v_settled.target_queue,
+        'pgconductor.settled',
+        'pgconductor.settled:' || v_settled.execution_id,
+        jsonb_build_object(
+          'executionId', v_settled.execution_id,
+          'taskKey', v_settled.task_key,
+          'status', v_settled.status,
+          'result', v_settled.result,
+          'error', v_settled.error
+        ),
+        null,
+        null,
+        v_settled.trace_context
+      );
+    end if;
+  end loop;
+end;
+$function$;
+
 -- signal the non-terminal execution of (task, key), or start one with the signal stored. returns
 -- the execution and whether this call started it. a listen of p_listens whose name another open
 -- execution of the task holds exclusively raises, and nothing is started.
@@ -1645,7 +1781,7 @@ returns table (
   execution_id uuid, queue text, task_key text, execution_group text, payload jsonb,
   failure_error text, failure_attempts integer, execution_cancelled boolean,
   dead_letter_queue text, dead_letter_task_key text, trace_context jsonb, metadata jsonb,
-  result_waiters jsonb
+  result_waiters jsonb, on_settled jsonb
 )
 language plpgsql
 volatile
@@ -1674,7 +1810,7 @@ begin
   with recursive locked_ancestors as materialized (
     select parent.id, parent.queue, parent.waiting_on_execution_id, parent.task_key,
       parent."group", parent.payload, parent.attempts, parent.trace_context, parent.metadata,
-      parent.result_waiters,
+      parent.result_waiters, parent.on_settled,
       t.remove_on_fail_days = 0 as should_remove,
       t.dead_letter_queue, t.dead_letter_task_key
     from pgconductor._private_executions parent
@@ -1721,7 +1857,7 @@ begin
   )
   select t.id, t.queue, t.task_key, t."group", t.payload, 'Child execution failed: ' || t.error,
     t.attempts, t.cancelled, t.dead_letter_queue, t.dead_letter_task_key, t.trace_context,
-    t.metadata, t.result_waiters
+    t.metadata, t.result_waiters, t.on_settled
   from targets t;
 end;
 $function$;
@@ -1745,6 +1881,7 @@ declare
   v_locked_ids uuid[];
   v_rows_affected integer;
   v_resolved integer;
+  v_settled jsonb;
 begin
   -- a waiting execution is cancelled with the executions it waits on and its
   -- linked children, and fails the executions waiting on it. the graph may
@@ -1857,7 +1994,7 @@ begin
         else p_reason end as error,
       e.id = any(v_ancestor_ids) is not true as cancelled,
       t.remove_on_fail_days = 0 as should_remove,
-      e.result_waiters
+      e.task_key, e.result_waiters, e.on_settled, e.trace_context
     from pgconductor._private_executions e
     left join pgconductor._private_tasks t on t.key = e.task_key and t.queue = e.queue
     where e.id = any(v_descendant_ids || p_execution_id || v_ancestor_ids)
@@ -1887,15 +2024,32 @@ begin
     using pending p
     where s.execution_id = p.id
   )
-  select pgconductor._private_resolve_result_waits(jsonb_agg(
-    w.value || jsonb_build_object('outcome', case when p.cancelled
-      then jsonb_build_object('status', 'cancelled', 'reason', p.error)
-      else jsonb_build_object('status', 'failed', 'error', p.error) end)
-  ))
-  into v_resolved
-  from pending p
-  cross join lateral jsonb_array_elements(p.result_waiters) w
-  having count(*) > 0;
+  select
+    (
+      select pgconductor._private_resolve_result_waits(jsonb_agg(
+        w.value || jsonb_build_object('outcome', case when p.cancelled
+          then jsonb_build_object('status', 'cancelled', 'reason', p.error)
+          else jsonb_build_object('status', 'failed', 'error', p.error) end)
+      ))
+      from pending p
+      cross join lateral jsonb_array_elements(p.result_waiters) w
+      having count(*) > 0
+    ),
+    (
+      select jsonb_agg(jsonb_build_object(
+        'execution_id', p.id, 'task_key', p.task_key, 'on_settled', p.on_settled,
+        'status', case when p.cancelled then 'cancelled' else 'failed' end,
+        'error', p.error, 'trace_context', p.trace_context
+      ))
+      from pending p
+      where p.on_settled is not null
+    )
+  into v_resolved, v_settled;
+
+  -- in a later statement, so it sees the rows failed above
+  if v_settled is not null then
+    perform pgconductor._private_signal_settled(v_settled);
+  end if;
 
   perform pgconductor._private_cancel_linked_children(jsonb_agg(jsonb_build_object(
     'execution_id', id,

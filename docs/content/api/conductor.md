@@ -117,6 +117,8 @@ async (event, ctx) => {
 }
 ```
 
+A handler that throws fails the attempt, and the execution is retried until it has used `maxAttempts`. A `PermanentError` (`import { PermanentError } from "pgconductor-js"`) thrown by the handler, a `ctx.step()` callback, a `ctx.onSignal()` handler or middleware fails the execution permanently at once, with its message as the error. A batch handler returns one in place of a member's result to fail only that member. See [Failing Without Retries](../task-execution/retries.md#failing-without-retries).
+
 ## conductor.invoke()
 
 Invoke a task:
@@ -144,11 +146,14 @@ await conductor.invoke(
     throttle?: { seconds: number },
     debounce?: { seconds: number },
     metadata?: Metadata,  // Execution metadata, at most 8 KB
+    onSettled?: { signal: { task: { name: string, queue?: string }, key: string } },
   }
 );
 ```
 
 Returns the execution ID, or `null` when `throttle` finds its time slot taken (see [Deduplication](../task-execution/deduplication.md)); only an invoke with `throttle` is typed `string | null`.
+
+`onSettled: { signal }` sends the open execution of the task holding `key` a `pgconductor.settled` signal (`SettledSignal`) once the execution completes, fails permanently, is cancelled or is superseded; see [Telling an Actor When It Settles](../crafting-tasks/child-invocation.md#telling-an-actor-when-it-settles). It applies only when the call starts the execution. Batch items take it too.
 
 **Batch invocation:**
 
@@ -306,6 +311,8 @@ Returns `null` if nothing matches or the execution was removed by its [retention
   key: string | null;         // the key signalWithStart() addresses it by
   payload: TPayload;          // the execution's input
   state: TState | null;       // what it last set with ctx.setState()
+  metadata: Metadata | null;  // its metadata, typed by the conductor's metadata schema
+  waitingStepKey: string | null; // step key of the wait it is suspended at, see below
   listens: string[];          // names of its ctx.listen()s, in the order they were created
   result: TResult | null;     // return value, set when completed
   error: string | null;       // last attempt's error, or the cancellation reason
@@ -318,7 +325,20 @@ Returns `null` if nothing matches or the execution was removed by its [retention
 
 `pending` covers executions that wait for their first attempt, a retry, a sleep, a child or an event. `cancelled` is reported once the cancellation has settled; until then a running execution stays `running`.
 
+`waitingStepKey` is the step key of the wait the execution is suspended at (`ctx.waitForEvent()`, `ctx.waitForAny()`, `ctx.waitForResult()`, `ctx.invokeAndWait()`), and `pgconductor.idle` for an idle [actor](../task-execution/actors.md). It is `null` while the execution runs, sleeps, waits for its first attempt or a retry, and once it ended. For the steps it saved, use [`conductor.getSteps()`](#conductorgetsteps).
+
 `listens` names the [listens](../crafting-tasks/triggers.md#listening-for-events) set by `ctx.listen()` and `signalWithStart({ listen })` and not removed by `ctx.unlisten()`. Listening again under a name with another event, filter or exclusivity creates it anew, so it moves to the end. Listens end with their execution: one that completed, failed or was cancelled has none.
+
+## conductor.getSteps()
+
+How far an execution got: how many steps it saved, and the keys of the last ones in the order they were saved, newest last:
+
+```typescript
+const { count, recent } = await conductor.getSteps(executionId, { limit: 10 }); // default 10
+// { count: 12, recent: ["fetch", "summarize", ..., "reply"] }
+```
+
+Saved steps include memoized waits, invocations and sleeps by their step keys. An unknown or removed execution has `{ count: 0, recent: [] }`. It reads all steps of the execution, which is why execution reads leave them out.
 
 ## conductor.getEvent()
 
@@ -360,6 +380,7 @@ List a task's executions, in the order they were created or newest first:
 const open = await conductor.listExecutions({
   task: { name: "approval" },
   where: { sessionId: "worker:w_1" }, // payload contains these fields
+  metadata: { tenant: "acme" },        // metadata contains these fields
   open: true,                          // only pending, waiting or running ones
   order: "asc",                        // or "desc", newest first
   limit: 100,                          // default 100
@@ -367,7 +388,7 @@ const open = await conductor.listExecutions({
 });
 ```
 
-Each entry has the fields of [`conductor.getExecution()`](#conductorgetexecution), with `payload`, `state` and `result` typed by the task's definition. `listens` is read only for the entries returned. Executions removed by their [retention policy](../crafting-tasks/retention.md) are not listed. Listing open executions uses an index that covers only those; a task's settled ones are read through the `task_key` index and filtered.
+Each entry has the fields of [`conductor.getExecution()`](#conductorgetexecution), with `payload`, `state` and `result` typed by the task's definition and `metadata` (also the filter) by the conductor's metadata schema. `listens` is read only for the entries returned. Executions removed by their [retention policy](../crafting-tasks/retention.md) are not listed. Listing open executions uses an index that covers only those; a task's settled ones are read through the `task_key` index and filtered.
 
 ## conductor.listListeners()
 

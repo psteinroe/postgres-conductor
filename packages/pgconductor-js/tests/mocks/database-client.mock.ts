@@ -38,6 +38,7 @@ export class MockDatabaseClient implements IDatabaseClient {
 	invokeBatch = vi.fn(async () => ["mock-id"]);
 	loadStep = vi.fn(async () => null);
 	countSteps = vi.fn(async () => 0);
+	getSteps = vi.fn(async () => ({ count: 0, recent: [] }));
 	saveStep = vi.fn(async (_args) => ({ existing: null }));
 	setState = vi.fn(async (_args) => true);
 	startExecution = vi.fn(async () => ({ id: "mock-started-id", started: true }));

@@ -14,6 +14,7 @@ import type {
 	InferEventPayload,
 } from "./event-definition.js";
 import type { SelectedRow } from "./select-columns.js";
+import type { PermanentError } from "./permanent-error.js";
 import * as assert from "./lib/assert.js";
 import { compileEventTriggers, type CompiledEventTrigger } from "./event-trigger-validation.js";
 
@@ -162,8 +163,8 @@ export type ExecuteFunction<
 	HasBatch extends boolean = false,
 > = HasBatch extends true
 	? Returns extends void
-		? (events: EventType[], context: Context) => Promise<void>
-		: (events: EventType[], context: Context) => Promise<Returns[]>
+		? (events: EventType[], context: Context) => Promise<void | (PermanentError | undefined)[]>
+		: (events: EventType[], context: Context) => Promise<(Returns | PermanentError)[]>
 	: (event: EventType, context: Context) => Promise<Returns>;
 
 // Represents a task definition that can be invoked or triggered by events

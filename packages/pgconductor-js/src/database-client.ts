@@ -22,6 +22,8 @@ import {
 	type EventFilterArgs,
 	type ListEventsArgs,
 	type ListExecutionsArgs,
+	type GetStepsArgs,
+	type StepsInfo,
 	type LoadStepArgs,
 	type CountStepsArgs,
 	type SaveStepArgs,
@@ -72,7 +74,17 @@ export interface ExecutionSpec {
 	parent_timeout_ms?: number | null;
 	trace_context?: TraceContextCarrier | null;
 	metadata?: Payload | null;
+	on_settled?: OnSettledSpec | null;
 }
+
+/**
+ * What happens when an execution settles for good, as stored on its row. Each kind has its own
+ * field; `signal` sends the open execution of the task holding the key a `pgconductor.settled`
+ * signal.
+ */
+export type OnSettledSpec = {
+	signal: { task_key: string; queue: string; key: string };
+};
 
 export interface TaskSpec {
 	key: string;
@@ -98,7 +110,12 @@ export type DeadLetterMetadata = {
 
 export type ExecutionStatus = "pending" | "running" | "completed" | "failed" | "cancelled";
 
-export type ExecutionInfo<TResult = unknown, TPayload = Payload, TState = Payload> = {
+export type ExecutionInfo<
+	TResult = unknown,
+	TPayload = Payload,
+	TState = Payload,
+	TMetadata = Payload,
+> = {
 	id: string;
 	taskKey: string;
 	queue: string;
@@ -109,6 +126,14 @@ export type ExecutionInfo<TResult = unknown, TPayload = Payload, TState = Payloa
 	payload: TPayload;
 	/** What the execution last told others about itself with `ctx.setState()` */
 	state: TState | null;
+	/** Metadata of the execution, inherited from the event, parent or schedule that created it */
+	metadata: TMetadata | null;
+	/**
+	 * Step key of the wait the execution is suspended at (`ctx.waitForEvent()`, `waitForAny()`,
+	 * `waitForResult()`, `invokeAndWait()`), or `pgconductor.idle` for an idle actor. Null while it
+	 * runs, sleeps, waits to run or after it ended.
+	 */
+	waitingStepKey: string | null;
 	/**
 	 * Names of its listens (`ctx.listen()`, `signalWithStart({ listen })`) in the order they were
 	 * created. Listens end with their execution, so an ended one has none.
@@ -825,6 +850,14 @@ export class DatabaseClient {
 			label: "listExecutions",
 			...opts,
 		});
+	}
+
+	async getSteps(args: GetStepsArgs, opts?: QueryMethodOptions): Promise<StepsInfo> {
+		const rows = await this.query(() => this.builder.buildGetSteps(args), {
+			label: "getSteps",
+			...opts,
+		});
+		return rows[0];
 	}
 
 	async getEvent(eventId: string, opts?: QueryMethodOptions): Promise<EventInfo | null> {
