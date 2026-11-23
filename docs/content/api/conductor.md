@@ -117,6 +117,8 @@ async (event, ctx) => {
 }
 ```
 
+A handler that throws fails the attempt, and the execution is retried until it has used `maxAttempts`. A `PermanentError` (`import { PermanentError } from "pgconductor-js"`) thrown by the handler, a `ctx.step()` callback, a `ctx.onSignal()` handler or middleware fails the execution permanently at once, with its message as the error. A batch handler returns one in place of a member's result to fail only that member. See [Failing Without Retries](../task-execution/retries.md#failing-without-retries).
+
 ## conductor.invoke()
 
 Invoke a task:

@@ -32,6 +32,7 @@ import { Telemetry } from "./telemetry.js";
 import { noop } from "./lib/noop.js";
 import type { Middleware, MiddlewareResult } from "./middleware.js";
 import { SignalInbox } from "./signal-inbox.js";
+import { isPermanentError } from "./permanent-error.js";
 import { parseSchema } from "./lib/validate-schema.js";
 
 /**
@@ -598,7 +599,11 @@ export class Worker<
 				// Stopping ends the retries of an acknowledgement. The handler keeps its slot, and the
 				// attempt is released with the signal undelivered.
 				if (this.signal.aborted) return;
-				taskAbortController.abort({ reason: "signal-failed", error: error.message });
+				taskAbortController.abort({
+					reason: "signal-failed",
+					error: error.message,
+					permanent: isPermanentError(error),
+				});
 			},
 			run: (signal, handle) =>
 				this.telemetry.signal({
@@ -740,7 +745,7 @@ export class Worker<
 					case "signal-failed":
 						return {
 							...identity,
-							status: "failed",
+							status: output.permanent ? "permanently_failed" : "failed",
 							error: output.error,
 						} as const;
 					case "suspended":
@@ -764,7 +769,7 @@ export class Worker<
 				if (this.signal.aborted) return { ...identity, status: "released" } as const;
 				return {
 					...identity,
-					status: "failed",
+					status: isPermanentError(outcome.signalFailure) ? "permanently_failed" : "failed",
 					error: outcome.signalFailure.message,
 				} as const;
 			}
@@ -782,6 +787,10 @@ export class Worker<
 
 			return complete(outcome.output, false);
 		} catch (err) {
+			// No attempt can fix it, so it fails the execution at once, even during shutdown
+			if (isPermanentError(err)) {
+				return { ...identity, status: "permanently_failed", error: err.message } as const;
+			}
 			// A handler that stops on ctx.signal during shutdown is released, not failed
 			if (this.signal.aborted) {
 				return {
@@ -967,7 +976,12 @@ export class Worker<
 						claim_token: exec.claim_token,
 						task_key: taskKey,
 					};
-					const result = await parseResult(task, outcome.output?.[i]);
+					// A member the handler returned a PermanentError for fails on its own
+					const output: unknown = outcome.output?.[i];
+					if (isPermanentError(output)) {
+						return { ...identity, status: "permanently_failed" as const, error: output.message };
+					}
+					const result = await parseResult(task, output);
 					if ("error" in result) return { ...identity, ...result };
 					return {
 						...identity,
@@ -986,13 +1000,14 @@ export class Worker<
 				}));
 			}
 
-			// Handler threw: all fail together
+			// Handler threw: all fail together, permanently for a PermanentError
 			const error = coerceError(err).message;
+			const status = isPermanentError(err) ? ("permanently_failed" as const) : ("failed" as const);
 			return executions.map((exec) => ({
 				execution_id: exec.id,
 				claim_token: exec.claim_token,
 				task_key: taskKey,
-				status: "failed" as const,
+				status,
 				error,
 			}));
 		} finally {

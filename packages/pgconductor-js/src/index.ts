@@ -69,6 +69,7 @@ export type {
 export { defineEvent } from "./event-definition.js";
 export type { Listen } from "./event-trigger-validation.js";
 export { ListenHeldError } from "./database-client.js";
+export { PermanentError } from "./permanent-error.js";
 export type {
 	EventInfo,
 	ExecutionInfo,

@@ -24,9 +24,17 @@ import type {
 	InferReturns,
 	InferSignalInputs,
 	InferStateInput,
+	SettledSignal,
 	SignalPayload,
 } from "./task-definition.js";
-import { checkPayload, parseSignalPayload, signalsOf, validateState } from "./task-definition.js";
+import {
+	checkPayload,
+	parseSettledSignal,
+	parseSignalPayload,
+	SETTLED_SIGNAL,
+	signalsOf,
+	validateState,
+} from "./task-definition.js";
 import type { TaskIdentifier } from "./task.js";
 import type { Logger } from "./lib/logger.js";
 import { WindowChecker } from "./lib/window-checker.js";
@@ -80,8 +88,8 @@ export type TaskAbortReasons =
 	  }
 	// the task ran longer than its timeoutMs
 	| { reason: "timed-out" }
-	// a signal handler threw
-	| { reason: "signal-failed"; error: string }
+	// a signal handler threw; a PermanentError fails the execution without retries
+	| { reason: "signal-failed"; error: string; permanent: boolean }
 	// the handler completed the execution with ctx.complete()
 	| { reason: "completed"; result: unknown }
 	// the task invoked a child
@@ -1079,6 +1087,29 @@ export class TaskContext<
 			const parsed = await this.parseSignal(name, payload);
 			if ("error" in parsed) {
 				this.#opts.logger.error(`Skipped signal "${name}": ${parsed.error}`, {
+					signal_id: info.id,
+				});
+				return;
+			}
+			return handle(parsed.value, info);
+		});
+	}
+
+	/**
+	 * Receive the outcomes of the executions invoked with `onSettled: { signal }` naming this
+	 * execution's task and key: a shorthand for `ctx.onSignal(SETTLED_SIGNAL, handler)` whose
+	 * handler receives the `pgconductor.settled` payload checked as a `SettledSignal`. A payload that
+	 * is not one is logged as an error and counts as delivered without reaching the handler.
+	 * Both register the handler of the same signal name, so use one of them. A type argument
+	 * (`onSettled<T>()`) types `result` without a check.
+	 */
+	onSettled<TResult = JsonValue>(handler: SignalHandler<SettledSignal<TResult>>): void {
+		// The result is typed by the caller without a check, like onSignal<T>()
+		const handle = handler as SignalHandler<SettledSignal>;
+		this.#opts.signals.listen(SETTLED_SIGNAL, async (payload, info) => {
+			const parsed = parseSettledSignal(payload);
+			if ("error" in parsed) {
+				this.#opts.logger.error(`Skipped signal "${SETTLED_SIGNAL}": ${parsed.error}`, {
 					signal_id: info.id,
 				});
 				return;

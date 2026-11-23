@@ -6,6 +6,7 @@ import { Orchestrator } from "../../src/orchestrator";
 import { defineTask, type SettledSignal } from "../../src/task-definition";
 import { TaskSchemas } from "../../src/schemas";
 import { Deferred } from "../../src/lib/deferred";
+import { PermanentError } from "../../src/permanent-error";
 import { TestDatabasePool, type TestDatabase } from "../fixtures/test-database";
 import { waitForCondition } from "../test-utils";
 
@@ -17,7 +18,7 @@ const sessionDefinition = defineTask({
 });
 const runDefinition = defineTask({
 	name: "run",
-	payload: z.object({ mode: z.enum(["complete", "fail", "block"]) }),
+	payload: z.object({ mode: z.enum(["complete", "fail", "permanent", "block"]) }),
 	returns: z.object({ value: z.string() }),
 });
 const jobDefinition = defineTask({
@@ -30,14 +31,17 @@ const flowDefinition = defineTask({
 	payload: z.object({}),
 	returns: z.object({ value: z.string() }),
 });
+const watcherDefinition = defineTask({ name: "watcher", payload: z.object({}) });
 const tasks = TaskSchemas.fromSchema([
 	sessionDefinition,
 	runDefinition,
 	jobDefinition,
 	flowDefinition,
+	watcherDefinition,
 ]);
 
 const session = (key = "s1") => ({ signal: { task: { name: "session" }, key } });
+const watcher = { signal: { task: { name: "watcher" }, key: "w1" } };
 
 describe("onSettled", () => {
 	let pool: TestDatabasePool;
@@ -61,8 +65,22 @@ describe("onSettled", () => {
 	async function setup({ maxAttempts }: { maxAttempts?: number } = {}) {
 		const db = await pool.child();
 		databases.push(db);
-		const conductor = Conductor.create({ sql: db.sql, tasks, context: {}, clock: db.clock });
+		const errors: string[] = [];
+		const logger = {
+			info: () => {},
+			warn: () => {},
+			debug: () => {},
+			error: (message: unknown) => errors.push(String(message)),
+		};
+		const conductor = Conductor.create({
+			sql: db.sql,
+			tasks,
+			context: {},
+			clock: db.clock,
+			logger,
+		});
 		const settled: SettledSignal[] = [];
+		const watched: SettledSignal<{ value: string }>[] = [];
 		let activations = 0;
 		const gate = new Deferred<void>();
 		const started = new Deferred<string>();
@@ -87,6 +105,7 @@ describe("onSettled", () => {
 			async (event, ctx) => {
 				if (event.name !== "pgconductor.invoke") throw new Error("unexpected event");
 				if (event.payload.mode === "fail") throw new Error("boom");
+				if (event.payload.mode === "permanent") throw new PermanentError("invalid input");
 				if (event.payload.mode === "block") {
 					started.resolve(ctx.executionId);
 					await gate.promise;
@@ -105,6 +124,16 @@ describe("onSettled", () => {
 			},
 		);
 
+		const watcherTask = conductor.createTask(
+			{ name: "watcher", actor: true },
+			{ invocable: true },
+			async (_event, ctx) => {
+				ctx.onSettled<{ value: string }>((outcome) => {
+					watched.push(outcome);
+				});
+			},
+		);
+
 		const flowTask = conductor.createTask(
 			{ name: "flow" },
 			{ invocable: true },
@@ -113,7 +142,7 @@ describe("onSettled", () => {
 
 		const orchestrator = Orchestrator.create({
 			conductor,
-			tasks: [sessionTask, runTask, jobTask, flowTask],
+			tasks: [sessionTask, runTask, jobTask, flowTask, watcherTask],
 			defaultWorker: { pollIntervalMs: 20, flushIntervalMs: 20, concurrency: 4 },
 		});
 		cleanups.push(() => orchestrator.stop());
@@ -150,10 +179,23 @@ describe("onSettled", () => {
 				select execution_id, id, payload from pgconductor._private_execution_signals
 				where name = 'pgconductor.settled' and id = ${`pgconductor.settled:${executionId}`}`;
 
+		const openWatcher = async () => {
+			const { id } = await conductor.signalWithStart({
+				task: "watcher",
+				key: "w1",
+				signal: { name: "hello", id: "hello" },
+			});
+			await waitForCondition(async () => (await row(id))?.waiting_step_key === "pgconductor.idle");
+			return id;
+		};
+
 		return {
 			db,
 			conductor,
+			errors,
 			settled,
+			watched,
+			openWatcher,
 			activations: () => activations,
 			gate,
 			started,
@@ -210,6 +252,88 @@ describe("onSettled", () => {
 			error: "boom",
 		});
 		expect((await row(id))?.failed_at).not.toBeNull();
+	});
+
+	test("a PermanentError fails at once and signals failed", async () => {
+		const { conductor, settled, openSession, row } = await setup({ maxAttempts: 3 });
+		await openSession();
+
+		const id = await conductor.invoke(
+			{ name: "run" },
+			{ mode: "permanent" },
+			{ onSettled: session() },
+		);
+		await waitForCondition(() => settled.length === 1);
+		expect(settled[0]).toEqual({
+			executionId: id,
+			taskKey: "run",
+			status: "failed",
+			result: null,
+			error: "invalid input",
+		});
+		expect(await row(id)).toMatchObject({ attempts: 1, last_error: "invalid input" });
+	});
+
+	test("ctx.onSettled receives a typed outcome for completed, failed and cancelled executions", async () => {
+		const { db, conductor, errors, watched, openWatcher } = await setup({ maxAttempts: 1 });
+		const watcherId = await openWatcher();
+
+		const completed = await conductor.invoke(
+			{ name: "run" },
+			{ mode: "complete" },
+			{ onSettled: watcher },
+		);
+		await waitForCondition(() => watched.length === 1);
+		expect(watched[0]).toEqual({
+			executionId: completed,
+			taskKey: "run",
+			status: "completed",
+			result: { value: "complete" },
+			error: null,
+		});
+
+		const failed = await conductor.invoke(
+			{ name: "run" },
+			{ mode: "fail" },
+			{ onSettled: watcher },
+		);
+		await waitForCondition(() => watched.length === 2);
+		expect(watched[1]).toEqual({
+			executionId: failed,
+			taskKey: "run",
+			status: "failed",
+			result: null,
+			error: "boom",
+		});
+
+		const cancelled = await conductor.invoke(
+			{ name: "run" },
+			{ mode: "complete" },
+			{ onSettled: watcher, run_at: new Date(Date.now() + 3_600_000) },
+		);
+		await conductor.cancel(cancelled, { reason: "not needed" });
+		await waitForCondition(() => watched.length === 3);
+		expect(watched[2]).toEqual({
+			executionId: cancelled,
+			taskKey: "run",
+			status: "cancelled",
+			result: null,
+			error: "not needed",
+		});
+
+		// A payload that is no SettledSignal is logged and delivered without reaching the handler
+		await conductor.signal(
+			{ task: { name: "watcher" }, key: "w1" },
+			{ name: "pgconductor.settled", id: "bogus", payload: { status: "done" } },
+		);
+		await waitForCondition(async () => {
+			const [signal] = await db.sql<{ delivered: boolean }[]>`
+				select delivered_at is not null as delivered from pgconductor._private_execution_signals
+				where execution_id = ${watcherId} and id = 'bogus'`;
+			return signal?.delivered === true;
+		});
+		expect(watched).toHaveLength(3);
+		expect(errors).toContainEqual(expect.stringContaining('Skipped signal "pgconductor.settled"'));
 	});
 
 	test("a workflow failed by the child it waits on signals failed", async () => {

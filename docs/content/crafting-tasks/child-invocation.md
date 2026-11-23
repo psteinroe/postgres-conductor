@@ -155,11 +155,9 @@ An execution that completed before the caller ended stays completed, and a calle
 
 ### Telling an Actor When It Settles
 
-An [actor](../task-execution/actors.md) is idle between signals, so it cannot wait for an execution with `ctx.waitForResult()`. Pass `onSettled: { signal: { task, key } }` instead: when the execution settles for good, Postgres Conductor sends the open execution of `task` holding `key` a `pgconductor.settled` signal, which wakes it like any signal:
+An [actor](../task-execution/actors.md) is idle between signals, so it cannot wait for an execution with `ctx.waitForResult()`. Pass `onSettled: { signal: { task, key } }` instead: when the execution settles for good, Postgres Conductor sends the open execution of `task` holding `key` a `pgconductor.settled` signal, which wakes it like any signal. The actor receives it with `ctx.onSettled(handler)`:
 
 ```typescript
-import type { SettledSignal } from "pgconductor-js";
-
 const session = conductor.createTask(
   { name: "session", actor: true },
   { invocable: true },
@@ -169,15 +167,17 @@ const session = conductor.createTask(
         onSettled: { signal: { task: { name: "session" }, key: "thread-1" } },
       });
     });
-    // typed as SettledSignal, without declaring it in the task's signals
-    ctx.onSignal("pgconductor.settled", async ({ executionId, status, result, error }) => {
+    // receives the outcome as a SettledSignal
+    ctx.onSettled(async ({ executionId, status, result, error }) => {
       await ctx.step(`report:${executionId}`, () => report(status, result, error));
     });
   },
 );
 ```
 
-`conductor.invoke(task, payload, { onSettled })` takes the same option. The signal's payload is a `SettledSignal`:
+`conductor.invoke(task, payload, { onSettled })` takes the same option. The two go together: the `onSettled` option sends, `ctx.onSettled()` receives. `ctx.onSettled(handler)` is a shorthand for `ctx.onSignal(SETTLED_SIGNAL, handler)` (`SETTLED_SIGNAL` is `"pgconductor.settled"`) whose handler receives the payload checked as a `SettledSignal`; a payload that is not one, for example one sent by hand, is logged as an error and skipped. Both receive the signal and register a handler for the same name, so an actor uses one of them; registering both throws. `ctx.onSettled<T>()` types `result` as `T` without a check. To race the signal against something else, pass `{ signal: SETTLED_SIGNAL }` as a branch of `ctx.waitForAny()`.
+
+The signal's payload is a `SettledSignal`:
 
 | Field | |
 |-|-|

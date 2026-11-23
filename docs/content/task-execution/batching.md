@@ -109,6 +109,8 @@ await conductor.invoke(
 
 **Important**: The returned array must have the same length as the input array. Each result corresponds to the event at the same index.
 
+A `PermanentError` in place of a result fails only that member, at once and without retries; a handler that throws fails every member. A task without a return type may return such an array too, with `undefined` for the members that succeeded. See [Failing Without Retries](retries.md#failing-without-retries).
+
 ### Batch Context
 
 Batch tasks receive `BatchTaskContext` instead of regular `TaskContext`:

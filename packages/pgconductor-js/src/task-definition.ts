@@ -242,6 +242,25 @@ export type SettledSignal<TResult = JsonValue> = {
 	error: string | null;
 };
 
+/** @internal The payload of a `pgconductor.settled` signal, or the reason it is not one */
+export function parseSettledSignal(
+	payload: JsonValue | undefined,
+): { value: SettledSignal } | { error: string } {
+	if (typeof payload !== "object" || payload === null || Array.isArray(payload)) {
+		return { error: "payload is not an object" };
+	}
+	const { executionId, taskKey, status, result, error } = payload;
+	if (typeof executionId !== "string") return { error: "executionId is not a string" };
+	if (typeof taskKey !== "string") return { error: "taskKey is not a string" };
+	if (status !== "completed" && status !== "failed" && status !== "cancelled") {
+		return { error: "status is not completed, failed or cancelled" };
+	}
+	if (error !== null && typeof error !== "string") return { error: "error is not a string" };
+	return {
+		value: { executionId, taskKey, status, result: result === undefined ? null : result, error },
+	};
+}
+
 /**
  * The payload of a signal named `TName` of a task with the signals `TSignals` (see
  * `InferSignals`): its declared type, `SettledSignal` for `pgconductor.settled`, or `TUndeclared`

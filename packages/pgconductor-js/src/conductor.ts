@@ -64,6 +64,7 @@ import { Worker, type WorkerConfig } from "./worker.js";
 import { DefaultLogger, type Logger } from "./lib/logger.js";
 import type { AddedContext, Middleware } from "./middleware.js";
 import { waitFor } from "./lib/wait-for.js";
+import type { PermanentError } from "./permanent-error.js";
 import { parseDuration, type DurationInput } from "./lib/duration.js";
 import { SchemaManager } from "./schema-manager.js";
 import { Telemetry } from "./telemetry.js";
@@ -376,11 +377,12 @@ export class Conductor<
 				? (
 						events: ResolvedBatchTaskEvent<Tasks, Events, TDef, TTriggers>[],
 						ctx: BatchTaskContext,
-					) => Promise<void>
+						// A PermanentError at a member's index fails only that member
+					) => Promise<void | (PermanentError | undefined)[]>
 				: (
 						events: ResolvedBatchTaskEvent<Tasks, Events, TDef, TTriggers>[],
 						ctx: BatchTaskContext,
-					) => Promise<Array<ResolvedReturns<Tasks, TDef>>>
+					) => Promise<(ResolvedReturns<Tasks, TDef> | PermanentError)[]>
 			: (
 					event: ResolvedTaskEvent<Tasks, Events, TDef, TTriggers>,
 					ctx: ResolvedContext<Tasks, Events, Metadata, TDef> & ExtraContext & MiddlewareContext,

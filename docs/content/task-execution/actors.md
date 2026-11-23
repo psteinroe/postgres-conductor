@@ -79,7 +79,7 @@ An actor receives the events it [listens](../crafting-tasks/triggers.md#listenin
 
 ## Executions an Actor Starts
 
-An actor cannot wait for an execution it starts: it sleeps between signals. Start it with `onSettled: { signal: { task, key } }` naming the actor's own task and key, and the actor gets a `pgconductor.settled` signal with the outcome once the execution completes, fails permanently, is cancelled or is superseded. See [Telling an Actor When It Settles](../crafting-tasks/child-invocation.md#telling-an-actor-when-it-settles).
+An actor cannot wait for an execution it starts: it sleeps between signals. Start it with `onSettled: { signal: { task, key } }` naming the actor's own task and key, and the actor gets a `pgconductor.settled` signal with the outcome once the execution completes, fails permanently, is cancelled or is superseded, which it receives with `ctx.onSettled(handler)`. See [Telling an Actor When It Settles](../crafting-tasks/child-invocation.md#telling-an-actor-when-it-settles).
 
 ## Ending an Actor
 

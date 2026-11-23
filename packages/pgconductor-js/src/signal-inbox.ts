@@ -2,6 +2,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import type { JsonValue, StoredSignal } from "./database-client.js";
 import { AsyncQueue } from "./lib/async-queue.js";
 import { coerceError } from "./lib/coerce-error.js";
+import { isPermanentError, PermanentError } from "./permanent-error.js";
 import { Deferred } from "./lib/deferred.js";
 
 // Set while a handler runs, to what ends its delivery when it hangs up
@@ -195,8 +196,9 @@ export class SignalInbox {
 				// The attempt ended with the handler
 				if (outcome === "hung-up") return;
 			} catch (err) {
+				const message = `Signal handler for "${signal.name}" failed: ${coerceError(err).message}`;
 				this.fail(
-					new Error(`Signal handler for "${signal.name}" failed: ${coerceError(err).message}`),
+					isPermanentError(err) ? new PermanentError(message, { cause: err }) : new Error(message),
 				);
 				return;
 			}
