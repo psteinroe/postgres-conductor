@@ -234,6 +234,55 @@ describe("Actors", () => {
 		expect(waits).toBe(2);
 	});
 
+	// A handler that started before untilIdle and returns while fn runs: fn saw the state before
+	// the handler's effect, so it must run again
+	test.each([{ arrives: "with the claim" as const }, { arrives: "by the poll" as const }])(
+		"untilIdle runs fn again after a handler running when it started ($arrives)",
+		async ({ arrives }) => {
+			const handlerStarted = new Deferred<void>();
+			const release = new Deferred<void>();
+			let submitted = false;
+			const observed: boolean[] = [];
+			const { db, conductor, send, idle } = await setup(async (activation, ctx) => {
+				if (activation > 1) return;
+				ctx.onSignal("input", async () => {
+					handlerStarted.resolve();
+					await release.promise;
+					submitted = true;
+				});
+				await handlerStarted.promise;
+				await ctx.untilIdle(async () => {
+					observed.push(submitted);
+					if (observed.length > 1) return;
+					// The handler returns and its signal is acknowledged while fn still runs
+					release.resolve();
+					await waitForCondition(async () => {
+						const [signal] = await db.sql<{ delivered_at: Date | null }[]>`
+						select delivered_at from pgconductor._private_execution_signals where id = 'input-1'`;
+						return !!signal?.delivered_at;
+					}, 5000);
+				});
+			});
+
+			const input = { name: "input", id: "input-1" };
+			const id =
+				arrives === "with the claim"
+					? (await conductor.signalWithStart({ task: "counter", key: "k1", signal: input })).id
+					: await send("s1");
+			if (arrives === "by the poll") {
+				await waitForCondition(async () => {
+					const [execution] = await db.sql<{ locked_by: string | null }[]>`
+					select locked_by from pgconductor._private_executions where id = ${id}`;
+					return !!execution?.locked_by;
+				}, 5000);
+				await conductor.signal(id, input);
+			}
+
+			await idle(id);
+			expect(observed).toEqual([false, true]);
+		},
+	);
+
 	test("a failed activation retries, and a clean one resets its attempts", async () => {
 		const { db, activations, send, idle, row } = await setup(async (activation) => {
 			if (activation === 1) throw new Error("boom");

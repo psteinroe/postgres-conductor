@@ -66,8 +66,9 @@ export class SignalInbox {
 	/** Signals received, and ones whose handler returned or that had no handler */
 	private received = 0;
 	private handled = 0;
-	/** Handlers started */
+	/** Handlers started, and ones that returned and were acknowledged */
 	private _started = 0;
+	private _finished = 0;
 	private quietWaiters: (() => void)[] = [];
 
 	constructor(private readonly opts: SignalInboxOptions) {}
@@ -77,9 +78,9 @@ export class SignalInbox {
 		return [...this.handlers.keys()];
 	}
 
-	/** Handlers started so far */
-	get started(): number {
-		return this._started;
+	/** Handlers that returned and were acknowledged so far */
+	get finished(): number {
+		return this._finished;
 	}
 
 	/**
@@ -111,8 +112,9 @@ export class SignalInbox {
 	}
 
 	/**
-	 * Stop delivering if no handler started since `started` was `since`, and every signal received
-	 * was handled; signals received later stay undelivered. Returns whether it stopped.
+	 * Stop delivering if every handler started so far had finished when `finished` was `since`
+	 * (none started since, and none was running then), and every signal received was handled;
+	 * signals received later stay undelivered. Returns whether it stopped.
 	 */
 	stopIfQuiet(since: number): boolean {
 		if (this.consuming && (this._started !== since || !this.quiet)) return false;
@@ -210,6 +212,7 @@ export class SignalInbox {
 				return;
 			}
 			this.delivering = null;
+			this._finished++;
 			this.markHandled();
 		}
 	}
