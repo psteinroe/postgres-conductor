@@ -124,9 +124,12 @@ export class SignalInbox {
 		return true;
 	}
 
-	/** Resolves once every signal received was handled, or delivery stopped */
+	/**
+	 * Resolves once no handler runs and every signal received was handled, or delivery stopped.
+	 * Without a handler nothing is delivered, so it resolves at once.
+	 */
 	whenQuiet(): Promise<void> {
-		if (this.quiet || this.closed) return Promise.resolve();
+		if (this.quiet || this.closed || !this.consuming) return Promise.resolve();
 		return new Promise((resolve) => this.quietWaiters.push(resolve));
 	}
 

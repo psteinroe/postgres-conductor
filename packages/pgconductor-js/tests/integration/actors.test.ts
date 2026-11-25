@@ -234,6 +234,49 @@ describe("Actors", () => {
 		expect(waits).toBe(2);
 	});
 
+	// A handler that started before untilIdle: fn runs only once it finished, so fn never sees the
+	// state before the handler's effect (it used to look, then stop when the handler returned meanwhile)
+	test.each([{ arrives: "with the claim" as const }, { arrives: "by the poll" as const }])(
+		"untilIdle waits for a handler running when it started ($arrives)",
+		async ({ arrives }) => {
+			const handlerStarted = new Deferred<void>();
+			const release = new Deferred<void>();
+			let submitted = false;
+			const observed: boolean[] = [];
+			const { db, conductor, send, idle } = await setup(async (activation, ctx) => {
+				if (activation > 1) return;
+				ctx.onSignal("input", async () => {
+					handlerStarted.resolve();
+					await release.promise;
+					submitted = true;
+				});
+				await handlerStarted.promise;
+				// The handler returns a while after untilIdle was called
+				setTimeout(() => release.resolve(), 200);
+				await ctx.untilIdle(async () => {
+					observed.push(submitted);
+				});
+			});
+
+			const input = { name: "input", id: "input-1" };
+			const id =
+				arrives === "with the claim"
+					? (await conductor.signalWithStart({ task: "counter", key: "k1", signal: input })).id
+					: await send("s1");
+			if (arrives === "by the poll") {
+				await waitForCondition(async () => {
+					const [execution] = await db.sql<{ locked_by: string | null }[]>`
+					select locked_by from pgconductor._private_executions where id = ${id}`;
+					return !!execution?.locked_by;
+				}, 5000);
+				await conductor.signal(id, input);
+			}
+
+			await idle(id);
+			expect(observed).toEqual([true]);
+		},
+	);
+
 	test("a failed activation retries, and a clean one resets its attempts", async () => {
 		const { db, activations, send, idle, row } = await setup(async (activation) => {
 			if (activation === 1) throw new Error("boom");

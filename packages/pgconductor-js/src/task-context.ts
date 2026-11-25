@@ -1133,9 +1133,11 @@ export class TaskContext<
 
 	/**
 	 * Wait until `fn` resolves while no signal is delivered, then stop delivering signals to this
-	 * attempt. `fn` runs again whenever a signal handler started while it ran, or one is still to
-	 * run. Signals stored later stay undelivered: they re-queue the execution when the attempt
-	 * settles, or wake an actor's next activation.
+	 * attempt. Before each call of `fn` it waits until no handler runs and every signal read was
+	 * handled, so `fn` never sees a handler half done; `fn` runs again whenever a handler started
+	 * while it ran. A handler must therefore not wait for something only `fn` does. Signals stored
+	 * later stay undelivered: they re-queue the execution when the attempt settles, or wake an
+	 * actor's next activation.
 	 *
 	 * An actor uses it to know that it may release what its activation holds, since no handler
 	 * can use it any more.
@@ -1143,11 +1145,12 @@ export class TaskContext<
 	async untilIdle(fn: () => Promise<unknown>): Promise<void> {
 		const signals = this.#opts.signals;
 		for (;;) {
+			// A handler running now acts after fn would look: let it finish first
+			await signals.whenQuiet();
 			const since = signals.started;
 			await fn();
 			await this.checkpoint();
 			if (signals.stopIfQuiet(since)) return;
-			await signals.whenQuiet();
 		}
 	}
 
