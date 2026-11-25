@@ -234,10 +234,10 @@ describe("Actors", () => {
 		expect(waits).toBe(2);
 	});
 
-	// A handler that started before untilIdle and returns while fn runs: fn saw the state before
-	// the handler's effect, so it must run again
+	// A handler that started before untilIdle: fn runs only once it finished, so fn never sees the
+	// state before the handler's effect (it used to look, then stop when the handler returned meanwhile)
 	test.each([{ arrives: "with the claim" as const }, { arrives: "by the poll" as const }])(
-		"untilIdle runs fn again after a handler running when it started ($arrives)",
+		"untilIdle waits for a handler running when it started ($arrives)",
 		async ({ arrives }) => {
 			const handlerStarted = new Deferred<void>();
 			const release = new Deferred<void>();
@@ -251,16 +251,10 @@ describe("Actors", () => {
 					submitted = true;
 				});
 				await handlerStarted.promise;
+				// The handler returns a while after untilIdle was called
+				setTimeout(() => release.resolve(), 200);
 				await ctx.untilIdle(async () => {
 					observed.push(submitted);
-					if (observed.length > 1) return;
-					// The handler returns and its signal is acknowledged while fn still runs
-					release.resolve();
-					await waitForCondition(async () => {
-						const [signal] = await db.sql<{ delivered_at: Date | null }[]>`
-						select delivered_at from pgconductor._private_execution_signals where id = 'input-1'`;
-						return !!signal?.delivered_at;
-					}, 5000);
 				});
 			});
 
@@ -279,7 +273,7 @@ describe("Actors", () => {
 			}
 
 			await idle(id);
-			expect(observed).toEqual([false, true]);
+			expect(observed).toEqual([true]);
 		},
 	);
 

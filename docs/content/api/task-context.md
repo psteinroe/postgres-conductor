@@ -473,7 +473,7 @@ ctx.onSettled(async ({ executionId, status, result, error }, { id }) => {
 
 ## ctx.untilIdle()
 
-Wait until `fn` resolves while no signal is delivered, then stop delivering signals to this attempt. `fn` runs again whenever a signal handler ran while it did, also one that was already running when `fn` was called, or a signal already read still waits for its handler. Signals stored later stay undelivered: they re-queue the execution when it completes, or start an actor's next activation. See [Actors](../task-execution/actors.md#going-idle).
+Wait until `fn` resolves while no signal is delivered, then stop delivering signals to this attempt. Before each call of `fn` it waits for a running signal handler and for signals already read, so `fn` never sees a handler half done. `fn` runs again whenever a handler started while it ran. A handler must not wait for something only `fn` does, or neither ever finishes. Signals stored later stay undelivered: they re-queue the execution when it completes, or start an actor's next activation. See [Actors](../task-execution/actors.md#going-idle).
 
 ```typescript
 await ctx.untilIdle(() => session.waitUntilIdle());

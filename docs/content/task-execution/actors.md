@@ -37,7 +37,9 @@ await conductor.signalWithStart({
 
 An activation usually opens something, such as a session, that its signal handlers use. Before it closes that, it must know that no handler is running or about to run. `ctx.untilIdle(fn)` gives it that point:
 
-- It calls `fn` and, once `fn` resolves, checks whether a signal handler ran meanwhile (also one that was already running when `fn` was called) or a signal already read still waits for its handler. If so, it waits for them and calls `fn` again
+- It first waits until no signal handler runs and every signal already read was handled, then calls `fn`. So `fn` never sees a handler half done
+- Once `fn` resolves, it checks whether a handler started meanwhile. If so, it waits for it and calls `fn` again
+- A handler must not wait for something only `fn` does: `untilIdle` waits for the handler before it calls `fn`
 - Otherwise it stops delivering signals to the activation and returns. Signals stored later stay undelivered and start the next activation
 - `fn` decides what idle means, for example "no work in progress"
 

@@ -66,9 +66,8 @@ export class SignalInbox {
 	/** Signals received, and ones whose handler returned or that had no handler */
 	private received = 0;
 	private handled = 0;
-	/** Handlers started, and ones that returned and were acknowledged */
+	/** Handlers started */
 	private _started = 0;
-	private _finished = 0;
 	private quietWaiters: (() => void)[] = [];
 
 	constructor(private readonly opts: SignalInboxOptions) {}
@@ -78,9 +77,9 @@ export class SignalInbox {
 		return [...this.handlers.keys()];
 	}
 
-	/** Handlers that returned and were acknowledged so far */
-	get finished(): number {
-		return this._finished;
+	/** Handlers started so far */
+	get started(): number {
+		return this._started;
 	}
 
 	/**
@@ -112,9 +111,8 @@ export class SignalInbox {
 	}
 
 	/**
-	 * Stop delivering if every handler started so far had finished when `finished` was `since`
-	 * (none started since, and none was running then), and every signal received was handled;
-	 * signals received later stay undelivered. Returns whether it stopped.
+	 * Stop delivering if no handler started since `started` was `since`, and every signal received
+	 * was handled; signals received later stay undelivered. Returns whether it stopped.
 	 */
 	stopIfQuiet(since: number): boolean {
 		if (this.consuming && (this._started !== since || !this.quiet)) return false;
@@ -126,9 +124,12 @@ export class SignalInbox {
 		return true;
 	}
 
-	/** Resolves once every signal received was handled, or delivery stopped */
+	/**
+	 * Resolves once no handler runs and every signal received was handled, or delivery stopped.
+	 * Without a handler nothing is delivered, so it resolves at once.
+	 */
 	whenQuiet(): Promise<void> {
-		if (this.quiet || this.closed) return Promise.resolve();
+		if (this.quiet || this.closed || !this.consuming) return Promise.resolve();
 		return new Promise((resolve) => this.quietWaiters.push(resolve));
 	}
 
@@ -212,7 +213,6 @@ export class SignalInbox {
 				return;
 			}
 			this.delivering = null;
-			this._finished++;
 			this.markHandled();
 		}
 	}
